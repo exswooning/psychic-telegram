@@ -82,7 +82,8 @@ class TestTheGates:
 
     def test_a_protected_domain_is_refused_in_words_about_deleting_not_seeding(self, _cfg, monkeypatch):
         import domain_guard
-        monkeypatch.setattr(domain_guard, "is_protected", lambda d: True)
+        monkeypatch.setattr(domain_guard, "protected_domains", lambda: {"src.example"})
+        monkeypatch.setattr(domain_guard, "revocations", lambda: {})
         _, _, err = _argv()
         assert "Deleting filler from" in err and "refused" in err
 

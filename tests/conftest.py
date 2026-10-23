@@ -145,7 +145,33 @@ def _sandbox_is_unprotected(tmp_path_factory, monkeypatch):
         domain_guard, "REVOCATIONS_PATH",
         str(tmp_path_factory.mktemp("guard") / "unprotected.json"))
     monkeypatch.setattr(domain_guard, "configured_domains", lambda: set())
+    # The permanent source registry (migration 013) reads the shared control-plane
+    # database, which a faked Settings points elsewhere and which keeps every source
+    # an earlier test configured. Only the live SOURCE_DOMAIN counts here; the
+    # registry itself is tested where it is patched (test_missing_mail_recovery.py).
+    monkeypatch.setattr(domain_guard, "source_domains",
+                        lambda: {d for d in {domain_guard._norm(os.getenv("SOURCE_DOMAIN", ""))} if d})
+    # And the suite's live source is a declared sandbox, as an operator would declare
+    # one before seeding it (never a government domain). A test about source
+    # protection itself takes this away with the `real_source_guard` fixture.
+    real_revocations = domain_guard.revocations
+
+    def _with_suite_sandbox():
+        got = dict(real_revocations())
+        d = domain_guard._norm(os.getenv("SOURCE_DOMAIN", ""))
+        if d and not domain_guard.is_government(d):
+            got.setdefault(d, {"by": "tests", "reason": "the suite's sandbox source", "at": ""})
+        return got
+    monkeypatch.setattr(domain_guard, "revocations", _with_suite_sandbox)
+    monkeypatch.setattr(domain_guard, "_real_revocations", real_revocations, raising=False)
     yield
+
+
+@pytest.fixture
+def real_source_guard(monkeypatch):
+    """Source protection exactly as deployed: no suite sandbox."""
+    import domain_guard
+    monkeypatch.setattr(domain_guard, "revocations", domain_guard._real_revocations)
 
 
 @pytest.fixture(autouse=True)
@@ -282,3 +308,20 @@ def gmail_migrator(auth, db, settings, identity):
 @pytest.fixture
 def cal_migrator(auth, db, settings, identity):
     return calendar_engine.CalendarMigrator(auth, db, settings, SRC_USER, TGT_USER)
+
+
+@pytest.fixture(autouse=True)
+def _no_run_env_leaks():
+    """A run exports per-run state to its own children through os.environ
+    (DRIVE_FAILED_USERS: whose mail an ordered run holds back; SCOPE_DROPPED: the
+    passes it switched off). In production each run is its own process; in the
+    suite one test's ordered run held the NEXT test's mail back and dropped its chat."""
+    yield
+    for name in ("DRIVE_FAILED_USERS", "SCOPE_DROPPED"):
+        os.environ.pop(name, None)
+    # Stop and memory pause are process-wide too: a test that pressed Stop left every
+    # later Gmail run stopping before its first message.
+    main_mod = sys.modules.get("main")
+    if main_mod is not None:
+        main_mod.SHUTDOWN.clear()
+        main_mod.MEMORY_PAUSE.clear()

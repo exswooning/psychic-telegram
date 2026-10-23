@@ -239,10 +239,19 @@ def test_chunked_sheet_read_spans_large_grid_and_every_tab():
     meta={'properties':{'title':'Big'},'sheets':[{'properties':{'sheetId':1,'title':'One','gridProperties':{'rowCount':6000,'columnCount':50}}},{'properties':{'sheetId':2,'title':'Two','gridProperties':{'rowCount':3,'columnCount':4}}}]}
     class Sheets:
         def spreadsheets(self):return self
-        def get(self,**kw):return request(meta)
-        def getByDataFilter(self,**kw):
-            grid=kw['body']['dataFilters'][0]['gridRange'];calls.append(grid)
-            return request({'sheets':[{'properties':{'sheetId':grid['sheetId']},'data':[{'startRow':grid['startRowIndex'],'startColumn':grid['startColumnIndex'],'rowData':[]}]}]})
+        def get(self,**kw):
+            if not kw.get('ranges'):return request(meta)
+            # Read with an A1 range (getByDataFilter needs the full Sheets scope).
+            import re
+            title,a,b=re.fullmatch(r"'(.+)'!([A-Z]+\d+):([A-Z]+\d+)",kw['ranges'][0]).groups()
+            def cell(x):
+                letters,num=re.fullmatch(r"([A-Z]+)(\d+)",x).groups();c=0
+                for ch in letters:c=c*26+ord(ch)-64
+                return c-1,int(num)-1
+            (c0,r0),(c1,r1)=cell(a),cell(b)
+            sid={'One':1,'Two':2}[title]
+            grid={'sheetId':sid,'startRowIndex':r0,'endRowIndex':r1+1,'startColumnIndex':c0,'endColumnIndex':c1+1};calls.append(grid)
+            return request({'sheets':[{'properties':{'sheetId':sid},'data':[{'startRow':r0,'startColumn':c0,'rowData':[]}]}]})
     result=read_sheet(Sheets(),'id')
     assert len(result['sheets'])==2 and {c['sheetId'] for c in calls}=={1,2}
     assert max((c['endRowIndex']-c['startRowIndex'])*(c['endColumnIndex']-c['startColumnIndex']) for c in calls)<=10000

@@ -175,10 +175,11 @@ class TestTasks:
         assert got["status"] == "completed"
         assert got["due"] == "2026-09-01T00:00:00.000Z"
 
-    def test_an_untitled_task_is_given_a_title_rather_than_dropped(
+    def test_an_untitled_task_stays_untitled(
             self, tasks, auth):
-        """Tasks itself allows an untitled task; the API refuses to create
-        one. Dropping the row would lose a real item."""
+        """Tasks allows an untitled task and so does its API (measured on the sandbox
+        target, 2026-10-23: title "" or none, read back as ""). An invented
+        "(untitled)" was a difference on every such task (dharan: 4 users)."""
         src = auth.source_tasks(SRC_USER)
         tl = src.add_list("Move")
         src.task_store[tl].append({"id": "bare-1", "status": "needsAction"})
@@ -187,6 +188,8 @@ class TestTasks:
 
         assert stats["tasks"] == 1
         assert stats["failed"] == 0
+        made = [t for ts in auth.target_tasks(TGT_USER).task_store.values() for t in ts]
+        assert [t.get("title") for t in made] == [""]
 
     def test_a_rerun_does_not_duplicate(self, tasks, auth, db, settings):
         import tasks_engine

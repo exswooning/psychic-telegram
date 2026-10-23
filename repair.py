@@ -601,6 +601,21 @@ def stranded_drive_users(db) -> list[str]:
     return [r["source_user"] for r in rows]
 
 
+def unresolved_shortcut_users(db) -> list[str]:
+    """Source users with a shortcut skipped because what it points at had no copy yet
+    (SKIPPED_UNRESOLVED_TARGET), still unmapped, where some Drive copy has been made
+    since -- so a re-walk may now resolve it (the engine also looks at other users'
+    copies now). Never the same user forever: nothing new copied, nothing re-walked."""
+    return [r["source_user"] for r in db.conn.execute(
+        """SELECT DISTINCT a.source_user FROM audit_log a
+            WHERE a.item_type='shortcut' AND a.status='SKIPPED_UNRESOLVED_TARGET'
+              AND NOT EXISTS (SELECT 1 FROM id_mapping m WHERE m.source_user=a.source_user
+                              AND m.source_id=a.item_id AND m.type='shortcut')
+              AND EXISTS (SELECT 1 FROM identity_map i WHERE i.source_email=a.source_user)
+              AND EXISTS (SELECT 1 FROM id_mapping n WHERE n.type IN ('file','folder')
+                          AND n.created_at > a.timestamp)""")]
+
+
 def pending_share_users(db) -> list[str]:
     """Source users with a copied item whose sharing was started and never finished
     (an `acl_pass` PENDING mark), still in the corpus."""
@@ -636,7 +651,8 @@ def retry_drive_stragglers(auth, db, settings, apply: bool = False,
     stats = {"attempted": 0, "retried": 0, "unmapped_users": 0, "errors": []}
     if users is None:
         users = list(dict.fromkeys(stranded_drive_users(db) + pending_share_users(db)
-                                   + forms_to_rebuild_users(db, settings)))
+                                   + forms_to_rebuild_users(db, settings)
+                                   + unresolved_shortcut_users(db)))
     for src in users:
         tgt = targets.get(src)
         if not tgt:
@@ -873,7 +889,7 @@ def fix_modified_times(auth, db, settings, apply: bool = False,
     from resilience import retry_on_google_error
 
     from db import utc_now
-    out = {"checked": 0, "drifted": 0, "fixed": 0, "failed": 0}
+    out = {"checked": 0, "drifted": 0, "fixed": 0, "failed": 0, "editedOnSource": 0}
     # Only users due a check: never checked, or written to since their own last one.
     # Every run ends with a repair, and re-listing all 300 users (~20 minutes) after a
     # run that touched five is work that finds nothing. Any status, not DONE only: a
@@ -885,7 +901,7 @@ def fix_modified_times(auth, db, settings, apply: bool = False,
     out["users"] = len(pairs)
 
     def one(pair) -> dict:
-        got = {"checked": 0, "drifted": 0, "fixed": 0, "failed": 0}
+        got = {"checked": 0, "drifted": 0, "fixed": 0, "failed": 0, "editedOnSource": 0}
         started = utc_now()       # before the listing: a write during it is due next time
         try:
             src_items, tgt_items = {}, {}
@@ -893,6 +909,9 @@ def fix_modified_times(auth, db, settings, apply: bool = False,
             tally.count_drive(auth.target_drive(pair[1]), settings, keep=tgt_items)
             tgt = auth.target_drive(pair[1])
             src = auth.source_drive(pair[0])
+            copied_at = dict(db.conn.execute(
+                "SELECT source_id, created_at FROM id_mapping WHERE source_user=? "
+                "AND type IN ('file','folder')", (pair[0],)).fetchall())
             for sid, tid in db.mapped_ids(pair[0], ("file", "folder")).items():
                 s, t = src_items.get(sid), tgt_items.get(tid)
                 if t and not s:
@@ -910,6 +929,12 @@ def fix_modified_times(auth, db, settings, apply: bool = False,
                 got["checked"] += 1
                 want = s.get("modifiedTime") or ""
                 if not want or want[:19] == (t.get("modifiedTime") or "")[:19]:
+                    continue
+                if want[:19] > (copied_at.get(sid) or "9999")[:19]:
+                    # Edited on the source AFTER it was copied: the copy's content is
+                    # stale, and its time is the honest signal of that. Bringing the
+                    # edit over is the delta's job (live, ward15: a Doc edited 10-22).
+                    got["editedOnSource"] += 1
                     continue
                 got["drifted"] += 1
                 if not apply:

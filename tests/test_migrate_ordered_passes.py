@@ -365,7 +365,7 @@ class TestEveryAccountIsCreatedBeforeAnythingMoves:
 
     def test_it_covers_every_chosen_user_even_one_already_done(self, db, settings, monkeypatch):
         seen = []
-        monkeypatch.setattr(main, "_ensure_target_accounts", lambda auth, s, pairs: seen.extend(pairs))
+        monkeypatch.setattr(main, "_ensure_target_accounts", lambda auth, s, pairs, db=None: seen.extend(pairs))
         monkeypatch.setattr(db, "all_identities", lambda: [
             {"entity_type": "user", "source_email": "a@src", "target_email": "a@tgt", "status": "DONE"},
             {"entity_type": "user", "source_email": "b@src", "target_email": "b@tgt", "status": "PENDING"},

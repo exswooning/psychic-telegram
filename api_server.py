@@ -309,6 +309,14 @@ class RunVerification(WriteAction):
     # None: the account's usual sample of each kind of item. A number: that many.
     # 0: every item the ledger paired -- the honest, slow check.
     limit: int | None = Field(default=None, ge=0)
+    # False: check only -- nothing is written and automatic repair is left as it is
+    # (a first-pass benchmark must measure the run, not the run plus its repairs).
+    repair: bool = True
+
+
+class SetRepairPolicy(WriteAction):
+    account_id: int | None = None
+    enabled: bool
 
 
 class StartMigration(WriteAction):
@@ -2518,6 +2526,68 @@ async def one_to_one_status(account_id: int | None = None, op: Operator = Depend
     return await _off_loop(_verification_view, aid)
 
 
+def _repair_policy(aid: int, enabled: bool | None = None) -> bool:
+    from db import MigrationDB
+    import verification_repairs
+    path = _account_db_path(aid)
+    if not path or not os.path.isfile(path):
+        return False
+    d = MigrationDB(path)
+    try:
+        if enabled is True:
+            verification_repairs.enable(d)
+        elif enabled is False:
+            verification_repairs.pause(d)
+        return verification_repairs.enabled(d)
+    finally:
+        d.close()
+
+
+@app.get("/api/v2/repair-policy")
+async def repair_policy(account_id: int | None = None, op: Operator = Depends(operator)):
+    """Whether this account's findings are repaired on their own when it is idle
+    (verification_repairs; api_server._dispatch_verification_repairs)."""
+    require_login(op)
+    aid = account_id if account_id is not None else op.account_id
+    if not aid:
+        return {"accountId": None, "enabled": False}
+    _require_account_access(aid, op)
+    return {"accountId": aid, "enabled": await _off_loop(_repair_policy, aid)}
+
+
+@app.post("/api/v2/repair-policy")
+async def set_repair_policy(body: SetRepairPolicy, op: Operator = Depends(operator)):
+    """Pause or resume automatic repairs for one account. Pausing stops new repairs from
+    being started; one already running finishes its user."""
+    aid = _resolve_account(body, op)
+
+    def go():
+        now = _repair_policy(aid, body.enabled)
+        return now == body.enabled, f"automatic repairs {'on' if now else 'paused'}"
+    return await _gated(op, "repair-policy." + ("resume" if body.enabled else "pause"), body,
+                        f"account {aid}", go)
+
+
+@app.get("/api/v2/known-issues")
+async def known_issues_view(account_id: int | None = None, op: Operator = Depends(operator)):
+    """Every kind of one-to-one finding: why it happens, how it is fixed, whether that
+    fix runs on its own, and how many are open / have been fixed (known_issues.py)."""
+    require_login(op)
+    aid = account_id if account_id is not None else op.account_id
+    if not aid:
+        return {"accountId": None, "kinds": [], "recent": []}
+    _require_account_access(aid, op)
+
+    def read():
+        import known_issues
+        path = _ledger_path(aid)
+        if not os.path.isfile(path):
+            return {"accountId": aid, "kinds": known_issues.summary_empty(), "recent": []}
+        with cpdb.ro(path) as conn:
+            return {"accountId": aid, **known_issues.summary(conn)}
+    return await _off_loop(read)
+
+
 def _migration_checks_view(account_id, offset=0):
     out = {"accountId": account_id, "storage": [], "repairQueue": [], "queueTotals": [], "repairActions": [], "actionTotals": [], "mailRecovery": [], "offset": offset,"acceptanceRuns":[],"manifestTotals":[],"receiptTotals":[],"transferRoutes":[]}
     path = _ledger_path(account_id)
@@ -2580,7 +2650,8 @@ async def one_to_one_run(body: RunVerification, op: Operator = Depends(operator)
         argv += ["--user", u]
     target = ",".join(body.users) if body.users else "ALL"
     env = dict(os.environ, VERIFY_WORKERS="auto")
-    argv += ["--repair-after-user"]
+    if body.repair:
+        argv += ["--repair-after-user"]
     return await _gated(op, "one-to-one.run", body, target,
                         lambda: _run_admitted(argv, account_id, "verify", env=env))
 
@@ -3262,6 +3333,7 @@ async def user_profiles_status(account_id: int | None = None, op: Operator = Dep
 
 @app.get("/api/v2/user-profiles/export.csv")
 async def user_profiles_csv(account_id: int | None = None, op: Operator = Depends(operator)):
+    require_login(op)
     result = await user_profiles_status(account_id, op)
     import user_profiles
     from fastapi.responses import Response

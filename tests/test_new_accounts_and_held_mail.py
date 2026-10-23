@@ -55,10 +55,11 @@ def test_the_wait_is_bounded_and_names_who_is_still_refused():
 
 
 def test_only_accounts_this_run_created_are_waited_for(monkeypatch, settings):
-    import provision
+    import user_profiles
     settings.auto_provision_users = True
-    monkeypatch.setattr(provision, "ensure_users",
-                        lambda d, emails: {"created": [("new@tenantb.com", "pw")], "failed": []})
+    monkeypatch.setattr(user_profiles, "sync_profiles",
+                        lambda *a, **k: {"created": [("new@tenantb.com", "pw")], "failed": []})
+    monkeypatch.setattr(main, "_license_run_accounts", lambda settings, emails: [])
     waited = []
     monkeypatch.setattr(main, "_wait_until_usable", lambda auth, emails, **k: waited.append(emails) or [])
 
@@ -113,6 +114,7 @@ class TestRedoRevisitsUsersAlreadyDone:
             account_id = 7
             rewrite_drive_links = True
             redo_unrewritten_links = redo
+            dry_run = False
 
         monkeypatch.setattr(main, "_coordination_enabled", lambda: False)
         monkeypatch.setattr(main, "_warn_if_ledger_is_stale", lambda *a, **k: None)

@@ -164,11 +164,13 @@ def drive(v, result):
                     shortcut = item.get("shortcutDetails", {})
                     if shortcut:
                         source_link = shortcut.get("targetId")
+                        got = target.get("shortcutDetails", {}).get("targetId")
+                        # Any genuine copy of the file it points to: one file shared
+                        # with many users has a copy per user (see copy_lookup).
+                        copies = (v.db.targets_for_source_id(source_link)
+                                  if hasattr(v.db, "targets_for_source_id") else [])
                         expected = v.db.target_for_source_id(source_link) or source_link
-                        if (
-                            target.get("shortcutDetails", {}).get("targetId")
-                            != expected
-                        ):
+                        if got != expected and got not in copies:
                             diffs.append("shortcut target differs")
                 if diffs:
                     result["differences"].append(

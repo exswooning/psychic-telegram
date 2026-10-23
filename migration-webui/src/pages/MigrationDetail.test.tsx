@@ -18,6 +18,8 @@ vi.mock('@/components/OneToOneSummary', () => ({
 vi.mock('@/api/controlPlane', () => ({
   fetchSourceGuard: () => Promise.resolve({ snapshotTakenAt: null, snapshotUsers: 0, latest: null }),
   runSourceGuard: () => Promise.resolve({ ok: true, actionId: 1, detail: '' }),
+  fetchUserProfiles: () => Promise.resolve({ profiles: [] }),
+  startUserProfileSync: () => Promise.resolve({ ok: true, actionId: 1, detail: '' }),
   fetchMigrationDetail: (...a: unknown[]) => fetchMigrationDetail(...a),
   startDelta: (...a: unknown[]) => startDelta(...a),
   startMigration: (...a: unknown[]) => startMigration(...a),
@@ -303,25 +305,25 @@ describe('MigrationDetail: who moves the mail', () => {
     await waitFor(() => expect(startMigration).toHaveBeenCalled())
   }
 
-  it('offers all three and has split selected', async () => {
+  it('offers all three and has this tool selected (split is experimental)', async () => {
     await openDialog()
-    expect(screen.getByTestId('mail-by-split').querySelector('input')).toBeChecked()
-    expect(screen.getByTestId('mail-by-engine').querySelector('input')).not.toBeChecked()
+    expect(screen.getByTestId('mail-by-engine').querySelector('input')).toBeChecked()
+    expect(screen.getByTestId('mail-by-split').querySelector('input')).not.toBeChecked()
     expect(screen.getByTestId('mail-by-dms').querySelector('input')).not.toBeChecked()
   })
 
-  it('says the DMS has to run AFTER, and that the mail is not on the target until it has', async () => {
+  it('says split is experimental, runs Drive first and has the DMS import afterward', async () => {
     await openDialog()
     const split = screen.getByTestId('mail-by-split')
-    expect(split).toHaveTextContent('after this run finishes')
-    expect(split).toHaveTextContent('most of the mail is not on the target')
-    expect(split).toHaveTextContent('Drive first, for every user')
+    expect(split).toHaveTextContent('Split (experimental)')
+    expect(split).toHaveTextContent('Drive first')
+    expect(split).toHaveTextContent('imports the mailbox afterward')
   })
 
-  it('starts a split run by default, and asks the server for it', async () => {
+  it('starts an engine run by default, and asks the server for it', async () => {
     await openDialog(); await confirm()
     const [, services, users, dry, account, mode] = startMigration.mock.calls[0]
-    expect([services, users, dry, account, mode]).toEqual([['all'], [], false, 7, 'split'])
+    expect([services, users, dry, account, mode]).toEqual([['all'], [], false, 7, 'engine'])
   })
 
   it('sends the mode chosen, and never decides the service list itself', async () => {
@@ -339,6 +341,7 @@ describe('MigrationDetail: who moves the mail', () => {
 
   it('sends dms_after=false when the box is unticked', async () => {
     await openDialog()
+    fireEvent.click(screen.getByTestId('mail-by-split').querySelector('input')!)
     fireEvent.click(screen.getByLabelText('start the DMS automatically'))
     await confirm()
     expect(startMigration.mock.calls[0][7]).toBe(false)

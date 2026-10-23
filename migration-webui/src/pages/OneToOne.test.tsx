@@ -14,6 +14,9 @@ vi.mock('@/api/controlPlane', () => ({
   fetchMe: () => Promise.resolve(me.value),
   migrationOf: (m: { id: number; migration_id?: number }) => m.migration_id ?? m.id,
   fetchOneToOne: cp.view,
+  fetchKnownIssues: () => Promise.resolve({ accountId: 7, kinds: [], recent: [] }),
+  fetchRepairPolicy: () => Promise.resolve({ accountId: 7, enabled: true }),
+  setRepairPolicy: () => Promise.resolve({ ok: true, actionId: 1, detail: '' }),
   runOneToOne: cp.run,
   fetchTenantOneToOne: cp.tenant,
   runTenantOneToOne: cp.tenantRun,
@@ -138,8 +141,18 @@ describe('Verify now', () => {
   it('asks for every user by default, with the usual sample', async () => {
     show()
     await confirm()
-    await waitFor(() => expect(cp.run).toHaveBeenCalledWith('checking after the fix', { accountId: 3, users: [], limit: undefined }))
+    await waitFor(() => expect(cp.run).toHaveBeenCalledWith('checking after the fix', { accountId: 3, users: [], limit: undefined, repair: true }))
     expect(await screen.findByText('started pid 1')).toBeInTheDocument()
+  })
+
+  it('can check without repairing anything', async () => {
+    show()
+    fireEvent.click(await screen.findByTestId('verify-now'))
+    fireEvent.click(screen.getByLabelText('repair what it finds'))
+    fireEvent.change(screen.getByLabelText('Reason Code'), { target: { value: 'first-pass benchmark' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm' }))
+    await waitFor(() => expect(cp.run).toHaveBeenCalledWith('first-pass benchmark',
+      expect.objectContaining({ repair: false })))
   })
 
   it('asks for just the users that were ticked', async () => {

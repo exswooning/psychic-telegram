@@ -32,6 +32,7 @@ class FakeDB:
 class S:
     user_workers = 6
     account_id = 7
+    dry_run = False
 
 
 def _run(monkeypatch, fresh_value):

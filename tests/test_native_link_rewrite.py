@@ -227,7 +227,8 @@ class TestARedoRepointsNativesCopiedBefore:
         settings.redo_unrewritten_links = settings.rewrite_drive_links = True
         m = self._engine(settings, db)
         m._sync_file({"id": "S1", "mimeType": "application/vnd.google-apps.document"}, "P")
-        assert m._pending_native == [({"id": "S1", "mimeType": "application/vnd.google-apps.document"}, "T1")]
+        got = [({k: v for k, v in i.items() if not k.startswith("_bitport")}, t) for i, t in m._pending_native]
+        assert got == [({"id": "S1", "mimeType": "application/vnd.google-apps.document"}, "T1")]
 
     def test_not_on_an_ordinary_run_and_never_for_a_binary(self, settings, db):
         settings.rewrite_drive_links, settings.redo_unrewritten_links = True, False

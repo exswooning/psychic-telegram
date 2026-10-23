@@ -52,7 +52,9 @@ def _users(db, *names):
 def _row(db, user, svc, verdict, **payload):
     db.save_user_verification(f"{user}@a.com", svc, verdict, 5, 5 if verdict == "IDENTICAL" else 3, 40,
                               {"counts": {"differences": 2 if verdict == "DIFFERENCES" else 0},
-                               "differences": [{"item": "x"}] if verdict == "DIFFERENCES" else [], **payload})
+                               "differences": [{"item": "x"}] if verdict == "DIFFERENCES" else [],
+                               # a current check that recorded its coverage (older rows read INCOMPLETE)
+                               "scopeVersion": 2, "coverageComplete": True, **payload})
 
 
 class TestTheView:
@@ -152,6 +154,29 @@ class TestADifferenceIsNotACrash:
         import db as db_mod
         import verify_sample as V
         monkeypatch.setattr(auth_mod, "AuthManager", lambda settings: object())
-        monkeypatch.setattr(db_mod, "MigrationDB", lambda path: object())
+        monkeypatch.setattr(db_mod, "MigrationDB", lambda path: type("D", (), {"close": lambda self: None})())
         monkeypatch.setattr(V, "run_and_save", lambda *a, **k: {"verdict": "DIFFERENCES"})
         assert V.main([]) == 0, "run_watch opens a 'crashed' incident for any non-zero exit"
+
+
+class TestCheckOnlyAndThePolicy:
+    def test_a_check_only_run_carries_no_repair(self, cp, monkeypatch):
+        aid = _signup(cp)
+        seen = {}
+        monkeypatch.setattr(api_server, "_run_admitted",
+                            lambda argv, aid, name, env=None: (seen.update(argv=argv) or (True, "started")))
+        cp.post("/api/v2/one-to-one/run", json={"reason": "first pass", "account_id": aid, "repair": False})
+        assert "--repair-after-user" not in seen["argv"]
+        cp.post("/api/v2/one-to-one/run", json={"reason": "fix it", "account_id": aid})
+        assert "--repair-after-user" in seen["argv"]
+
+    def test_repairs_can_be_paused_and_resumed(self, cp, monkeypatch):
+        aid = _signup(cp)
+        monkeypatch.setattr(api_server, "_account_db_path", lambda a: cp.ledger.path)
+        assert cp.get("/api/v2/repair-policy", params={"account_id": aid}).json()["enabled"] is False
+        r = cp.post("/api/v2/repair-policy", json={"reason": "resume", "account_id": aid, "enabled": True})
+        assert r.json()["ok"] is True
+        assert cp.get("/api/v2/repair-policy", params={"account_id": aid}).json()["enabled"] is True
+        cp.post("/api/v2/repair-policy", json={"reason": "benchmark", "account_id": aid, "enabled": False})
+        assert cp.get("/api/v2/repair-policy", params={"account_id": aid}).json()["enabled"] is False
+        assert cp.get("/api/v2/repair-policy", params={"account_id": aid + 5}).status_code == 403

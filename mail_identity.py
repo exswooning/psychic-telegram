@@ -120,10 +120,11 @@ def insert_without_message_id(gm, sid, raw, insert):
     from verification_reads import gmail_raw, status_of
 
     require_not_source(gm.target_user.rsplit("@", 1)[-1], gm.settings.source_domain)
-    if not gm.settings.source_read_only or gm.settings.dry_run:
-        raise RuntimeError(
-            "Missing-ID recovery requires a read-only source and an apply run"
-        )
+    # Writes only to the target; the source is read through the migration's own Gmail
+    # grant, which is read-only by scope on every source. Requiring a PROTECTED source
+    # here failed every message without a Message-ID on any sandbox source.
+    if gm.settings.dry_run:
+        raise RuntimeError("Missing-ID recovery requires an apply run")
     if gm.target_user != gm.db.resolve_identity(gm.source_user) or (
         gm.target_user.rsplit("@", 1)[-1].lower() != gm.settings.target_domain.lower()
     ):

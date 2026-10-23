@@ -31,7 +31,7 @@ from googleapiclient.http import MediaFileUpload  # noqa: F401
 
 from config import DEFERRED_TO_DMS, DELIVERED_BY_DMS, OWED_GRANT, Settings
 from sample_budget import Budget
-from link_rewrite import has_drive_link, rewrite_raw
+from link_rewrite import rewrite_raw
 from resilience import (PermanentAPIError, RateLimiter, TransportExhausted,
                         retry_on_google_error, shutdown_requested)
 

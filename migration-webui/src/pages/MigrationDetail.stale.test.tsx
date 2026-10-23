@@ -10,6 +10,8 @@ vi.mock('@/components/OneToOneSummary', () => ({ default: () => null }))
 vi.mock('@/api/controlPlane', () => ({
   fetchSourceGuard: () => Promise.resolve({ snapshotTakenAt: null, snapshotUsers: 0, latest: null }),
   runSourceGuard: () => Promise.resolve({ ok: true, actionId: 1, detail: '' }),
+  fetchUserProfiles: () => Promise.resolve({ profiles: [] }),
+  startUserProfileSync: () => Promise.resolve({ ok: true, actionId: 1, detail: '' }),
   fetchMigrationDetail: (...a: unknown[]) => fetchMigrationDetail(...a),
   startDelta: vi.fn(),
   // The page also surveys its failures. A mock missing an export the

@@ -59,6 +59,8 @@ class FakeSettings:
     dry_run = False
     migrate_chat = False          # chat is off in these runs; not the subject
     migrate_contacts = migrate_tasks = True
+    mail_only_with_links = False
+    migration_checks_enabled = False
     def effective_upload_cap(self): return 10 ** 12
 
 

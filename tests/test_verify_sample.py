@@ -180,7 +180,8 @@ class TestARealMigrationIsFoundIdentical:
     def test_native_documents_are_exported_and_compared(self, migrated):
         r = verify(migrated)
         plan = next(e for e in r["evidence"] if e.get("name") == "Plan")
-        assert "exported" in plan["how"]
+        # Opened through the Docs API on both sides and compared as a structure, not export text.
+        assert "Docs" in plan["how"]
 
     def test_a_doc_whose_links_were_repointed_at_the_copies_is_identical(self, migrated):
         """The engine repoints a Doc's links at the copies on purpose, and a Drive id is
@@ -194,7 +195,6 @@ class TestARealMigrationIsFoundIdentical:
         tgt.exports[plan(tgt)] = f"see https://drive.google.com/file/d/{tid}/view".encode()
         r = verify(migrated)
         assert r["verdict"] == "IDENTICAL", r["reasons"]
-        assert "repointed" in next(e for e in r["evidence"] if e.get("name") == "Plan")["how"]
         tgt.exports[plan(tgt)] = f"see https://drive.google.com/file/d/{sid}/view, edited".encode()
         assert verify(migrated)["verdict"] == "DIFFERENCES"                # a real edit still shows
 
@@ -255,7 +255,7 @@ class TestEveryKindOfDamageIsFound:
         tgt, f = self._drive_target(migrated, "Plan")
         tgt.exports[f["id"]] = b"a different plan"
         r = verify(migrated)
-        assert any("exported" in x for d in r["users"][SRC_USER]["drive"]["differences"] for x in d["diffs"])
+        assert any("native document content" in x for d in r["users"][SRC_USER]["drive"]["differences"] for x in d["diffs"])
 
     def test_a_file_that_is_gone(self, migrated):
         tgt, f = self._drive_target(migrated, "notes.txt")
@@ -403,7 +403,8 @@ class TestACopyThatDidNothingIsNotVerified:
 
     def test_an_empty_migration_is_incomplete_not_identical(self, auth, db, settings, identity):
         r = V.run(auth, db, settings, [SRC_USER], V.ALL_SERVICES, progress=lambda *_: None)
-        assert r["totals"]["checked"] == 0 and r["verdict"] == "INCOMPLETE"
+        # The Directory profile is always there to compare (one check); nothing else is.
+        assert r["totals"]["checked"] <= 1 and r["verdict"] == "INCOMPLETE"
         assert "source was not confirmed empty" in " ".join(r["reasons"])
 
     def test_each_empty_service_says_so(self, auth, db, settings, identity):
@@ -735,6 +736,8 @@ class TestLinksInsideNativeFilesAreChecked:
                 raise RuntimeError("403 docs API off")
             return due
         monkeypatch.setattr(link_rewrite, "rewrite_native", fake)
+        import native_fidelity      # this test is about links; the structure compare is stubbed out
+        monkeypatch.setattr(native_fidelity, "compare_native", lambda *a, **k: ([], "Docs structure"))
         r = V.run(migrated.auth, migrated.db, migrated.settings, [SRC_USER], ("drive",), progress=lambda *_: None)
         assert r["verdict"] == verdict, r["reasons"]
         assert asked == [("docs", ("target", "docs"), False)]      # the target copy, reads only

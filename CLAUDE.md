@@ -129,6 +129,17 @@ guards two different operations (seeding writes fabricated data; reset/wipe
 deletes real data) and `refuse_reason()` takes an `action` argument so the
 message names the right one.
 
+**A domain ever configured as a source stays protected, from every account,
+permanently** (migration 013: `source_domain_protections`, append-only by trigger;
+`domain_guard.source_refuse_reason` / `require_not_source`, which every target-write
+path and writable source client calls). The one way out is an operator declaring it a
+sandbox (a revocation, on the record) -- never for a government domain (`is_government`),
+which nothing can declare. The operator's rule, 2026-10-23: real sources stay protected,
+declared sandboxes can be seeded and reset again. The Wipe/Delete/Remove buttons ask the
+server (`/api/v2/domain-guard/{domain}` `immutable`) instead of disabling a whole side.
+The suite declares its own `SOURCE_DOMAIN` a sandbox (conftest); a test about source
+protection itself takes the `real_source_guard` fixture.
+
 **A subprocess launched by `webui.py` or `api_server.py` does not reliably
 survive a restart of its parent's systemd unit**, even with
 `KillMode=process` set (which only protects the unit's *own* main PID, not
@@ -206,7 +217,9 @@ audit, with a default reason when none is given. Notifications are opt-in via `I
 by default and a failed send never fails a run.
 
 **Who moves the mail is a per-run choice (`mail_mode`), and the dialog defaults to
-`split`.** `engine`: this tool moves all mail. A caller that names no mode gets `split` for a whole-tenant run that moves both Drive and mail, `engine` for anything else (a sample, a few users, no Drive or no mail; `api_server._default_mail_mode`). `dms`:
+`engine`.** `engine`: this tool moves all mail, and a caller that names no mode gets it
+(`api_server._default_mail_mode`): split is offered as experimental until the DMS's
+overlap with mail already copied is proven per message. `dms`:
 Google's Data Migration Service does, and the run migrates everything else.
 `split`: the engine inserts only mail that carries a Drive link and rewrites it;
 the rest is written `SKIPPED_NO_DRIVE_LINK` (`config.DEFERRED_TO_DMS`) and moved by
@@ -380,6 +393,41 @@ header's notifications. An outsider with no Google account stays
 **The source is indexed when a pair is ready** (`api_server._start_discovery`, a `discover` job: `main.py discover --include-mail`, the ETA baseline): after `link-domains`, and after an identity-map build ends cleanly (`_discover_when_mapped`) -- but only when the account's ledger maps THIS pair's users. A ledger outlives the pair it was built for, so a scan over whatever is mapped could read the previous pair's tenant; it says why it did not start instead.
 
 **`reset_target` also trashes Google's own welcome mail** (`from:mail-noreply@google.com`, `trash_google_welcome_mail`): the seeder's reset only trashes `@seed.test` mail, the source mailboxes hold the same two welcome messages and a migration copies them, so each reset-and-rerun cycle used to stack another pair on the target. The listing excludes the trash, so its count is also the check.
+
+**One-to-one findings are repaired on their own, and every fix is recorded per kind.**
+`known_issues.py` lists each kind of finding seen live (dharan, 2026-10-23) with its
+cause, its fix, and whether that fix is automatic; `verification_repairs.enqueue_findings`
+tags every finding in `verification_repair_queue.issue`, and when a fresh, complete
+(never sampled) check no longer finds it the row turns RESOLVED and one line goes to
+`issue_fix_log` (who, which kind, how it is fixed). The One-to-one page shows it ("Known
+issues and how they are fixed", `GET /api/v2/known-issues`). The automatic part is the
+account's repair policy (`verification_repairs.enable`, switched on by any UI One-to-one
+run or a full migration): `api_server._dispatch_verification_repairs` re-verifies, once a
+minute when the account is idle, up to 4 users with open findings, and
+`scoped_repair` runs every handler that applies -- target writes only, each user once per
+unchanged fingerprint. Add a kind to `known_issues.ISSUES` when a new one is understood,
+with a handler if one can be automatic. What the live kinds taught:
+- **Gmail filed migrated SENT mail as received** (INBOX, or CATEGORY_PERSONAL): the From
+  is the old domain's address, not the new account's. Labels are realigned after every
+  insert (`migration_checks.verify_written_mail`, `MIGRATION_CHECKS`, on) and by repair.
+- **One source file shared with many users is copied once per user** when its owner is
+  not in the migration (dharan: 112 files, 552 copies, one with 22). Every copy is a right
+  answer for a link or a shortcut: `db.targets_for_source_id`, `verify_sample.copy_lookup`.
+  A shortcut resolves to any user's copy (`_fixup_shortcuts`); one skipped before that
+  copy existed is re-walked once something new has been copied
+  (`repair.unresolved_shortcut_users`).
+- **A read-only source grant cannot call `spreadsheets.getByDataFilter`** (Google wants
+  the full Sheets scope): cells are read with `spreadsheets.get` + A1 ranges
+  (`native_repair.read_sheet`). Embedded Doc/Slide images are compared by the hash of
+  their bytes, fetched from their signed URLs (`native_fidelity._hash_images`).
+- **A file edited on the source after it was copied keeps its stale time**:
+  `repair.fix_modified_times` leaves it (`editedOnSource`) for the delta.
+- **Google accepts a task with an empty title** (measured on the sandbox target): the
+  engine keeps it empty; `finding_repairs.repair_tasks` puts back old "(untitled)" ones.
+- **Directory profiles are reported, never a block**: `run_batch` still migrates a user
+  whose profile could not be synced (the operator's rule, 2026-10-23).
+- **The Gmail check reads ahead** `VERIFY_GMAIL_WINDOW` (4) batch pairs of 10: one pair at
+  a time took 8.7-11.5 h for a 39,756-message mailbox at a tenth of Gmail's quota.
 
 **Every user is verified as they finish** (`verify_sample.verify_user`, started from
 the end of `main.migrate_user`, gated by `VERIFY_ON_COMPLETE`, default on): a

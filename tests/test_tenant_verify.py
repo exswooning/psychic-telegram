@@ -31,7 +31,7 @@ def test_every_source_user_needs_a_migrated_account_on_the_target(settings, db, 
     why = {d["item"]: d["diffs"] for d in s["differences"]}
     assert s["status"] == "DIFFERENCES" and s["compared"] == 4 and s["matched"] == 1
     assert why["b@tenanta.com"] == ["not migrated yet (PENDING)"]
-    assert why["c@tenanta.com"] == ["givenName 'A' -> 'Z'"]
+    assert why["c@tenanta.com"] == ["Directory profile differs: name"]
     assert why["d@tenanta.com"] == ["not paired with a target account"]
     assert "admin@tenantb.com" in s["notes"][0]          # listed, not counted against the source
 
@@ -51,7 +51,8 @@ def test_a_group_compares_its_members_as_translated(settings, db, monkeypatch):
                         lambda e: {"a@tenanta.com": "a@tenantb.com", "b@tenanta.com": "b@tenantb.com"}.get(e))
     s = c.groups()
     assert s["status"] == "DIFFERENCES"
-    assert s["differences"][0]["diffs"] == ["member missing: b@tenantb.com (MEMBER)",
+    assert s["differences"][0]["diffs"] == ["source group member has no target identity mapping: x@else.org",
+                                            "member missing: b@tenantb.com (MEMBER)",
                                             "member a@tenantb.com: role OWNER -> MEMBER",
                                             "member on the target only: z@tenantb.com"]
     assert any("1 member(s) with no target identity" in n for n in s["notes"])
@@ -85,7 +86,7 @@ def test_every_item_in_a_shared_drive_is_found_or_named(settings, db, monkeypatc
     s = c.shared_drives()
     assert s["status"] == "DIFFERENCES"
     assert sorted(s["differences"][0]["diffs"]) == sorted([
-        "b.pdf: content differs (md5)", "c.pdf: copied, now missing on the target",
+        "b.pdf: content checksum differs or target checksum unavailable", "c.pdf: copied, now missing on the target",
         "d.pdf: never copied", "stray: on the target only"])
 
 

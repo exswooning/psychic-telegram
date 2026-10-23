@@ -1813,15 +1813,44 @@ export interface OneToOneView {
   users: OneToOneUser[]
   totals: Partial<Record<OneToOneVerdict, number>>
 }
+/** One kind of one-to-one finding (known_issues.py): why it happens, how it is fixed. */
+export interface KnownIssueKind {
+  id: string
+  service: string
+  title: string
+  cause: string
+  fix: string
+  auto: boolean
+  open: number
+  fixed: number
+  lastFixed: string | null
+}
+export interface KnownIssues {
+  accountId: number | null
+  kinds: KnownIssueKind[]
+  recent: { fixedAt: string; user: string; service: string; issue: string; item: string | null }[]
+}
+export const fetchKnownIssues = (accountId?: number) =>
+  cpFetch<KnownIssues>(`/api/v2/known-issues${accountId ? `?account_id=${accountId}` : ''}`)
+
 export const fetchOneToOne = (accountId?: number) =>
   cpFetch<OneToOneView>(`/api/v2/one-to-one${accountId ? `?account_id=${accountId}` : ''}`)
 
 /** limit: undefined = the account's usual sample, a number = that many, 0 = every item. */
-export const runOneToOne = (reason: string, opts: { accountId?: number; users?: string[]; limit?: number } = {}) =>
+export const runOneToOne = (reason: string, opts: { accountId?: number; users?: string[]; limit?: number; repair?: boolean } = {}) =>
   cpFetch<ActionResult>('/api/v2/one-to-one/run', {
     method: 'POST',
     body: JSON.stringify({ reason, account_id: opts.accountId ?? null, users: opts.users ?? [],
-                           ...(opts.limit !== undefined ? { limit: opts.limit } : {}) }),
+                           ...(opts.limit !== undefined ? { limit: opts.limit } : {}),
+                           ...(opts.repair === false ? { repair: false } : {}) }),
+  })
+
+/** Whether this account's findings are repaired on their own when it is idle. */
+export const fetchRepairPolicy = (accountId?: number) =>
+  cpFetch<{ accountId: number | null; enabled: boolean }>(`/api/v2/repair-policy${accountId ? `?account_id=${accountId}` : ''}`)
+export const setRepairPolicy = (enabled: boolean, reason: string, accountId?: number) =>
+  cpFetch<ActionResult>('/api/v2/repair-policy', {
+    method: 'POST', body: JSON.stringify({ enabled, reason, account_id: accountId ?? null }),
   })
 
 /** The tenant's own one-to-one check (tenant_verify.py): what belongs to the tenant, not a user. */

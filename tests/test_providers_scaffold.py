@@ -61,7 +61,9 @@ class TestTheInterfaceIsWhatTheDriveEngineCalls:
     }
 
     def test_every_operation_has_a_counterpart_in_the_engine(self):
-        src = open(os.path.join(ROOT, "drive_engine.py"), encoding="utf-8").read().replace("\n", "").replace(" ", "")
+        # Comment threads are synced by migration_comments on the engine's behalf.
+        src = "".join(open(os.path.join(ROOT, f), encoding="utf-8").read()
+                      for f in ("drive_engine.py", "migration_comments.py")).replace("\n", "").replace(" ", "")
         for op, needle in self.ENGINE_CALLS.items():
             assert needle.replace(" ", "") in src, f"{op}: the engine never calls {needle}"
 

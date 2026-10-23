@@ -959,6 +959,16 @@ class MigrationDB:
         ).fetchone()
         return row["target_id"] if row else None
 
+    def targets_for_source_id(self, source_id: str,
+                              types: tuple[str, ...] = ("file", "folder")) -> list[str]:
+        """Every target copy of one source file. A file owned outside the migration and
+        shared with many users is copied once per user (live: one file, 19 ward
+        copies), so `target_for_source_id`'s one pick is not the only right answer."""
+        marks = ",".join("?" * len(types))
+        return [r["target_id"] for r in self.conn.execute(
+            f"SELECT target_id FROM id_mapping WHERE source_id=? AND type IN ({marks}) ORDER BY rowid",
+            (source_id, *types))]
+
     def mapping_bounds(self, source_user: str):
         """How many mappings this user has, and when the first was written.
 

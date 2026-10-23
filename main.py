@@ -847,16 +847,19 @@ def run_batch(auth: AuthManager, db: MigrationDB, settings: Settings,
         log.warning("no users to process — check identity_map")
         return []
 
+    # Profiles are reported, never a reason to hold a user's data back (the operator's
+    # rule, 2026-10-23): a Directory outage blocked every user of a run, and one name
+    # Google would not take (admin@mdharan) would have blocked that user for good.
+    # A failure is a profile finding (User profiles panel, the One-to-one directory
+    # row); a user whose account could not be made fails when its data cannot land.
     try:
-        profile_failed = _ensure_target_accounts(auth, settings, pairs, db=db)
+        profile_failed = _ensure_target_accounts(auth, settings, pairs, db=db) or set()
     except Exception as exc:
-        log.error("could not read/sync source-backed profiles: %s", exc)
-        profile_failed = {source for source, _ in pairs}
-    for source in profile_failed:
-        db.set_identity_status(source, "BLOCKED", "Directory profile reconciliation failed; see user profile findings")
-    pairs = [(source, target) for source, target in pairs if source not in profile_failed]
-    if not pairs:
-        return []
+        log.error("could not read/sync source-backed profiles (users still migrate): %s", exc)
+        profile_failed = set()
+    for source in sorted(profile_failed):
+        log.warning("[%s] Directory profile not reconciled; migrating the data anyway -- "
+                    "see User profiles", source)
 
     _warn_if_ledger_is_stale(db, auth, pairs)
 
@@ -1537,8 +1540,8 @@ def _ensure_target_accounts(auth: AuthManager, settings: Settings,
                             pairs: list[tuple[str, str]], db=None) -> set[str]:
     """Source-backed profile creation/sync before any per-user data pass.
 
-    Existing mapped users are reconciled too. Failed profile reads or writes
-    block the affected user rather than inventing a name or declaring Done.
+    Existing mapped users are reconciled too. Returns the sources whose profile could
+    not be reconciled; run_batch reports them and still migrates their data.
     External-IdP installations retain their AUTO_PROVISION_USERS opt-out.
     """
     if not pairs or settings.dry_run or not settings.auto_provision_users:

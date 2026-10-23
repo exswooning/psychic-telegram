@@ -30,3 +30,10 @@ export const serviceSummary = (s: OneToOneService): string => {
   const same = s.identical === s.checked && !wrong.length ? 'all identical' : `${s.identical.toLocaleString()} identical`
   return [`${s.service}: ${s.checked.toLocaleString()} checked${of}`, same, ...wrong, ...completion].join(' · ')
 }
+
+/** identical/checked as a percentage that never rounds a shortfall up to 100. */
+export const parity = (identical: number, checked: number): string => {
+  if (!checked) return '—'
+  if (identical >= checked) return '100%'
+  return `${(Math.floor((identical / checked) * 10000) / 100).toFixed(2)}%`
+}

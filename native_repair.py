@@ -47,13 +47,26 @@ def read_sheet(svc, fid, cell_budget=2000000):
         for col in range(0,width,100):
             end_col=min(width,col+100);row_step=max(1,10000//max(1,end_col-col))
             for row in range(0,height,row_step):
-                result=svc.spreadsheets().getByDataFilter(spreadsheetId=fid,
-                    body={"includeGridData":True,"dataFilters":[{"gridRange":{"sheetId":props["sheetId"],"startRowIndex":row,"endRowIndex":min(height,row+row_step),"startColumnIndex":col,"endColumnIndex":end_col}}]},
+                # spreadsheets.get with an A1 range, not getByDataFilter: Google takes that
+                # method only with the full Sheets scope, so on a read-only grant every
+                # native Sheet read 403 ACCESS_TOKEN_SCOPE_INSUFFICIENT (dharan, 2026-10-23).
+                rng="'"+props["title"].replace("'","''")+"'!"+_a1(col,row)+":"+_a1(end_col-1,min(height,row+row_step)-1)
+                result=svc.spreadsheets().get(spreadsheetId=fid,ranges=[rng],includeGridData=True,
                     fields="sheets(properties.sheetId,data(startRow,startColumn,rowData(values("+CELL_FIELDS+"))))").execute()
                 for chunk in result.get("sheets",[]):
                     if chunk.get("properties",{}).get("sheetId")==props["sheetId"]:
                         sheet["data"].extend(chunk.get("data",[]))
     return doc
+
+
+def _a1(col, row):
+    """Zero-based column/row to an A1 cell: (0,0) -> A1, (26,9) -> AA10."""
+    letters=""
+    col+=1
+    while col:
+        col,rem=divmod(col-1,26)
+        letters=chr(65+rem)+letters
+    return f"{letters}{row+1}"
 
 
 def canonical_sheet(document, lookup=lambda fid: None):

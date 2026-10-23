@@ -41,11 +41,13 @@ export const TenantActionDialog: React.FC<{
     setTyped(''); setPassword(''); setError('')
   }, [target?.domain, target?.mode])
 
+  const guardDomain = target?.domain
+  const guardMode = target?.mode
   useEffect(() => {
     let active = true
     setGuard(null)
-    if (!target || target.mode === 'repair') return
-    const domain = target.domain
+    if (!guardDomain || guardMode === 'repair') return
+    const domain = guardDomain
     fetchDomainGuardStatus(domain).then((status) => {
       if (active) setGuard({ domain, reason: status.immutable
         ? status.reason || 'This domain is permanently protected from deletion.' : '' })
@@ -53,7 +55,7 @@ export const TenantActionDialog: React.FC<{
       if (active) setGuard({ domain, reason: 'Cannot read domain protection. Deletion is blocked.' })
     })
     return () => { active = false }
-  }, [target?.domain, target?.mode])
+  }, [guardDomain, guardMode])
 
   if (!target) return null
   const copy = COPY[target.mode]

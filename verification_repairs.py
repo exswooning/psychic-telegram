@@ -27,6 +27,8 @@ def ensure(db):
             category TEXT NOT NULL, item_id TEXT, state TEXT NOT NULL,
             detail TEXT NOT NULL, first_seen TEXT NOT NULL, last_seen TEXT NOT NULL,
             resolved_at TEXT, PRIMARY KEY(source_user,service,finding_key))""")
+        import known_issues
+        known_issues.ensure(conn)
 
 
 def enqueue_findings(db, user, per):
@@ -37,6 +39,7 @@ def enqueue_findings(db, user, per):
     """
     if not hasattr(db, "write"):
         return 0
+    import known_issues
     ensure(db)
     count, now = 0, utc_now()
     with db.write() as conn:
@@ -49,23 +52,26 @@ def enqueue_findings(db, user, per):
                     seen.add(key)
                     iid = (item.get("source") or item.get("id") or item.get("item")) if isinstance(item, dict) else None
                     conn.execute("""INSERT INTO verification_repair_queue
-                        (source_user,service,finding_key,category,item_id,state,detail,first_seen,last_seen)
-                        VALUES(?,?,?,?,?,'QUEUED',?,?,?)
+                        (source_user,service,finding_key,category,item_id,state,detail,first_seen,last_seen,issue)
+                        VALUES(?,?,?,?,?,'QUEUED',?,?,?,?)
                         ON CONFLICT(source_user,service,finding_key) DO UPDATE SET
-                        last_seen=excluded.last_seen,
+                        last_seen=excluded.last_seen,issue=excluded.issue,
                         state=CASE WHEN verification_repair_queue.state='RESOLVED' THEN 'QUEUED'
                                    ELSE verification_repair_queue.state END,resolved_at=NULL""",
-                        (user, service, key, category, iid, detail, now, now))
+                        (user, service, key, category, iid, detail, now, now,
+                         known_issues.classify(service, item if category != "notCopied" else {"notCopied": item})))
                     count += 1
             if not result.get("sampled") and not result.get("errors") and (
                     result.get("checked", 0) > 0 or result.get("emptySource")):
-                rows = conn.execute("SELECT finding_key FROM verification_repair_queue WHERE source_user=? AND service=?",
-                                    (user, service)).fetchall()
-                for row in rows:
-                    if row[0] not in seen:
-                        conn.execute("UPDATE verification_repair_queue SET state='RESOLVED',resolved_at=? "
-                                     "WHERE source_user=? AND service=? AND finding_key=?",
-                                     (now, user, service, row[0]))
+                gone = [r for r in conn.execute(
+                    "SELECT source_user,service,finding_key,item_id,issue FROM verification_repair_queue "
+                    "WHERE source_user=? AND service=? AND state!='RESOLVED'", (user, service)).fetchall()
+                    if r["finding_key"] not in seen]
+                known_issues.log_resolved(conn, gone, now)
+                for row in gone:
+                    conn.execute("UPDATE verification_repair_queue SET state='RESOLVED',resolved_at=? "
+                                 "WHERE source_user=? AND service=? AND finding_key=?",
+                                 (now, user, service, row["finding_key"]))
     return count
 
 
@@ -220,8 +226,15 @@ def _finish(db, user, keys, state, summary):
             services = []
         if services:
             queue_state = ("RECHECK_REQUIRED" if json.loads(summary).get("checkLimit") else "RESOLVED") if state == "VERIFIED" else state
+            marks = ",".join("?" for _ in services)
+            if queue_state == "RESOLVED":
+                import known_issues
+                known_issues.log_resolved(conn, conn.execute(
+                    "SELECT source_user,service,finding_key,item_id,issue FROM verification_repair_queue "
+                    f"WHERE source_user=? AND state!='RESOLVED' AND service IN ({marks})",
+                    (user, *services)).fetchall(), utc_now())
             conn.execute("UPDATE verification_repair_queue SET state=?,resolved_at=? WHERE source_user=? "
-                         "AND state!='RESOLVED' AND service IN (" + ",".join("?" for _ in services) + ")",
+                         "AND state!='RESOLVED' AND service IN (" + marks + ")",
                          (queue_state, utc_now() if queue_state == "RESOLVED" else None, user, *services))
 
 
@@ -283,7 +296,8 @@ def scoped_repair(auth, db, settings, user, per):
            for item in drive.get("differences", [])):
         out["native_links"] = repair.repair_verified_native_links(
             auth, db, st, {"users": {user: per}}, apply=True)
-    if any(i.get("type") in ("file", "folder", "shortcut") for i in drive.get("notCopied", [])):
+    if (any(i.get("type") in ("file", "folder", "shortcut") for i in drive.get("notCopied", []))
+            or user in repair.unresolved_shortcut_users(db)):
         out["drive_retry"] = repair.retry_drive_stragglers(auth, db, st, apply=True, users=[user])
     if ((out.get("native_links") or {}).get("changed")
             or any("modified time" in d for i in drive.get("differences", []) for d in i.get("diffs", []))):

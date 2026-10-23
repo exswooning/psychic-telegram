@@ -20,6 +20,8 @@ import {
 import { KeyboardArrowDown as OpenIcon, KeyboardArrowUp as CloseIcon, Refresh as RefreshIcon } from '@mui/icons-material'
 import ReasonCodeDialog from '@/components/ReasonCodeDialog'
 import TenantOneToOne from '@/components/TenantOneToOne'
+import KnownIssuesPanel from '@/components/KnownIssuesPanel'
+import RepairPolicySwitch from '@/components/RepairPolicySwitch'
 import { fetchMe, fetchOneToOne, runOneToOne, migrationOf } from '@/api/controlPlane'
 import type { OneToOneService, OneToOneUser, OneToOneVerdict, OneToOneView } from '@/api/controlPlane'
 
@@ -149,6 +151,7 @@ const OneToOne: React.FC = () => {
   const [picked, setPicked] = useState<Set<string>>(new Set())
   const [asking, setAsking] = useState(false)
   const [everything, setEverything] = useState(false)
+  const [repairToo, setRepairToo] = useState(true)
   const [busy, setBusy] = useState(false)
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null)
 
@@ -174,7 +177,7 @@ const OneToOne: React.FC = () => {
   const go = async (reason: string) => {
     setBusy(true)
     try {
-      const r = await runOneToOne(reason, { accountId, users: [...picked], limit: everything ? 0 : undefined })
+      const r = await runOneToOne(reason, { accountId, users: [...picked], limit: everything ? 0 : undefined, repair: repairToo })
       setNote({ ok: r.ok, text: r.detail || (r.ok ? 'started' : 'refused') })
       if (r.ok) setAsking(false)
     } catch (e) {
@@ -186,6 +189,7 @@ const OneToOne: React.FC = () => {
     <Box>
       <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 0.5 }}>
         <Typography variant="h5" sx={{ fontWeight: 700, flexGrow: 1 }}>One-to-one check</Typography>
+        <RepairPolicySwitch accountId={accountId} />
         <Button size="small" startIcon={<RefreshIcon />} onClick={load}>Refresh</Button>
         <Button size="small" variant="contained" onClick={() => { setNote(null); setAsking(true) }} data-testid="verify-now">
           {picked.size ? `Verify ${picked.size} selected` : 'Verify all now'}
@@ -200,6 +204,7 @@ const OneToOne: React.FC = () => {
       {error && <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>}
 
       <TenantOneToOne accountId={accountId} />
+      <KnownIssuesPanel accountId={accountId} />
 
       <Typography variant="h6" sx={{ fontWeight: 700, mb: 1 }}>Each user</Typography>
       {note && <Alert severity={note.ok ? 'success' : 'error'} sx={{ mb: 2 }} onClose={() => setNote(null)}>{note.text}</Alert>}
@@ -244,9 +249,14 @@ const OneToOne: React.FC = () => {
       <ReasonCodeDialog
         open={asking} busy={busy} title="Verify now"
         description={<>
-          Opens {picked.size ? `${picked.size} selected user(s)` : 'every user'} on both tenants and compares them. As each user finishes, supported differences are repaired on the target
-          and that user is checked again. Unresolved findings remain visible for review. Older unresolved checks
-          are picked up automatically when this account is idle. The source is only read.
+          Opens {picked.size ? `${picked.size} selected user(s)` : 'every user'} on both tenants and compares them.{' '}
+          {repairToo
+            ? 'As each user finishes, supported differences are repaired on the target and that user is checked again. Unresolved findings remain visible for review.'
+            : 'Nothing is written to either tenant, and automatic repairs are left as they are.'}{' '}
+          The source is only read.
+          <FormControlLabel sx={{ display: 'block', mt: 1 }} control={
+            <Checkbox size="small" checked={repairToo} onChange={(e) => setRepairToo(e.target.checked)} inputProps={{ 'aria-label': 'repair what it finds' }} />}
+            label="Repair what it finds on the target" />
           <FormControlLabel sx={{ display: 'block', mt: 1 }} control={
             <Checkbox size="small" checked={everything} onChange={(e) => setEverything(e.target.checked)} inputProps={{ 'aria-label': 'check every item' }} />}
             label="Check every item, not a sample (slow on a large user)" />

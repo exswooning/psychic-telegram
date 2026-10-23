@@ -70,6 +70,18 @@ class TestRepairPutsDriftedTimesBack:
         assert tgt.store[ta]["modifiedTime"] == "2023-01-01T00:00:00Z"
         assert [c["fileId"] for c in tgt.calls_to("files.update")] == [ta]
 
+    def test_a_file_edited_on_the_source_after_its_copy_is_left_for_the_delta(self, auth, db, settings, identity):
+        """Putting the source's newer time on a stale copy would hide that it is stale."""
+        import repair
+        tgt, ta, _ = self._world(auth, db)
+        src = auth.source_drive(SRC_USER)
+        a = next(i for i, f in src.store.items() if f.get("name") == "Drifted")
+        src.store[a]["modifiedTime"] = "2099-01-01T00:00:00Z"        # edited after it was copied
+        out = repair.fix_modified_times(auth, db, settings, apply=True)
+        assert (out["drifted"], out["fixed"]) == (0, 0)
+        assert tgt.store[ta]["modifiedTime"] == NATIVE_IMPORT_TIME
+        assert tgt.call_count("files.update") == 0
+
     def test_a_survey_writes_nothing(self, auth, db, settings, identity):
         import repair
         tgt, ta, _ = self._world(auth, db)

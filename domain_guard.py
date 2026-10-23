@@ -131,14 +131,20 @@ def source_refuse_reason(domain: str, source_domain: str = "") -> str:
         return "The domain is unknown; destructive actions are refused."
     if is_government(d):
         return f"{d} is a government domain. Destructive actions are permanently refused."
+    if d in revocations():
+        # An operator declared it a sandbox, on the record (by, reason, when): the one
+        # way out, never for a government domain (revoke refuses those). The operator's
+        # rule, 2026-10-23: real sources stay protected, declared sandboxes can be
+        # seeded and reset again.
+        return ""
     if d == _norm(source_domain) or d == _norm(os.getenv("SOURCE_DOMAIN", "")):
-        return f"{d} is a source domain. Destructive actions are permanently refused; protection cannot be revoked."
+        return f"{d} is a source domain. Destructive actions are permanently refused; protection is lifted only by declaring it a sandbox."
     try:
         source = d in source_domains()
     except DomainGuardUnavailable:
         return f"Cannot read source domain protection. Destructive actions on {d} are refused."
     if source:
-        return f"{d} is a source domain. Destructive actions are permanently refused; protection cannot be revoked."
+        return f"{d} is a source domain. Destructive actions are permanently refused; protection is lifted only by declaring it a sandbox."
     return ""
 
 
@@ -171,7 +177,9 @@ def revocations() -> dict[str, dict]:
 def protected_domains() -> set[str]:
     """Configured domains minus revocations, plus the environment list.
 
-    Sources and the environment list are ABSOLUTE; revocations cannot lift them. The
+    The environment list is ABSOLUTE; a revocation cannot lift it. A source (any domain
+    ever configured as one, migration 013) is protected the same way unless an operator
+    has declared it a sandbox -- never possible for a government domain. The
     two say different things: a configured domain is protected because this
     deployment happens to know about it, which an operator may legitimately
     override for a sandbox; a domain typed into PROTECTED_DOMAINS is
@@ -180,7 +188,8 @@ def protected_domains() -> set[str]:
     one -- and this is a guard, so where the two disagree it takes the
     safer reading.
     """
-    return (configured_domains() - set(revocations())) | env_domains() | source_domains()
+    revoked = set(revocations())
+    return (configured_domains() - revoked) | env_domains() | (source_domains() - revoked)
 
 
 def is_government(domain: str) -> bool:
@@ -251,7 +260,6 @@ def revoke(domain: str, by: str, reason: str) -> dict:
         raise ValueError("domain is required")
     if is_government(d):
         raise ValueError(f"{d} is a government domain; it can never be declared a sandbox")
-    require_not_source(d)
     if not (reason or "").strip():
         raise ValueError("a reason is required to unprotect a domain")
     data = revocations()

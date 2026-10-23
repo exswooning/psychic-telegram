@@ -86,7 +86,33 @@ def canonical_native(document, lookup=lambda _: None):
     return visit(doc)
 
 
-def compare_native(auth, source_user, target_user, sid, tid, mime, lookup):
+IMAGE_KEYS = ("contentUri", "contentUrl")
+IMAGE_MAX_BYTES = 64 * 1024 * 1024
+
+
+def _fetch_image(url: str) -> bytes:
+    import urllib.request
+    with urllib.request.urlopen(url, timeout=60) as resp:
+        data = resp.read(IMAGE_MAX_BYTES + 1)
+    if len(data) > IMAGE_MAX_BYTES:
+        raise RuntimeError("Embedded image is larger than the comparison limit")
+    return data
+
+
+def _hash_images(value, fetch=None):
+    """Every embedded image's signed URL replaced by sha256 of its bytes."""
+    import hashlib
+    fetch = fetch or _fetch_image
+    if isinstance(value, dict):
+        return {k: ("sha256:" + hashlib.sha256(fetch(v)).hexdigest()
+                    if k in IMAGE_KEYS and isinstance(v, str) else _hash_images(v, fetch))
+                for k, v in value.items()}
+    if isinstance(value, list):
+        return [_hash_images(v, fetch) for v in value]
+    return value
+
+
+def compare_native(auth, source_user, target_user, sid, tid, mime, lookup, fetch=None):
     if mime.endswith(".document"):
         source = (
             auth.api("source", "docs", source_user)
@@ -120,19 +146,10 @@ def compare_native(auth, source_user, target_user, sid, tid, mime, lookup):
     else:
         raise RuntimeError("Native feature reader not implemented for " + mime)
 
-    # Signed image URLs are not stable image identities; do not ignore them
-    # and then claim embedded image bytes were verified.
-    def has_image_uri(value):
-        if isinstance(value, dict):
-            return "contentUri" in value or any(
-                has_image_uri(v) for v in value.values()
-            )
-        return isinstance(value, list) and any(has_image_uri(v) for v in value)
-
-    if has_image_uri(source) or has_image_uri(target):
-        raise RuntimeError(
-            "Embedded image bytes need dedicated authenticated hashing; native feature coverage remains incomplete"
-        )
+    # A signed image URL is not an identity: each side's differs on every read. Each
+    # image is fetched (the URL acts as the requester, for a short while) and compared
+    # by its bytes' hash -- Docs call it contentUri, Slides contentUrl.
+    source, target = _hash_images(source, fetch), _hash_images(target, fetch)
     a, b = canonical_native(source, lookup), canonical_native(target)
     return (
         [] if a == b else ["native document content, formatting or structure differs"]

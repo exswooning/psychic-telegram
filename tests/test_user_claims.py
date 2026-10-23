@@ -264,10 +264,12 @@ class TestCoordinatedDispatch:
             return {"source": s, "status": "DONE"}
 
         monkeypatch.setattr(main, "migrate_user", fake_migrate)
+        monkeypatch.setattr(main, "_ensure_target_accounts", lambda *a, **k: set())
 
         class S:
             user_workers = 4
             account_id = 7
+            dry_run = False
 
         out = main.run_batch(None, FakeDB(), S(), {"gmail"},
                              delta=False, delta_days=0)

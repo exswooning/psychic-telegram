@@ -96,6 +96,14 @@ def _gmail_batch_size():
         return GMAIL_BATCH_SIZE
 
 
+def _gmail_read_window():
+    """How many batch pairs are read ahead (VERIFY_GMAIL_WINDOW, 1-8; default 4)."""
+    try:
+        return max(1, min(8, int(os.getenv("VERIFY_GMAIL_WINDOW", "4"))))
+    except ValueError:
+        return 4
+
+
 def sha256(b: bytes) -> str:
     return hashlib.sha256(b).hexdigest()
 
@@ -389,6 +397,22 @@ def _sample(items: list, limit: int | None) -> list:
         return items
     ordered = sorted(items, key=lambda x: str(x[0]))
     return [ordered[int(i * len(ordered) / limit)] for i in range(limit)]
+
+
+def copy_lookup(db, target_bytes: bytes):
+    """The rewriter's lookup, for checking one target item: a source id resolves to
+    the copy this item actually names when that is one of its genuine copies (one
+    file shared with many users has one copy per user), otherwise to the default
+    pick. A link to anything that is not a copy of that source file still differs."""
+    many = getattr(db, "targets_for_source_id", None)
+
+    def lookup(source_id: str):
+        if many:
+            for tid in many(source_id):
+                if tid.encode() in target_bytes:
+                    return tid
+        return db.target_for_source_id(source_id)
+    return lookup
 
 
 class Verifier:
@@ -865,7 +889,7 @@ class Verifier:
                     # The migration repoints a Doc's links at the copies on purpose, so the
                     # source put through the engine's own rewriter is what the target must be.
                     import link_rewrite
-                    if link_rewrite.rewrite_bytes(a, self.db.target_for_source_id)[0] == b:
+                    if link_rewrite.rewrite_bytes(a, copy_lookup(self.db, b))[0] == b:
                         ev["how"] += "; its Drive links repointed at the copies, as intended"
                         return []
                 return [] if a == b else [f"content differs when exported ({len(a)} -> {len(b)} bytes)"]
@@ -1014,9 +1038,8 @@ class Verifier:
 
         AuthManager caches transports per thread. Resolve each service INSIDE its
         worker; never send the main thread's httplib2 transport into the pool.
-        At most one source and one target batch is live, and only one bounded
-        pair of batches is held while comparisons run. The default remains ten
-        bodies per side; larger experimental windows require an explicit setting.
+        At most VERIFY_GMAIL_WINDOW pairs of batches (default 4) are live or held,
+        yielded in order; ten bodies per side per batch.
         """
         from concurrent.futures import ThreadPoolExecutor
         size = _gmail_batch_size()
@@ -1027,21 +1050,42 @@ class Verifier:
             svc = (self.auth.source_gmail(self.src_user) if side == "source"
                    else self.auth.target_gmail(self.tgt_user))
             return self._raw_many(svc, ids, side, offset, total)
+        # A bounded read-ahead window of batch pairs, yielded in order. One pair at a
+        # time left each mailbox ~10x under Gmail's per-user quota and took 8.7-11.5 h
+        # for info@'s 39,756 messages (dharan, 2026-10-23). The window bounds memory too:
+        # at most `window` pairs of `size` bodies are held.
+        window = _gmail_read_window() if parallel else 1
+        import collections
+        ahead = collections.deque()
+
+        def submit(offset):
+            chunk = pairs[offset:offset + size]
+            src_ids, tgt_ids = [p[0] for p in chunk], [p[1] for p in chunk]
+            if parallel:
+                return offset, chunk, pool.submit(read, "source", src_ids, offset), pool.submit(read, "target", tgt_ids, offset)
+            return offset, chunk, None, (read("source", src_ids, offset), read("target", tgt_ids, offset))
         # One executor per mailbox, not per item. It is drained even on stop/error.
-        with ThreadPoolExecutor(max_workers=2, thread_name_prefix="verify-mail-read") as pool:
-            for offset in range(0, total, size):
+        with ThreadPoolExecutor(max_workers=2 * window, thread_name_prefix="verify-mail-read") as pool:
+            offsets = iter(range(0, total, size))
+            for offset in offsets:
                 _stop_check()
-                chunk = pairs[offset:offset + size]
-                source_ids, target_ids = [p[0] for p in chunk], [p[1] for p in chunk]
-                if parallel:
-                    source = pool.submit(read, "source", source_ids, offset)
-                    target = pool.submit(read, "target", target_ids, offset)
-                    source_result, target_result = source.result(), target.result()
-                else:
-                    source_result = read("source", source_ids, offset)
-                    target_result = read("target", target_ids, offset)
+                ahead.append(submit(offset))
+                if len(ahead) < window:
+                    continue
+                yield self._settle(ahead.popleft())
+            while ahead:
                 _stop_check()
-                yield offset, chunk, source_result, target_result
+                yield self._settle(ahead.popleft())
+
+    @staticmethod
+    def _settle(entry):
+        offset, chunk, source, target = entry
+        if source is None:
+            source_result, target_result = target
+        else:
+            source_result, target_result = source.result(), target.result()
+        _stop_check()
+        return offset, chunk, source_result, target_result
 
     def gmail(self) -> dict:
         res = self._blank()
@@ -1101,7 +1145,8 @@ class Verifier:
                 expected = None
                 if sid in rewritten:
                     b64 = base64.urlsafe_b64encode(sraw).decode().rstrip("=")
-                    new_b64, _n = rewrite_raw(b64, self.db.target_for_source_id)
+                    # decoded parts too: a base64 or quoted-printable body hides the ids
+                    new_b64, _n = rewrite_raw(b64, copy_lookup(self.db, traw + normalise_message(traw)[1]))
                     expected = base64.urlsafe_b64decode(new_b64 + "=" * (-len(new_b64) % 4))
                 verdict, notes = compare_message(sraw, traw, expected)
                 diffs = []
@@ -1374,11 +1419,15 @@ class Verifier:
 
     def directory(self):
         import verification_coverage
-        return verification_coverage.directory(self)
+        res = verification_coverage.directory(self)
+        res["notCopied"] += self._failed(("directory",))
+        return res
 
     def chat(self):
         import verification_coverage
-        return verification_coverage.chat(self)
+        res = verification_coverage.chat(self)
+        res["notCopied"] += self._failed(("chat",))      # the whole service failed for this user
+        return res
 
     # -- Contacts ---------------------------------------------------------
     def contacts(self) -> dict:
@@ -1636,9 +1685,15 @@ def run(auth, db, settings, users: list[str] | None = None, services=ALL_SERVICE
     ident = {r["source_email"]: r["target_email"] for r in db.all_identities() if r["entity_type"] == "user"}
     chosen = [u for u in (users or list(ident)) if u in ident]
     services = tuple(s for s in ALL_SERVICES if s in services)
+    # Chat is skipped only when it was never part of this migration: not selected,
+    # nothing mapped and nothing attempted. A chat that failed outright has nothing
+    # mapped either, and must still read as not copied.
     if "chat" in services and not getattr(settings, "migrate_chat", False) and not any(
             db.get_target_id(user, sid, "chat_space") for user in chosen
-            for sid, in db.conn.execute("SELECT source_id FROM id_mapping WHERE source_user=? AND type='chat_space' LIMIT 1", (user,))):
+            for sid, in db.conn.execute("SELECT source_id FROM id_mapping WHERE source_user=? AND type='chat_space' LIMIT 1", (user,))
+    ) and not any(db.conn.execute("SELECT 1 FROM audit_log WHERE source_user=? AND item_type IN "
+                                  "('chat','chat_space','chat_message') LIMIT 1", (user,)).fetchone()
+                  for user in chosen):
         services = tuple(s for s in services if s != "chat")
     report = {"generatedAt": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
               "accountId": getattr(settings, "account_id", None),

@@ -46,6 +46,7 @@ class _Svc:
 class _DB:
     def __init__(self): self.forgot, self.audit = [], []
     def get_target_id(self, u, i, t): return "TGT1"
+    def get_audit(self, u, i, t): return None
     def already_repaired(self, u, i): return False
     def forget_mapping(self, u, i, t): self.forgot.append((u, i, t))
     def log_audit(self, *a, **k): self.audit.append(a)
@@ -131,6 +132,7 @@ class _ListSvc:
 
 def _finder(ids):
     g = object.__new__(gmail_engine.GmailMigrator)
+    g.settings = type("S", (), {"mail_only_with_links": False})()
     g.tgt = _ListSvc(ids)
     g.limiter = type("L", (), {"acquire": lambda self: None})()
     g._retry = lambda fn, label=None: fn()

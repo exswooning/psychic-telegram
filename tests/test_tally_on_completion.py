@@ -124,4 +124,4 @@ class TestAUserIsTalliedWhenTheyFinish:
         self._seed(auth)
         self._finish(auth, db, settings, {"gmail"})
         _drain()
-        assert len(db.user_tallies()) == 1 and len(db.user_verifications()) == 1
+        assert len(db.user_tallies()) == 1 and [v["service"] for v in db.user_verifications() if v["service"] != "directory"] == ["gmail"]

@@ -13,6 +13,12 @@ vi.mock('@/hooks/useRunningJobs', () => ({
                            refresh: vi.fn() }),
 }))
 
+// The dialog asks the server whether a domain is permanently protected; these
+// test domains are not.
+vi.mock('@/api/controlPlane', () => ({
+  fetchDomainGuardStatus: (domain: string) => Promise.resolve({ domain, immutable: false }),
+}))
+
 import WorkingDomains from './WorkingDomains'
 
 /* Two very different actions behind one card, which is the point of showing
@@ -77,7 +83,7 @@ describe('working domains', () => {
     expect(screen.getByTestId('admin-password')).toBeInTheDocument()
   })
 
-  it('refuses until the exact domain is typed', () => {
+  it('refuses until the exact domain is typed', async () => {
     open('wipe')
     expect(screen.getByTestId('confirm-act')).toBeDisabled()
     fireEvent.change(screen.getByTestId('confirm-domain'),
@@ -85,7 +91,8 @@ describe('working domains', () => {
     expect(screen.getByTestId('confirm-act')).toBeDisabled()
     fireEvent.change(screen.getByTestId('confirm-domain'),
                      { target: { value: 'src.example.com' } })
-    expect(screen.getByTestId('confirm-act')).not.toBeDisabled()
+    // ...and the server has said the domain is not permanently protected.
+    await waitFor(() => expect(screen.getByTestId('confirm-act')).not.toBeDisabled())
   })
 
   it('will not accept the other configured domain', () => {
@@ -99,6 +106,7 @@ describe('working domains', () => {
     const onAct = open('wipe')
     fireEvent.change(screen.getByTestId('confirm-domain'),
                      { target: { value: 'src.example.com' } })
+    await waitFor(() => expect(screen.getByTestId('confirm-act')).not.toBeDisabled())
     fireEvent.click(screen.getByTestId('confirm-act'))
     await waitFor(() => expect(onAct).toHaveBeenCalled())
     expect(onAct.mock.calls[0][1]).toBe('wipe')

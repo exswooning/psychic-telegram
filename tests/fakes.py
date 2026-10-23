@@ -1532,7 +1532,8 @@ class _CalList:
         return _Call(self.s, "calendarList.list", self._list, kw)
 
     def _list(self, minAccessRole: str = "", **_):
-        rows = list(self.s.calendar_store.values())
+        # Google lists the primary calendar too, as itself (primary: True).
+        rows = [self.s.primary_entry] + list(self.s.calendar_store.values())
         if minAccessRole == "owner":
             rows = [c for c in rows if c.get("accessRole") == "owner"]
         return {"items": copy.deepcopy(rows)}
@@ -1871,6 +1872,20 @@ class FakeAuth:
         """Resolves the users/{id} -> email lookup chat_engine needs."""
         return _FakeDirectory(self)
 
+    def api(self, tenant: str, name: str, user: str):
+        if name in ("docs", "slides"):
+            return _FakeNativeReader(self._get(tenant, "drive", user))
+        return self._get(tenant, name, user)
+
+    def directory(self, tenant: str, writable: bool = False, **_):
+        """Directory profiles (the verifier's `directory` service). A user nobody set
+        answers with a name made from their address, the same on both tenants."""
+        return _FakeProfiles(self.profiles.setdefault(tenant, {}))
+
+    @property
+    def profiles(self) -> dict:
+        return self.__dict__.setdefault("_profiles", {})
+
     def verify_delegation(self, tenant: str, user: str) -> tuple[bool, str]:
         if (tenant, user) in self.delegation_failures:
             return False, "unauthorized_client"
@@ -2122,6 +2137,58 @@ class _FakeDirectory:
                 return {"primaryEmail": email}
 
         return _Req()
+
+
+class _FakeNativeReader:
+    """Docs/Slides `get` for a fake Drive native: one text run holding its export text,
+    so two copies with the same export read as the same structure."""
+
+    def __init__(self, drive: "FakeDrive"):
+        self.drive = drive
+
+    def documents(self):
+        return self
+
+    def presentations(self):
+        return self
+
+    def get(self, documentId: str = "", presentationId: str = "", **_):
+        fid = documentId or presentationId
+        if fid not in self.drive.exports:
+            raise http_error(404, "notFound", fid)
+        text = self.drive.exports[fid].decode("utf-8", "replace")
+        return _Done(lambda: {"body": {"content": [{"paragraph": {"elements": [{"textRun": {"content": text}}]}}]}})
+
+
+class _Done:
+    def __init__(self, fn):
+        self.fn = fn
+
+    def execute(self, num_retries: int = 0):
+        return self.fn()
+
+
+class _FakeProfiles:
+    """users().get / patch for Directory profiles, keyed by address on one tenant."""
+
+    def __init__(self, store: dict):
+        self.store = store
+
+    def users(self):
+        return self
+
+    def _profile(self, key: str) -> dict:
+        return self.store.setdefault(key, {"primaryEmail": key, "name": {
+            "givenName": key.split("@")[0].title(), "familyName": "User"}})
+
+    def get(self, userKey: str = "", **_):
+        return _Done(lambda: copy.deepcopy(self._profile(userKey)))
+
+    def patch(self, userKey: str = "", body: dict | None = None, **_):
+        def go():
+            self._profile(userKey).update(copy.deepcopy(body or {}))
+            return copy.deepcopy(self._profile(userKey))
+        return _Done(go)
 
 
 # ======================================================================
@@ -2436,8 +2503,8 @@ class _Tasks:
     def _insert(self, tasklist: str, body: dict, parent: Optional[str] = None, **_):
         if tasklist not in self.s.lists:
             raise http_error(404, "notFound", tasklist)
-        if not body.get("title"):
-            raise http_error(400, "invalidArgument", "title is required")
+        # Measured on the sandbox target (2026-10-23): Google accepts a task with an
+        # empty title, or none, and reads it back as "" -- there is no rule to model.
         if parent is not None and not any(
                 t["id"] == parent for t in self.s.task_store.get(tasklist, [])):
             # The real API rejects a parent that is not in this list, which is

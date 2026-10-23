@@ -91,7 +91,9 @@ class TestASampledVerification:
         r = self._run(big, db, settings, 4)
         for svc in ("drive", "gmail"):
             assert r["users"][SRC_USER][svc]["extras"] == [], svc
-        assert r["verdict"] == "IDENTICAL", r["reasons"]
+        # A sample cannot prove the rest, so it is never a pass -- but nothing was found wrong.
+        assert r["verdict"] == "INCOMPLETE", r["reasons"]
+        assert all("not fully checked" in x for x in r["reasons"])
 
     def test_unsampled_it_checks_everything_as_before(self, big, db, settings):
         r = self._run(big, db, settings, None)
@@ -112,17 +114,17 @@ class TestASampledVerification:
         tg.messages[outside]["raw"] = base64.urlsafe_b64encode(
             base64.urlsafe_b64decode(tg.messages[outside]["raw"]).replace(b"body", b"BODY")).decode()
         r = self._run(big, db, settings, 4)
-        assert r["verdict"] == "IDENTICAL"
+        assert r["verdict"] == "INCOMPLETE"          # never IDENTICAL from a sample, for exactly this reason
         assert any("would not be seen" in n for n in r["notes"])
 
 
 class TestVerifyUserRecordsWhatItFound:
     def test_one_row_per_user_and_service(self, big, db, settings):
-        assert V.verify_user(big, db, settings, SRC_USER, ("drive", "gmail"), 5) == "IDENTICAL"
+        assert V.verify_user(big, db, settings, SRC_USER, ("drive", "gmail"), 5) == "INCOMPLETE"   # a sample
         rows = {(r["user"], r["service"]): r for r in db.user_verifications()}
         assert set(rows) == {(SRC_USER, "drive"), (SRC_USER, "gmail")}
         g = rows[(SRC_USER, "gmail")]
-        assert g["verdict"] == "IDENTICAL" and g["checked"] == 5 and g["identical"] == 5 and g["sampledOf"] == 12
+        assert g["verdict"] == "INCOMPLETE" and g["checked"] == 5 and g["identical"] == 5 and g["sampledOf"] == 12
         assert g["counts"]["differences"] == 0 and g["verifiedAt"]
 
     def test_a_later_verification_replaces_the_earlier_one(self, big, db, settings):
@@ -140,9 +142,12 @@ class TestVerifyUserRecordsWhatItFound:
         row = next(r for r in db.user_verifications() if r["service"] == "gmail")
         assert row["missing"] and "not on the target" in row["missing"][0]["why"]
 
-    def test_nothing_checked_is_stored_as_incomplete_not_identical(self, auth, db, settings, identity):
+    def test_a_source_read_and_found_empty_is_identical_empty(self, auth, db, settings, identity):
+        """Nothing to compare is a pass only when the source was READ and is empty (a
+        never-read one is INCOMPLETE: test_verify_sample's empty-migration test)."""
         V.verify_user(auth, db, settings, SRC_USER, ("calendar",), 5)
-        assert next(r for r in db.user_verifications())["verdict"] == "INCOMPLETE"
+        row = next(r for r in db.user_verifications())
+        assert row["verdict"] == "IDENTICAL" and row["checked"] == 0
 
     def test_a_service_that_cannot_be_read_is_incomplete_and_says_why(self, db, settings, identity):
         assert V.verify_user(object(), db, settings, SRC_USER, ("gmail",), 5) == "INCOMPLETE"    # no usable auth
@@ -169,15 +174,15 @@ class TestAUserIsVerifiedWhenTheyFinish:
         assert self._finish(auth, db, settings, {"gmail", "contacts"})["status"] == "DONE"
         _drain()
         got = {r["service"]: r for r in db.user_verifications()}
-        assert set(got) == {"gmail", "contacts"}
-        assert all(r["verdict"] == "IDENTICAL" and r["checked"] == 1 for r in got.values())
+        assert set(got) == {"gmail", "contacts", "directory"}     # the profile is checked for every finished user
+        assert all(got[s]["verdict"] == "IDENTICAL" and got[s]["checked"] == 1 for s in ("gmail", "contacts"))
 
     def test_an_ordered_pass_verifies_only_the_service_it_just_finished(self, auth, db, settings, identity):
         settings.verify_on_complete = True
         self._seed(auth)
         self._finish(auth, db, settings, {"gmail"})
         _drain()
-        assert {r["service"] for r in db.user_verifications()} == {"gmail"}
+        assert {r["service"] for r in db.user_verifications()} == {"gmail", "directory"}
 
     def test_nothing_is_verified_when_the_feature_is_off(self, auth, db, settings, identity):
         settings.verify_on_complete = False

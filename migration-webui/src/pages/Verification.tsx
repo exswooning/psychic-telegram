@@ -42,6 +42,7 @@ import { VERIFICATION_KEYS } from '@/actionHomes'
 import { tint } from '@/theme'
 import { describeElapsed } from '@/hooks/useRunningJobs'
 import { verificationEstimate } from '@/components/RunningJobDetail.utils'
+import PairParityCard from '@/components/PairParityCard'
 
 const runWhen = (value: string | null): string => {
   if (!value) return '—'
@@ -340,6 +341,8 @@ const Verification: React.FC = () => {
     <Box>
       <Typography variant="h4" sx={{ fontWeight: 700, mb: 0.5 }}>Verification</Typography>
       <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>Data integrity checks across all migrated services</Typography>
+
+      <PairParityCard />
 
       <VerifiedDomains />
 

@@ -3292,17 +3292,23 @@ def dwd_payload(account_id: int | None = None) -> dict:
                                 for sso in (False, True):
                                     for cal_acls in (False, True):
                                         for grp in (False, True):
-                                            s = dataclasses.replace(
-                                                base, transfer_mode=mode,
-                                                migrate_gmail_settings=gmail,
-                                                migrate_chat=chat,
-                                                chat_space_mode=chat_mode,
-                                                migrate_contacts=contacts,
-                                                migrate_tasks=tasks,
-                                                migrate_sso=sso,
-                                                migrate_calendar_acls=cal_acls,
-                                                migrate_groups=grp,
-                                            )
+                                            try:
+                                                s = dataclasses.replace(
+                                                    base, transfer_mode=mode,
+                                                    migrate_gmail_settings=gmail,
+                                                    migrate_chat=chat,
+                                                    chat_space_mode=chat_mode,
+                                                    migrate_contacts=contacts,
+                                                    migrate_tasks=tasks,
+                                                    migrate_sso=sso,
+                                                    migrate_calendar_acls=cal_acls,
+                                                    migrate_groups=grp,
+                                                )
+                                            except ValueError:
+                                                # A mode this pair may not use (adaptive is
+                                                # s.->t. only): it asks for nothing here. Raising
+                                                # emptied the whole line for every account.
+                                                continue
                                             scopes.update(fn(s))
         return sorted(scopes)
 

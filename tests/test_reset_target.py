@@ -55,7 +55,8 @@ class TestGuards:
         """Nothing good can come of it, and the domain check alone would pass."""
         monkeypatch.setenv("SANDBOX_MODE", "true")
         monkeypatch.delenv("PROTECTED_DOMAINS", raising=False)
-        with pytest.raises(SystemExit, match="same"):
+        # Refused either way: the permanent source guard now speaks first.
+        with pytest.raises(SystemExit, match="same|source domain"):
             reset_target.assert_sandbox(settings("x.com", "x.com"), "x.com")
 
     def test_a_correct_invocation_passes(self, monkeypatch):
@@ -319,8 +320,9 @@ def test_a_wipe_counts_users_for_the_jobs_page(monkeypatch, capsys):
     import webui
     monkeypatch.setattr(reset_target, "reset_one", lambda s, a, u, svc: {
         "user": u, "drive": 1, "gmail": 2, "calendar": 0, "chat": 0})
+    st = type("S", (), {"target_domain": "t.com", "source_domain": "s.com"})()
     totals, unreached = reset_target.reset_all(
-        None, None, ["a@t.com", "b@t.com", "c@t.com"], ("drive",), 2)
+        st, None, ["a@t.com", "b@t.com", "c@t.com"], ("drive",), 2)
     lines = capsys.readouterr().out.splitlines()
     assert (totals["drive"], totals["gmail"], unreached) == (3, 6, [])
     assert webui._counter_progress_pct(lines[:1]) == 0

@@ -54,7 +54,10 @@ from db import MigrationDB    # noqa: E402
 # `acl_pass` is the marker for an item whose sharing was started and not finished; it goes
 # with the items it describes.
 DRIVE_TYPES = ("folder", "file", "shortcut", "acl", "comment", "acl_pass", "links_pass",
-               "form_link")
+               "form_link",
+               # per-file decisions and evidence about the copies a reset removes: which
+               # route/method copied it, a Google-flagged file, a source-tripwire change
+               "source_change", "flagged_file", "method", "transfer_route")
 
 # The ledger row types each service owns. Everything the engine writes to
 # id_mapping/audit_log has to appear here, or a reset leaves rows behind

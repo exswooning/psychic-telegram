@@ -132,12 +132,22 @@ def test_retained_source_protection_cannot_be_deleted_or_role_flipped():
             c.execute(sql)
 
 
-def test_source_protection_refuses_cross_account_target_even_with_revocation(monkeypatch):
+def test_source_protection_refuses_cross_account_target_unless_declared_a_sandbox(monkeypatch):
+    """Any domain ever configured as a source stays refused from every account; only an
+    operator's declared sandbox lifts it (the operator's rule, 2026-10-23), and never
+    for a government domain."""
     import domain_guard as guard
-    monkeypatch.setattr(guard, "source_domains", lambda: {"source.example"})
-    monkeypatch.setattr(guard, "revocations", lambda: {"source.example": {"reason": "sandbox"}})
+    monkeypatch.setattr(guard, "source_domains", lambda: {"source.example", "dharan.gov.np"})
+    monkeypatch.setattr(guard, "revocations", lambda: {})
     with pytest.raises(ValueError, match="source domain"):
         guard.require_not_source("source.example", "different-source.example")
+    monkeypatch.setattr(guard, "revocations", lambda: {"source.example": {"reason": "sandbox"},
+                                                        "dharan.gov.np": {"reason": "never"}})
+    guard.require_not_source("source.example", "different-source.example")       # declared: allowed
+    with pytest.raises(ValueError, match="government"):
+        guard.require_not_source("dharan.gov.np", "different-source.example")
+    with pytest.raises(ValueError, match="government"):
+        guard.revoke("dharan.gov.np", "op", "try")
 
 
 def test_orphaned_verification_is_interrupted_only_when_disabled_and_owner_dead(db, monkeypatch):

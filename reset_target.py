@@ -95,8 +95,6 @@ def assert_sandbox(settings: Settings, confirm_domain: str,
     if confirm_domain.lower() != domain:
         sys.exit(f"REFUSING: --confirm-domain {confirm_domain!r} does not match "
                  f"{env_name} {domain!r}.")
-    if side == "source" or domain_guard._norm(domain) == domain_guard._norm(settings.source_domain):
-        sys.exit(f"REFUSING: {domain} is a source domain; it can never be wiped.")
     refusal = domain_guard.refuse_reason(domain)
     if refusal:
         sys.exit("REFUSING: " + refusal)

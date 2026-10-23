@@ -531,14 +531,12 @@ const Jobs: React.FC = () => {
                           <Button size="small" color="warning" variant="outlined"
                                   startIcon={<WipeIcon />}
                                   data-testid={`wipe-runs-${domain}`}
-                                  disabled={side === 'source'}
                                   onClick={() => setActOn({ domain, side, mode: 'wipe' })}>
                             Wipe data
                           </Button>
                           <Button size="small" color="error" variant="outlined"
                                   startIcon={<UsersIcon />}
                                   data-testid={`delete-users-runs-${domain}`}
-                                  disabled={side === 'source'}
                                   onClick={() => setActOn({ domain, side,
                                                             mode: 'delete_users' })}>
                             Delete users

@@ -1899,7 +1899,9 @@ class DriveMigrator:
             return
 
         body = {"name": item["name"], "parents": [self._staging_drive_id]}
-        body.update(carried_metadata(item))
+        # This call is made as the SOURCE user: starred is per user, so it would star the
+        # copy for them. It is set as the target in the move (_out_of_staging).
+        body.update({k: v for k, v in carried_metadata(item).items() if k != "starred"})
         # copy() does not carry modifiedTime across on its own.
         if item.get("modifiedTime"):
             body["modifiedTime"] = item["modifiedTime"]
@@ -2693,9 +2695,13 @@ class DriveMigrator:
     def _fixup_shortcuts(self) -> None:
         for item, tgt_parent in self._pending_shortcuts:
             target_id = (item.get("shortcutDetails") or {}).get("targetId")
+            # This user's own copy first; else whoever's copy exists. A shortcut usually
+            # points at a colleague's file -- live, dharan: ward7 and info@ each had one
+            # left SKIPPED_UNRESOLVED_TARGET although planning@'s copy was on the target.
             mapped = (
                 self.db.get_target_id(self.source_user, target_id, "file")
                 or self.db.get_target_id(self.source_user, target_id, "folder")
+                or self.db.target_for_source_id(target_id, ("file", "folder"))
             )
             if not mapped:
                 self.db.log_audit(self.source_user, item["id"], "shortcut",

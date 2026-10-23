@@ -11,6 +11,8 @@ vi.mock('@/components/OneToOneSummary', () => ({ default: () => null }))
 vi.mock('@/api/controlPlane', () => ({
   fetchSourceGuard: () => Promise.resolve({ snapshotTakenAt: null, snapshotUsers: 0, latest: null }),
   runSourceGuard: () => Promise.resolve({ ok: true, actionId: 1, detail: '' }),
+  fetchUserProfiles: () => Promise.resolve({ profiles: [] }),
+  startUserProfileSync: () => Promise.resolve({ ok: true, actionId: 1, detail: '' }),
   fetchMigrationDetail: (...a: unknown[]) => fetchMigrationDetail(...a),
   runRepair: (...a: unknown[]) => runRepair(...a),
   startDelta: vi.fn(),
