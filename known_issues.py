@@ -43,6 +43,15 @@ ISSUES = [
      "shared with many users; otherwise a real content difference.",
      "Checker accepts any genuine copy (verify_sample.copy_lookup, 2026-10-23); what remains "
      "is a real difference for a person.", False),
+    ("chat.attributed", "chat", lambda t: "posted by the user with an attribution" in t,
+     "Chat message re-posted with an attribution",
+     "The sender is a bot (e.g. Drive notifications) or has no account on the target; Chat lets "
+     "nobody post as them, so the user posts the same text prefixed \"[originally from ...]\".",
+     "None possible through the Chat API. Text and order are intact; listed in the final report.", False),
+    ("chat.text", "chat", lambda t: "Chat text differs" in t,
+     "Chat message text differs",
+     "A real text difference (link rewrite or edit).",
+     "Inspect; re-post if needed.", False),
     ("tasks.untitled", "tasks", lambda t: "'(untitled)'" in t,
      "Untitled task got the title \"(untitled)\"",
      "An old engine rule; Google accepts an empty title (measured 2026-10-23).",
@@ -138,27 +147,64 @@ def summary_empty() -> list[dict]:
              "open": 0, "fixed": 0, "lastFixed": None} for i, svc, _m, title, cause, fix, auto in ISSUES]
 
 
-def summary(conn) -> dict:
-    """Every known kind with its counts (open now, fixed so far, last fixed), plus the
-    latest fixes, for the One-to-one page."""
+def _open_rows(conn) -> list[tuple[str, str, str]]:
+    """(kind, category, source_user) for every open finding. A ledger whose queue
+    predates kinds (the column is added on the next write) is classified here, from
+    each row's stored detail, rather than read as having nothing open."""
     tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-    open_, fixed, last, recent = {}, {}, {}, []
-    if "verification_repair_queue" in tables:
-        cols = {r[1] for r in conn.execute("PRAGMA table_info(verification_repair_queue)")}
-        if "issue" in cols:
-            open_ = dict(conn.execute("SELECT COALESCE(issue,'unclassified'), COUNT(*) FROM "
-                                      "verification_repair_queue WHERE state!='RESOLVED' GROUP BY 1").fetchall())
+    if "verification_repair_queue" not in tables:
+        return []
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(verification_repair_queue)")}
+    pick = "issue" if "issue" in cols else "NULL"
+    out = []
+    for issue, service, category, detail, user in conn.execute(
+            f"SELECT {pick}, service, category, detail, source_user FROM verification_repair_queue "
+            "WHERE state!='RESOLVED'"):
+        if not issue:
+            try:
+                item = json.loads(detail)
+            except ValueError:
+                item = detail
+            issue = classify(service, item if category != "notCopied" else {"notCopied": item})
+        out.append((issue, category, user))
+    return out
+
+
+def summary(conn) -> dict:
+    """Every known kind with its counts (open now, by category; fixed so far; last
+    fixed), plus the latest fixes -- for the One-to-one page and the pair card."""
+    tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    open_, by_cat, fixed, last, recent = {}, {}, {}, {}, []
+    for issue, category, _user in _open_rows(conn):
+        open_[issue] = open_.get(issue, 0) + 1
+        by_cat.setdefault(issue, {})[category] = by_cat.setdefault(issue, {}).get(category, 0) + 1
     if "issue_fix_log" in tables:
         for issue, n, at in conn.execute("SELECT issue, COUNT(*), MAX(fixed_at) FROM issue_fix_log GROUP BY 1"):
             fixed[issue], last[issue] = n, at
         recent = [dict(zip(("fixedAt", "user", "service", "issue", "item"), r)) for r in conn.execute(
             "SELECT fixed_at,source_user,service,issue,item_id FROM issue_fix_log ORDER BY id DESC LIMIT 50")]
     kinds = [{"id": i, "service": svc, "title": title, "cause": cause, "fix": fix, "auto": auto,
-              "open": open_.get(i, 0), "fixed": fixed.get(i, 0), "lastFixed": last.get(i)}
+              "open": open_.get(i, 0), "openByCategory": by_cat.get(i, {}),
+              "fixed": fixed.get(i, 0), "lastFixed": last.get(i)}
              for i, svc, _m, title, cause, fix, auto in ISSUES]
     if open_.get("unclassified") or fixed.get("unclassified"):
         kinds.append({"id": "unclassified", "service": "", "title": "Not a known kind yet",
                       "cause": "", "fix": "Read the finding; add its kind here once understood.", "auto": False,
-                      "open": open_.get("unclassified", 0), "fixed": fixed.get("unclassified", 0),
+                      "open": open_.get("unclassified", 0), "openByCategory": by_cat.get("unclassified", {}),
+                      "fixed": fixed.get("unclassified", 0),
                       "lastFixed": last.get("unclassified")})
     return {"kinds": kinds, "recent": recent}
+
+
+def users_for(conn, issue: str) -> list[dict]:
+    """Who one kind affects: open findings per user, and fixes recorded for them."""
+    per: dict[str, dict] = {}
+    for kind, _cat, user in _open_rows(conn):
+        if kind == issue:
+            per.setdefault(user, {"user": user, "open": 0, "fixed": 0, "lastFixed": None})["open"] += 1
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE name='issue_fix_log'").fetchone():
+        for user, n, at in conn.execute("SELECT source_user, COUNT(*), MAX(fixed_at) FROM issue_fix_log "
+                                        "WHERE issue=? GROUP BY 1", (issue,)):
+            row = per.setdefault(user, {"user": user, "open": 0, "fixed": 0, "lastFixed": None})
+            row["fixed"], row["lastFixed"] = n, at
+    return sorted(per.values(), key=lambda r: (-(r["open"] + r["fixed"]), r["user"]))

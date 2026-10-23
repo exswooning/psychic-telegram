@@ -546,7 +546,9 @@ def migrate_user(auth: AuthManager, db: MigrationDB, settings: Settings,
     try:
         if acceptance_enabled:
             from migration_acceptance import Acceptance, dependency_preflight
-            dependency_preflight(auth,db,settings,source_user,target_user)
+            dependencies = dependency_preflight(auth,db,settings,source_user,target_user)
+            if dependencies:
+                result["dependencyFindings"] = dependencies
             acceptance = Acceptance(auth,db,settings,source_user,target_user,services)
             result["acceptanceRunId"] = acceptance.run_id
             if not acceptance.ready():

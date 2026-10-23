@@ -470,7 +470,13 @@ class Acceptance:
 
 
 def dependency_preflight(auth, db, settings, source, target):
-    """Names and identity mappings are prerequisites, never guessed from filenames."""
+    """Names and identity mappings are prerequisites, never guessed from filenames --
+    and never a reason to hold a user's data back (the operator's rule, 2026-10-23):
+    what does not match is returned as findings for the run's record, the User
+    profiles panel and the One-to-one directory row. Live, it refused every Drive
+    re-walk on dharan because names read back with different capitalisation, which
+    also kept the six Google-flagged files from ever being copied."""
+    import logging
     import user_profiles
 
     result = user_profiles.sync_profiles(
@@ -482,20 +488,17 @@ def dependency_preflight(auth, db, settings, source, target):
         create_missing=False,
         progress=lambda _: None,
     )
-    failures = [
-        r.get("error") or r.get("status")
+    findings = [
+        "Profile not reconciled: " + str(r.get("error") or r.get("status"))
         for r in result["profiles"]
         if r.get("status") not in ("MATCHED", "UPDATED")
     ]
-    if failures:
-        raise RuntimeError("Profile dependency unresolved: " + "; ".join(failures))
     if getattr(settings, "migrate_groups", False):
         from tenant_verify import TenantCheck
 
         check = TenantCheck(auth, db, settings).groups()
         if check["status"] != "IDENTICAL":
-            raise RuntimeError(
-                "Group membership dependencies unresolved: "
-                + canonical(check["differences"][:5])
-            )
-    return result
+            findings.append("Group membership differs: " + canonical(check["differences"][:5]))
+    for f in findings:
+        logging.getLogger("migrate").warning("[%s] %s (migrating anyway)", source, f)
+    return findings

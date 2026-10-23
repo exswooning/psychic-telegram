@@ -180,3 +180,20 @@ class TestCheckOnlyAndThePolicy:
         cp.post("/api/v2/repair-policy", json={"reason": "benchmark", "account_id": aid, "enabled": False})
         assert cp.get("/api/v2/repair-policy", params={"account_id": aid}).json()["enabled"] is False
         assert cp.get("/api/v2/repair-policy", params={"account_id": aid + 5}).status_code == 403
+
+
+class TestKnownIssueUsers:
+    def test_it_lists_who_one_kind_affects_and_needs_access(self, cp):
+        import json
+        import verification_repairs
+        aid = _signup(cp)
+        verification_repairs.enqueue_findings(cp.ledger, "ann@a.com", {"gmail": {
+            "checked": 2, "identical": 1, "differences": [{"source": "s1", "target": "t1",
+            "diffs": ["labels added on the target: ['INBOX']"]}], "missing": [], "duplicates": [],
+            "notCopied": [], "errors": [], "extras": [], "notes": []}})
+        r = cp.get("/api/v2/known-issues/gmail.labels_added/users", params={"account_id": aid}).json()
+        assert r["users"] == [{"user": "ann@a.com", "open": 1, "fixed": 0, "lastFixed": None}]
+        kinds = {k["id"]: k for k in cp.get("/api/v2/known-issues", params={"account_id": aid}).json()["kinds"]}
+        assert kinds["gmail.labels_added"]["openByCategory"] == {"differences": 1}
+        assert cp.get("/api/v2/known-issues/gmail.labels_added/users",
+                      params={"account_id": aid + 5}).status_code == 403

@@ -9,15 +9,16 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
-  Box, Button, Card, CardContent, Chip, IconButton, Stack, Table, TableBody, TableCell, TableHead,
+  Box, Button, Card, CardContent, Chip, Collapse, IconButton, Stack, Table, TableBody, TableCell, TableHead,
   TableRow, Typography,
 } from '@mui/material'
 import { Refresh as RefreshIcon } from '@mui/icons-material'
 import {
-  fetchKnownIssues, fetchMe, fetchOneToOne, fetchSourceGuard, fetchTally, migrationOf,
+  fetchKnownIssues, fetchMe, fetchMigrations, fetchOneToOne, fetchSourceGuard, fetchTally, migrationOf,
 } from '@/api/controlPlane'
 import type { KnownIssues, OneToOneUser, OneToOneView, SourceGuard, TallyView } from '@/api/controlPlane'
 import { VERDICT, ORDER, parity } from '@/oneToOneVerdicts'
+import DifferencesBreakdown from './DifferencesBreakdown'
 
 const SERVICES = ['drive', 'gmail', 'calendar', 'contacts', 'tasks', 'chat', 'directory']
 const COUNT_KEYS = ['differences', 'missing', 'notCopied', 'errors'] as const
@@ -32,6 +33,8 @@ const PairParityCard: React.FC<{ accountId?: number }> = ({ accountId: given }) 
   const [tally, setTally] = useState<TallyView | null>(null)
   const [issues, setIssues] = useState<KnownIssues | null>(null)
   const [guard, setGuard] = useState<SourceGuard | null>(null)
+  const [pair, setPair] = useState<{ source: string; target: string } | null>(null)
+  const [showWhere, setShowWhere] = useState(false)
 
   useEffect(() => {
     if (accountId) return
@@ -44,6 +47,11 @@ const PairParityCard: React.FC<{ accountId?: number }> = ({ accountId: given }) 
     fetchTally(accountId).then(setTally).catch(() => setTally(null))
     fetchKnownIssues(accountId).then(setIssues).catch(() => setIssues(null))
     fetchSourceGuard(accountId).then(setGuard).catch(() => setGuard(null))
+    // The pair's own domains, as configured -- never inferred or hard-coded.
+    fetchMigrations().then((r) => {
+      const row = r.migrations.find((m) => m.accountId === accountId)
+      if (row) setPair({ source: row.sourceDomain, target: row.targetDomain })
+    }).catch(() => {})
   }, [accountId])
   useEffect(() => { load(); const t = setInterval(load, 60000); return () => clearInterval(t) }, [load])
 
@@ -52,8 +60,8 @@ const PairParityCard: React.FC<{ accountId?: number }> = ({ accountId: given }) 
   if (!view || !users.length) return null
 
   const tallyOf = new Map((tally?.users ?? []).map((t) => [t.user, t]))
-  const source = users[0].user.split('@')[1]
-  const target = (users.find((u) => u.target)?.target ?? '').split('@')[1] || '—'
+  const source = pair?.source || users[0].user.split('@')[1]
+  const target = pair?.target || (users.find((u) => u.target)?.target ?? '').split('@')[1] || '—'
   const checked = sum(users, (s) => s.checked)
   const identical = sum(users, (s) => s.identical)
   const sampled = users.some((u) => u.services.some((s) => s.sampledOf != null))
@@ -78,6 +86,10 @@ const PairParityCard: React.FC<{ accountId?: number }> = ({ accountId: given }) 
           <Typography variant="h6" sx={{ fontWeight: 700, flexGrow: 1 }} data-testid="pair-title">
             {source} → {target}
           </Typography>
+          <Button size="small" variant={showWhere ? 'contained' : 'outlined'} onClick={() => setShowWhere(!showWhere)}
+                  aria-expanded={showWhere} data-testid="where-differences">
+            Where the differences come from
+          </Button>
           <Button size="small" onClick={() => navigate(`/one-to-one?account=${accountId}`)}>Open one-to-one</Button>
           <IconButton size="small" onClick={load} aria-label="refresh pair parity"><RefreshIcon fontSize="small" /></IconButton>
         </Stack>
@@ -94,6 +106,13 @@ const PairParityCard: React.FC<{ accountId?: number }> = ({ accountId: given }) 
           {tally && <Chip size="small" variant="outlined"
                           label={`tally: ${tally.totals.COMPLETE ?? 0} of ${tally.users.length} users complete`} />}
         </Stack>
+        <Collapse in={showWhere} unmountOnExit>
+          {accountId && (
+            <Box sx={{ mb: 2, p: 2, borderRadius: 1, bgcolor: 'action.hover' }}>
+              <DifferencesBreakdown accountId={accountId} kinds={issues?.kinds ?? []} users={users} />
+            </Box>
+          )}
+        </Collapse>
         {sampled && (
           <Typography variant="body2" color="warning.main" sx={{ mb: 1 }}>
             Some results come from a sample, not every item: a sample can never read as 1:1.

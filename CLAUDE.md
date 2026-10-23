@@ -34,7 +34,9 @@ Both backends serve the same origin in production, split by path (see
 .venv/bin/python -m pytest tests/test_foo.py::TestClass::test_x -q # one test
 .venv/bin/python -m pytest data-generator/ -q  # the seeder's own tests (separate conftest.py)
 ```
-No linter is configured for the Python side.
+No linter is configured for the Python side. The suite needs `requirements-control-plane.txt`
+installed too (`httpx` for Starlette's TestClient): without it 17 API modules `importorskip`
+and the run still reads green -- check the skip count, not just the failures.
 
 **Frontend** (from `migration-webui/`):
 ```bash
@@ -426,6 +428,22 @@ with a handler if one can be automatic. What the live kinds taught:
   engine keeps it empty; `finding_repairs.repair_tasks` puts back old "(untitled)" ones.
 - **Directory profiles are reported, never a block**: `run_batch` still migrates a user
   whose profile could not be synced (the operator's rule, 2026-10-23).
+- **A Message-ID can sit far down a long header block** (dharan: bytes 8,818 and 11,426):
+  `gmail_engine._message_id_header` reads to the blank line that ends the headers, never a
+  fixed window -- an 8 KB one read them as missing, and a body line as a header.
+- **Profile and group dependencies are findings, not gates**: `migration_acceptance.
+  dependency_preflight` returns them (`result["dependencyFindings"]`); as a gate it refused
+  every Drive re-walk on dharan, so the six flagged files were never copied.
+- **A chat message from a bot or an unmapped sender is re-posted by the user as
+  "[originally from users/…] text"** (Chat lets nobody post as them): the check names it
+  (`chat.attributed`), a difference with a reason, never an identical.
+- **`/api/v2/domain-guard/status`: `immutable` means nothing can lift it** (government,
+  `PROTECTED_DOMAINS`); `sourceRefused` means a source not yet declared a sandbox. Reading
+  every source as immutable disabled the very toggle that declares one.
+- The Verification page's pair card ("<source> → <target>", from the account's own
+  domains) opens "Where the differences come from": per-service and per-kind bars
+  (`DifferencesBreakdown`), a bar showing its cause, fix and users
+  (`GET /api/v2/known-issues/{id}/users`).
 - **The Gmail check reads ahead** `VERIFY_GMAIL_WINDOW` (4) batch pairs of 10: one pair at
   a time took 8.7-11.5 h for a 39,756-message mailbox at a tenth of Gmail's quota.
 

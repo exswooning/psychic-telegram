@@ -714,9 +714,16 @@ def chat(v):
         target = v._x(lambda: tgt.spaces().messages().get(name=tid).execute())
         want = rewrite_text(source.get("text", ""), v.db.target_for_source_id)[0]
         result["checked"] += 1
-        if want != target.get("text", ""):
+        got = target.get("text", "")
+        # chat_engine posts a bot's, or an unmapped sender's, words as the user with
+        # this exact attribution: Chat lets nobody post as them. Same text, but not
+        # the same sender -- named for what it is, never counted identical.
+        attributed = f"[originally from {(source.get('sender') or {}).get('name', 'unknown')}] {want}"
+        if want != got:
             result["differences"].append(
-                {"source": sid, "target": tid, "diffs": ["Chat text differs"]}
+                {"source": sid, "target": tid, "diffs": [
+                    "posted by the user with an attribution: the sender (a bot or an account "
+                    "not on the target) cannot post there" if got == attributed else "Chat text differs"]}
             )
         else:
             result["identical"] += 1

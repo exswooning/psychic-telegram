@@ -49,7 +49,7 @@ export const TenantActionDialog: React.FC<{
     if (!guardDomain || guardMode === 'repair') return
     const domain = guardDomain
     fetchDomainGuardStatus(domain).then((status) => {
-      if (active) setGuard({ domain, reason: status.immutable
+      if (active) setGuard({ domain, reason: status.immutable || status.sourceRefused
         ? status.reason || 'This domain is permanently protected from deletion.' : '' })
     }).catch(() => {
       if (active) setGuard({ domain, reason: 'Cannot read domain protection. Deletion is blocked.' })

@@ -265,14 +265,26 @@ class GmailMigrator:
         this runs on a failure path where decoding a 25 MB attachment to read
         one header would be a poor trade.
         """
-        window = raw[: (8192 // 3) * 4]
-        window = window[: len(window) - (len(window) % 4)]   # base64 needs 4s
-        if not window:
-            return None
-        try:
-            text = base64.urlsafe_b64decode(window).decode("utf-8", "replace")
-        except (ValueError, TypeError):
-            return None
+        # Up to the end of the header block, not a fixed 8 KB: live (dharan), messages
+        # with long Received chains had their Message-ID at byte 8,818 and 11,426, read
+        # as missing -- failed in the migration, then refused by the recovery that
+        # found the header (mail_identity parses the whole message).
+        text = ""
+        for size in (8192, 65536, 524288):
+            window = raw[: (size // 3) * 4]
+            window = window[: len(window) - (len(window) % 4)]   # base64 needs 4s
+            if not window:
+                return None
+            try:
+                text = base64.urlsafe_b64decode(window).decode("utf-8", "replace")
+            except (ValueError, TypeError):
+                return None
+            end = min((i for i in (text.find("\r\n\r\n"), text.find("\n\n")) if i >= 0), default=-1)
+            if end >= 0:
+                text = text[:end]
+                break
+            if len(window) < (size // 3) * 4:
+                break                                # the whole message is decoded
         match = re.search(r"^message-id:\s*(<[^>]+>)", text, re.IGNORECASE | re.MULTILINE)
         return match.group(1) if match else None
 

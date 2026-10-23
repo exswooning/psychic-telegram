@@ -1386,6 +1386,8 @@ export type LinkEnd = {
 
 export interface DomainGuardStatus {
   immutable?: boolean
+  /** A source not declared a sandbox: destructive actions refused until it is. */
+  sourceRefused?: boolean
   reason?: string
   domain: string
   protected: boolean
@@ -1822,9 +1824,15 @@ export interface KnownIssueKind {
   fix: string
   auto: boolean
   open: number
+  /** Open findings by the check's own category: differences, missing, notCopied, errors. */
+  openByCategory?: Record<string, number>
   fixed: number
   lastFixed: string | null
 }
+export interface KnownIssueUser { user: string; open: number; fixed: number; lastFixed: string | null }
+export const fetchKnownIssueUsers = (issueId: string, accountId?: number) =>
+  cpFetch<{ issue: string; users: KnownIssueUser[] }>(
+    `/api/v2/known-issues/${encodeURIComponent(issueId)}/users${accountId ? `?account_id=${accountId}` : ''}`)
 export interface KnownIssues {
   accountId: number | null
   kinds: KnownIssueKind[]

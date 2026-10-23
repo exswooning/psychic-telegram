@@ -178,7 +178,7 @@ class TestProvisioning:
         assert r["total"] == 2
         assert r["running"] is False
 
-    def test_progress_is_parsed_from_the_exact_provision_log_format(self, cp, tmp_path):
+    def test_progress_is_parsed_from_the_exact_provision_log_format(self, cp, tmp_path, monkeypatch):
         """Pins the parser against provision.report()'s ACTUAL output.
 
         The version this replaces wrote `provision: created a@t.com` -- a
@@ -191,7 +191,11 @@ class TestProvisioning:
         the end of this class checks it still is.
         """
         import api_server
+        import webui
 
+        # The job runner's own log wins when there is one; a leftover one in the
+        # checkout must not stand in for the file written here.
+        monkeypatch.setattr(webui, "job_log_path", lambda aid, name: os.path.join(api_server.HERE, "logs", "_no_such.log"))
         os.makedirs(os.path.join(api_server.HERE, "logs"), exist_ok=True)
         log = os.path.join(api_server.HERE, "logs", "provision-target.log")
         with open(log, "w", encoding="utf-8") as fh:
@@ -3244,6 +3248,27 @@ class TestDomainGuardControls:
         assert "guardboss@example.com" in status["revokedBy"]
         assert status["revokedReason"] == "rehearsal tenant, never real data"
 
+    def test_a_source_is_refused_until_declared_and_can_be_declared(
+            self, cp, monkeypatch, tmp_path, real_source_guard):
+        """Live 2026-10-23: every source read `immutable`, which disabled the very toggle
+        that declares a sandbox. Only a government domain (or PROTECTED_DOMAINS) is."""
+        import domain_guard
+        self._boss(cp)
+        self._configure(monkeypatch, tmp_path, "s.example")
+        monkeypatch.setattr(domain_guard, "source_domains", lambda: {"s.example", "city.gov.np"})
+        st = cp.get("/api/v2/domain-guard/status?domain=s.example", headers=ADMIN).json()
+        assert (st["immutable"], st["sourceRefused"], st["protected"]) == (False, True, True)
+        r = cp.post("/api/v2/domain-guard/revoke", headers=ADMIN, json={
+            "reason": "benchmark sandbox", "domain": "s.example", "confirm_domain": "s.example"})
+        assert r.json()["ok"] is True, r.text
+        st = cp.get("/api/v2/domain-guard/status?domain=s.example", headers=ADMIN).json()
+        assert (st["sourceRefused"], st["protected"]) == (False, False)
+        gov = cp.get("/api/v2/domain-guard/status?domain=city.gov.np", headers=ADMIN).json()
+        assert gov["immutable"] is True and gov["sourceRefused"] is True
+        r = cp.post("/api/v2/domain-guard/revoke", headers=ADMIN, json={
+            "reason": "no", "domain": "city.gov.np", "confirm_domain": "city.gov.np"})
+        assert not r.json().get("ok")
+
     def test_restoring_needs_no_typed_confirm(self, cp, monkeypatch, tmp_path):
         import domain_guard
         self._boss(cp)
@@ -3282,7 +3307,8 @@ class TestForceStop:
         import api_server
         import webui
         sent = []
-        monkeypatch.setattr(api_server.os, "kill", lambda pid, sig: sent.append((pid, sig)))
+        # Signal 0 is a liveness probe (is it still running?), not a signal sent.
+        monkeypatch.setattr(api_server.os, "kill", lambda pid, sig: sig and sent.append((pid, sig)))
         monkeypatch.setattr(webui, "_external_processes",
                             lambda: [{"pid": 4242, "elapsed": 9, "name": "migrate"}])
         return sent

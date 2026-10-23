@@ -2588,6 +2588,25 @@ async def known_issues_view(account_id: int | None = None, op: Operator = Depend
     return await _off_loop(read)
 
 
+@app.get("/api/v2/known-issues/{issue_id}/users")
+async def known_issue_users(issue_id: str, account_id: int | None = None, op: Operator = Depends(operator)):
+    """The users one kind of finding affects in this account: open and fixed counts."""
+    require_login(op)
+    aid = account_id if account_id is not None else op.account_id
+    if not aid:
+        return {"issue": issue_id, "users": []}
+    _require_account_access(aid, op)
+
+    def read():
+        import known_issues
+        path = _ledger_path(aid)
+        if not os.path.isfile(path):
+            return {"issue": issue_id, "users": []}
+        with cpdb.ro(path) as conn:
+            return {"issue": issue_id, "users": known_issues.users_for(conn, issue_id)}
+    return await _off_loop(read)
+
+
 def _migration_checks_view(account_id, offset=0):
     out = {"accountId": account_id, "storage": [], "repairQueue": [], "queueTotals": [], "repairActions": [], "actionTotals": [], "mailRecovery": [], "offset": offset,"acceptanceRuns":[],"manifestTotals":[],"receiptTotals":[],"transferRoutes":[]}
     path = _ledger_path(account_id)
@@ -7666,7 +7685,12 @@ async def domain_guard_status(domain: str, op: Operator = Depends(operator)):
         rec = None if source_reason else domain_guard.revocations().get(d)
         return {
             "domain": d, "protected": protected,
-            "immutable": bool(source_reason) or domain_guard.is_government(d),
+            # immutable: nothing can lift it -- a government domain, or PROTECTED_DOMAINS.
+            # An undeclared source is refused (sourceRefused) but CAN be declared a
+            # sandbox (the operator's rule, 2026-10-23); marking it immutable disabled
+            # the very toggle that declares one.
+            "immutable": domain_guard.is_government(d) or d in domain_guard.env_domains(),
+            "sourceRefused": bool(source_reason),
             "reason": source_reason or domain_guard.refuse_reason(d),
             "revokedBy": (rec or {}).get("by"),
             "revokedReason": (rec or {}).get("reason"),
