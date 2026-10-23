@@ -60,7 +60,7 @@ def test_no_baseline_is_said_not_passed(db, settings):
     assert G.check(None, settings, db, "42", read=lambda *a: _state())["verdict"] == "NO_SNAPSHOT"
 
 
-def test_the_loop_guards_only_an_open_migration_on_a_protected_source(monkeypatch, tmp_path):
+def test_the_loop_guards_an_open_migration_and_stops_it_on_a_bitport_change(monkeypatch, tmp_path):
     import json
     import api_server
     import domain_guard
@@ -89,13 +89,16 @@ def test_the_loop_guards_only_an_open_migration_on_a_protected_source(monkeypatc
         "verdict": "CHANGED", "auditLog": {"byBitport": [{"app": "admin", "event": "AUTHORIZE_API_CLIENT_ACCESS", "item": ""},
                                                          {"app": "drive", "event": "copy", "item": "Copy of Form"}]}})
     monkeypatch.setattr(lifecycle, "state", lambda aid: {})
+    stops = []
+    monkeypatch.setattr(api_server, "_stop_account_jobs", lambda aid, why: stops.append((aid, why)) or 1)
     assert api_server._source_guard_one(5)["verdict"] == "CHANGED"
     assert opened and opened[0]["kind"] == "source_changed" and "Copy of Form" in opened[0]["summary"]
+    assert stops and stops[0][0] == 5 and "Copy of Form" in stops[0][1]      # and the run is stopped
     monkeypatch.setattr(lifecycle, "state", lambda aid: {"approved_at": "2026-10-20"})
     assert api_server._source_guard_one(5) is None                     # approved: no longer guarded
     monkeypatch.setattr(domain_guard, "is_protected", lambda d: False)
     monkeypatch.setattr(lifecycle, "state", lambda aid: {})
-    assert api_server._source_guard_one(5) is None                     # a sandbox source
+    assert api_server._source_guard_one(5)["verdict"] == "CHANGED"     # a sandbox with a baseline: guarded too
 
 
 def test_each_counted_difference_is_explained_by_the_audit_log():
@@ -113,3 +116,51 @@ def test_each_counted_difference_is_explained_by_the_audit_log():
     assert got[2]["by"].startswith("a person: person@src from 5.5.5.5")
     assert got[3]["by"].startswith("not in Google's audit log yet")
     assert "by" not in got[4]                                                 # no id: nothing to look up
+
+
+
+def test_google_acting_for_a_user_is_its_own_finding():
+    """The 10-19 pattern: a cross-organisation copy made Google write 'Copy of' a Form into
+    the owner's Drive -- no app, no address. It stops a run like a change of Bitport's."""
+    def ev(ip, name, title):
+        return ({"ipAddress": ip, "id": {"time": "t"}, "actor": {"email": "u@src"}}, {"name": name},
+                {"doc_title": title})
+    log = {"token": [ev("9.9.9.9", "authorize", "")], "drive": [ev(None, "copy", "Copy of Form"),
+                                                               ev("5.5.5.5", "edit", "a person's edit")],
+           "admin": [], "calendar": []}
+    out = G.audit(None, "since", "42", events=lambda app: log[app])
+    assert [r["item"] for r in out["byGoogle"]] == ["Copy of Form"] and out["byBitport"] == []
+
+
+def test_the_fast_watch_stops_the_run_on_a_change(monkeypatch, tmp_path):
+    import json
+    import api_server
+    import source_guard
+    ledger = tmp_path / "m.db"
+    ledger.write_text("")
+    key = tmp_path / "k.json"
+    key.write_text(json.dumps({"client_id": "42"}))
+    monkeypatch.setattr(api_server, "_account_db_path", lambda aid: str(ledger))
+    monkeypatch.setattr(api_server, "_account_jobs", lambda aid: [{"pid": 77, "job_name": "migrate"}])
+
+    class St:
+        source_domain, source_sa_key = "a.gov.np", str(key)
+    monkeypatch.setattr("config.Settings", lambda account_id=None: St())
+
+    class D:
+        def __init__(self, path): pass
+        def close(self): pass
+    monkeypatch.setattr("db.MigrationDB", D)
+    monkeypatch.setattr(source_guard, "snapshot_taken", lambda d: "2026-10-19")
+    stops = []
+    monkeypatch.setattr(api_server, "_stop_account_jobs", lambda aid, why: stops.append(why) or 1)
+    monkeypatch.setattr(source_guard, "audit", lambda st, since, cid: {"byBitport": [], "byGoogle": []})
+    assert api_server._source_guard_fast(5) == [] and stops == []
+    monkeypatch.setattr(source_guard, "audit", lambda st, since, cid: {
+        "byBitport": [], "byGoogle": [{"event": "copy", "item": "Copy of Form", "app": "drive"}]})
+    assert api_server._source_guard_fast(5) and "Copy of Form" in stops[0]
+
+
+def test_a_stop_by_the_guard_is_never_resumed_as_a_memory_pause():
+    import run_watch
+    assert "source-guard.auto-stop" in run_watch.STOP_ACTIONS

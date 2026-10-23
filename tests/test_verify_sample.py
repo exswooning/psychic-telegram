@@ -196,6 +196,7 @@ class TestARealMigrationIsFoundIdentical:
         r = verify(migrated)
         assert r["verdict"] == "IDENTICAL", r["reasons"]
         tgt.exports[plan(tgt)] = f"see https://drive.google.com/file/d/{sid}/view, edited".encode()
+        tgt._mark(plan(tgt))          # as Drive does on any edit: its version rises
         assert verify(migrated)["verdict"] == "DIFFERENCES"                # a real edit still shows
 
     def test_it_writes_nothing_to_either_tenant(self, migrated):

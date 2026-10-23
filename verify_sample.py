@@ -63,7 +63,7 @@ def _stop_check():
 HERE = os.path.dirname(os.path.abspath(__file__))
 FOLDER = "application/vnd.google-apps.folder"
 DRIVE_METADATA_BATCH_SIZE = 25
-DRIVE_META_FIELDS = ("id,name,mimeType,parents,size,md5Checksum,modifiedTime,trashed,ownedByMe,"
+DRIVE_META_FIELDS = ("id,name,mimeType,parents,size,md5Checksum,modifiedTime,trashed,ownedByMe,version,"
                      "permissions(id,type,role,emailAddress,domain,deleted)")
 # Files larger than this are compared by size and MD5 only. Both sides are read into
 # memory to hash, and a sample is small; a 2 GB video is not what it is for.
@@ -399,6 +399,76 @@ def _sample(items: list, limit: int | None) -> list:
     return [ordered[int(i * len(ordered) / limit)] for i in range(limit)]
 
 
+# -- reusing a Drive content comparison ----------------------------------------
+# Opening both copies (download, export, Docs/Sheets/Slides structure, image hashes) is
+# the slow part of a Drive check: hours for a big user, and all of it again after any
+# interruption. Drive's `version` rises on every change to a file, so a comparison made
+# when the source and the target were at these exact versions, by this exact comparison
+# code, cannot have a different answer now. Reused only then; a failed read is never kept.
+_CODE_DIGEST = None
+
+
+def _comparison_code() -> str:
+    global _CODE_DIGEST
+    if _CODE_DIGEST is None:
+        import hashlib as _h
+        from pathlib import Path
+        here = Path(__file__).resolve().parent
+        _CODE_DIGEST = _h.sha256(b"".join(
+            (here / f).read_bytes() for f in ("verify_sample.py", "native_fidelity.py", "native_repair.py",
+                                              "verification_reads.py", "link_rewrite.py")
+            if (here / f).exists())).hexdigest()[:24]
+    return _CODE_DIGEST
+
+
+def _cache_table(db) -> None:
+    with db.write() as c:
+        c.execute("""CREATE TABLE IF NOT EXISTS drive_content_cache (
+            source_user TEXT NOT NULL, source_id TEXT NOT NULL, target_id TEXT NOT NULL,
+            source_version TEXT NOT NULL, target_version TEXT NOT NULL, code TEXT NOT NULL,
+            diffs TEXT NOT NULL, compared_at TEXT NOT NULL,
+            PRIMARY KEY (source_user, source_id, target_id))""")
+
+
+def drive_content_cache_get(db, user, sid, tid, sm, tm):
+    sv, tv = sm.get("version"), tm.get("version")
+    if not sv or not tv or not hasattr(db, "write"):
+        return None
+    try:
+        row = db.conn.execute("SELECT source_version, target_version, code, diffs, compared_at FROM "
+                              "drive_content_cache WHERE source_user=? AND source_id=? AND target_id=?",
+                              (user, sid, tid)).fetchone()
+    except Exception:      # noqa: BLE001 - no table yet: nothing to reuse
+        return None
+    if not row or (row[0], row[1], row[2]) != (str(sv), str(tv), _comparison_code()):
+        return None
+    kept = json.loads(row[3])
+    if isinstance(kept, list):                 # never written this way; read as "not reusable"
+        return None
+    return {"diffs": kept["diffs"], "ev": kept.get("ev", {}), "at": row[4]}
+
+
+# What a comparison established about the file besides its differences -- the coverage
+# rules read these (verification_coverage: native features checked / matched), so a
+# reused result carries them or it would read as "not checked".
+CACHED_EVIDENCE = ("opened", "how", "bytes", "sha256", "nativeFeaturesChecked", "nativeFeaturesMatched")
+
+
+def drive_content_cache_put(db, user, sid, tid, sm, tm, diffs, ev=None) -> None:
+    sv, tv = sm.get("version"), tm.get("version")
+    if not sv or not tv or not hasattr(db, "write"):
+        return
+    try:
+        _cache_table(db)
+        with db.write() as c:
+            c.execute("INSERT OR REPLACE INTO drive_content_cache VALUES (?,?,?,?,?,?,?,?)",
+                      (user, sid, tid, str(sv), str(tv), _comparison_code(),
+                       json.dumps({"diffs": diffs, "ev": {k: (ev or {})[k] for k in CACHED_EVIDENCE if k in (ev or {})}}),
+                       datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")))
+    except Exception as exc:      # noqa: BLE001 - a cache that cannot be written only costs time
+        log.warning("drive comparison cache not written for %s: %s", sid, exc)
+
+
 def copy_lookup(db, target_bytes: bytes):
     """The rewriter's lookup, for checking one target item: a source id resolves to
     the copy this item actually names when that is one of its genuine copies (one
@@ -670,7 +740,18 @@ class Verifier:
                 ev = {"kind": kind, "name": sm.get("name"), "path": sp, "opened": False}
                 if kind == "file":
                     target_keys[(tp, tm.get("name"), tm.get("md5Checksum"))] = tid
-                    diffs += self._content(src, tgt, sid, tid, sm, tm, ev)
+                    reused = drive_content_cache_get(self.db, self.src_user, sid, tid, sm, tm)
+                    if reused is not None:
+                        diffs += reused["diffs"]
+                        ev.update(reused["ev"])
+                        ev.update(reused=True, how=f"{reused['ev'].get('how', 'compared')} -- neither copy has "
+                                                   f"changed since {reused['at']}, so that comparison is reused")
+                        res["contentReused"] = res.get("contentReused", 0) + 1
+                    else:
+                        content = self._content(src, tgt, sid, tid, sm, tm, ev)
+                        diffs += content
+                        if not ev.get("error"):
+                            drive_content_cache_put(self.db, self.src_user, sid, tid, sm, tm, content, ev)
                     if ev.get("error"):
                         res["errors"].append(f"file {sid}: {ev.pop('error')}")
                     if getattr(self.settings, "rewrite_drive_links", False):

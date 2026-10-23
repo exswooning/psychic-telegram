@@ -80,8 +80,10 @@ def test_a_repair_reports_each_step_in_order(monkeypatch, auth, db, settings):
     monkeypatch.setattr(repair, "fix_modified_times", lambda *a, **k: {})
     monkeypatch.setattr(repair, "reapply_owed_grants", lambda *a, **k: {})
     monkeypatch.setattr(repair, "survey", lambda d: {"total": 0})
+    monkeypatch.setattr(repair, "clean_staging_drives", lambda *a, **k: {"errors": []})
     repair.run_all(db, auth, settings, apply=False, progress=lambda i, n, name: seen.append((i, n, name)))
-    assert seen == [(1, 10, "file times"), (2, 10, "owed shares"), (3, 10, "failure survey")]  # nothing failed: stops
+    assert seen == [(1, 11, "file times"), (2, 11, "owed shares"), (3, 11, "leftover staging drives"),
+                         (4, 11, "failure survey")]  # nothing failed: stops
 
 
 def test_a_running_repair_is_listed_with_its_step_and_no_pid(monkeypatch):

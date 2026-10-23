@@ -625,7 +625,10 @@ def migrate_user(auth: AuthManager, db: MigrationDB, settings: Settings,
             [f"{n}: no access" for n in sorted(no_access)]
             # the reason too: "drive: failed" alone sent people to logs that a repair
             # thread never wrote (live, ward1/12/15/16 on 2026-10-23)
-            + [f"{n}: failed -- {str(failures[n])[:160]}" for n in sorted(failures)])
+            # A check cut short by a Stop or a memory pause did not FAIL: it did not
+            # finish. Said so, or an interrupted user read like one with differences.
+            + [f"{n}: interrupted -- re-run to finish" if interrupted and n == "acceptance"
+               else f"{n}: failed -- {str(failures[n])[:160]}" for n in sorted(failures)])
 
         # A pass that ran nothing says nothing about whether this user is
         # finished. Promoting them anyway is how two users whose audit rows

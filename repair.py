@@ -1060,7 +1060,101 @@ def restore_direct_grants(auth, db, settings, apply: bool = False,
     return out
 
 
-REPAIR_STEPS = ("file times", "owed shares", "failure survey", "contact names",
+def clean_staging_drives(auth, db, settings, apply: bool = False) -> dict:
+    """Leftover server-side staging drives on the TARGET: never shown on either tenant.
+
+    Each user's server-side pass makes `<prefix>-<user>` on the target with the source
+    user and the target user as members; a run that switched mode, or stopped, left them
+    -- live (dharan, 2026-10-23) fifteen, each listed in BOTH users' Shared drives, five
+    holding a copy made on 10-19 and never moved. Only this account's own users' drives,
+    and only while the account is idle (a repair never overlaps a run). A file that is
+    some item's mapped copy is kept and the drive with it; an unmapped copy is deleted
+    only when that user's mapped copy of the same name matches it (type, and checksum or
+    size); the source domain's members are removed; an empty drive is deleted. Target
+    writes only. Every action is an audit row (item_type staging_cleanup)."""
+    out = {"drives": 0, "deleted_drives": 0, "deleted_copies": 0, "members_removed": 0,
+           "kept": [], "errors": []}
+    if settings is None or not getattr(settings, "target_admin", None):
+        return out                       # nothing configured to look at: nothing to do
+    prefix = f"{settings.staging_drive_prefix}-"
+    src_domain = (settings.source_domain or "").lower()
+    mine = {r["source_email"].split("@")[0].lower(): r for r in db.all_identities()
+            if r["entity_type"] == "user" and r["target_email"]}
+    try:
+        adm = auth.target_drive(settings.target_admin)
+        drives, token = [], None
+        while True:
+            r = adm.drives().list(useDomainAdminAccess=True, pageSize=100, pageToken=token,
+                                  fields="nextPageToken,drives(id,name)").execute()
+            drives += r.get("drives", [])
+            token = r.get("nextPageToken")
+            if not token:
+                break
+    except Exception as exc:      # noqa: BLE001
+        out["errors"].append(f"could not list target shared drives: {str(exc)[:160]}")
+        return out
+    for drv in drives:
+        name = drv.get("name") or ""
+        local = name[len(prefix):].split("-")[0].lower() if name.startswith(prefix) else ""
+        ident = mine.get(local)
+        if not ident or name[len(prefix):].upper().startswith(("MOVE-CHECK", "BACK-")):
+            continue
+        out["drives"] += 1
+        source_user, target_user = ident["source_email"], ident["target_email"]
+        try:
+            member = auth.target_drive(target_user)
+            items = member.files().list(corpora="drive", driveId=drv["id"], includeItemsFromAllDrives=True,
+                                        supportsAllDrives=True, pageSize=1000,
+                                        fields="files(id,name,mimeType,md5Checksum,size)").execute().get("files", [])
+            for item in items:
+                if db.conn.execute("SELECT 1 FROM id_mapping WHERE target_id=?", (item["id"],)).fetchone():
+                    out["kept"].append(f"{name}: {item['name']} is a mapped copy (copied, not moved)")
+                    continue
+                twins = [row["target_id"] for row in db.conn.execute(
+                    "SELECT target_id FROM id_mapping WHERE source_user=? AND source_name=? AND type='file'",
+                    (source_user, item["name"]))]
+                match = None
+                for tid in twins:
+                    t = member.files().get(fileId=tid, supportsAllDrives=True,
+                                           fields="id,mimeType,md5Checksum,size,trashed").execute()
+                    if t.get("trashed") or t.get("mimeType") != item.get("mimeType"):
+                        continue
+                    if item.get("md5Checksum") and t.get("md5Checksum") != item["md5Checksum"]:
+                        continue
+                    if not item.get("md5Checksum") and item.get("size") != t.get("size"):
+                        continue
+                    match = tid
+                    break
+                if not match:
+                    out["kept"].append(f"{name}: {item['name']} has no matching mapped copy")
+                    continue
+                if apply and not settings.dry_run:
+                    member.files().delete(fileId=item["id"], supportsAllDrives=True).execute()
+                    db.log_audit(source_user, item["id"], "staging_cleanup", "DELETED_ORPHAN_COPY",
+                                 f"{name}: '{item['name']}' duplicated the mapped copy {match}")
+                out["deleted_copies"] += 1
+            perms = adm.permissions().list(fileId=drv["id"], supportsAllDrives=True, useDomainAdminAccess=True,
+                                           fields="permissions(id,emailAddress)").execute().get("permissions", [])
+            for p in perms:
+                if src_domain and (p.get("emailAddress") or "").lower().endswith("@" + src_domain):
+                    if apply and not settings.dry_run:
+                        adm.permissions().delete(fileId=drv["id"], permissionId=p["id"], supportsAllDrives=True,
+                                                 useDomainAdminAccess=True).execute()
+                        db.log_audit(source_user, drv["id"], "staging_cleanup", "MEMBER_REMOVED",
+                                     f"{name}: {p['emailAddress']} no longer sees it")
+                    out["members_removed"] += 1
+            if any(k.startswith(name + ":") for k in out["kept"]):
+                continue
+            if apply and not settings.dry_run:
+                adm.drives().delete(driveId=drv["id"], useDomainAdminAccess=True).execute()
+                db.log_audit(source_user, drv["id"], "staging_cleanup", "DRIVE_DELETED", f"{name}: empty")
+            out["deleted_drives"] += 1
+        except Exception as exc:      # noqa: BLE001 - one drive never stops the rest
+            out["errors"].append(f"{name}: {str(exc)[:160]}")
+    return out
+
+
+REPAIR_STEPS = ("file times", "owed shares", "leftover staging drives", "failure survey", "contact names",
                 "stale grantees and users", "shared drives", "Drive stragglers (re-walk)",
                 "folder grants and ACL reconcile", "stranded mail and events", "re-apply grants")
 
@@ -1110,6 +1204,12 @@ def run_all(db, auth, settings, apply: bool = False,
         out["owed_grants"] = reapply_owed_grants(auth, db, settings, apply=apply)
     except Exception as exc:      # noqa: BLE001
         out["errors"].append(f"owed grants: {str(exc)[:160]}")
+    step("leftover staging drives")
+    try:
+        out["staging"] = clean_staging_drives(auth, db, settings, apply=apply)
+        out["errors"].extend(out["staging"]["errors"])
+    except Exception as exc:      # noqa: BLE001
+        out["errors"].append(f"staging drives: {str(exc)[:160]}")
     step("failure survey")
     try:
         out["survey"] = survey(db)
@@ -1251,11 +1351,19 @@ def summarise(result: dict) -> str:
             + (f"{og['covered']:,} already had access through their folder; " if og.get("covered") else "")
             + f"{og['owed'] - og.get('ready', 0):,} still waiting for the colleague's account"
             if og.get("owed") else "")
+    sd = result.get("staging") or {}
+    staging = (f"{sd.get('deleted_drives', 0):,} leftover staging drive(s) deleted, "
+               f"{sd.get('deleted_copies', 0):,} duplicate copy(ies) in them removed, "
+               f"{sd.get('members_removed', 0):,} source member(s) removed"
+               + (f", {len(sd['kept'])} kept for review" if sd.get("kept") else "")
+               if sd.get("drives") else "")
     if not s.get("total"):
-        return "; ".join(p for p in ("no failed items recorded", times, owed) if p)
+        return "; ".join(p for p in ("no failed items recorded", times, owed, staging) if p)
     parts = [f"{s['total']:,} failed item(s)"]
     if times:
         parts.append(times)
+    if staging:
+        parts.append(staging)
     if result.get("resolved"):
         parts.append(f"{result['resolved']:,} resolved (grantee recreated)")
     if owed:

@@ -884,12 +884,14 @@ async def lifespan(_: FastAPI):
     ends = asyncio.create_task(_lifecycle_loop())
     owed = asyncio.create_task(_owed_grants_loop())
     guard = asyncio.create_task(_source_guard_loop())
+    guard_fast = asyncio.create_task(_source_guard_fast_loop())
     verification_repairs_task = asyncio.create_task(_verification_repair_loop())
     try:
         yield
     finally:
         verification_repairs_task.cancel()
         guard.cancel()
+        guard_fast.cancel()
         task.cancel()
         watchdog.cancel()
         observer.cancel()
@@ -1846,6 +1848,67 @@ def _queue_starter(account_id: int | None, job_name: str,
             else _start_admitted(list(payload["argv"]), account_id, job_name, env))
 
 
+RESUMABLE_EXIT = 3                    # main.EXIT_PAUSED: the memory watchdog paused the run
+RESUMABLE_JOBS = ("migrate", "delta")
+RESUME_MAX = 3                        # per launch: a run that keeps running out stops for a person
+RESUME_WAIT_SEC = 1800                # for memory to calm down, and for the slot
+RESUME_POLL_SEC = 30
+RESUME_CALM_READINGS = 3
+
+
+def _resume_after_memory_pause(argv, account_id, job_name, env, then, pid, started) -> None:
+    """Resume a migrate/delta the memory watchdog paused: the same command, one process
+    and half the user workers, once memory has been calm for a few readings and the slot
+    is free. Bounded (RESUME_MAX per launch, counted in the child's environment) and
+    audited. Never after a person's Stop: a pause the operator also asked for stays put."""
+    import run_watch
+    from resources import cached_probe, pressure_severe
+    env = dict(env or os.environ)
+    attempt = int(env.get("BITPORT_RESUME_ATTEMPT", "0") or 0) + 1
+    try:
+        if run_watch.stopped_by(pid, started):
+            log.info("%s for account %s paused and was stopped by a person: not resumed", job_name, account_id)
+            return
+    except Exception:      # noqa: BLE001 - unknown: do not resume over a possible Stop
+        return
+    if attempt > RESUME_MAX:
+        log.warning("%s for account %s paused for memory %d times: left for a person", job_name, account_id, RESUME_MAX)
+        return
+    try:
+        workers = int(env.get("USER_WORKERS") or 0)
+    except ValueError:
+        workers = 0
+    env.update(MIGRATE_PROCESSES="1", USER_WORKERS=str(max(1, workers // 2) if workers else 2),
+               BITPORT_RESUME_ATTEMPT=str(attempt))
+    deadline, calm = time.time() + RESUME_WAIT_SEC, 0
+    while time.time() < deadline:
+        time.sleep(RESUME_POLL_SEC)
+        try:
+            calm = 0 if pressure_severe(cached_probe(ttl=0)) else calm + 1
+        except Exception:      # noqa: BLE001
+            calm = 0
+        if calm < RESUME_CALM_READINGS:
+            continue
+        admitted, _ = job_admission.try_admit(account_id, job_name)
+        if not admitted:
+            continue                  # something else has the slot: keep waiting for it
+        why = (f"resumed automatically after a memory pause (attempt {attempt} of {RESUME_MAX}): "
+               f"one process, {env['USER_WORKERS']} user worker(s)")
+        action = cpdb.begin_action("system", "system", f"{job_name}.auto-resume", why,
+                                   str(account_id), {"argv": argv[1:]}, None, account_id)
+        try:
+            ok, detail = _start_admitted(argv, account_id, job_name, env, then)
+        except Exception as exc:      # noqa: BLE001
+            ok, detail = False, str(exc)
+        if not ok:
+            job_admission.release(account_id, job_name)
+        cpdb.finish_action(action, "OK" if ok else "FAILED", detail)
+        log.info("%s account %s: %s -- %s", job_name, account_id, why, detail)
+        return
+    log.warning("%s for account %s paused for memory and did not calm (or the slot stayed busy) "
+                "within %ds: left for a person", job_name, account_id, RESUME_WAIT_SEC)
+
+
 def _start_admitted(argv: list[str], account_id: int | None, job_name: str,
                     env: dict[str, str] | None = None,
                     then: str | list[str] | None = None) -> tuple[bool, str]:
@@ -1869,6 +1932,7 @@ def _start_admitted(argv: list[str], account_id: int | None, job_name: str,
     # process that knew the argv is usually long restarted by the time a
     # stall is noticed.
     job_admission.record_launch(account_id, job_name, proc.pid, argv, HERE)
+    started = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
     def _wait_then_release() -> None:
         proc.wait()
@@ -1906,6 +1970,13 @@ def _start_admitted(argv: list[str], account_id: int | None, job_name: str,
             job_queue.dispatch_one(_queue_starter, job_queue.RUNNER_API)
         except Exception as exc:      # noqa: BLE001 - never wedge the waiter
             print(f"queue dispatch after {job_name!r} failed: {exc}", flush=True)
+        # A memory pause (the watchdog's own exit, 3) used to wait for a person to press
+        # the button again -- with the same concurrency that ran out of memory. Resumed
+        # here once memory is calm, smaller; never after a person's Stop.
+        if rc == RESUMABLE_EXIT and job_name in RESUMABLE_JOBS:
+            threading.Thread(target=_resume_after_memory_pause, name=f"resume-{job_name}-{account_id}",
+                             args=(argv, account_id, job_name, env, then, proc.pid, started),
+                             daemon=True).start()
         if then and rc == 0 and not verify_repair_first:
             for kind in followups:
                 try:
@@ -4809,10 +4880,11 @@ def _source_guard_one(aid, force: bool = False) -> dict | None:
     if not path or not os.path.isfile(path):
         return None
     st = Settings(account_id=aid)
-    if not domain_guard.is_protected(st.source_domain or ""):
-        return None
+    # Every protected source -- and any source an operator took a baseline of (a
+    # declared sandbox under a server-side test is watched the same way).
     if not force and lifecycle.state(aid).get("approved_at"):
         return None
+    del domain_guard            # protection no longer decides; the baseline does
     d = MigrationDB(path)
     try:
         if not source_guard.snapshot_taken(d):
@@ -4827,7 +4899,12 @@ def _source_guard_one(aid, force: bool = False) -> dict | None:
     # source's DATA opens an incident.
     mine = [r for r in (rep.get("auditLog") or {}).get("byBitport") or [] if r.get("app") != "admin"]
     mine += [{"event": c.get("what"), "item": c.get("name")} for c in rep.get("changes") or [] if c.get("byTool")]
+    mine += (rep.get("auditLog") or {}).get("byGoogle") or []
+    mine += [{"event": c.get("what"), "item": c.get("name")} for c in rep.get("changes") or []
+             if str(c.get("by", "")).startswith("Google itself")]
     if mine:
+        _stop_account_jobs(aid, f"source guard: {len(mine)} change(s) on {st.source_domain} by Bitport or by "
+                                f"Google on its behalf, e.g. {mine[0].get('event')} {mine[0].get('item')!r}")
         import run_watch
         run_watch.open_incident(
             kind="source_changed", title=f"Bitport changed something on {st.source_domain}",
@@ -4837,14 +4914,102 @@ def _source_guard_one(aid, force: bool = False) -> dict | None:
     return rep
 
 
+SOURCE_GUARD_ACTIVE_SEC = int(os.getenv("SOURCE_GUARD_ACTIVE_SEC", "120"))   # full recount while a job runs
+SOURCE_GUARD_FAST_SEC = int(os.getenv("SOURCE_GUARD_FAST_SEC", "60"))       # audit log while a job runs
+_GUARD_LAST: dict = {}          # account -> monotonic time of its last full check
+_GUARD_AUDIT_SINCE: dict = {}   # account -> RFC3339 the fast watch has read up to
+
+
+def _account_jobs(aid) -> list[dict]:
+    return [r for r in job_admission.list_active() if r.get("account_id") == aid]
+
+
+def _stop_account_jobs(aid, why: str) -> int:
+    """The source guard's automatic Stop: every running job of this account gets the
+    same cooperative SIGINT an operator's Stop sends, recorded as a Stop (never resumed
+    as if it had only run out of memory), with an incident saying why."""
+    stopped = 0
+    for row in _account_jobs(aid):
+        pid = row.get("pid")
+        if not pid:
+            continue
+        action = cpdb.begin_action("system", "system", "source-guard.auto-stop", why, str(pid),
+                                   {"pid": pid, "job": row.get("job_name")}, None, aid)
+        try:
+            os.kill(pid, 2)
+            job_admission.note_stop(pid)
+            cpdb.finish_action(action, "OK", f"SIGINT -> {pid}")
+            stopped += 1
+        except ProcessLookupError:
+            cpdb.finish_action(action, "OK", f"{pid} had already exited")
+    import run_watch
+    run_watch.open_incident(kind="source_changed", title="Source guard stopped the run",
+                            summary=why + (f"; {stopped} job(s) stopped" if stopped else "; nothing was running"),
+                            account_id=aid, job_name="source-guard", fingerprint=f"source-guard-stop:{aid}")
+    log.warning("source guard stopped account %s: %s", aid, why)
+    return stopped
+
+
+def _source_guard_fast(aid) -> list[dict]:
+    """While a job runs: Google's audit log since the last look, every minute -- a change
+    from this tool's addresses or by Google on its behalf stops the account's jobs at
+    once. Faster than a recount, but Google's log can lag; the recount every
+    SOURCE_GUARD_ACTIVE_SEC is the backstop."""
+    import source_guard
+    from config import Settings
+    from db import MigrationDB
+    path = _account_db_path(aid)
+    if not path or not os.path.isfile(path) or not _account_jobs(aid):
+        return []
+    d = MigrationDB(path)
+    try:
+        if not source_guard.snapshot_taken(d):
+            return []
+    finally:
+        d.close()
+    st = Settings(account_id=aid)
+    with open(st.source_sa_key, encoding="utf-8") as fh:
+        client_id = json.load(fh).get("client_id")
+    now = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime())
+    since = _GUARD_AUDIT_SINCE.get(aid) or time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(time.time() - 600))
+    found = source_guard.audit(st, since, client_id)
+    _GUARD_AUDIT_SINCE[aid] = now
+    hits = [r for r in found.get("byBitport") or [] if r.get("app") != "admin"] + (found.get("byGoogle") or [])
+    if hits:
+        _stop_account_jobs(aid, f"source guard (audit log): {len(hits)} change(s) on {st.source_domain} by "
+                                f"Bitport or by Google on its behalf, e.g. {hits[0].get('event')} {hits[0].get('item')!r}")
+    return hits
+
+
+async def _source_guard_fast_loop() -> None:
+    while True:
+        try:
+            await asyncio.sleep(SOURCE_GUARD_FAST_SEC)
+            for acct in accounts_auth.list_accounts():
+                aid = acct.get("id") if isinstance(acct, dict) else acct
+                try:
+                    await _off_loop(_source_guard_fast, aid)
+                except Exception as exc:      # noqa: BLE001
+                    log.warning("source guard fast watch failed for account %s: %r", aid, exc)
+        except asyncio.CancelledError:
+            raise
+        except Exception:      # noqa: BLE001
+            log.exception("source guard fast loop")
+
+
 async def _source_guard_loop() -> None:
     """Every protected source with a baseline is compared and its audit log read, every
     SOURCE_GUARD_POLL_SEC, until its migration is approved (source_guard.py)."""
     while True:
         try:
-            await asyncio.sleep(SOURCE_GUARD_POLL_SEC)
+            await asyncio.sleep(30)
             for acct in accounts_auth.list_accounts():
                 aid = acct.get("id") if isinstance(acct, dict) else acct
+                # Every 2 minutes while one of its jobs runs, every 10 otherwise.
+                due = SOURCE_GUARD_ACTIVE_SEC if await _off_loop(_account_jobs, aid) else SOURCE_GUARD_POLL_SEC
+                if time.monotonic() - _GUARD_LAST.get(aid, 0) < due:
+                    continue
+                _GUARD_LAST[aid] = time.monotonic()
                 try:
                     rep = await _off_loop(_source_guard_one, aid)
                     if rep:

@@ -50,13 +50,21 @@ def ensure_tables(db) -> None:
 
 
 # -- reading the source -------------------------------------------------------
+def _retried(fn):
+    """A read with the migration's own backoff: one 429 ("Resource has been exhausted")
+    made a whole check INCOMPLETE (live, info@'s contacts, 2026-10-23 18:20Z). What still
+    cannot be read after the retries is an error, never a zero."""
+    from resilience import retry_on_google_error
+    return retry_on_google_error(max_retries=5)(fn)()
+
+
 def read_user(auth, settings, user: str) -> dict:
     """One source user's state. A service that cannot be read is an error, never a zero."""
     import tally
     out: dict = {"files": {}, "counts": {}, "errors": {}}
     try:
         items: dict = {}
-        tally.count_drive(auth.source_drive(user), settings, keep=items)
+        _retried(lambda: tally.count_drive(auth.source_drive(user), settings, keep=items))
         out["files"] = {i: [v.get("name"), v.get("modifiedTime")] for i, v in items.items()}
     except Exception as exc:      # noqa: BLE001
         out["errors"]["drive"] = str(exc)[:200]
@@ -65,7 +73,7 @@ def read_user(auth, settings, user: str) -> dict:
                     ("calendar", lambda: tally.count_calendar(auth.source_calendar(user))),
                     ("contacts", lambda: tally.count_contacts(auth.api("source", "people", user)))):
         try:
-            out["counts"][svc] = fn()
+            out["counts"][svc] = _retried(fn)
         except Exception as exc:      # noqa: BLE001
             out["errors"][svc] = str(exc)[:200]
     return out
@@ -147,7 +155,7 @@ def audit(settings, since: str, client_id: str, events=None) -> dict:
         events = lambda app: _events(svc, app, since)      # noqa: E731
     ours = {x.get("ipAddress") for x, e, p in events("token")
             if str(p.get("client_id")) == str(client_id) and x.get("ipAddress")}
-    by_bitport, deletions = [], []
+    by_bitport, by_google, deletions = [], [], []
     for app in APPS:
         for x, e, p in events(app):
             name, ip = e.get("name"), x.get("ipAddress")
@@ -157,9 +165,14 @@ def audit(settings, since: str, client_id: str, events=None) -> dict:
                    "id": p.get("doc_id")}
             if ip in ours and name not in READS:
                 by_bitport.append(row)
+            elif app == "drive" and not ip and name not in READS:
+                # No address and no app: Google itself acting for a user -- live
+                # (dharan, 10-19), the "Copy of" a Form a cross-organisation copy made.
+                by_google.append(row)
             elif name in ("delete", "trash"):
                 deletions.append(row)
-    return {"bitportAddresses": sorted(ours), "byBitport": by_bitport, "deletionsByOthers": deletions}
+    return {"bitportAddresses": sorted(ours), "byBitport": by_bitport, "byGoogle": by_google,
+            "deletionsByOthers": deletions}
 
 
 # -- the two sources, against each other -----------------------------------------
