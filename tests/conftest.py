@@ -311,6 +311,13 @@ def cal_migrator(auth, db, settings, identity):
 
 
 @pytest.fixture(autouse=True)
+def _profiles_read_back_at_once(monkeypatch):
+    """user_profiles waits for Google's Directory to show a write; tests do not."""
+    import user_profiles
+    monkeypatch.setattr(user_profiles, "_sleep", lambda s: None)
+
+
+@pytest.fixture(autouse=True)
 def _no_run_env_leaks():
     """A run exports per-run state to its own children through os.environ
     (DRIVE_FAILED_USERS: whose mail an ordered run holds back; SCOPE_DROPPED: the

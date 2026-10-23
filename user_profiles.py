@@ -13,7 +13,12 @@ import io
 import json
 import logging
 import os
+import time
 from datetime import datetime, timezone
+
+# Seconds between read-backs of an updated profile (Directory shows writes late).
+READBACK_PAUSES = (2, 4, 8, 16, 30, 30)
+_sleep = time.sleep
 
 # Never expand this to a complete User payload: it contains security controls.
 COLLECTIONS = {
@@ -336,16 +341,24 @@ def sync_profiles(
                     request = writer.users().update(userKey=current["id"], body=body)
                     request.headers["If-Match"] = current["etag"]
                     request.execute(num_retries=3)
-                    fresh = (
-                        target_directory.users()
-                        .get(
-                            userKey=current["id"],
-                            projection="full",
-                            viewType="admin_view",
-                            fields=READ_FIELDS,
+                    # Google's Directory shows an update a little later, not at once:
+                    # live (dharan), revenue@ and ward14@ read back their old names
+                    # straight after the write and matched on the next pass. Read again,
+                    # backing off, before calling it a difference.
+                    for pause in (0,) + READBACK_PAUSES:
+                        _sleep(pause)
+                        fresh = (
+                            target_directory.users()
+                            .get(
+                                userKey=current["id"],
+                                projection="full",
+                                viewType="admin_view",
+                                fields=READ_FIELDS,
+                            )
+                            .execute(num_retries=3)
                         )
-                        .execute(num_retries=3)
-                    )
+                        if not differences(wanted, fresh):
+                            break
                     if (
                         _address(fresh.get("primaryEmail")) != target
                         or fresh.get("id") != current["id"]
@@ -360,7 +373,7 @@ def sync_profiles(
                     )
                     if row["remainingFields"]:
                         raise ValueError(
-                            "Profile read-back still differs: "
+                            f"Profile read-back still differs after {sum(READBACK_PAUSES)}s: "
                             + ", ".join(row["remainingFields"])
                         )
             progress(

@@ -290,6 +290,19 @@ export function useRunningJobs() {
           // and stopping someone else's run isn't this page's call to make.
         })
       }
+      // A Repair: a thread inside the API, so it is no admitted job and has no pid --
+      // listed with its current step, and never a Stop (it would signal the server).
+      for (const row of activeJobs) {
+        if (row.job_name !== 'repair' || !row.progress) continue
+        const pr = row.progress
+        found.push({
+          key: `repair-${row.account_id}`, kind: 'other',
+          label: `repair — account #${row.account_id ?? 'legacy'}`,
+          detail: `step ${pr.index} of ${pr.total}: ${pr.step}`,
+          pct: pr.total ? Math.round((100 * Math.max(0, pr.index - 1)) / pr.total) : null,
+          startedAt: row.started_at ?? undefined,
+        })
+      }
       // Provisioning, which registers nowhere else.
       //
       // It deliberately does not go through job_admission -- that gate holds

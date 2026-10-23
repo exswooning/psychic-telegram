@@ -1615,7 +1615,16 @@ async def get_active_jobs(op: Operator = Depends(operator)):
     ps scan) each only ever show the calling account's own job, so a
     capacity refusal caused by a DIFFERENT account's run was invisible to
     everyone else. This is the one place that actually knows."""
-    return await _off_loop(job_admission.list_active)
+    rows = await _off_loop(job_admission.list_active)
+    # A Repair is a thread in this process, not an admitted job, so it was on no
+    # list at all (live, 2026-10-23: "where is the running job?"). Listed with its
+    # current step and no pid: a Stop would signal this server, never the repair.
+    for aid, prog in list(_REPAIR_PROGRESS.items()):
+        t = _REPAIR_THREADS.get(aid)
+        if t is not None and t.is_alive():
+            rows = list(rows) + [{"account_id": aid, "job_name": "repair", "pid": None,
+                                  "started_at": prog.get("startedAt"), "progress": dict(prog)}]
+    return rows
 
 
 @app.get("/api/v2/users")
@@ -2110,6 +2119,8 @@ def _discover_when_mapped(proc, account_id: int | None) -> None:
 # The repair each account last started, so a follow-on that must see its result
 # (the tally) can wait for it rather than count a target repair is still fixing.
 _REPAIR_THREADS: dict = {}
+# Each running repair's current step (repair.REPAIR_STEPS), for the Jobs page.
+_REPAIR_PROGRESS: dict = {}
 
 
 # The engine service that fills a tally service's gap.
@@ -2239,7 +2250,11 @@ def _start_repair(account_id: int | None, why: str, *,
             d = MigrationDB(st.db_path)
             run_id = d.repair_started()
             try:
-                out = repair.run_all(d, AuthManager(st), st, apply=True)
+                _REPAIR_PROGRESS[account_id] = {"startedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "index": 0,
+                                                 "total": len(repair.REPAIR_STEPS), "step": "starting"}
+                out = repair.run_all(d, AuthManager(st), st, apply=True,
+                                     progress=lambda i, n, name: _REPAIR_PROGRESS.get(account_id, {}).update(
+                                         index=i, total=n, step=name))
                 if verification_report is not None:
                     out["verified_gmail_labels"] = repair.repair_verified_gmail_labels(
                         AuthManager(st), d, st, verification_report, apply=True)
@@ -2248,6 +2263,7 @@ def _start_repair(account_id: int | None, why: str, *,
                 d.repair_finished(run_id, "", str(exc)[:500])
                 raise
             finally:
+                _REPAIR_PROGRESS.pop(account_id, None)
                 _DETAIL_CACHE.invalidate(("migration_detail", account_id))
                 d.close()
         except Exception as exc:      # noqa: BLE001

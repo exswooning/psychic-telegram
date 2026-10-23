@@ -72,3 +72,47 @@ def test_a_bot_message_reposted_with_attribution_is_named_not_lumped(auth, db, s
     assert known_issues.classify("chat", {"diffs": ["posted by the user with an attribution: x"]}) == "chat.attributed"
     assert known_issues.classify("chat", {"diffs": ["Chat text differs"]}) == "chat.text"
     assert V.ALL_SERVICES  # module loads
+
+
+def test_a_repair_reports_each_step_in_order(monkeypatch, auth, db, settings):
+    import repair
+    seen = []
+    monkeypatch.setattr(repair, "fix_modified_times", lambda *a, **k: {})
+    monkeypatch.setattr(repair, "reapply_owed_grants", lambda *a, **k: {})
+    monkeypatch.setattr(repair, "survey", lambda d: {"total": 0})
+    repair.run_all(db, auth, settings, apply=False, progress=lambda i, n, name: seen.append((i, n, name)))
+    assert seen == [(1, 10, "file times"), (2, 10, "owed shares"), (3, 10, "failure survey")]  # nothing failed: stops
+
+
+def test_a_running_repair_is_listed_with_its_step_and_no_pid(monkeypatch):
+    import threading
+    import api_server
+    from fastapi.testclient import TestClient
+    stop = threading.Event()
+    t = threading.Thread(target=stop.wait, daemon=True)
+    t.start()
+    monkeypatch.setitem(api_server._REPAIR_THREADS, 5, t)
+    monkeypatch.setitem(api_server._REPAIR_PROGRESS, 5, {"index": 7, "total": 10, "step": "Drive stragglers (re-walk)",
+                                                          "startedAt": "2026-10-23T11:12:03Z"})
+    monkeypatch.setattr(api_server.job_admission, "list_active", lambda: [])
+    monkeypatch.setattr(api_server, "require_reader", lambda op: None)
+    try:
+        rows = TestClient(api_server.app).get("/api/v2/active-jobs").json()
+    finally:
+        stop.set()
+    assert rows == [{"account_id": 5, "job_name": "repair", "pid": None, "started_at": "2026-10-23T11:12:03Z",
+                     "progress": {"index": 7, "total": 10, "step": "Drive stragglers (re-walk)",
+                                  "startedAt": "2026-10-23T11:12:03Z"}}]
+
+
+def test_a_repair_re_walk_leaves_verification_to_the_one_to_one_run(db, settings):
+    import repair
+    from db import bulk_seed_identities
+    bulk_seed_identities(db, [("u@src", "u@tgt")])
+    settings.first_pass_acceptance = settings.verify_on_complete = True
+    seen = []
+    repair.retry_drive_stragglers(None, db, settings, apply=True, users=["u@src"],
+                                  _migrate_user=lambda a, d, st, s, t, *x, **k: seen.append(st) or {"status": "DONE"})
+    st = seen[0]
+    assert (st.first_pass_acceptance, st.verify_on_complete, st.tally_on_complete) == (False, False, False)
+    assert settings.first_pass_acceptance is True               # the run's own settings untouched

@@ -187,3 +187,28 @@ class TestTheOverwriteBoxIsProvenTicked:
         src = inspect.getsource(dwd_helper.run)
         assert src.index("if not _tick_overwrite(") < src.index("auth_btn.first.click()", src.index("_tick_overwrite"))
         assert "return 7" in src
+
+
+class TestTheTargetLoginIsTheTargetsOwn:
+    """Live 2026-10-23: the shared target login was a sandbox's and was offered for
+    mdharan.com's console. Never another tenant's sign-in, on either side."""
+
+    def test_a_login_from_another_domain_is_never_offered(self, settings, monkeypatch, tmp_path):
+        import admin_secrets
+        import scope_guard
+        settings.target_domain, settings.account_id = "mdharan.example", 5
+        monkeypatch.setattr(admin_secrets, "LOGIN_DIR", str(tmp_path))
+        monkeypatch.setenv("DWD_EMAIL", "admin@target2.sandbox.example")
+        monkeypatch.setenv("DWD_PASSWORD", "sandbox-pw")
+        assert scope_guard.can_repair(settings, "target") is False
+
+    def test_the_accounts_own_kept_login_is_used(self, settings, monkeypatch, tmp_path):
+        import admin_secrets
+        import scope_guard
+        settings.target_domain, settings.account_id = "mdharan.example", 5
+        monkeypatch.setattr(admin_secrets, "LOGIN_DIR", str(tmp_path))
+        monkeypatch.setenv("DWD_EMAIL", "admin@target2.sandbox.example")
+        monkeypatch.setenv("DWD_PASSWORD", "sandbox-pw")
+        admin_secrets.save_teardown_login(5, "target", "admin@mdharan.example", "own-pw")
+        assert scope_guard._console_login(settings, "target") == {
+            "DWD_EMAIL": "admin@mdharan.example", "DWD_PASSWORD": "own-pw"}

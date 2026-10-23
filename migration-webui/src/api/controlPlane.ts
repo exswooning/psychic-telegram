@@ -362,6 +362,8 @@ export interface ActiveJobRow {
   account_id: number | null; job_name: string; pid: number | null; started_at: string
   /** When a Stop was first sent to it; the server forces the next Stop. */
   stop_asked_at?: string | null
+  /** A Repair (a thread in the API, no pid): its current step of repair.REPAIR_STEPS. */
+  progress?: { index: number; total: number; step: string; startedAt?: string } | null
 }
 // job_admission.py's admission table, unscoped by caller -- the one place
 // that shows what's occupying the shared capacity slot regardless of which

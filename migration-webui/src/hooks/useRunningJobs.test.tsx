@@ -135,6 +135,18 @@ describe('Running Now', () => {
       expect(container.textContent).not.toMatch(/detached/)
     })
 
+    it('shows a running Repair with its step and no Stop', async () => {
+      cp.fetchMe.mockResolvedValue({ id: 5 })
+      client.fetchJob.mockResolvedValue(null)
+      cp.fetchActiveJobs.mockResolvedValue([{ account_id: 5, job_name: 'repair', pid: null,
+        started_at: '2026-10-23T11:12:03Z',
+        progress: { index: 7, total: 10, step: 'Drive stragglers (re-walk)' } }])
+      const { container } = render(<RunningNow />)
+      await waitFor(() => expect(container.textContent).toMatch(/step 7 of 10: Drive stragglers \(re-walk\)/))
+      expect(container.textContent).toMatch(/repair — account #5/)
+      expect(screen.queryByRole('button', { name: /^Stop repair/ })).not.toBeInTheDocument()
+    })
+
     it('dedupes against a row that never recorded a pid, by name', async () => {
       cp.fetchMe.mockResolvedValue({ id: 1 })
       client.fetchJob.mockResolvedValue(scan())

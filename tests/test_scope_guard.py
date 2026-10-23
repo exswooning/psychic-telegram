@@ -245,7 +245,7 @@ class TestRepair:
         for k in ("DWD_EMAIL_SOURCE", "DWD_PASSWORD_SOURCE"):
             monkeypatch.delenv(k, raising=False)
         f = tmp_path / "dwd.env"
-        f.write_text("DWD_EMAIL=t@tgt.example\nDWD_PASSWORD=target-only\n")
+        f.write_text("DWD_EMAIL=t@tenantb.com\nDWD_PASSWORD=target-only\n")   # the target's own domain
         import admin_secrets
         monkeypatch.setattr(admin_secrets, "ENV_FILE", str(f))
         assert not scope_guard.can_repair(settings, "source")

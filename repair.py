@@ -663,12 +663,21 @@ def retry_drive_stragglers(auth, db, settings, apply: bool = False,
         if not apply:
             continue
         st = settings
+        if settings is not None:
+            # A re-walk for stragglers, not a migration: the full first-pass acceptance
+            # check (every file's content, again) and the on-finish checks belong to the
+            # One-to-one run that follows. Live (dharan, 2026-10-23): ward14's re-walk
+            # took a minute and its acceptance check then held the repair for hours.
+            st = copy.copy(settings)
+            st.first_pass_acceptance = False
+            st.verify_on_complete = False
+            st.tally_on_complete = False
         if settings is not None and settings.transfer_mode != "move" and db.conn.execute(
                 "SELECT 1 FROM id_mapping WHERE source_user=? AND type='file' "
                 "AND source_id = target_id LIMIT 1", (src,)).fetchone():
             # Its files were MOVED: what is left goes the same way, never copied instead
             # (the end-of-run repair runs in the API's own mode, a copy).
-            st = copy.copy(settings)
+            st = copy.copy(st)
             st.transfer_mode = "move"
         try:
             result = migrate_user(auth, db, st, src, tgt, {"drive"},
@@ -1048,9 +1057,14 @@ def restore_direct_grants(auth, db, settings, apply: bool = False,
     return out
 
 
+REPAIR_STEPS = ("file times", "owed shares", "failure survey", "contact names",
+                "stale grantees and users", "shared drives", "Drive stragglers (re-walk)",
+                "folder grants and ACL reconcile", "stranded mail and events", "re-apply grants")
+
+
 def run_all(db, auth, settings, apply: bool = False,
             reconcile_limit: int | None = None,
-            reapply_passes: int = 6) -> dict:
+            reapply_passes: int = 6, progress=None) -> dict:
     """Survey, then fix what can be fixed without guessing.
 
     Called automatically at the end of a migration, so the failure count an
@@ -1073,17 +1087,27 @@ def run_all(db, auth, settings, apply: bool = False,
     worse than no repair pass.
     """
     out = {"survey": {}, "resolved": 0, "reconciled": 0, "errors": []}
+
+    def step(name):      # (index, total, name) to whoever shows this run's progress
+        if progress:
+            try:
+                progress(REPAIR_STEPS.index(name) + 1, len(REPAIR_STEPS), name)
+            except Exception:      # noqa: BLE001 - reporting never stops a repair
+                pass
     # Before the failure survey, and whatever it finds: a copy carrying the wrong
     # modifiedTime is not a failure row, so a run with none still needs this.
+    step("file times")
     try:
         out["mtimes"] = fix_modified_times(auth, db, settings, apply=apply)
     except Exception as exc:      # noqa: BLE001
         out["errors"].append(f"modifiedTime: {str(exc)[:160]}")
+    step("owed shares")
     # Also before the survey: an owed grant is not a failure row either.
     try:
         out["owed_grants"] = reapply_owed_grants(auth, db, settings, apply=apply)
     except Exception as exc:      # noqa: BLE001
         out["errors"].append(f"owed grants: {str(exc)[:160]}")
+    step("failure survey")
     try:
         out["survey"] = survey(db)
     except Exception as exc:      # noqa: BLE001
@@ -1092,12 +1116,14 @@ def run_all(db, auth, settings, apply: bool = False,
     if not out["survey"].get("total"):
         return out
 
+    step("contact names")
     try:
         out["contacts_retried"] = retry_failed_contact_names(
             auth, db, settings, apply=apply)
     except Exception as exc:      # noqa: BLE001
         out["errors"].append(f"contact retry: {str(exc)[:160]}")
 
+    step("stale grantees and users")
     if out["survey"].get("acl_no_account"):
         try:
             stale = stale_grantee_failures(db, auth.directory("target"))
@@ -1139,6 +1165,7 @@ def run_all(db, auth, settings, apply: bool = False,
                          "member had no emailAddress (a deleted account); recorded as "
                          "FAILED before shared_drives skipped these")
 
+    step("shared drives")
     if out["survey"].get("shared_drives"):
         try:
             out["shared_drives_retried"] = retry_failed_shared_drives(
@@ -1146,6 +1173,7 @@ def run_all(db, auth, settings, apply: bool = False,
         except Exception as exc:      # noqa: BLE001
             out["errors"].append(f"shared drives: {str(exc)[:160]}")
 
+    step("Drive stragglers (re-walk)")
     # Before the ACL passes below: a file ACLs would apply to has to exist first,
     # and a stranded file is exactly what an ACL grant has nothing to attach to.
     if out["survey"].get("drive_stragglers") or out["survey"].get("owed_shares"):
@@ -1161,6 +1189,7 @@ def run_all(db, auth, settings, apply: bool = False,
     # inherits, so repairing a folder can restore access to hundreds of
     # files at once -- and repairing the files first would spend the rate
     # limiter's budget on the cheaper half of the problem.
+    step("folder grants and ACL reconcile")
     out["doors"] = broken_folder_grants(db)
 
     if out["survey"].get("acl_quota"):
@@ -1178,6 +1207,7 @@ def run_all(db, auth, settings, apply: bool = False,
     # by the item's own date, so a message or event that failed to import is
     # never offered again unless somebody edits it -- four such rows survived
     # two runs and a repair while everything around them was retried.
+    step("stranded mail and events")
     try:
         import retry_failed
         rf = retry_failed.retry(auth, db, settings, apply=apply)
@@ -1193,6 +1223,7 @@ def run_all(db, auth, settings, apply: bool = False,
     # the pass resolved 1, and the 273 grants it had just confirmed absent
     # stayed absent because nothing put them back. Folders first, since one
     # folder's grant is what everything inside it inherits.
+    step("re-apply grants")
     if apply and out["survey"].get("acl_quota"):
         try:
             import acl_repair

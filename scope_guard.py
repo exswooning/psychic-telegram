@@ -204,22 +204,32 @@ def can_repair(settings: Settings | None = None, tenant: str | None = None) -> b
 
 def _console_login(settings: Settings | None, tenant: str | None) -> dict:
     """The sign-in dwd_helper needs, as the env vars it reads -- or {} when there is
-    none. The environment first, then the root-only file admin_secrets reads
-    (/etc/bitport/dwd.env): a migrate launch does not carry the file's contents in
-    its environment, so reading only os.environ said "no login on file" while the
-    login sat in that file (live, the run switched Chat off instead of granting)."""
+    none. Never one tenant's login typed into another tenant's console, on either side:
+    live (2026-10-23) the shared target login was a sandbox's (target2.sarafgloabalexim.com)
+    and was offered for mdharan.com. The account's own kept login (setup's keep_login,
+    admin_secrets) comes first; then the environment and /etc/bitport/dwd.env, each only
+    when its address is on that side's own domain."""
     import admin_secrets
     filed = admin_secrets._load()
     pick = lambda k: (os.getenv(k) or filed.get(k) or "").strip()   # noqa: E731
-    if tenant == "source":
+    side = "source" if tenant == "source" else "target"
+    domain = ((getattr(settings, f"{side}_domain", "") if settings else "") or "").lower()
+    keys = ("DWD_EMAIL_SOURCE", "DWD_PASSWORD_SOURCE") if side == "source" else ("DWD_EMAIL", "DWD_PASSWORD")
+
+    def on_domain(email: str) -> bool:
+        return bool(email and domain and email.lower().endswith("@" + domain))
+    aid = getattr(settings, "account_id", None) if settings else None
+    if aid:
+        email, pw = admin_secrets.teardown_login(aid, side)
+        if pw and on_domain(email):
+            return {keys[0]: email.lower(), keys[1]: pw}
+    if side == "source":
         # Side-specific only: the generic pair is the TARGET admin's.
         email, pw = pick("DWD_EMAIL_SOURCE").lower(), pick("DWD_PASSWORD_SOURCE")
-        domain = ((settings.source_domain if settings else "") or "").lower()
-        ok = bool(email and pw and domain and email.endswith("@" + domain))
-        return {"DWD_EMAIL_SOURCE": email, "DWD_PASSWORD_SOURCE": pw} if ok else {}
-    email = pick("DWD_EMAIL") or pick("DWD_EMAIL_TARGET")
-    pw = pick("DWD_PASSWORD") or pick("DWD_PASSWORD_TARGET")
-    return {"DWD_EMAIL": email, "DWD_PASSWORD": pw} if email and pw else {}
+    else:
+        email = (pick("DWD_EMAIL") or pick("DWD_EMAIL_TARGET")).lower()
+        pw = pick("DWD_PASSWORD") or pick("DWD_PASSWORD_TARGET")
+    return {keys[0]: email, keys[1]: pw} if pw and on_domain(email) else {}
 
 
 def repair(gap: ScopeGap, timeout: int = 900,
