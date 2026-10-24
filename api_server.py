@@ -5585,7 +5585,13 @@ def _relinks(conn) -> list[dict]:
     for r in conn.execute(
             "SELECT source_user, item_id, error_message FROM audit_log a WHERE item_type='form_link' "
             "AND status='RELINK_BY_HAND' AND EXISTS (SELECT 1 FROM identity_map m "
-            "WHERE m.source_email = a.source_user) ORDER BY source_user LIMIT 200").fetchall():
+            "WHERE m.source_email = a.source_user) "
+            # Linked since (form_relink.py), or a Google-made "Copy of" Form whose Sheet is
+            # Bitport's own target copy: nothing left for a person to do.
+            "AND NOT EXISTS (SELECT 1 FROM audit_log b WHERE b.item_type='form_link' "
+            "AND b.item_id=a.item_id AND b.status='RELINKED') "
+            "AND NOT EXISTS (SELECT 1 FROM id_mapping t WHERE t.target_id=substr(a.error_message, 8)) "
+            "ORDER BY source_user LIMIT 200").fetchall():
         sheet_src = (r["error_message"] or "").removeprefix("sheet: ").strip()
         form_tgt, form_name = target(r["item_id"])
         sheet_tgt, sheet_name = target(sheet_src)

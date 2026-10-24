@@ -64,6 +64,12 @@ ISSUES = [
      "A Doc/Slide with images could not be compared",
      "Image URLs are signed per read, so they never match.",
      "Checker compares each image by the hash of its bytes (native_fidelity._hash_images, 2026-10-23).", True),
+    ("drive.form_relinked", "drive", lambda t: "copied Form is relinked" in t,
+     "A responses Sheet has one tab more than the source",
+     "Linking a copied Form to its copied responses Sheet makes Google add an empty "
+     "\"Form Responses\" tab; no API links a Form, and no link adds none.",
+     "None: the operator chose a linked Form over an identical Sheet (2026-10-24). Done by "
+     "form_relink.py as the target admin, in repair's \"form links\" step.", False),
     ("drive.native_structure", "drive", lambda t: ("native document content, formatting or structure differs" in t
                                                  or "native Sheet entered values, formatting, or structures differ" in t),
      "Doc/Slide structure differs from the source",

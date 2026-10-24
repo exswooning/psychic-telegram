@@ -955,6 +955,12 @@ class Verifier:
                 source_sheet = self._x(lambda: read_sheet(self.auth.api("source", "sheets", self.src_user), sid))
                 target_sheet = self._x(lambda: read_sheet(self.auth.api("target", "sheets", self.tgt_user), tid))
                 differences = compare_sheets(source_sheet, target_sheet, self.db.target_for_source_id)
+                if differences and self.db.conn.execute(
+                        "SELECT 1 FROM audit_log WHERE item_type='form_link' AND status='RELINKED' "
+                        "AND error_message LIKE ?", (f"%-> sheet {tid}",)).fetchone():
+                    # The operator's choice (2026-10-24): a linked Form over an identical Sheet.
+                    differences = [d + " -- includes the empty responses tab Google adds when a copied "
+                                       "Form is relinked" for d in differences]
                 ev.update(opened=True, how="native Sheet entered values, formulas, cell styles and structures; calculated results excluded",nativeFeaturesChecked=True,nativeFeaturesMatched=not differences)
                 return differences
             if mime in ("application/vnd.google-apps.document", "application/vnd.google-apps.presentation"):

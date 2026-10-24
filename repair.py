@@ -25,6 +25,7 @@ which keeps the record of what happened and why it stopped mattering.
 from __future__ import annotations
 
 import copy
+import sys
 import logging
 
 log = logging.getLogger("repair")
@@ -1154,9 +1155,35 @@ def clean_staging_drives(auth, db, settings, apply: bool = False) -> dict:
     return out
 
 
-REPAIR_STEPS = ("file times", "owed shares", "leftover staging drives", "failure survey", "contact names",
+REPAIR_STEPS = ("file times", "owed shares", "leftover staging drives", "form links", "failure survey", "contact names",
                 "stale grantees and users", "shared drives", "Drive stragglers (re-walk)",
                 "folder grants and ACL reconcile", "stranded mail and events", "re-apply grants")
+
+
+def relink_forms(db, settings, apply: bool) -> dict:
+    """Link each copied Form to its copied responses Sheet (form_relink.py), on the target.
+
+    A browser signed in as the target admin, so it runs as its own process -- never in
+    the API's -- and only with a kept admin login on the target's own domain. Without
+    one the pairs stay listed for a person to relink, as before."""
+    import subprocess
+    import form_relink
+    from scope_guard import _console_login
+    done = lambda: sum(p.get("skip") == "already relinked" for p in form_relink.pairs(db))   # noqa: E731
+    todo = [p for p in form_relink.pairs(db) if not p.get("skip")]
+    out = {"pending": len(todo), "linked": 0, "errors": []}
+    if not apply or not todo or not getattr(settings, "account_id", None):
+        return out
+    if not _console_login(settings, "target"):
+        out["errors"].append(f"{len(todo)} form(s) to relink by hand: no kept admin login on the target")
+        return out
+    before = done()
+    r = subprocess.run([sys.executable, form_relink.__file__, "--account", str(settings.account_id), "--apply"],
+                       capture_output=True, text=True, timeout=1800)
+    out["linked"] = done() - before
+    if r.returncode:
+        out["errors"].append("form links: " + (r.stderr or r.stdout).strip().splitlines()[-1][:200])
+    return out
 
 
 def run_all(db, auth, settings, apply: bool = False,
@@ -1210,6 +1237,12 @@ def run_all(db, auth, settings, apply: bool = False,
         out["errors"].extend(out["staging"]["errors"])
     except Exception as exc:      # noqa: BLE001
         out["errors"].append(f"staging drives: {str(exc)[:160]}")
+    step("form links")
+    try:
+        out["form_links"] = relink_forms(db, settings, apply=apply)
+        out["errors"].extend(out["form_links"]["errors"])
+    except Exception as exc:      # noqa: BLE001
+        out["errors"].append(f"form links: {str(exc)[:160]}")
     step("failure survey")
     try:
         out["survey"] = survey(db)
@@ -1351,19 +1384,24 @@ def summarise(result: dict) -> str:
             + (f"{og['covered']:,} already had access through their folder; " if og.get("covered") else "")
             + f"{og['owed'] - og.get('ready', 0):,} still waiting for the colleague's account"
             if og.get("owed") else "")
+    fl = result.get("form_links") or {}
     sd = result.get("staging") or {}
     staging = (f"{sd.get('deleted_drives', 0):,} leftover staging drive(s) deleted, "
                f"{sd.get('deleted_copies', 0):,} duplicate copy(ies) in them removed, "
                f"{sd.get('members_removed', 0):,} source member(s) removed"
                + (f", {len(sd['kept'])} kept for review" if sd.get("kept") else "")
                if sd.get("drives") else "")
+    forms = (f"{fl.get('linked', 0)}/{fl['pending']} form(s) relinked to their responses sheet"
+             if fl.get("pending") else "")
     if not s.get("total"):
-        return "; ".join(p for p in ("no failed items recorded", times, owed, staging) if p)
+        return "; ".join(p for p in ("no failed items recorded", times, owed, staging, forms) if p)
     parts = [f"{s['total']:,} failed item(s)"]
     if times:
         parts.append(times)
     if staging:
         parts.append(staging)
+    if forms:
+        parts.append(forms)
     if result.get("resolved"):
         parts.append(f"{result['resolved']:,} resolved (grantee recreated)")
     if owed:
