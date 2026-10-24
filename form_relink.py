@@ -31,7 +31,6 @@ import logging
 import os
 import re
 import sys
-import time
 
 log = logging.getLogger("form_relink")
 

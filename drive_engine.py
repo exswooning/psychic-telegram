@@ -1304,8 +1304,8 @@ class DriveMigrator:
         carry it, so it is copied here, in place. A colleague's file stays with the
         colleague's run; one the target domain owns is already Bitport's own copy.
         """
-        if (self.shared_drive or not self.settings.migrate_external_shares
-                or not self.settings.owned_only or shutdown_requested()):
+        if (shutdown_requested() or self.shared_drive or not self.settings.migrate_external_shares
+                or not self.settings.owned_only):
             return
         target = (self.settings.target_domain or "").lower()
         for child in self._list_children(src_parent, owned_only=False, with_owners=True, not_mine=True):
