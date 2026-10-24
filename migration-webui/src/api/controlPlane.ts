@@ -1319,10 +1319,11 @@ export const uploadCredentials = (
   })
 
 /** Superadmin: give this account's side the key another account already holds here. */
-export const reuseKey = (reason: string, side: 'source' | 'target', fromAccountId: number) =>
+export const reuseKey = (reason: string, side: 'source' | 'target', fromAccountId: number, accountId?: number) =>
   cpFetch<ActionResult>('/api/v2/setup/reuse-key', {
     method: 'POST',
-    body: JSON.stringify({ reason, side, from_account_id: fromAccountId }),
+    body: JSON.stringify({ reason, side, from_account_id: fromAccountId,
+                           ...(accountId != null ? { account_id: accountId } : {}) }),
   })
 
 /** tenant_capacity.py: a field that could not be read is null, its reason under errors. */

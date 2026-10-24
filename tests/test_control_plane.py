@@ -3384,7 +3384,7 @@ class TestReuseKey:
         kd = tmp_path / "keys" / str(acct)
         kd.mkdir(parents=True, exist_ok=True)
         (kd / "source-sa.json").write_text(json.dumps({"client_id": "111", "project_id": "p"}))
-        accounts_auth.update_tenant_config(acct, "source", domain=domain,
+        accounts_auth.update_tenant_config(acct, "source", domain=domain, admin_email=f"admin@{domain}",
                                            sa_key_path=str(kd / "source-sa.json"))
 
     def test_refuses_a_non_superadmin(self, cp, tmp_path, monkeypatch):
@@ -3411,9 +3411,17 @@ class TestReuseKey:
         assert r.status_code == 200 and r.json()["ok"] is True
         dest = tmp_path / "keys" / str(boss) / "source-sa.json"
         assert json.loads(dest.read_text())["client_id"] == "111"
-        assert accounts_auth.get_tenant_config(boss, "source")["domain"] == "d.com"
+        cfg = accounts_auth.get_tenant_config(boss, "source")
+        assert (cfg["domain"], cfg["admin_email"]) == ("d.com", "admin@d.com")
+        # The same key again: its record is completed (live: account 7 had dharan's key, no admin).
+        accounts_auth.update_tenant_config(boss, "source", admin_email="")
         again = cp.post("/api/v2/setup/reuse-key", headers=ADMIN, json=body).json()
-        assert again["ok"] is False and "never overwritten" in again["detail"]
+        assert again["ok"] is True and "completed" in again["detail"]
+        assert accounts_auth.get_tenant_config(boss, "source")["admin_email"] == "admin@d.com"
+        dest.write_text(json.dumps({"client_id": "OTHER", "project_id": "q"}))   # a different key
+        refused = cp.post("/api/v2/setup/reuse-key", headers=ADMIN, json=body).json()
+        assert refused["ok"] is False and "never overwritten" in refused["detail"]
+        assert json.loads(dest.read_text())["client_id"] == "OTHER"
 
 
 class TestCapacity:
@@ -3453,3 +3461,24 @@ def test_a_pilot_is_held_only_to_a_storage_limit_of_zero():
     src = {"storage": {"usage": 475_000_000_000}}
     assert tenant_capacity.refusal(tgt, src) and not tenant_capacity.refusal(tgt, src, whole_tenant=False)
     assert tenant_capacity.refusal({"storage": {"limit": 0, "usage": 5}}, src, whole_tenant=False)
+
+
+def test_capacity_tries_the_wider_scope_when_the_narrow_one_is_refused(monkeypatch):
+    """Live: s.'s target key holds drive, not drive.readonly; build() is lazy, so the first
+    scope always 'worked' and storage read as unknown."""
+    import readiness
+    import tenant_capacity
+    tried = []
+
+    class _C:
+        def __init__(self, scope):
+            self.scope = scope
+
+        def refresh(self, _req):
+            tried.append(self.scope)
+            if self.scope.endswith("drive.readonly"):
+                raise Exception("unauthorized_client")
+    monkeypatch.setattr(readiness, "_creds", lambda key, scopes, subject: _C(scopes[0]))
+    monkeypatch.setattr("googleapiclient.discovery.build", lambda *a, **k: "svc")
+    assert tenant_capacity._service("k", "a@x", "drive", "v3", ("drive.readonly", "drive")) == "svc"
+    assert [t.rsplit("/", 1)[1] for t in tried] == ["drive.readonly", "drive"]

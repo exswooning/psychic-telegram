@@ -7700,12 +7700,22 @@ async def reuse_key(body: ReuseKey, op: Operator = Depends(operator)):
         dest = os.path.join(dest_dir, f"{body.side}-sa.json")
         have = (accounts_auth.get_tenant_config(to, body.side) or {}).get("sa_key_path") or ""
         have = have if os.path.isabs(have) else os.path.join(HERE, have)
-        if os.path.exists(dest) or (have and os.path.isfile(have)):
-            return False, f"account {to} already has a {body.side} key; it is never overwritten"
+        held = have if have and os.path.isfile(have) else (dest if os.path.exists(dest) else "")
+        if held:
+            import provision_gcp
+            # The SAME key already here (its domain or admin never recorded -- live, account 7's
+            # source had dharan's key and no admin, so readiness said "no source domain or admin
+            # set up"): complete the record. Any other key is never overwritten.
+            if provision_gcp.client_id_of(held) != provision_gcp.client_id_of(src):
+                return False, f"account {to} already has a different {body.side} key; it is never overwritten"
+            accounts_auth.update_tenant_config(to, body.side, domain=src_cfg["domain"],
+                                               admin_email=src_cfg.get("admin_email") or None)
+            return True, f"{body.side} record of {src_cfg['domain']} completed from account {body.from_account_id}"
         os.makedirs(dest_dir, exist_ok=True)
         shutil.copyfile(src, dest)
         os.chmod(dest, 0o600)
-        accounts_auth.update_tenant_config(to, body.side, domain=src_cfg["domain"], sa_key_path=dest)
+        accounts_auth.update_tenant_config(to, body.side, domain=src_cfg["domain"], sa_key_path=dest,
+                                           admin_email=src_cfg.get("admin_email") or None)
         return True, f"{body.side} key of {src_cfg['domain']} copied from account {body.from_account_id}"
     return await _gated(op, "setup.reuse_key", body, f"account:{to}", _copy,
                         extra_check=require_superadmin)

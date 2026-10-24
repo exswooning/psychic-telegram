@@ -539,7 +539,8 @@ const QuickTenantSetup: React.FC<{
     if (!readinessKey) return
     Promise.resolve().then(() => fetchCapacity(side)).then(setCapacity).catch(() => setCapacity(null))
   }, [readinessKey, side])
-  const noKey = !!tenantCfg && !tenantCfg.hasKey
+  // No key -- or a key with no admin on record, which readiness cannot check as anyone.
+  const noKey = !!tenantCfg && (!tenantCfg.hasKey || !tenantCfg.adminEmail)
   useEffect(() => {
     if (!noKey) return
     Promise.resolve().then(() => fetchAllDomains()).then((r) => setReusable(!r.superadmin ? [] :

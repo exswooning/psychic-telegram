@@ -17,8 +17,13 @@ def _service(key, admin, api, version, scopes):
     err: Exception | None = None
     for s in scopes:
         try:
-            svc = build(api, version, credentials=readiness._creds(key, [G + s], admin), cache_discovery=False)
-            return svc
+            # Mint now: build() is lazy, so without this the first scope always "worked" and a
+            # key delegated only the wider one (s.'s target: drive, not drive.readonly) read
+            # as storage unknown.
+            from google.auth.transport.requests import Request
+            creds = readiness._creds(key, [G + s], admin)
+            creds.refresh(Request())
+            return build(api, version, credentials=creds, cache_discovery=False)
         except Exception as exc:      # noqa: BLE001
             err = exc
     raise err or RuntimeError("no scope")

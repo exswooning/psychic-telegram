@@ -5,6 +5,7 @@ import AdminAccounts from './AdminAccounts'
 const fetchAdminAccounts = vi.fn()
 const deleteAccount = vi.fn()
 const createAccount = vi.fn()
+const reuseKey = vi.fn()
 vi.mock('@/api/controlPlane', () => ({
   createAccount: (...a: unknown[]) => createAccount(...a),
   fetchAdminAccounts: (...a: unknown[]) => fetchAdminAccounts(...a),
@@ -13,6 +14,10 @@ vi.mock('@/api/controlPlane', () => ({
   setAccountSeedEnabled: vi.fn(),
   fetchLifecycle: vi.fn().mockResolvedValue({ accountId: 1, state: {}, plan: [], teardownDays: 30 }),
   fetchGcloudIdentities: vi.fn().mockResolvedValue({ identities: [] }),
+  fetchAllDomains: vi.fn().mockResolvedValue({ superadmin: true, domains: [
+    { side: 'source', domain: 'dharan.gov.np', accountId: 5, hasKey: true, superseded: false },
+    { side: 'target', domain: 'mdharan.com', accountId: 5, hasKey: true, superseded: false }] }),
+  reuseKey: (...a: unknown[]) => reuseKey(...a),
 }))
 
 const acct = (id: number, email: string, is_superadmin = false) => ({
@@ -67,5 +72,19 @@ describe('each account\'s end of life', () => {
     fetchAdminAccounts.mockResolvedValue([acct(1, 'boss@x.com', true), acct(7, 'client@x.com')])
     render(<AdminAccounts />)
     expect(await screen.findByTestId('lifecycle-7')).toHaveTextContent('not approved')
+  })
+})
+
+describe('giving an account a key already on the server', () => {
+  it('copies the chosen side to that account after a Reason Code', async () => {
+    fetchAdminAccounts.mockResolvedValue([acct(1, 'boss@x.com', true), acct(7, 'pair@x.com')])
+    reuseKey.mockResolvedValue({ ok: true, actionId: 2, detail: 'copied' })
+    render(<AdminAccounts />)
+    await waitFor(() => expect(screen.getByTestId('reuse-key-7')).not.toBeDisabled())
+    fireEvent.click(screen.getByTestId('reuse-key-7'))
+    fireEvent.click(await screen.findByTestId('reuse-source-5'))
+    fireEvent.change(screen.getByLabelText('Reason Code'), { target: { value: 'dharan to s.' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm' }))
+    await waitFor(() => expect(reuseKey).toHaveBeenCalledWith('dharan to s.', 'source', 5, 7))
   })
 })

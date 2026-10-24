@@ -1,12 +1,12 @@
 import React, { useEffect, useState } from 'react'
 import {
-  Alert, Box, Button, Chip, CircularProgress, IconButton, Paper, Stack, Switch, Table,
+  Alert, Box, Button, Chip, CircularProgress, IconButton, Menu, MenuItem, Paper, Stack, Switch, Table,
   TableBody, TableCell, TableContainer, TableHead, TableRow, TextField, Typography,
 } from '@mui/material'
 import { AdminPanelSettings as AdminIcon, DeleteOutline as DeleteIcon } from '@mui/icons-material'
 import {
-  Account, createAccount, deleteAccount, fetchAdminAccounts, setAccountSubscription, setAccountSeedEnabled,
-  setPairLimit,
+  Account, createAccount, deleteAccount, fetchAdminAccounts, fetchAllDomains, reuseKey, setAccountSubscription,
+  setAccountSeedEnabled, setPairLimit,
 } from '@/api/controlPlane'
 import ReasonCodeDialog from '@/components/ReasonCodeDialog'
 import LifecycleChip from '@/components/LifecycleChip'
@@ -16,7 +16,9 @@ type Pending = { id: number; email: string } & (
   | { kind: 'seed'; enabled: boolean }
   | { kind: 'delete' }
   | { kind: 'create'; name: string; password: string }
+  | { kind: 'reuse'; side: 'source' | 'target'; from: number; domain: string }
 )
+type KeyOnServer = { side: 'source' | 'target'; domain: string; accountId: number }
 
 /**
  * Superadmin only (see require_superadmin in api_server.py) -- everyone
@@ -34,6 +36,15 @@ const AdminAccounts: React.FC = () => {
   const [actionError, setActionError] = useState<string | null>(null)
   const [draft, setDraft] = useState({ email: '', name: '', password: '' })
   const [created, setCreated] = useState<string | null>(null)
+  // Keys already on this server, for "Use a key…": a new pair can take an existing tenant's
+  // key (dharan's read-only one) without that tenant being set up again.
+  const [keys, setKeys] = useState<KeyOnServer[]>([])
+  const [keyMenu, setKeyMenu] = useState<{ el: HTMLElement; account: Account } | null>(null)
+  useEffect(() => {
+    fetchAllDomains().then((r) => setKeys(r.domains.filter((d) => d.hasKey && !d.superseded && d.accountId != null)
+      .map((d) => ({ side: d.side as 'source' | 'target', domain: d.domain, accountId: d.accountId as number }))))
+      .catch(() => setKeys([]))
+  }, [])
 
   const refresh = () => {
     fetchAdminAccounts().then(setAccounts).catch((e) => setError(e.message))
@@ -51,7 +62,9 @@ const AdminAccounts: React.FC = () => {
           ? await setAccountSeedEnabled(pending.id, pending.enabled, reason)
           : pending.kind === 'create'
             ? await createAccount(pending.email, pending.password, pending.name, reason)
-            : await deleteAccount(pending.id, pending.email, reason)
+            : pending.kind === 'reuse'
+              ? await reuseKey(reason, pending.side, pending.from, pending.id)
+              : await deleteAccount(pending.id, pending.email, reason)
       if (!r.ok) throw new Error(r.detail || 'could not update')
       if (pending.kind === 'create') {
         setCreated(`${r.detail}. Sign in as it to set up its pair in the Setup Wizard.`)
@@ -167,6 +180,11 @@ const AdminAccounts: React.FC = () => {
                   </TableCell>
                   <TableCell><LifecycleChip accountId={a.id} /></TableCell>
                   <TableCell align="center">
+                    <Button size="small" data-testid={`reuse-key-${a.id}`}
+                            disabled={!keys.some((k) => k.accountId !== a.id)}
+                            onClick={(e) => setKeyMenu({ el: e.currentTarget, account: a })}>
+                      Use a key…
+                    </Button>
                     {!a.is_superadmin && (
                       <IconButton size="small" color="error" aria-label={`delete ${a.email}`}
                                   data-testid={`delete-account-${a.id}`}
@@ -185,6 +203,19 @@ const AdminAccounts: React.FC = () => {
         </TableContainer>
       )}
 
+      <Menu anchorEl={keyMenu?.el} open={!!keyMenu} onClose={() => setKeyMenu(null)}>
+        {keyMenu && keys.filter((k) => k.accountId !== keyMenu.account.id).map((k) => (
+          <MenuItem key={`${k.side}-${k.accountId}`} data-testid={`reuse-${k.side}-${k.accountId}`}
+                    onClick={() => {
+                      setPending({ id: keyMenu.account.id, email: keyMenu.account.email, kind: 'reuse',
+                                   side: k.side, from: k.accountId, domain: k.domain })
+                      setKeyMenu(null)
+                    }}>
+            {k.side}: {k.domain} (account {k.accountId})
+          </MenuItem>
+        ))}
+      </Menu>
+
       <ReasonCodeDialog
         open={!!pending}
         busy={busy}
@@ -195,7 +226,8 @@ const AdminAccounts: React.FC = () => {
             : pending?.kind === 'seed'
               ? (pending.enabled ? `Enable seeding for ${pending.email}` : `Disable seeding for ${pending.email}`)
               : pending?.kind === 'delete' ? `Delete ${pending.email}`
-                : pending?.kind === 'create' ? `Create account ${pending.email}` : ''
+                : pending?.kind === 'create' ? `Create account ${pending.email}`
+                  : pending?.kind === 'reuse' ? `Give ${pending.email} the ${pending.side} key of ${pending.domain}` : ''
         }
         description={
           pending?.kind === 'subscription' ? (
@@ -212,6 +244,10 @@ const AdminAccounts: React.FC = () => {
           ) : pending?.kind === 'create' ? (
             <>Creates a sign-in with its own empty pair and its own ledger. Nothing is set up
               yet: sign in as it and run the Setup Wizard for its source and target.</>
+          ) : pending?.kind === 'reuse' ? (
+            <>Copies account {pending.from}&apos;s {pending.side} key, domain and admin to this account.
+              Nothing changes on {pending.domain}: delegation belongs to the key. A different key
+              already there is never overwritten; the same key gets its record completed.</>
           ) : null
         }
         confirmPhrase={pending?.kind === 'delete' ? pending.email : undefined}
