@@ -306,8 +306,11 @@ const QuickTenantSetup: React.FC<{
    *  open and is never written anywhere. */
   initialEmail?: string
   initialPassword?: string
+  /** A superadmin viewing another account (useViewedAccount): every read asks about
+   *  that account, and every action is disabled -- they would act on the caller's own. */
+  viewedAccount?: number
 }> = ({ side, view, showSeedOptions, showProvisionUsers, onRequestManual,
-        initialDomain, initialEmail, initialPassword }) => {
+        initialDomain, initialEmail, initialPassword, viewedAccount }) => {
   const [domain, setDomain] = useState(initialDomain ?? '')
   const [email, setEmail] = useState(initialEmail ?? '')
   const [password, setPassword] = useState(initialPassword ?? '')
@@ -368,11 +371,11 @@ const QuickTenantSetup: React.FC<{
   const [readinessErr, setReadinessErr] = useState('')
   const checkReadiness = useCallback(() => {
     setReadinessBusy(true); setReadinessErr('')
-    fetchReadiness(side, purpose)
+    fetchReadiness(side, purpose, viewedAccount)
       .then(setReadiness)
       .catch((e) => setReadinessErr(e instanceof Error ? e.message : String(e)))
       .finally(() => setReadinessBusy(false))
-  }, [side, purpose])
+  }, [side, purpose, viewedAccount])
 
   // How big the tenant is, and what it can hold -- shown under the verdict.
   const [capacity, setCapacity] = useState<TenantCapacity | null>(null)
@@ -382,8 +385,8 @@ const QuickTenantSetup: React.FC<{
   const [reuseErr, setReuseErr] = useState('')
 
   const refreshTenantCfg = useCallback(() => {
-    fetchTenantConfigStatus(side).then(setTenantCfg).catch(() => {})
-  }, [side])
+    fetchTenantConfigStatus(side, viewedAccount).then(setTenantCfg).catch(() => {})
+  }, [side, viewedAccount])
 
   useEffect(() => { refreshTenantCfg() }, [refreshTenantCfg])
 
@@ -455,8 +458,8 @@ const QuickTenantSetup: React.FC<{
   const [redoMsg, setRedoMsg] = useState('')
 
   const poll = useCallback(() => {
-    return fetchFullSetupStatus(side).then(setStatus).catch(() => {})
-  }, [side])
+    return fetchFullSetupStatus(side, viewedAccount).then(setStatus).catch(() => {})
+  }, [side, viewedAccount])
 
   useEffect(() => {
     poll()
@@ -537,8 +540,8 @@ const QuickTenantSetup: React.FC<{
   useEffect(() => { if (readinessKey) checkReadiness() }, [readinessKey, checkReadiness])
   useEffect(() => {
     if (!readinessKey) return
-    Promise.resolve().then(() => fetchCapacity(side)).then(setCapacity).catch(() => setCapacity(null))
-  }, [readinessKey, side])
+    Promise.resolve().then(() => fetchCapacity(side, viewedAccount)).then(setCapacity).catch(() => setCapacity(null))
+  }, [readinessKey, side, viewedAccount])
   // No key -- or a key with no admin on record, which readiness cannot check as anyone.
   const noKey = !!tenantCfg && (!tenantCfg.hasKey || !tenantCfg.adminEmail)
   useEffect(() => {
@@ -849,6 +852,14 @@ const QuickTenantSetup: React.FC<{
 
   return (
     <Paper variant="outlined" sx={{ borderRadius: 2, p: 2 }}>
+      {viewedAccount !== undefined && (
+        <Alert severity="info" sx={{ mb: 1 }} data-testid="qts-readonly">
+          Viewing account {viewedAccount}: read-only here. Sign-in, upload and setup act on your
+          own account, so they are switched off. Choose your own account to change anything.
+        </Alert>
+      )}
+      <Box component="fieldset" disabled={viewedAccount !== undefined}
+           sx={{ border: 0, p: 0, m: 0, minWidth: 0 }}>
       <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 1, flexWrap: 'wrap', gap: 1 }}>
         <QuickIcon color="action" />
         <Typography variant="h6" sx={{ flexGrow: 1 }}>
@@ -1601,6 +1612,7 @@ const QuickTenantSetup: React.FC<{
         onCancel={() => { setPostAction(null); setPostError(null) }}
         onConfirm={runPostAction}
       />
+      </Box>
     </Paper>
   )
 }

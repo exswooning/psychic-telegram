@@ -1,3 +1,4 @@
+import { useViewedAccount } from '@/hooks/useViewedAccount'
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Box, Typography, Card, CardContent, Stack, Chip, IconButton, Tooltip,
@@ -111,6 +112,7 @@ function deriveHealth(cfg: TenantConfigStatus | null, dwd: VerifiedDomain | null
  * just one place that composes them.
  */
 const Jobs: React.FC = () => {
+  const viewed = useViewedAccount()
   // Every running job, from every source -- webui's own Job, the fleet,
   // job_admission rows, full-setup and provisioning. One hook, so this page
   // and nothing else has to know where a job can come from.
@@ -173,8 +175,8 @@ const Jobs: React.FC = () => {
     setLoading(true)
     try {
       const [srcCfg, tgtCfg, srcSetup, tgtSetup, job, hist, nodes, activeJobs, me] = await Promise.all([
-        fetchTenantConfigStatus('source').catch(() => null),
-        fetchTenantConfigStatus('target').catch(() => null),
+        fetchTenantConfigStatus('source', viewed).catch(() => null),
+        fetchTenantConfigStatus('target', viewed).catch(() => null),
         fetchFullSetupStatus('source').catch(() => null),
         fetchFullSetupStatus('target').catch(() => null),
         fetchJob(0).catch(() => null),
@@ -212,7 +214,7 @@ const Jobs: React.FC = () => {
       setLoading(false)
       busy.current = false
     }
-  }, [])
+  }, [viewed])
 
   // Delegation is verified FUNCTIONALLY -- Google offers no way to read a
   // delegation entry back, so each of these mints a real token per scope.

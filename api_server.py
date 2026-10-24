@@ -7725,13 +7725,16 @@ async def reuse_key(body: ReuseKey, op: Operator = Depends(operator)):
 
 
 @app.get("/api/v2/setup/tenant-config")
-async def get_tenant_config_status(side: str, op: Operator = Depends(operator)):
+async def get_tenant_config_status(side: str, account_id: int | None = None,
+                                   op: Operator = Depends(operator)):
     if side not in ("source", "target"):
         raise HTTPException(400, "side must be source or target")
     require_login(op)
+    aid = account_id if account_id is not None else op.account_id
+    _require_account_access(aid, op)
 
     def _read() -> dict:
-        cfg = accounts_auth.get_tenant_config(op.account_id, side) or {}
+        cfg = accounts_auth.get_tenant_config(aid, side) or {}
         has_key = bool(cfg.get("sa_key_path")) and os.path.isfile(cfg["sa_key_path"])
         client_id = ""
         scopes: list[str] = []
@@ -7743,7 +7746,7 @@ async def get_tenant_config_status(side: str, op: Operator = Depends(operator)):
             client_id = provision_gcp.client_id_of(cfg["sa_key_path"])
             try:
                 scopes = verify_scopes.required_scopes(
-                    Settings(account_id=op.account_id), side)
+                    Settings(account_id=aid), side)
             except Exception:      # noqa: BLE001 - advisory only
                 scopes = []
         return {"side": side, "domain": cfg.get("domain") or "",

@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
+import { useViewedAccount } from '@/hooks/useViewedAccount'
 import {
   Box,
   Typography,
@@ -67,14 +68,15 @@ const RunOutcome: React.FC<{ run: HistoryRun }> = ({ run }) => {
 /** Verification and its follow-up repair history, plus a live ETA while a
  *  one-to-one run is still checking its current user. */
 const VerificationRuns: React.FC = () => {
+  const viewed = useViewedAccount()
   const [accountId, setAccountId] = useState<number | undefined>()
   const [runs, setRuns] = useState<HistoryRun[] | null>(null)
   const [job, setJob] = useState<JobStatus | null>(null)
   const [error, setError] = useState('')
   useEffect(() => {
-    fetchMe().then((me) => setAccountId(migrationOf(me)))
+    fetchMe().then((me) => setAccountId(viewed ?? migrationOf(me)))
       .catch((e) => setError(e instanceof Error ? e.message : String(e)))
-  }, [])
+  }, [viewed])
 
   const load = useCallback(() => {
     if (!accountId) return

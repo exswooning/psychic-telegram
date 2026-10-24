@@ -18,6 +18,7 @@ import {
   uploadCredential, fetchDwd, checkDwdNow, diagnoseScopes, ActionSpec,
   StatusPayload, ConfigFields, ConfigPayload, DwdPayload, ScopeDiagnosis, UploadKind,
 } from '@/api/client'
+import { useViewedAccount } from '@/hooks/useViewedAccount'
 import { fetchMe, startFullSetup, fetchFullSetupStatus, fetchAllDomains, fetchTenantConfigStatus } from '@/api/controlPlane'
 import type { FullSetupStatus } from '@/api/controlPlane'
 import MfaBanner from '@/components/MfaBanner'
@@ -325,6 +326,7 @@ const AdminSignInStep: React.FC<{
 }
 
 const Wizard: React.FC = () => {
+  const viewed = useViewedAccount()
   const [params] = useSearchParams()
   const [saved] = useState(savedRun)
   const [step, setStep] = useState<Step>(saved ? 'run' : 'domain')
@@ -349,7 +351,7 @@ const Wizard: React.FC = () => {
   useEffect(() => {
     if (saved) return undefined
     let live = true
-    Promise.all([fetchTenantConfigStatus('source'), fetchTenantConfigStatus('target')])
+    Promise.all([fetchTenantConfigStatus('source', viewed), fetchTenantConfigStatus('target', viewed)])
       .then(([src, tgt]) => {
         if (!live || !(src.hasKey || tgt.hasKey)) return
         const asTarget = !src.hasKey
@@ -362,7 +364,7 @@ const Wizard: React.FC = () => {
       })
       .catch(() => {})
     return () => { live = false }
-  }, [saved])
+  }, [saved, viewed])
   // Nothing preselected: the operator says what the domain is for.
   const [picked, setPicked] = useState<Purpose | ''>('')
   const [autoBusy, setAutoBusy] = useState(false)
@@ -861,6 +863,7 @@ const MigrateWizard: React.FC<{
   targetEmail?: string
   targetPassword?: string
 }> = ({ sourceDomain, targetDomain, adminEmail, adminPassword, targetEmail, targetPassword }) => {
+  const viewed = useViewedAccount()
   const [route, setRoute] = useState<'automated' | 'manual'>('automated')
   const navigate = useNavigate()
 
@@ -897,14 +900,14 @@ const MigrateWizard: React.FC<{
       {route === 'automated' && (
         <Grid container spacing={2}>
           <Grid item xs={12} md={6}>
-            <QuickTenantSetup side="source" view="automated"
+            <QuickTenantSetup side="source" view="automated" viewedAccount={viewed}
                              initialDomain={sourceDomain}
                              initialEmail={adminEmail}
                              initialPassword={adminPassword}
                              onRequestManual={() => setRoute('manual')} />
           </Grid>
           <Grid item xs={12} md={6}>
-            <QuickTenantSetup side="target" view="automated" showProvisionUsers
+            <QuickTenantSetup side="target" view="automated" showProvisionUsers viewedAccount={viewed}
                              initialDomain={targetDomain}
                              initialEmail={targetEmail}
                              initialPassword={targetPassword}
