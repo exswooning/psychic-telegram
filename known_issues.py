@@ -64,7 +64,8 @@ ISSUES = [
      "A Doc/Slide with images could not be compared",
      "Image URLs are signed per read, so they never match.",
      "Checker compares each image by the hash of its bytes (native_fidelity._hash_images, 2026-10-23).", True),
-    ("drive.native_structure", "drive", lambda t: "native document content, formatting or structure differs" in t,
+    ("drive.native_structure", "drive", lambda t: ("native document content, formatting or structure differs" in t
+                                                 or "native Sheet entered values, formatting, or structures differ" in t),
      "Doc/Slide structure differs from the source",
      "A read-only source forces download+upload: Google rebuilds the document's internals "
      "(style/list ids, soft breaks). Text is the same.",
@@ -101,6 +102,38 @@ ISSUES = [
      "A share did not come across",
      "A grant refused or skipped during the run.",
      "Re-apply the grant on the target (finding_repairs._repair_grants).", True),
+    # The rest of dharan's 438 'unclassified' Drive findings (2026-10-24).
+    ("drive.unmapped_source", "drive", lambda t: "UNMAPPED_SOURCE" in t,
+     "A source file has no copy",
+     "Live: a personal account's file inside the user's own folder -- the walk listed only the "
+     "user's own files, and shared-with-me shows only direct shares. (Bitport's own copies and "
+     "reasoned skips used to be counted here too; the checker no longer does.)",
+     "The walk copies such files in place (drive_engine._sync_outsiders_here); repair re-walks "
+     "the user's Drive.", True),
+    ("drive.office_compared_as_native", "drive", lambda t: "must not be an Office file" in t,
+     "An Office file could not be compared",
+     "Word's mimeType ends in '.document' and PowerPoint's in '.presentation': the checker sent "
+     "them to the Docs/Slides API.",
+     "Checker compares Office files by their bytes (verify_sample, 2026-10-24); rechecked.", True),
+    ("drive.read_refused", "drive", lambda t: "RESOURCE_EXHAUSTED" in t or "HTTP 429" in t
+                                             or "HTTP 500" in t or "(INTERNAL)" in t,
+     "Google refused or failed a read during the check",
+     "Sheets allows 60 reads a minute per user; the Docs API sometimes answers 500.",
+     "Nothing on either tenant is wrong: the next check reads it again.", True),
+    ("drive.source_changed", "drive", lambda t: "Source changed during migration" in t,
+     "The source changed while the user was copied",
+     "Someone at the source edited the file during the run (the tripwire saw it).",
+     "The delta (Mirror) copies the new version.", True),
+    ("drive.duplicate", "drive", lambda t: "duplicateOf" in t,
+     "Two copies of one file on the target",
+     "A copy landed twice (an earlier interrupted run).",
+     "None automatic: deleting is the operator's call. Listed with both ids.", False),
+    ("drive.comments", "drive", lambda t: "comment resolution differs" in t or "comment anchor differs" in t
+                                         or "comment replies differ" in t,
+     "Comments differ",
+     "Drive cannot write a comment as its author, mark one resolved on create, or anchor it "
+     "to the same text in a rebuilt Office file.",
+     "None automatic beyond what the copy carried. Listed in the final report.", False),
 ]
 BY_ID = {i[0]: i for i in ISSUES}
 
@@ -122,9 +155,10 @@ def ensure(conn) -> None:
     if cols and "issue" not in cols:
         conn.execute("ALTER TABLE verification_repair_queue ADD COLUMN issue TEXT")
     if cols:
-        # Rows queued before kinds existed: classified from their own stored detail.
+        # Rows queued before kinds existed, or before their kind was known: classified
+        # from their own stored detail (a kind added later names rows already open).
         for r in conn.execute("SELECT rowid, service, category, detail FROM verification_repair_queue "
-                              "WHERE issue IS NULL").fetchall():
+                              "WHERE issue IS NULL OR issue='unclassified'").fetchall():
             try:
                 item = json.loads(r[3])
             except ValueError:
@@ -160,7 +194,7 @@ def _open_rows(conn) -> list[tuple[str, str, str]]:
     for issue, service, category, detail, user in conn.execute(
             f"SELECT {pick}, service, category, detail, source_user FROM verification_repair_queue "
             "WHERE state!='RESOLVED'"):
-        if not issue:
+        if not issue or issue == "unclassified":
             try:
                 item = json.loads(detail)
             except ValueError:

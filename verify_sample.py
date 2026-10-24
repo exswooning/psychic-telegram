@@ -957,7 +957,7 @@ class Verifier:
                 differences = compare_sheets(source_sheet, target_sheet, self.db.target_for_source_id)
                 ev.update(opened=True, how="native Sheet entered values, formulas, cell styles and structures; calculated results excluded",nativeFeaturesChecked=True,nativeFeaturesMatched=not differences)
                 return differences
-            if mime.endswith((".document", ".presentation")):
+            if mime in ("application/vnd.google-apps.document", "application/vnd.google-apps.presentation"):
                 from native_fidelity import compare_native
                 differences,scope=self._x(lambda: compare_native(self.auth,self.src_user,self.tgt_user,sid,tid,mime,self.db.target_for_source_id))
                 ev.update(opened=True,how=scope,nativeFeaturesChecked=True,nativeFeaturesMatched=not differences)

@@ -462,7 +462,11 @@ class _DriveFiles:
             rows = [f for f in rows if wanted in (f.get("parents") or [])]
         if "trashed = false" in (q or "") or "trashed=false" in (q or ""):
             rows = [f for f in rows if not f.get("trashed")]
-        if "'me' in owners" in (q or ""):
+        if "not 'me' in owners" in (q or ""):
+            rows = [f for f in rows
+                    if not any(o.get("emailAddress") == self.s.owner
+                               for o in f.get("owners", []))]
+        elif "'me' in owners" in (q or ""):
             rows = [f for f in rows
                     if any(o.get("emailAddress") == self.s.owner
                            for o in f.get("owners", []))]
@@ -484,6 +488,8 @@ class _DriveFiles:
         # this fake can be trusted on the point.
         for f in out["files"]:
             f["shared"] = self.s._shared_flag(f["id"])
+            if f.get("owners"):
+                f["ownedByMe"] = any(o.get("emailAddress") == self.s.owner for o in f["owners"])
             # Drive returns the grants inline on files.list too -- measured
             # live at 96/96 files, with counts matching permissions.list
             # exactly (contract_probe: "files.list returns permissions

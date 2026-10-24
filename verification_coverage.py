@@ -77,17 +77,25 @@ def drive(v, result):
             if file.get("driveId"):
                 excluded += 1  # tenant/shared-drive check owns this scope
                 continue
+            # Owned by the target domain: Bitport's own copy, still readable by the
+            # source user who made it (a server-side copy keeps "anyone with the
+            # link"). Live, dharan: 118 such copies read as unmapped source files.
+            ours = (v.settings.source_domain.lower(), (v.settings.target_domain or "").lower())
             if carried and not (
                 getattr(v.settings, "migrate_external_shares", False)
                 and owners
-                and all(x != v.settings.source_domain.lower() for x in owners)
+                and all(x not in ours for x in owners)
             ):
                 excluded += 1
                 continue
             in_scope.append(file["id"])
             if not carried:
                 owned_items.append(file)
-        missing = set(in_scope) - known
+        from migration_checks import accounted_for, drive_decisions
+
+        decided = drive_decisions(v.db, v.src_user)
+        reasoned = {f for f in set(in_scope) - known if accounted_for(decided.get(f, (None,))[0])}
+        missing = set(in_scope) - known - reasoned
         old = {i.get("id") for i in result["notCopied"]}
         for fid in sorted(missing - old):
             result["notCopied"].append(
@@ -103,6 +111,7 @@ def drive(v, result):
             "inScope": len(in_scope),
             "excludedSharedOrTenantItems": excluded,
             "unmapped": len(missing),
+            "notCopiedByDecision": len(reasoned),
         }
         result["emptySource"] = not in_scope
 

@@ -127,6 +127,20 @@ def mailbox_completion(auth, db, settings, source_user, target_user, retry=lambd
 ACCOUNTED_STATUSES = ("OVER_DAILY_CAP", "OWED_GRANTEE_NO_ACCOUNT", "RELINK_BY_HAND", "MOVED_BACK")
 
 
+def drive_decisions(db, source_user):
+    """{source id: (status, why)} -- the ledger's last word on each of the user's Drive items."""
+    return {r[0]: (r[1], r[2]) for r in db.conn.execute(
+        "SELECT item_id, status, error_message FROM audit_log a WHERE source_user=? "
+        "AND item_type IN ('file','folder','shortcut') AND id=(SELECT MAX(id) FROM audit_log b "
+        "WHERE b.source_user=a.source_user AND b.item_id=a.item_id AND b.item_type=a.item_type)",
+        (source_user,))}
+
+
+def accounted_for(status):
+    """Unmapped by a recorded decision -- a reasoned skip or an owed item, never a gap."""
+    return bool(status) and (status.startswith("SKIPPED") or status in ACCOUNTED_STATUSES)
+
+
 def drive_completion(auth, db, settings, source_user, target_user, retry=lambda f: f,
                      persist=True, finding_result=None):
     """Cover the configured My Drive inventory, not merely successful mappings."""
@@ -152,11 +166,7 @@ def drive_completion(auth, db, settings, source_user, target_user, retry=lambda 
     # accounted for -- listed with its reason, never a silent gap and never a match.
     # Counting them as gaps failed every user holding one (dharan: ward1 773, ward12
     # 316, ward15 98 files in another organisation's shared drive).
-    decided = {r[0]: (r[1], r[2]) for r in db.conn.execute(
-        "SELECT item_id, status, error_message FROM audit_log a WHERE source_user=? "
-        "AND item_type IN ('file','folder','shortcut') AND id=(SELECT MAX(id) FROM audit_log b "
-        "WHERE b.source_user=a.source_user AND b.item_id=a.item_id AND b.item_type=a.item_type)",
-        (source_user,))}
+    decided = drive_decisions(db, source_user)
     accounted = []
     try:
         source = inventory(auth.source_drive(source_user))
@@ -166,7 +176,7 @@ def drive_completion(auth, db, settings, source_user, target_user, retry=lambda 
             kind = "folder" if mime == V.FOLDER else "shortcut" if mime.endswith(".shortcut") else "file"
             tid = db.get_target_id(source_user, sid, kind)
             status, why = decided.get(sid, (None, None))
-            if not tid and status and (status.startswith("SKIPPED") or status in ACCOUNTED_STATUSES):
+            if not tid and accounted_for(status):
                 accounted.append({"type": kind, "id": sid, "status": status, "why": (why or "")[:200]})
                 continue
             if not tid:

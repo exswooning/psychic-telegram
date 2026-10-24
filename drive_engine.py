@@ -1112,8 +1112,10 @@ class DriveMigrator:
 
     # -- traversal ------------------------------------------------------------
     def _list_children(self, parent_id: str, owned_only: bool | None = None,
-                       with_owners: bool = False):
+                       with_owners: bool = False, not_mine: bool = False):
         q_parts = [f"'{parent_id}' in parents", "trashed = false"]
+        if not_mine:
+            q_parts.append("not 'me' in owners")
         # owned_only exists to stop a file shared with four colleagues being
         # copied five times. It is meaningless inside a shared drive, where
         # every file is owned by the drive and no user is in `owners` -- and
@@ -1290,6 +1292,29 @@ class DriveMigrator:
                     break
                 files.append(item)
         self._sync_files(files, tgt_parent)
+        self._sync_outsiders_here(src_parent, tgt_parent, depth)
+
+    def _sync_outsiders_here(self, src_parent: str, tgt_parent: str, depth: int) -> None:
+        """Copy what someone outside the source org put into this user's own folder.
+
+        The walk lists `'me' in owners`, and the shared-with-me pass sees only what was
+        shared with the user directly -- a file a personal account uploaded into a folder
+        the user shared with it is in neither (live, dharan: ward15tax@gmail.com's files in
+        ward15's folders, ~77 across 6 users, never in the ledger). Nobody else's run can
+        carry it, so it is copied here, in place. A colleague's file stays with the
+        colleague's run; one the target domain owns is already Bitport's own copy.
+        """
+        if (self.shared_drive or not self.settings.migrate_external_shares
+                or not self.settings.owned_only or shutdown_requested()):
+            return
+        target = (self.settings.target_domain or "").lower()
+        for child in self._list_children(src_parent, owned_only=False, with_owners=True, not_mine=True):
+            if child.get("_inSharedDrive") or self._owned_by_source_org(child):
+                continue
+            if target and all((o.get("emailAddress") or "").lower().endswith("@" + target)
+                              for o in child.get("owners") or []):
+                continue
+            self._sync_shared_item(child, tgt_parent, depth)
 
     # -- the file pool ---------------------------------------------------------
     #
