@@ -1,5 +1,5 @@
 /** QuickTenantSetup asks about the viewed account and switches its actions off. */
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, fireEvent } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { describe, it, expect, vi } from 'vitest'
 import QuickTenantSetup from './QuickTenantSetup'
@@ -43,5 +43,11 @@ describe('viewing another account', () => {
     expect(calls.cfg).toHaveBeenCalledWith('target', 9)
     expect(calls.ready).toHaveBeenCalledWith('target', 'migrate', 9)
     expect(screen.getByTestId('qts-readonly')).toBeInTheDocument()
+    // Re-asking Google changes nothing, so it stays available on another account.
+    const before = calls.ready.mock.calls.length
+    const again = screen.getByTestId('qts-readonly-recheck')
+    expect(again).not.toBeDisabled()
+    fireEvent.click(again)
+    await waitFor(() => expect(calls.ready.mock.calls.length).toBeGreaterThan(before))
   })
 })

@@ -853,7 +853,12 @@ const QuickTenantSetup: React.FC<{
   return (
     <Paper variant="outlined" sx={{ borderRadius: 2, p: 2 }}>
       {viewedAccount !== undefined && (
-        <Alert severity="info" sx={{ mb: 1 }} data-testid="qts-readonly">
+        <Alert severity="info" sx={{ mb: 1 }} data-testid="qts-readonly"
+               action={
+                 // Outside the disabled fieldset: asking Google again changes nothing.
+                 <Button size="small" onClick={checkReadiness} disabled={readinessBusy}
+                         data-testid="qts-readonly-recheck">Check again</Button>
+               }>
           Viewing account {viewedAccount}: read-only here. Sign-in, upload and setup act on your
           own account, so they are switched off. Choose your own account to change anything.
         </Alert>

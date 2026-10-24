@@ -1,4 +1,6 @@
 """A superadmin reads another account's Setup (tenant-config, readiness); a client cannot."""
+import os
+
 import pytest
 
 pytest.importorskip("fastapi", reason="control plane deps not installed")
@@ -24,7 +26,8 @@ def client(monkeypatch):
     app.dependency_overrides[api_server.operator] = lambda: api_server.Operator(
         name="t", role="admin", account_id=1, login_id=1, is_superadmin=who["super"])
     with TestClient(app) as c:
-        monkeypatch.setattr(config, "Settings", lambda account_id=None: type("S", (), {"account_id": account_id})())
+        monkeypatch.setattr(config, "Settings", lambda account_id=None: type("S", (), {"account_id": account_id,
+                                                                      "db_path": os.environ["MIGRATION_DB"]})())
         yield c, who
     app.dependency_overrides.clear()
 
