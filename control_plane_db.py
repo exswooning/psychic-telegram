@@ -36,14 +36,22 @@ MIGRATIONS_DIR = os.path.join(HERE, "migrations")
 
 
 def _db_path() -> str:
-    # CONTROL_PLANE_DB first: a per-account child is handed MIGRATION_DB pointing at its
-    # account's ledger, and following that here found no tenant_configs -- live, the
-    # domain guard then refused every reset/wipe it was asked to check (2026-10-24, "could
-    # not read configured tenant domains (OperationalError)"). The API and the webui pin
-    # it at start, so every child inherits the real one.
+    """The control-plane database -- never an account's ledger.
+
+    A per-account child is handed MIGRATION_DB = data/accounts/<id>/migration.db, and
+    following it found no tenant_configs: live (2026-10-24) the domain guard then refused
+    every reset/wipe it was asked to check ("could not read configured tenant domains").
+    A ledger under data/accounts/ is never the control plane, so that case reads the one
+    beside this file. CONTROL_PLANE_DB names it outright when set."""
     from config import Settings
 
-    return os.getenv("CONTROL_PLANE_DB") or Settings().db_path
+    named = os.getenv("CONTROL_PLANE_DB")
+    if named:
+        return named
+    path = Settings().db_path
+    if f"{os.sep}data{os.sep}accounts{os.sep}" in os.path.abspath(path):
+        return os.path.join(os.path.dirname(os.path.abspath(__file__)), "migration.db")
+    return path
 
 
 # ----------------------------------------------------------------------

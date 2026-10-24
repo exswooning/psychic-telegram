@@ -186,3 +186,13 @@ def test_a_per_account_child_still_reads_the_protected_domains(tmp_path, monkeyp
     monkeypatch.setenv("MIGRATION_DB", ledger)                 # what a per-account child is handed
     monkeypatch.setenv("CONTROL_PLANE_DB", cp)                  # what it inherits from its parent
     assert "s.example" in domain_guard.configured_domains()
+
+
+def test_an_account_ledger_is_never_taken_for_the_control_plane(tmp_path, monkeypatch):
+    import os
+    import control_plane_db as cpdb
+    monkeypatch.delenv("CONTROL_PLANE_DB", raising=False)
+    monkeypatch.setenv("MIGRATION_DB", str(tmp_path / "data" / "accounts" / "7" / "migration.db"))
+    assert cpdb._db_path() == os.path.join(os.path.dirname(os.path.abspath(cpdb.__file__)), "migration.db")
+    monkeypatch.setenv("MIGRATION_DB", str(tmp_path / "control.db"))
+    assert cpdb._db_path() == str(tmp_path / "control.db")
