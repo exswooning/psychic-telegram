@@ -13,6 +13,7 @@
  */
 import React, { useCallback, useEffect, useMemo, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
+import { useViewedAccount } from '@/hooks/useViewedAccount'
 import {
   Alert, Box, Button, Checkbox, Chip, Collapse, FormControlLabel, IconButton, Paper, Stack, Table,
   TableBody, TableCell, TableHead, TableRow, ToggleButton, ToggleButtonGroup, Tooltip, Typography,
@@ -143,7 +144,8 @@ const sizeOf = (us: OneToOneUser[], per: number) => {
 
 const OneToOne: React.FC = () => {
   const [params] = useSearchParams()
-  const asked = Number(params.get('account')) || undefined
+  const viewed = useViewedAccount()
+  const asked = Number(params.get('account')) || viewed
   const [accountId, setAccountId] = useState<number | undefined>(asked)
   const [view, setView] = useState<OneToOneView | null>(null)
   const [error, setError] = useState('')

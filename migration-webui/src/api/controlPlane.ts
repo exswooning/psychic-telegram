@@ -1130,8 +1130,9 @@ export interface ScopeOptions {
 export const fetchScopeOptions = (side: 'source' | 'target') =>
   cpFetch<ScopeOptions>(`/api/v2/setup/scope-options?side=${side}`)
 
-export const fetchFullSetupStatus = (side: 'source' | 'target') =>
-  cpFetch<FullSetupStatus>(`/api/v2/full-setup/status?side=${side}`)
+export const fetchFullSetupStatus = (side: 'source' | 'target', accountId?: number) =>
+  cpFetch<FullSetupStatus>(`/api/v2/full-setup/status?side=${side}`
+    + (accountId === undefined ? '' : `&account=${accountId}`))
 
 // -- GCP / DWD teardown -- the reverse of full-setup ---------------------------
 export interface TeardownResult {
@@ -1198,8 +1199,9 @@ export interface Readiness {
   side: 'source' | 'target'; purpose: 'migrate' | 'seed'; domain: string; admin: string
   ready: boolean; checks: ReadinessCheck[]
 }
-export const fetchReadiness = (side: 'source' | 'target', purpose: 'migrate' | 'seed') =>
-  cpFetch<Readiness>(`/api/v2/setup/readiness?side=${side}&purpose=${purpose}`)
+export const fetchReadiness = (side: 'source' | 'target', purpose: 'migrate' | 'seed', accountId?: number) =>
+  cpFetch<Readiness>(`/api/v2/setup/readiness?side=${side}&purpose=${purpose}`
+    + (accountId === undefined ? '' : `&account_id=${accountId}`))
 
 /** A government source copied server-side (exact copies): off unless the operator says so. */
 export interface ExactCopy { government: boolean; domain: string; on: boolean }
@@ -1209,8 +1211,9 @@ export const setExactCopy = (on: boolean, reason: string) =>
     method: 'POST', body: JSON.stringify({ on, reason }),
   })
 
-export const fetchTenantConfigStatus = (side: 'source' | 'target') =>
-  cpFetch<TenantConfigStatus>(`/api/v2/setup/tenant-config?side=${side}`)
+export const fetchTenantConfigStatus = (side: 'source' | 'target', accountId?: number) =>
+  cpFetch<TenantConfigStatus>(`/api/v2/setup/tenant-config?side=${side}`
+    + (accountId === undefined ? '' : `&account_id=${accountId}`))
 
 // -- Tenant inventory --------------------------------------------------------
 // Two live Google calls per account, so this is explicit-trigger only and
@@ -1332,8 +1335,9 @@ export interface TenantCapacity {
   storage: { limit: number | null; usage: number } | null
   errors: Record<string, string>; checkedAt: string
 }
-export const fetchCapacity = (side: 'source' | 'target') =>
-  cpFetch<TenantCapacity>(`/api/v2/setup/capacity?side=${side}`)
+export const fetchCapacity = (side: 'source' | 'target', accountId?: number) =>
+  cpFetch<TenantCapacity>(`/api/v2/setup/capacity?side=${side}`
+    + (accountId === undefined ? '' : `&account_id=${accountId}`))
 
 // -- DWD scope status ---------------------------------------------------------
 export interface DwdStatus {

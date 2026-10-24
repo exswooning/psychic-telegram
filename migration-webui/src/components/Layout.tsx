@@ -61,6 +61,7 @@ import {
 import { useMigrationStore } from '@/store'
 import MigrationSwitcher from './MigrationSwitcher'
 import { fetchConfig, fetchJob, ConfigPayload, HostInfo, JobStatus, stopJob } from '@/api/client'
+import ViewingAccountSelect from '@/components/ViewingAccountSelect'
 import { fetchMe, fetchOwedGrants, logout, Account, OwedGrants } from '@/api/controlPlane'
 import { formatDuration } from '@/utils/formatters'
 import { formatPct } from '@/utils/formatPct'
@@ -498,6 +499,7 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
           )}
 
           <Box sx={{ flexGrow: 1 }} />
+          <ViewingAccountSelect />
 
           {/* Where this tab is actually talking to -- a local seed run and
              a deployed VPS instance can both bind 127.0.0.1:8080 and look
