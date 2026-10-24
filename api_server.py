@@ -50,6 +50,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import shutil
 from concurrent.futures import ThreadPoolExecutor
 import hmac
 from contextlib import asynccontextmanager
@@ -2472,6 +2473,18 @@ async def migrate_start(body: StartMigration, op: Operator = Depends(operator)):
         raise HTTPException(400, "a sample moves its mail through this tool; "
                                  f"mail_mode {body.mail_mode!r} would leave it to the DMS")
     from config import Settings
+    if not body.dry_run:
+        # Never refuses on a number it could not read -- only on a known 0 or a known shortfall.
+        import tenant_capacity
+        try:
+            st = Settings(account_id=account_id)
+            tgt, src = await asyncio.gather(_off_loop(tenant_capacity.read, st, "target"),
+                                            _off_loop(tenant_capacity.read, st, "source"))
+            why = tenant_capacity.refusal(tgt, src, whole_tenant=not body.users and not body.sample)
+        except Exception:      # noqa: BLE001 - advisory
+            why = None
+        if why:
+            raise HTTPException(409, f"Not started: {why}.")
     services, env, ordered = _mail_plan(body.services, body.mail_mode,
                                         Settings(account_id=account_id).rewrite_drive_links)
     if body.sample is not None:
@@ -7646,6 +7659,56 @@ async def setup_readiness(side: str, purpose: str = "migrate", account_id: int |
         from config import Settings
         return readiness.check(Settings(account_id=aid), side, purpose)
     return await _off_loop(_read)
+
+
+@app.get("/api/v2/setup/capacity")
+async def setup_capacity(side: str, account_id: int | None = None, op: Operator = Depends(operator)):
+    """Users and Drive storage of one side, asked of Google as its admin. A field that
+    could not be read is null with the reason under `errors`."""
+    if side not in ("source", "target"):
+        raise HTTPException(400, "side must be source or target")
+    require_reader(op)
+    aid = account_id if account_id is not None else op.account_id
+    _require_account_access(aid, op)
+
+    def _read() -> dict:
+        import tenant_capacity
+        from config import Settings
+        return tenant_capacity.read(Settings(account_id=aid), side)
+    return await _off_loop(_read)
+
+
+class ReuseKey(WriteAction):
+    side: Literal["source", "target"]
+    from_account_id: int
+    account_id: int | None = None
+
+
+@app.post("/api/v2/setup/reuse-key")
+async def reuse_key(body: ReuseKey, op: Operator = Depends(operator)):
+    """Superadmin: give an account's side the key another account already holds on this
+    box. Delegation follows the key's client id, so nothing needs granting again."""
+    to = body.account_id if body.account_id is not None else op.account_id
+
+    def _copy() -> tuple[bool, str]:
+        src_cfg = accounts_auth.get_tenant_config(body.from_account_id, body.side) or {}
+        src = src_cfg.get("sa_key_path") or ""
+        src = src if os.path.isabs(src) else os.path.join(HERE, src)
+        if not src_cfg.get("domain") or not os.path.isfile(src):
+            return False, f"account {body.from_account_id} has no {body.side} key on this server"
+        dest_dir = os.path.join(HERE, "keys", str(to))
+        dest = os.path.join(dest_dir, f"{body.side}-sa.json")
+        have = (accounts_auth.get_tenant_config(to, body.side) or {}).get("sa_key_path") or ""
+        have = have if os.path.isabs(have) else os.path.join(HERE, have)
+        if os.path.exists(dest) or (have and os.path.isfile(have)):
+            return False, f"account {to} already has a {body.side} key; it is never overwritten"
+        os.makedirs(dest_dir, exist_ok=True)
+        shutil.copyfile(src, dest)
+        os.chmod(dest, 0o600)
+        accounts_auth.update_tenant_config(to, body.side, domain=src_cfg["domain"], sa_key_path=dest)
+        return True, f"{body.side} key of {src_cfg['domain']} copied from account {body.from_account_id}"
+    return await _gated(op, "setup.reuse_key", body, f"account:{to}", _copy,
+                        extra_check=require_superadmin)
 
 
 @app.get("/api/v2/setup/tenant-config")

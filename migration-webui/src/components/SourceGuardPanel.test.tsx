@@ -10,7 +10,7 @@ vi.mock('@/api/controlPlane', () => ({
 
 describe('the source guard', () => {
   it('says the source changed, what changed, and what Google says this tool did', async () => {
-    g.value = { snapshotTakenAt: '2026-10-19T06:24:00Z', snapshotUsers: 45, latest: {
+    g.value = { snapshotTakenAt: '2026-10-19T06:24:00Z', snapshotUsers: 45, firstChangedAt: '2026-10-19T13:30:00Z', latest: {
       checkedAt: '2026-10-19T14:00:00Z', since: '2026-10-19T13:50:00Z', verdict: 'CHANGED', changeCount: 1,
       changes: [{ user: 'info@a.gov.np', what: 'file created', name: 'Copy of Survey', by: "Google itself, on info@a.gov.np's behalf (copy, no app, no address)" }], unread: [],
       auditLog: { byBitport: [{ at: '2026-10-19T05:47:46Z', app: 'drive', event: 'copy', actor: 'info@a.gov.np', item: 'Copy of Survey' }],
@@ -20,6 +20,8 @@ describe('the source guard', () => {
     expect(screen.getByText('Bitport changed 1')).toBeInTheDocument()
     fireEvent.click(screen.getByTestId('source-guard-details'))
     expect(await screen.findByText(/info@a.gov.np · file created · Copy of Survey — by Google itself/)).toBeInTheDocument()
+    expect(screen.getByText(/\[Google for Bitport\]/)).toBeInTheDocument()
+    expect(screen.getByTestId('source-guard-since')).toHaveTextContent(/changed since/)
   })
 
   it('never calls an unread source unchanged', async () => {

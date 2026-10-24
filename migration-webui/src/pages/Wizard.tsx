@@ -18,7 +18,7 @@ import {
   uploadCredential, fetchDwd, checkDwdNow, diagnoseScopes, ActionSpec,
   StatusPayload, ConfigFields, ConfigPayload, DwdPayload, ScopeDiagnosis, UploadKind,
 } from '@/api/client'
-import { fetchMe, startFullSetup, fetchFullSetupStatus, fetchAllDomains } from '@/api/controlPlane'
+import { fetchMe, startFullSetup, fetchFullSetupStatus, fetchAllDomains, fetchTenantConfigStatus } from '@/api/controlPlane'
 import type { FullSetupStatus } from '@/api/controlPlane'
 import MfaBanner from '@/components/MfaBanner'
 import SeedDomainPicker from '@/components/SeedDomainPicker'
@@ -344,6 +344,25 @@ const Wizard: React.FC = () => {
   const [targetPassword, setTargetPassword] = useState('')
   const [role, setRole] = useState<'source' | 'target'>(saved?.role ?? 'source')
   const [purpose, setPurpose] = useState<Purpose | null>(saved ? 'migrate' : null)
+  // No saved run, but a side already holds a key: open on the tenants themselves, where
+  // their Ready / Not ready verdict is, not on the sign-in form. "Change" goes back to it.
+  useEffect(() => {
+    if (saved) return undefined
+    let live = true
+    Promise.all([fetchTenantConfigStatus('source'), fetchTenantConfigStatus('target')])
+      .then(([src, tgt]) => {
+        if (!live || !(src.hasKey || tgt.hasKey)) return
+        const asTarget = !src.hasKey
+        const [mine, other] = asTarget ? [tgt, src] : [src, tgt]
+        setRole(asTarget ? 'target' : 'source')
+        setDomain(mine.domain); setAdminEmail(mine.adminEmail)
+        setOtherDomain(other.domain); setTargetEmail(other.adminEmail)
+        setPurpose('migrate')
+        setStep((cur) => (cur === 'domain' ? 'run' : cur))
+      })
+      .catch(() => {})
+    return () => { live = false }
+  }, [saved])
   // Nothing preselected: the operator says what the domain is for.
   const [picked, setPicked] = useState<Purpose | ''>('')
   const [autoBusy, setAutoBusy] = useState(false)

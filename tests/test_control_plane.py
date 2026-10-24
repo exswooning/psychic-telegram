@@ -3367,3 +3367,89 @@ class TestChosenUsersMoveTheirOwnMail:
             "reason": "two users", "services": ["all"], "users": ["a@s.test"]})
         assert r.status_code == 200, r.text
         assert started
+
+
+class TestReuseKey:
+    """POST /api/v2/setup/reuse-key: a superadmin gives an account's side a key another
+    account already holds on this box; an existing key is never overwritten."""
+
+    def _acct(self, cp, email):
+        cp.post("/api/v2/auth/signup", json={"email": email, "password": "hunter22222", "name": "User"})
+        me = cp.get("/api/v2/auth/me", headers=ADMIN).json()["id"]
+        cp.post("/api/v2/auth/logout")
+        return me
+
+    def _donor(self, tmp_path, acct, domain):
+        import accounts_auth
+        kd = tmp_path / "keys" / str(acct)
+        kd.mkdir(parents=True, exist_ok=True)
+        (kd / "source-sa.json").write_text(json.dumps({"client_id": "111", "project_id": "p"}))
+        accounts_auth.update_tenant_config(acct, "source", domain=domain,
+                                           sa_key_path=str(kd / "source-sa.json"))
+
+    def test_refuses_a_non_superadmin(self, cp, tmp_path, monkeypatch):
+        import api_server
+        monkeypatch.setattr(api_server, "HERE", str(tmp_path))
+        donor = self._acct(cp, "reusedonor0@ex.com")
+        self._donor(tmp_path, donor, "d.com")
+        self._acct(cp, "reuseplain@ex.com")
+        cp.post("/api/v2/auth/login", json={"email": "reuseplain@ex.com", "password": "hunter22222"})
+        r = cp.post("/api/v2/setup/reuse-key", headers=ADMIN,
+                    json={"reason": "test reuse", "side": "source", "from_account_id": donor})
+        assert r.status_code == 403
+
+    def test_copies_records_and_never_overwrites(self, cp, tmp_path, monkeypatch):
+        import accounts_auth, api_server
+        monkeypatch.setattr(api_server, "HERE", str(tmp_path))
+        donor = self._acct(cp, "reusedonor@ex.com")
+        self._donor(tmp_path, donor, "d.com")
+        boss = self._acct(cp, "reuseboss@ex.com")
+        accounts_auth.promote_to_superadmin("reuseboss@ex.com")
+        cp.post("/api/v2/auth/login", json={"email": "reuseboss@ex.com", "password": "hunter22222"})
+        body = {"reason": "test reuse", "side": "source", "from_account_id": donor}
+        r = cp.post("/api/v2/setup/reuse-key", headers=ADMIN, json=body)
+        assert r.status_code == 200 and r.json()["ok"] is True
+        dest = tmp_path / "keys" / str(boss) / "source-sa.json"
+        assert json.loads(dest.read_text())["client_id"] == "111"
+        assert accounts_auth.get_tenant_config(boss, "source")["domain"] == "d.com"
+        again = cp.post("/api/v2/setup/reuse-key", headers=ADMIN, json=body).json()
+        assert again["ok"] is False and "never overwritten" in again["detail"]
+
+
+class TestCapacity:
+    def test_refusal_rules(self):
+        import tenant_capacity as T
+        src = {"storage": {"limit": None, "usage": 50}}
+        assert T.refusal({"storage": {"limit": 0, "usage": 0}}, src)
+        assert T.refusal({"storage": {"limit": 100, "usage": 80}}, src)       # 20 free < 50
+        assert T.refusal({"storage": {"limit": 100, "usage": 10}}, src) is None
+        assert T.refusal({"storage": None}, src) is None                        # unknown
+        assert T.refusal({"storage": {"limit": None, "usage": 1}}, src) is None  # unlimited
+        assert T.refusal({"storage": {"limit": 100, "usage": 80}}, {"storage": None}) is None
+
+    def test_a_side_with_no_key_reports_null_not_500(self, cp, monkeypatch):
+        import tenant_capacity as T
+        monkeypatch.setattr(T, "read", T.real_read)      # the real read, against no key
+        cp.post("/api/v2/auth/signup", json={"email": "cap@ex.com", "password": "hunter22222", "name": "User"})
+        r = cp.get("/api/v2/setup/capacity?side=target", headers=ADMIN)
+        assert r.status_code == 200
+        assert r.json()["users"] is None and r.json()["errors"]
+
+    def test_migrate_start_is_refused_when_the_target_cannot_hold_it(self, cp, monkeypatch):
+        import api_server, tenant_capacity as T
+        monkeypatch.setattr(api_server, "_run_admitted", lambda *a, **k: (True, "started"))
+        full = {"target": {"storage": {"limit": 0, "usage": 0}}, "source": {"storage": {"limit": None, "usage": 5}}}
+        monkeypatch.setattr(T, "read", lambda st, side: full[side])
+        r = cp.post("/api/v2/migrate/start", headers=ADMIN, json={"reason": "test reuse", "services": ["drive"]})
+        assert r.status_code == 409 and "storage limit of 0" in r.json()["detail"]
+        full["target"] = {"storage": None, "errors": {"storage": "x"}}
+        r = cp.post("/api/v2/migrate/start", headers=ADMIN, json={"reason": "test reuse", "services": ["drive"]})
+        assert r.status_code == 200
+
+
+def test_a_pilot_is_held_only_to_a_storage_limit_of_zero():
+    import tenant_capacity
+    tgt = {"storage": {"limit": 32_000_000_000, "usage": 2_000_000_000}}
+    src = {"storage": {"usage": 475_000_000_000}}
+    assert tenant_capacity.refusal(tgt, src) and not tenant_capacity.refusal(tgt, src, whole_tenant=False)
+    assert tenant_capacity.refusal({"storage": {"limit": 0, "usage": 5}}, src, whole_tenant=False)

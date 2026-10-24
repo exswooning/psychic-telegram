@@ -164,3 +164,12 @@ def test_the_fast_watch_stops_the_run_on_a_change(monkeypatch, tmp_path):
 def test_a_stop_by_the_guard_is_never_resumed_as_a_memory_pause():
     import run_watch
     assert "source-guard.auto-stop" in run_watch.STOP_ACTIONS
+
+
+def test_first_changed_at_is_the_start_of_the_current_unbroken_run_of_changed(db):
+    G.ensure_tables(db)
+    with db.write() as c:
+        for at, v in [("t1", "CHANGED"), ("t2", "CLEAN"), ("t3", "CHANGED"), ("t4", "CHANGED")]:
+            c.execute("INSERT INTO source_guard_checks(checked_at, since, verdict, report) VALUES (?,?,?,?)",
+                      (at, "s", v, "{}"))
+    assert G.latest(db)["firstChangedAt"] == "t3"

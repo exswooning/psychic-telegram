@@ -7,7 +7,7 @@ import React, { useCallback, useEffect, useState } from 'react'
 import { Alert, Box, Button, Chip, Collapse, Paper, Stack, Typography } from '@mui/material'
 import ReasonCodeDialog from './ReasonCodeDialog'
 import { fetchSourceGuard, runSourceGuard } from '@/api/controlPlane'
-import type { SourceGuard } from '@/api/controlPlane'
+import type { SourceGuard, SourceGuardChange } from '@/api/controlPlane'
 
 const VERDICT = {
   CLEAN: { color: 'success' as const, label: 'Unchanged' },
@@ -15,6 +15,10 @@ const VERDICT = {
   INCOMPLETE: { color: 'warning' as const, label: 'Could not check all of it' },
   NO_SNAPSHOT: { color: 'default' as const, label: 'No baseline' },
 }
+
+// Who a difference is put down to: this tool, Google acting for it, or someone else.
+const attributed = (c: SourceGuardChange) =>
+  c.byTool ? 'Bitport' : c.by?.startsWith('Google itself') ? 'Google for Bitport' : 'not Bitport'
 
 const when = (s?: string | null) => (s ? new Date(s).toLocaleString() : '—')
 
@@ -65,6 +69,11 @@ const SourceGuardPanel: React.FC<{ accountId?: number; sourceDomain?: string }> 
           </Button>
           <Collapse in={open} unmountOnExit>
             <Box sx={{ mt: 1 }}>
+              {g.firstChangedAt && r.verdict === 'CHANGED' && (
+                <Typography variant="caption" sx={{ display: 'block', mb: 1 }} data-testid="source-guard-since">
+                  changed since {when(g.firstChangedAt)}
+                </Typography>
+              )}
               {mine.length > 0 && (
                 <Alert severity="error" sx={{ mb: 1 }}>
                   Google's audit log shows {mine.length} change(s) made from this tool's own addresses:
@@ -84,7 +93,7 @@ const SourceGuardPanel: React.FC<{ accountId?: number; sourceDomain?: string }> 
               {r.changes.slice(0, 50).map((c, i) => (
                 <Typography key={`${c.user}${c.id}${i}`} variant="caption" sx={{ display: 'block', overflowWrap: 'anywhere' }}>
                   {c.user} · {c.what}{c.name ? ` · ${c.name}` : ''}{c.from !== undefined ? ` · ${String(c.from)} → ${String(c.to)}` : ''}
-                  {c.by ? ` — by ${c.by}` : ''}
+                  {c.by ? ` — by ${c.by}` : ''} [{attributed(c)}]
                 </Typography>
               ))}
               {others.length > 0 && (

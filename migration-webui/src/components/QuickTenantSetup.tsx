@@ -16,6 +16,7 @@ import {
   startProvision, fetchProvisionStatus, ProvisionStatus,
   fetchTenantConfigStatus, uploadCredentials, TenantConfigStatus,
   fetchReadiness, Readiness,
+  fetchCapacity, TenantCapacity, fetchAllDomains, reuseKey, ConfiguredDomain,
   fetchTenantInventory, TenantInventory,
   startTenantScan, fetchTenantScan,
   buildIdentityMap, fetchIdentityMapStatus, IdentityMapStatus,
@@ -277,6 +278,8 @@ const GoogleStyleAuth: React.FC<{
  * clears its own input the moment the request is sent -- there is no
  * "remember password" anywhere in this tool.
  */
+const gb = (b: number) => `${(b / 1e9).toFixed(1)} GB`
+
 const QuickTenantSetup: React.FC<{
   side: 'source' | 'target'
   /** 'automated' shows only the Sign in with Google trigger, its dialog,
@@ -370,6 +373,13 @@ const QuickTenantSetup: React.FC<{
       .catch((e) => setReadinessErr(e instanceof Error ? e.message : String(e)))
       .finally(() => setReadinessBusy(false))
   }, [side, purpose])
+
+  // How big the tenant is, and what it can hold -- shown under the verdict.
+  const [capacity, setCapacity] = useState<TenantCapacity | null>(null)
+  // Superadmin only: keys other accounts already hold on this server for this side.
+  const [reusable, setReusable] = useState<ConfiguredDomain[]>([])
+  const [reuseBusy, setReuseBusy] = useState(false)
+  const [reuseErr, setReuseErr] = useState('')
 
   const refreshTenantCfg = useCallback(() => {
     fetchTenantConfigStatus(side).then(setTenantCfg).catch(() => {})
@@ -525,6 +535,24 @@ const QuickTenantSetup: React.FC<{
   const readinessKey = alreadyHere && !status?.running
     ? `${tenantCfg?.clientId}:${domain.trim().toLowerCase()}:${result?.ok ? 'ok' : ''}` : ''
   useEffect(() => { if (readinessKey) checkReadiness() }, [readinessKey, checkReadiness])
+  useEffect(() => {
+    if (!readinessKey) return
+    Promise.resolve().then(() => fetchCapacity(side)).then(setCapacity).catch(() => setCapacity(null))
+  }, [readinessKey, side])
+  const noKey = !!tenantCfg && !tenantCfg.hasKey
+  useEffect(() => {
+    if (!noKey) return
+    Promise.resolve().then(() => fetchAllDomains()).then((r) => setReusable(!r.superadmin ? [] :
+      r.domains.filter((d) => d.side === side && d.hasKey && !d.superseded)))
+      .catch(() => setReusable([]))
+  }, [noKey, side])
+  const reuse = (d: ConfiguredDomain) => {
+    setReuseBusy(true); setReuseErr('')
+    reuseKey(`reuse the ${side} key of ${d.domain} (account ${d.accountId})`, side, d.accountId)
+      .then((r) => { if (r.ok) refreshTenantCfg(); else setReuseErr(r.detail) })
+      .catch((e) => setReuseErr(e instanceof Error ? e.message : String(e)))
+      .finally(() => setReuseBusy(false))
+  }
   // A grant can take ~15 minutes to propagate: while only delegation/services fail,
   // ask again every minute for 20 minutes instead of waiting for someone to press it.
   const propagating = !!readiness && !readiness.ready && readiness.checks.every((c) =>
@@ -1168,6 +1196,21 @@ const QuickTenantSetup: React.FC<{
 
       {error && <Alert severity="error" sx={{ mt: 2 }}>{error}</Alert>}
 
+      {noKey && reusable.length > 0 && (
+        <Box sx={{ mt: 2 }} data-testid={`qts-${side}-reuse`}>
+          <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>Use a key already on this server</Typography>
+          <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap sx={{ mt: 0.5 }}>
+            {reusable.map((d) => (
+              <Button key={`${d.accountId}`} size="small" variant="outlined" disabled={reuseBusy}
+                      onClick={() => reuse(d)}>
+                {d.domain} (account {d.accountId})
+              </Button>
+            ))}
+          </Stack>
+          {reuseErr && <Alert severity="warning" sx={{ mt: 1 }}>{reuseErr}</Alert>}
+        </Box>
+      )}
+
       {(readiness || readinessBusy || readinessErr) && (
         <Box sx={{ mt: 2 }} data-testid={`qts-${side}-readiness`}>
           <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 1 }}>
@@ -1208,6 +1251,19 @@ const QuickTenantSetup: React.FC<{
             </Stack>
           )}
         </Box>
+      )}
+
+      {capacity && alreadyHere && (
+        <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }} data-testid={`qts-${side}-capacity`}>
+          {capacity.users === null ? 'accounts unknown' : `${capacity.users} accounts`}
+          {' · '}
+          {!capacity.storage ? 'storage unknown'
+            : capacity.storage.limit === null
+              ? `${gb(capacity.storage.usage)} used, no storage limit`
+              : capacity.storage.limit === 0
+                ? 'storage limit 0 — this tenant cannot store files'
+                : `${gb(capacity.storage.usage)} used of ${gb(capacity.storage.limit)}`}
+        </Typography>
       )}
 
       {side === 'source' && purpose === 'migrate' && alreadyHere && <GovExactCopy />}

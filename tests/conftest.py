@@ -311,6 +311,15 @@ def cal_migrator(auth, db, settings, identity):
 
 
 @pytest.fixture(autouse=True)
+def _capacity_unknown(monkeypatch):
+    """A migration start reads both tenants' capacity live; in the suite every number is
+    unknown, which never refuses. A test about capacity sets its own."""
+    import tenant_capacity
+    tenant_capacity.__dict__.setdefault("real_read", tenant_capacity.read)
+    monkeypatch.setattr(tenant_capacity, "read", lambda settings, side: {"users": None, "storage": None, "errors": {}})
+
+
+@pytest.fixture(autouse=True)
 def _profiles_read_back_at_once(monkeypatch):
     """user_profiles waits for Google's Directory to show a write; tests do not."""
     import user_profiles

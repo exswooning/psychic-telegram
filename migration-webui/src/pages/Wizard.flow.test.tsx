@@ -24,6 +24,8 @@ const allDomains = vi.fn(() => Promise.resolve(
   { superadmin: true, domains: [] as import('@/api/controlPlane').ConfiguredDomain[] }))
 const migrations = vi.fn(() => Promise.resolve({ migrations: [] as import('@/api/controlPlane').MigrationRow[] }))
 const openMig = vi.fn()
+const tenantConfig = vi.fn((side: string) => Promise.resolve(
+  { side, domain: '', adminEmail: '', hasKey: false, clientId: '', scopes: [] as string[] }))
 vi.mock('@/api/controlPlane', () => ({
   fetchMe: () => seedEnabled(),
   fetchMigrations: () => migrations(),
@@ -40,6 +42,7 @@ vi.mock('@/api/controlPlane', () => ({
   // SeedDomainPicker reads this to list the tenants already set up, so the
   // seed path renders cards instead of a sign-in form.
   fetchAllDomains: () => allDomains(),
+  fetchTenantConfigStatus: (side: string) => tenantConfig(side),
 }))
 vi.mock('@/pages/SeedWizard', () => ({
   default: ({ sourceDomain }: { sourceDomain?: string }) =>
@@ -74,6 +77,23 @@ vi.mock('@/api/client', () => ({
 
 beforeEach(() => {
   seedEnabled.mockResolvedValue({ seed_enabled: true })
+})
+
+describe('an account whose tenants already have keys', () => {
+  it('opens on them, not on the sign-in form, and Change goes back', async () => {
+    tenantConfig.mockImplementation((side: string) => Promise.resolve(
+      side === 'source'
+        ? { side, domain: 'src.com', adminEmail: 'a@src.com', hasKey: true, clientId: '1', scopes: [] }
+        : { side, domain: 'tgt.com', adminEmail: 'a@tgt.com', hasKey: false, clientId: '', scopes: [] }))
+    view()
+    expect(await screen.findByTestId('wizard-change')).toBeInTheDocument()
+    expect(screen.queryByTestId('admin-email')).toBeNull()
+    expect(screen.getByText('src.com')).toBeInTheDocument()
+    fireEvent.click(screen.getByTestId('wizard-change'))
+    expect(await screen.findByTestId('admin-email')).toBeInTheDocument()
+    tenantConfig.mockImplementation((side: string) => Promise.resolve(
+      { side, domain: '', adminEmail: '', hasKey: false, clientId: '', scopes: [] }))
+  })
 })
 
 const view = () => render(<MemoryRouter><Wizard /></MemoryRouter>)

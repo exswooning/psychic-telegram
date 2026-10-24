@@ -1318,6 +1318,22 @@ export const uploadCredentials = (
     }),
   })
 
+/** Superadmin: give this account's side the key another account already holds here. */
+export const reuseKey = (reason: string, side: 'source' | 'target', fromAccountId: number) =>
+  cpFetch<ActionResult>('/api/v2/setup/reuse-key', {
+    method: 'POST',
+    body: JSON.stringify({ reason, side, from_account_id: fromAccountId }),
+  })
+
+/** tenant_capacity.py: a field that could not be read is null, its reason under errors. */
+export interface TenantCapacity {
+  side: 'source' | 'target'; users: number | null
+  storage: { limit: number | null; usage: number } | null
+  errors: Record<string, string>; checkedAt: string
+}
+export const fetchCapacity = (side: 'source' | 'target') =>
+  cpFetch<TenantCapacity>(`/api/v2/setup/capacity?side=${side}`)
+
 // -- DWD scope status ---------------------------------------------------------
 export interface DwdStatus {
   tenant: string; checked: boolean; clientId?: string
@@ -1559,7 +1575,7 @@ export interface SourceGuardReport {
   changes: SourceGuardChange[]; changeCount: number; changedByTool?: number; unread: { user: string; errors: Record<string, string> }[]
   auditLog: { bitportAddresses?: string[]; byBitport?: SourceGuardLogRow[]; deletionsByOthers?: SourceGuardLogRow[]; error?: string }
 }
-export interface SourceGuard { snapshotTakenAt: string | null; snapshotUsers: number; latest: SourceGuardReport | null }
+export interface SourceGuard { snapshotTakenAt: string | null; snapshotUsers: number; latest: SourceGuardReport | null; firstChangedAt?: string | null }
 export const fetchSourceGuard = (accountId?: number) =>
   cpFetch<SourceGuard>(`/api/v2/source-guard${accountId ? `?account_id=${accountId}` : ''}`)
 export const runSourceGuard = (action: 'check' | 'baseline', reason: string, accountId?: number) =>

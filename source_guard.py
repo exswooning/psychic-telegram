@@ -266,4 +266,15 @@ def latest(db) -> dict:
     r = db.conn.execute("SELECT report FROM source_guard_checks ORDER BY id DESC LIMIT 1").fetchone()
     return {"snapshotTakenAt": snapshot_taken(db),
             "snapshotUsers": db.conn.execute("SELECT COUNT(*) FROM source_guard_snapshot").fetchone()[0],
-            "latest": json.loads(r[0]) if r else None}
+            "latest": json.loads(r[0]) if r else None,
+            "firstChangedAt": _first_changed_at(db)}
+
+
+def _first_changed_at(db):
+    """checked_at of the earliest check in the current unbroken run of CHANGED verdicts."""
+    first = None
+    for at, verdict in db.conn.execute("SELECT checked_at, verdict FROM source_guard_checks ORDER BY id DESC"):
+        if verdict != "CHANGED":
+            break
+        first = at
+    return first
