@@ -617,6 +617,19 @@ def unresolved_shortcut_users(db) -> list[str]:
                           AND n.created_at > a.timestamp)""")]
 
 
+def unmapped_source_users(db) -> list[str]:
+    """Source users the one-to-one check found a source Drive file with no copy for, still
+    open. Not a failure row: the walk never saw it (live, dharan: files personal accounts
+    put into the users' own folders -- drive_engine._sync_outsiders_here now copies them),
+    so only a re-walk can. A fresh complete check resolves the finding and ends the re-walks."""
+    if not db.conn.execute("SELECT 1 FROM sqlite_master WHERE name='verification_repair_queue'").fetchone():
+        return []
+    return [r[0] for r in db.conn.execute(
+        """SELECT DISTINCT q.source_user FROM verification_repair_queue q
+            WHERE q.service='drive' AND q.state!='RESOLVED' AND q.detail LIKE '%UNMAPPED_SOURCE%'
+              AND EXISTS (SELECT 1 FROM identity_map i WHERE i.source_email=q.source_user)""")]
+
+
 def pending_share_users(db) -> list[str]:
     """Source users with a copied item whose sharing was started and never finished
     (an `acl_pass` PENDING mark), still in the corpus."""
@@ -653,7 +666,8 @@ def retry_drive_stragglers(auth, db, settings, apply: bool = False,
     if users is None:
         users = list(dict.fromkeys(stranded_drive_users(db) + pending_share_users(db)
                                    + forms_to_rebuild_users(db, settings)
-                                   + unresolved_shortcut_users(db)))
+                                   + unresolved_shortcut_users(db)
+                                   + unmapped_source_users(db)))
     for src in users:
         tgt = targets.get(src)
         if not tgt:

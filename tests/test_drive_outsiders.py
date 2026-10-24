@@ -70,3 +70,16 @@ def test_an_office_file_is_compared_by_its_bytes_not_the_docs_api(migrator, auth
     d = r["users"][SRC_USER]["drive"]
     assert not d["errors"], d["errors"]
     assert r["verdict"] == "IDENTICAL"
+
+
+def test_repair_re_walks_a_user_the_check_found_an_uncopied_file_for(db):
+    import repair
+    from db import bulk_seed_identities
+    bulk_seed_identities(db, [(SRC_USER, TGT_USER)])
+    db.conn.execute("CREATE TABLE IF NOT EXISTS verification_repair_queue (source_user TEXT, service TEXT, "
+                    "state TEXT, detail TEXT)")
+    db.conn.execute("INSERT INTO verification_repair_queue VALUES (?, 'drive', 'QUEUED', ?)",
+                    (SRC_USER, '{"status": "UNMAPPED_SOURCE", "id": "x"}'))
+    assert repair.unmapped_source_users(db) == [SRC_USER]
+    db.conn.execute("UPDATE verification_repair_queue SET state='RESOLVED'")
+    assert repair.unmapped_source_users(db) == []
