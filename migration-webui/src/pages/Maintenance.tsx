@@ -3,7 +3,7 @@ import {
   Box, Typography, Card, CardContent, Stack, TextField, Button, Alert,
 } from '@mui/material'
 import { Build as MaintenanceIcon } from '@mui/icons-material'
-import { fetchActions, fetchConfig, runResetDriveLedger, runWipeTarget, runWipeSource, ActionSpec } from '@/api/client'
+import { fetchActions, fetchConfig, runResetDriveLedger, runResetTarget, runWipeTarget, runWipeSource, ActionSpec } from '@/api/client'
 import JobRunner from '@/components/JobRunner'
 import TenantSelect from '@/components/TenantSelect'
 
@@ -70,6 +70,7 @@ const Maintenance: React.FC = () => {
       )}
 
       <ResetDriveLedgerCard />
+      <EmptyTargetCard />
       <WipeTargetCard />
       <WipeSourceCard />
     </Box>
@@ -194,6 +195,49 @@ const WipeTargetCard: React.FC = () => {
           </Button>
         </Stack>
         {ok && <Alert severity="success" sx={{ mt: 2 }}>Started -- check Mission Control for output.</Alert>}
+        {err && <Alert severity="error" sx={{ mt: 2 }}>{err}</Alert>}
+      </CardContent>
+    </Card>
+  )
+}
+
+/**
+ * Empties the target's DATA and keeps its accounts and their licences (reset_target.py) --
+ * the one to use before moving a real tenant into a sandbox that held test data. Wiping
+ * deletes the accounts and holds their licences for 20 days. Until 2026-10-24 this lived
+ * only in the Seed Wizard, out of reach of an account that migrates.
+ */
+const EmptyTargetCard: React.FC = () => {
+  const [confirmDomain, setConfirmDomain] = useState('')
+  const [account, setAccount] = useState('')
+  const [err, setErr] = useState<string | null>(null)
+  const [ok, setOk] = useState(false)
+  const run = async () => {
+    setErr(null); setOk(false)
+    const r = await runResetTarget(confirmDomain, account ? Number(account) : undefined)
+    if (r.ok) setOk(true)
+    else setErr(r.error || 'could not start')
+  }
+  return (
+    <Card elevation={0} sx={{ borderRadius: 2, border: '1px solid', borderColor: 'divider', mt: 3 }}>
+      <CardContent>
+        <Typography variant="h6" sx={{ fontWeight: 600, mb: 1 }}>Empty target data</Typography>
+        <Alert severity="warning" sx={{ mb: 2 }}>
+          Deletes the files, mail, events, contacts and tasks in the TARGET tenant&apos;s
+          accounts and keeps the accounts and their licences. Refused unless that tenant is a
+          declared sandbox. Type the target domain to confirm.
+        </Alert>
+        <Stack direction="row" spacing={2} sx={{ flexWrap: 'wrap', gap: 2 }}>
+          <TextField size="small" label="Type the target domain to confirm"
+                     inputProps={{ 'data-testid': 'empty-target-domain' }}
+                     value={confirmDomain} onChange={(e) => setConfirmDomain(e.target.value)} sx={{ width: 280 }} />
+          <TenantSelect value={account} onChange={setAccount} width={280} testid="empty-target-account" />
+          <Button variant="outlined" color="warning" disabled={!confirmDomain} onClick={run}
+                  data-testid="empty-target-go">
+            Empty target data
+          </Button>
+        </Stack>
+        {ok && <Alert severity="success" sx={{ mt: 2 }}>Started -- the Jobs page shows it.</Alert>}
         {err && <Alert severity="error" sx={{ mt: 2 }}>{err}</Alert>}
       </CardContent>
     </Card>
