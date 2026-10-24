@@ -847,6 +847,9 @@ async def lifespan(_: FastAPI):
     cancelled on shutdown so a reload does not leave orphaned tasks
     broadcasting to sockets that are already gone.
     """
+    # Every child this process starts inherits the control-plane database, whatever
+    # MIGRATION_DB it is handed (control_plane_db._db_path).
+    os.environ.setdefault("CONTROL_PLANE_DB", os.path.abspath(cpdb._db_path()))
     # asyncio's default executor is sized min(32, cpu_count + 4) -- six
     # threads on this 2-core VPS -- and _off_loop hands it every blocking
     # read in the process. That sizing assumes CPU-bound work. This work is

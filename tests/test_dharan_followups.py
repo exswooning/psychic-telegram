@@ -160,3 +160,29 @@ def test_a_re_walk_that_fails_says_why(db, settings):
     out = repair.retry_drive_stragglers(None, db, settings, apply=True, users=["u@src"],
         _migrate_user=lambda *a, **k: {"status": "FAILED", "failed_services": {"drive": "coverage incomplete"}})
     assert out["errors"] == ["u@src drive re-walk FAILED: drive: coverage incomplete"]
+
+
+def test_a_per_account_child_still_reads_the_protected_domains(tmp_path, monkeypatch):
+    """Live: Maintenance > Empty target data for account 7 refused at once -- its child had
+    MIGRATION_DB = the account's ledger, the control-plane path followed it, and the domain
+    guard could not read tenant_configs ("could not read configured tenant domains")."""
+    import importlib.util
+    import sqlite3
+    import control_plane_db as cpdb
+    import domain_guard as stubbed
+    # The suite empties configured_domains(); load an untouched copy of the module.
+    spec = importlib.util.spec_from_file_location("domain_guard_real", stubbed.__file__)
+    domain_guard = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(domain_guard)
+    cp = str(tmp_path / "control.db")
+    cpdb.apply_migrations(cp)
+    with sqlite3.connect(cp) as c:
+        cols = {r[1] for r in c.execute("PRAGMA table_info(tenant_configs)")}
+        row = {"account_id": 7, "side": "target", "domain": "s.example"}
+        c.execute(f"INSERT INTO tenant_configs ({','.join(k for k in row if k in cols)}) VALUES "
+                  f"({','.join('?' for k in row if k in cols)})", [v for k, v in row.items() if k in cols])
+    ledger = str(tmp_path / "ledger.db")
+    sqlite3.connect(ledger).close()
+    monkeypatch.setenv("MIGRATION_DB", ledger)                 # what a per-account child is handed
+    monkeypatch.setenv("CONTROL_PLANE_DB", cp)                  # what it inherits from its parent
+    assert "s.example" in domain_guard.configured_domains()

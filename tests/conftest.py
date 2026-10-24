@@ -333,7 +333,7 @@ def _no_run_env_leaks():
     passes it switched off). In production each run is its own process; in the
     suite one test's ordered run held the NEXT test's mail back and dropped its chat."""
     yield
-    for name in ("DRIVE_FAILED_USERS", "SCOPE_DROPPED"):
+    for name in ("DRIVE_FAILED_USERS", "SCOPE_DROPPED", "CONTROL_PLANE_DB"):
         os.environ.pop(name, None)
     # Stop and memory pause are process-wide too: a test that pressed Stop left every
     # later Gmail run stopping before its first message.

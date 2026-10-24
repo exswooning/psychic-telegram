@@ -36,9 +36,14 @@ MIGRATIONS_DIR = os.path.join(HERE, "migrations")
 
 
 def _db_path() -> str:
+    # CONTROL_PLANE_DB first: a per-account child is handed MIGRATION_DB pointing at its
+    # account's ledger, and following that here found no tenant_configs -- live, the
+    # domain guard then refused every reset/wipe it was asked to check (2026-10-24, "could
+    # not read configured tenant domains (OperationalError)"). The API and the webui pin
+    # it at start, so every child inherits the real one.
     from config import Settings
 
-    return Settings().db_path
+    return os.getenv("CONTROL_PLANE_DB") or Settings().db_path
 
 
 # ----------------------------------------------------------------------

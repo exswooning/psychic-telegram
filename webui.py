@@ -6593,6 +6593,9 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Children inherit the control-plane database, whatever MIGRATION_DB they are handed.
+    import control_plane_db
+    os.environ.setdefault("CONTROL_PLANE_DB", os.path.abspath(control_plane_db._db_path()))
     # Loud, once, at boot. A domain someone turned protection OFF for is
     # the state that should be impossible to forget -- a protected one is
     # the expected case and announcing it every start trains people to skim.
