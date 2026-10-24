@@ -630,6 +630,22 @@ def unmapped_source_users(db) -> list[str]:
               AND EXISTS (SELECT 1 FROM identity_map i WHERE i.source_email=q.source_user)""")]
 
 
+def misread_shared_drive_users(db) -> list[str]:
+    """Source users holding a SKIPPED_OTHER_ORG_SHARED_DRIVE written before 2026-10-24: a
+    malformed field selection made Google refuse every listing of a folder shared in from
+    outside, and the refusal was read as "another organisation's shared drive" (dharan:
+    2,983 items, 32 users, in personal accounts' ordinary folders). A real one now names its
+    drive -- "(drive <id>)" -- so a re-walk replaces each old row, copied or re-recorded, and
+    the user drops out of this list."""
+    return [r[0] for r in db.conn.execute(
+        """SELECT DISTINCT a.source_user FROM audit_log a
+            WHERE a.status='SKIPPED_OTHER_ORG_SHARED_DRIVE' AND a.error_message NOT LIKE '%(drive %'
+              AND a.id=(SELECT MAX(id) FROM audit_log b WHERE b.source_user=a.source_user
+                        AND b.item_id=a.item_id AND b.item_type=a.item_type)
+              AND NOT EXISTS (SELECT 1 FROM id_mapping m WHERE m.source_user=a.source_user AND m.source_id=a.item_id)
+              AND EXISTS (SELECT 1 FROM identity_map i WHERE i.source_email=a.source_user)""")]
+
+
 def pending_share_users(db) -> list[str]:
     """Source users with a copied item whose sharing was started and never finished
     (an `acl_pass` PENDING mark), still in the corpus."""
@@ -667,7 +683,8 @@ def retry_drive_stragglers(auth, db, settings, apply: bool = False,
         users = list(dict.fromkeys(stranded_drive_users(db) + pending_share_users(db)
                                    + forms_to_rebuild_users(db, settings)
                                    + unresolved_shortcut_users(db)
-                                   + unmapped_source_users(db)))
+                                   + unmapped_source_users(db)
+                                   + misread_shared_drive_users(db)))
     for src in users:
         tgt = targets.get(src)
         if not tgt:
@@ -1117,10 +1134,24 @@ def clean_staging_drives(auth, db, settings, apply: bool = False) -> dict:
         out["drives"] += 1
         source_user, target_user = ident["source_email"], ident["target_email"]
         try:
+            # Source members first, whatever the files hold: one file that cannot be
+            # deleted used to end the drive's cleanup here, leaving a source account an
+            # organizer of a target drive (live: ward4@dharan.gov.np on MIGRATION-STAGING-ward4).
+            perms = adm.permissions().list(fileId=drv["id"], supportsAllDrives=True, useDomainAdminAccess=True,
+                                           fields="permissions(id,emailAddress)").execute().get("permissions", [])
+            for p in perms:
+                if src_domain and (p.get("emailAddress") or "").lower().endswith("@" + src_domain):
+                    if apply and not settings.dry_run:
+                        adm.permissions().delete(fileId=drv["id"], permissionId=p["id"], supportsAllDrives=True,
+                                                 useDomainAdminAccess=True).execute()
+                        db.log_audit(source_user, drv["id"], "staging_cleanup", "MEMBER_REMOVED",
+                                     f"{name}: {p['emailAddress']} no longer sees it")
+                    out["members_removed"] += 1
             member = auth.target_drive(target_user)
             items = member.files().list(corpora="drive", driveId=drv["id"], includeItemsFromAllDrives=True,
                                         supportsAllDrives=True, pageSize=1000,
                                         fields="files(id,name,mimeType,md5Checksum,size)").execute().get("files", [])
+            stuck = []        # verified duplicates the member may not delete: go with the drive
             for item in items:
                 if db.conn.execute("SELECT 1 FROM id_mapping WHERE target_id=?", (item["id"],)).fetchone():
                     out["kept"].append(f"{name}: {item['name']} is a mapped copy (copied, not moved)")
@@ -1144,25 +1175,26 @@ def clean_staging_drives(auth, db, settings, apply: bool = False) -> dict:
                     out["kept"].append(f"{name}: {item['name']} has no matching mapped copy")
                     continue
                 if apply and not settings.dry_run:
-                    member.files().delete(fileId=item["id"], supportsAllDrives=True).execute()
+                    try:
+                        member.files().delete(fileId=item["id"], supportsAllDrives=True).execute()
+                    except Exception:      # noqa: BLE001 - live: "lack the necessary license"
+                        stuck.append((item, match))
+                        continue
                     db.log_audit(source_user, item["id"], "staging_cleanup", "DELETED_ORPHAN_COPY",
                                  f"{name}: '{item['name']}' duplicated the mapped copy {match}")
                 out["deleted_copies"] += 1
-            perms = adm.permissions().list(fileId=drv["id"], supportsAllDrives=True, useDomainAdminAccess=True,
-                                           fields="permissions(id,emailAddress)").execute().get("permissions", [])
-            for p in perms:
-                if src_domain and (p.get("emailAddress") or "").lower().endswith("@" + src_domain):
-                    if apply and not settings.dry_run:
-                        adm.permissions().delete(fileId=drv["id"], permissionId=p["id"], supportsAllDrives=True,
-                                                 useDomainAdminAccess=True).execute()
-                        db.log_audit(source_user, drv["id"], "staging_cleanup", "MEMBER_REMOVED",
-                                     f"{name}: {p['emailAddress']} no longer sees it")
-                    out["members_removed"] += 1
             if any(k.startswith(name + ":") for k in out["kept"]):
                 continue
             if apply and not settings.dry_run:
-                adm.drives().delete(driveId=drv["id"], useDomainAdminAccess=True).execute()
-                db.log_audit(source_user, drv["id"], "staging_cleanup", "DRIVE_DELETED", f"{name}: empty")
+                # Only verified duplicates can be left here, so the drive may take them along.
+                adm.drives().delete(driveId=drv["id"], useDomainAdminAccess=True,
+                                    allowItemDeletion=bool(stuck)).execute()
+                for item, match in stuck:
+                    db.log_audit(source_user, item["id"], "staging_cleanup", "DELETED_ORPHAN_COPY",
+                                 f"{name}: '{item['name']}' duplicated the mapped copy {match} (deleted with its drive)")
+                    out["deleted_copies"] += 1
+                db.log_audit(source_user, drv["id"], "staging_cleanup", "DRIVE_DELETED",
+                             f"{name}: empty" if not stuck else f"{name}: {len(stuck)} verified duplicate(s) went with it")
             out["deleted_drives"] += 1
         except Exception as exc:      # noqa: BLE001 - one drive never stops the rest
             out["errors"].append(f"{name}: {str(exc)[:160]}")

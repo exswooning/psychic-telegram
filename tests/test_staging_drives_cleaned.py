@@ -20,6 +20,7 @@ class _Tgt:
         self.drives_ = {}       # id -> {"name", "files": {id: meta}, "perms": [{id, emailAddress}]}
         self.files_ = {}        # My Drive files by id
         self.log = []
+        self.refuse = set()     # file ids the member may not delete
 
     def drives(self):
         t = self
@@ -30,7 +31,8 @@ class _Tgt:
 
             def delete(self, driveId, **k):
                 def go():
-                    assert not t.drives_[driveId]["files"], "deleted a drive with files in it"
+                    assert k.get("allowItemDeletion") or not t.drives_[driveId]["files"], \
+                        "deleted a drive with files in it"
                     t.log.append(("drive-deleted", t.drives_.pop(driveId)["name"]))
                 return _Exec(go)
         return D()
@@ -47,6 +49,8 @@ class _Tgt:
 
             def delete(self, fileId, **k):
                 def go():
+                    if fileId in t.refuse:
+                        raise Exception("403 Cannot set the requested role for that user as they lack the necessary license.")
                     for d in t.drives_.values():
                         if d["files"].pop(fileId, None):
                             t.log.append(("file-deleted", fileId))
@@ -109,3 +113,21 @@ def test_a_survey_changes_nothing(db, settings):
                        "perms": [{"id": "p", "emailAddress": "ward6@dharan.example"}]}}
     out = repair.clean_staging_drives(type("A", (), {"target_drive": lambda self, u: t})(), db, settings, apply=False)
     assert out["deleted_drives"] == 1 and t.log == [] and "d" in t.drives_
+
+
+def test_a_duplicate_the_member_may_not_delete_goes_with_the_drive_after_source_members(db, settings, monkeypatch):
+    """Live, mdharan: ward4's duplicate refused ('lack the necessary license') and the
+    cleanup stopped there, leaving ward4@dharan.gov.np an organizer of the target drive."""
+    settings.source_domain, settings.target_domain = "dharan.example", "mdharan.example"
+    settings.target_admin, settings.staging_drive_prefix = "admin@mdharan.example", "MIGRATION-STAGING"
+    bulk_seed_identities(db, [("ward4@dharan.example", "ward4@mdharan.example")])
+    t = _Tgt()
+    t.files_["twin"] = {"id": "twin", "mimeType": "application/pdf", "md5Checksum": "aa", "size": "3"}
+    db.record_mapping("ward4@dharan.example", "SRC", "twin", "file", source_name="sec.pdf")
+    t.drives_["d4"] = {"name": "MIGRATION-STAGING-ward4", "perms": [{"id": "p-src", "emailAddress": "ward4@dharan.example"}],
+                       "files": {"dup": {"id": "dup", "name": "sec.pdf", "mimeType": "application/pdf", "md5Checksum": "aa"}}}
+    t.refuse.add("dup")
+    auth = type("A", (), {"target_drive": lambda self, u: t})()
+    out = repair.clean_staging_drives(auth, db, settings, apply=True)
+    assert t.log == [("member-removed", "p-src"), ("drive-deleted", "MIGRATION-STAGING-ward4")]
+    assert out["deleted_copies"] == 1 and not out["errors"]

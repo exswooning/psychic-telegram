@@ -51,7 +51,7 @@ def test_the_verifier_accounts_for_a_reasoned_skip(auth, db, settings, identity)
     src = auth.source_drive(SRC_USER)
     skipped = src.add_binary("in another org's drive.pdf")
     lost = src.add_binary("never copied.pdf")
-    db.log_audit(SRC_USER, skipped, "file", "SKIPPED_OTHER_ORG_SHARED_DRIVE", "stays there")
+    db.log_audit(SRC_USER, skipped, "file", "SKIPPED_OTHER_ORG_SHARED_DRIVE", "in another organisation's shared drive (drive 0AOther)")
     r = V.run(auth, db, settings, [SRC_USER], ("drive",), progress=lambda *_: None)
     d = r["users"][SRC_USER]["drive"]
     assert [i["id"] for i in d["notCopied"]] == [lost]
@@ -83,3 +83,10 @@ def test_repair_re_walks_a_user_the_check_found_an_uncopied_file_for(db):
     assert repair.unmapped_source_users(db) == [SRC_USER]
     db.conn.execute("UPDATE verification_repair_queue SET state='RESOLVED'")
     assert repair.unmapped_source_users(db) == []
+
+
+def test_an_old_misread_shared_drive_skip_is_a_gap_not_a_decision():
+    from migration_checks import accounted_for
+    assert accounted_for("SKIPPED_OTHER_ORG_SHARED_DRIVE", "x\nin another organisation's shared drive (drive 0A1)")
+    assert not accounted_for("SKIPPED_OTHER_ORG_SHARED_DRIVE", "x\nin another organisation's shared drive, shared with")
+    assert accounted_for("SKIPPED_NO_DOWNLOAD", "")

@@ -136,8 +136,12 @@ def drive_decisions(db, source_user):
         (source_user,))}
 
 
-def accounted_for(status):
-    """Unmapped by a recorded decision -- a reasoned skip or an owed item, never a gap."""
+def accounted_for(status, why=None):
+    """Unmapped by a recorded decision -- a reasoned skip or an owed item, never a gap.
+    Not an "another organisation's shared drive" skip that names no drive: those were
+    misread refusals (repair.misread_shared_drive_users), a gap until re-walked."""
+    if status == "SKIPPED_OTHER_ORG_SHARED_DRIVE" and why is not None and "(drive " not in why:
+        return False
     return bool(status) and (status.startswith("SKIPPED") or status in ACCOUNTED_STATUSES)
 
 
@@ -176,7 +180,7 @@ def drive_completion(auth, db, settings, source_user, target_user, retry=lambda 
             kind = "folder" if mime == V.FOLDER else "shortcut" if mime.endswith(".shortcut") else "file"
             tid = db.get_target_id(source_user, sid, kind)
             status, why = decided.get(sid, (None, None))
-            if not tid and accounted_for(status):
+            if not tid and accounted_for(status, why or ""):
                 accounted.append({"type": kind, "id": sid, "status": status, "why": (why or "")[:200]})
                 continue
             if not tid:

@@ -1129,34 +1129,26 @@ class DriveMigrator:
         if self.shared_drive:
             extra = {"corpora": "drive", "driveId": self.shared_drive,
                      "includeItemsFromAllDrives": True}
-        fields = f"nextPageToken, files({ITEM_FIELDS})"
-        # owners is only requested when the caller needs it (the external-share
-        # walk, which has to inspect who owns each file). On the default hot
-        # path -- the tree mirror -- it stays out of the response, exactly as
-        # before.
-        if with_owners:
-            fields += ",owners"
+        # owners (and driveId) only when the caller needs them -- the external-share
+        # walk, which has to inspect who owns each file; the tree mirror's hot path
+        # stays as it was. Both INSIDE files(...): appended after it, `owners` is an
+        # invalid top-level field and Google refuses every such listing (HTTP 400
+        # "Invalid field selection owners"). Until 2026-10-24 that refusal was read as
+        # "a folder in another organisation's shared drive" and every item below the
+        # top of a folder shared in from outside was skipped as one -- on dharan, 3,041
+        # files in personal accounts' ordinary folders. Another organisation's shared
+        # drive is now told by the item's own driveId.
+        extra_fields = ",owners,driveId" if with_owners else ""
+        fields = f"nextPageToken, files({ITEM_FIELDS}{extra_fields})"
         token = None
-        owners_refused = False
         while True:
-            try:
-                resp = self._retry(lambda t=token, fl=fields: self.src.files().list(
-                    q=q, pageSize=LIST_PAGE_SIZE, pageToken=t, fields=fl,
-                    spaces="drive", supportsAllDrives=True, **extra,
-                ).execute(), label="drive.files.list", write=False,
-                                   tenant="source")
-            except Exception as exc:      # noqa: BLE001 - only the one refusal is handled
-                # A folder in a shared drive: its items have no owners, and Google
-                # refuses to list them when asked for that field (live, dharan.gov.np:
-                # "Invalid field selection owners" ended a user's whole external-share
-                # pass). Listed without it; each item is marked owner-unknown.
-                if not with_owners or owners_refused or "Invalid field selection owners" not in str(exc):
-                    raise
-                owners_refused = True
-                fields = f"nextPageToken, files({ITEM_FIELDS})"
-                continue
+            resp = self._retry(lambda t=token, fl=fields: self.src.files().list(
+                q=q, pageSize=LIST_PAGE_SIZE, pageToken=t, fields=fl,
+                spaces="drive", supportsAllDrives=True, **extra,
+            ).execute(), label="drive.files.list", write=False,
+                               tenant="source")
             for f in resp.get("files", []):
-                if owners_refused:
+                if with_owners and f.get("driveId") and f.get("driveId") != self.shared_drive:
                     f["_inSharedDrive"] = True
                 yield f
             token = resp.get("nextPageToken")
@@ -1233,7 +1225,7 @@ class DriveMigrator:
                         self.db.log_audit(self.source_user, child["id"], "file",
                                           "SKIPPED_OTHER_ORG_SHARED_DRIVE",
                                           f"{child.get('name')}\nin another organisation's "
-                                          "shared drive, shared with this user -- it stays "
+                                          f"shared drive (drive {child.get('driveId')}), shared with this user -- it stays "
                                           "there; share it with the new account to keep access")
                         self._bump("skipped")
                         continue

@@ -94,7 +94,7 @@ def drive(v, result):
         from migration_checks import accounted_for, drive_decisions
 
         decided = drive_decisions(v.db, v.src_user)
-        reasoned = {f for f in set(in_scope) - known if accounted_for(decided.get(f, (None,))[0])}
+        reasoned = {f for f in set(in_scope) - known if accounted_for(*decided.get(f, (None, None)))}
         missing = set(in_scope) - known - reasoned
         old = {i.get("id") for i in result["notCopied"]}
         for fid in sorted(missing - old):
