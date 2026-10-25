@@ -25,6 +25,7 @@ import ReasonCodeDialog from '@/components/ReasonCodeDialog'
 import RunReports from '@/components/RunReports'
 import QuickVerification from '@/components/QuickVerification'
 import OneToOneSummary from '@/components/OneToOneSummary'
+import CopySafetyCard from '@/components/CopySafetyCard'
 
 /**
  * One migration in full: what moved, what failed, and why.
@@ -361,6 +362,8 @@ export const MigrationDetail: React.FC = () => {
               migration's single self-check above: this fills in continuously as each
               user's migration finishes. Hides itself until there is something to say. */}
           <OneToOneSummary accountId={Number(accountId)} />
+
+          <CopySafetyCard accountId={Number(accountId)} users={(d?.users ?? []).map((u) => u.sourceUser)} />
 
           {p && (
             <Paper variant="outlined" sx={{ p: 2, mb: 3 }}>

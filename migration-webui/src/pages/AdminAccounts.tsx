@@ -16,7 +16,7 @@ type Pending = { id: number; email: string } & (
   | { kind: 'seed'; enabled: boolean }
   | { kind: 'delete' }
   | { kind: 'create'; name: string; password: string }
-  | { kind: 'reuse'; side: 'source' | 'target'; from: number; domain: string }
+  | { kind: 'reuse'; side: 'source' | 'target'; fromSide: 'source' | 'target'; from: number; domain: string }
 )
 type KeyOnServer = { side: 'source' | 'target'; domain: string; accountId: number }
 
@@ -63,7 +63,7 @@ const AdminAccounts: React.FC = () => {
           : pending.kind === 'create'
             ? await createAccount(pending.email, pending.password, pending.name, reason)
             : pending.kind === 'reuse'
-              ? await reuseKey(reason, pending.side, pending.from, pending.id)
+              ? await reuseKey(reason, pending.side, pending.from, pending.id, pending.fromSide)
               : await deleteAccount(pending.id, pending.email, reason)
       if (!r.ok) throw new Error(r.detail || 'could not update')
       if (pending.kind === 'create') {
@@ -204,16 +204,17 @@ const AdminAccounts: React.FC = () => {
       )}
 
       <Menu anchorEl={keyMenu?.el} open={!!keyMenu} onClose={() => setKeyMenu(null)}>
-        {keyMenu && keys.filter((k) => k.accountId !== keyMenu.account.id).map((k) => (
-          <MenuItem key={`${k.side}-${k.accountId}`} data-testid={`reuse-${k.side}-${k.accountId}`}
-                    onClick={() => {
-                      setPending({ id: keyMenu.account.id, email: keyMenu.account.email, kind: 'reuse',
-                                   side: k.side, from: k.accountId, domain: k.domain })
-                      setKeyMenu(null)
-                    }}>
-            {k.side}: {k.domain} (account {k.accountId})
-          </MenuItem>
-        ))}
+        {keyMenu && keys.filter((k) => k.accountId !== keyMenu.account.id).flatMap((k) =>
+          (['source', 'target'] as const).map((as) => (
+            <MenuItem key={`${as}-${k.side}-${k.accountId}`} data-testid={`reuse-${as}-${k.side}-${k.accountId}`}
+                      onClick={() => {
+                        setPending({ id: keyMenu.account.id, email: keyMenu.account.email, kind: 'reuse',
+                                     side: as, fromSide: k.side, from: k.accountId, domain: k.domain })
+                        setKeyMenu(null)
+                      }}>
+              {k.domain} ({k.side} key of account {k.accountId}) as {as}
+            </MenuItem>
+          )))}
       </Menu>
 
       <ReasonCodeDialog
@@ -245,7 +246,7 @@ const AdminAccounts: React.FC = () => {
             <>Creates a sign-in with its own empty pair and its own ledger. Nothing is set up
               yet: sign in as it and run the Setup Wizard for its source and target.</>
           ) : pending?.kind === 'reuse' ? (
-            <>Copies account {pending.from}&apos;s {pending.side} key, domain and admin to this account.
+            <>Copies account {pending.from}&apos;s {pending.fromSide} key, domain and admin to this account as its {pending.side}.
               Nothing changes on {pending.domain}: delegation belongs to the key. A different key
               already there is never overwritten; the same key gets its record completed.</>
           ) : null

@@ -2887,6 +2887,50 @@ async def tally_run(body: RunVerification, op: Operator = Depends(operator)):
                                               then=_tally_follow("tally_fix", body.users or None)))
 
 
+# -- Server-side copy safety test (copy_safety.py) ---------------------------------
+class CopySafetyStart(WriteAction):
+    account_id: int | None = None
+    user: str = Field(min_length=3)
+    per_type: int = Field(default=2, ge=1, le=10)
+    settle_min: float = Field(default=10, ge=0, le=120)
+
+
+@app.post("/api/v2/copy-safety/start")
+async def copy_safety_start(body: CopySafetyStart, op: Operator = Depends(operator)):
+    """Does a server-side copy by this source user change anything on the source? An admitted
+    job named `copy-safety`; it refuses a government source itself, and again here."""
+    account_id = _resolve_account(body, op)
+
+    def _start() -> tuple[bool, str]:
+        import copy_safety
+        from config import Settings
+        why = copy_safety.refuse_reason(Settings(account_id=account_id), body.user)
+        if why:
+            return False, why
+        argv = [PY, "copy_safety.py", "--account", str(account_id), "--user", body.user,
+                "--per-type", str(body.per_type), "--settle-min", str(body.settle_min), "--apply"]
+        return _run_admitted(argv, account_id, "copy-safety")
+    return await _gated(op, "copy_safety.start", body, body.user, _start)
+
+
+@app.get("/api/v2/copy-safety/latest")
+async def copy_safety_latest(account_id: int | None = None, op: Operator = Depends(operator)):
+    """The newest copy-safety report of this account, or null."""
+    require_login(op)
+    aid = account_id if account_id is not None else op.account_id
+    _require_account_access(aid, op)
+
+    def _read():
+        import glob
+        import json as _json
+        found = sorted(glob.glob(os.path.join(HERE, "logs", str(aid), "copy-safety-*.json")))
+        if not found:
+            return None
+        with open(found[-1]) as fh:
+            return {**_json.load(fh), "file": os.path.basename(found[-1])}
+    return await _off_loop(_read)
+
+
 # -- Mirror ---------------------------------------------------------------------------
 # A target kept as a continuously updated copy of its source (mirror.py). Settings
 # live in the control plane (mirror_scheduler.py); cycles, held deletions and
@@ -7682,6 +7726,9 @@ class ReuseKey(WriteAction):
     side: Literal["source", "target"]
     from_account_id: int
     account_id: int | None = None
+    # Which side's key to take from the other account (default: the same side). A source
+    # key can be given as a target: delegation follows the client id.
+    from_side: Literal["source", "target"] | None = None
 
 
 @app.post("/api/v2/setup/reuse-key")
@@ -7691,11 +7738,12 @@ async def reuse_key(body: ReuseKey, op: Operator = Depends(operator)):
     to = body.account_id if body.account_id is not None else op.account_id
 
     def _copy() -> tuple[bool, str]:
-        src_cfg = accounts_auth.get_tenant_config(body.from_account_id, body.side) or {}
+        fside = body.from_side or body.side
+        src_cfg = accounts_auth.get_tenant_config(body.from_account_id, fside) or {}
         src = src_cfg.get("sa_key_path") or ""
         src = src if os.path.isabs(src) else os.path.join(HERE, src)
         if not src_cfg.get("domain") or not os.path.isfile(src):
-            return False, f"account {body.from_account_id} has no {body.side} key on this server"
+            return False, f"account {body.from_account_id} has no {fside} key on this server"
         dest_dir = os.path.join(HERE, "keys", str(to))
         dest = os.path.join(dest_dir, f"{body.side}-sa.json")
         have = (accounts_auth.get_tenant_config(to, body.side) or {}).get("sa_key_path") or ""

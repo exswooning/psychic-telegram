@@ -1322,10 +1322,12 @@ export const uploadCredentials = (
   })
 
 /** Superadmin: give this account's side the key another account already holds here. */
-export const reuseKey = (reason: string, side: 'source' | 'target', fromAccountId: number, accountId?: number) =>
+export const reuseKey = (reason: string, side: 'source' | 'target', fromAccountId: number, accountId?: number,
+  fromSide?: 'source' | 'target') =>
   cpFetch<ActionResult>('/api/v2/setup/reuse-key', {
     method: 'POST',
     body: JSON.stringify({ reason, side, from_account_id: fromAccountId,
+                           ...(fromSide ? { from_side: fromSide } : {}),
                            ...(accountId != null ? { account_id: accountId } : {}) }),
   })
 
@@ -2212,4 +2214,20 @@ export const fetchUserProfiles = (accountId: number) =>
 export const startUserProfileSync = (reason: string, accountId: number, dryRun = true) =>
   cpFetch<ActionResult>('/api/v2/user-profiles/start', {
     method: 'POST', body: JSON.stringify({ reason, account_id: accountId, dry_run: dryRun }),
+  })
+
+/** copy_safety.py: does a server-side copy change anything on the source? One report per run. */
+export interface CopySafetyRow { type: string; name: string; copied: boolean; verdict: string; evidence: unknown }
+export interface CopySafetyReport {
+  user: string; started: string; finished: string; overall: string; file: string
+  verdicts: Record<string, string>; rows: CopySafetyRow[]
+  unattributed: { id: string; name: string; kind: string; modifiedTime: string }[]
+  auditReadable: boolean; cleanup: { ok: boolean; error?: string }
+}
+export const fetchCopySafety = (accountId?: number) =>
+  cpFetch<CopySafetyReport | null>(`/api/v2/copy-safety/latest${accountId ? `?account_id=${accountId}` : ''}`)
+export const startCopySafety = (reason: string, user: string, perType: number, settleMin: number, accountId?: number) =>
+  cpFetch<ActionResult>('/api/v2/copy-safety/start', {
+    method: 'POST',
+    body: JSON.stringify({ reason, user, per_type: perType, settle_min: settleMin, account_id: accountId ?? null }),
   })
