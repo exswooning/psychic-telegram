@@ -1,6 +1,6 @@
 # Handoff: dharan.gov.np → s.sarafgloabalexim.com, and what Bitport still needs
 
-Written 2026-10-25 by Claude for Codex (from 2026-10-28). Read `CLAUDE.md` first; this file
+Written 2026-10-25 by Claude for Codex (Codex resets 2026-11-01). Read `CLAUDE.md` first; this file
 is the live work list. Tick items here (`[x]` + date + commit) as you finish them.
 
 ## Rules that are not negotiable
