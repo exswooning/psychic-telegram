@@ -49,6 +49,16 @@ is the live work list. Tick items here (`[x]` + date + commit) as you finish the
 - **One-to-one so far:** the main open kind is "Doc/Slide structure differs from the source"
   — Docs and Slides rebuilt by the read-only route. Only a server-side copy fixes it.
 
+- **Box setting (2026-10-25):** `/etc/systemd/system/bitport-api.service.d/speed.conf` sets
+  `FIRST_PASS_ACCEPTANCE=false`, so runs copy at full speed (the per-user check held each worker
+  for hours at ~3 files/min). The One-to-one checks every item after the run. Replace it with a
+  per-run tick-box in the Migrate dialog ("Check each user as it finishes", item C) and then
+  delete the drop-in.
+- **Kill switch built, not deployed:** branch `worktree-agent-aff2009f324507dc9` (5f12f62) --
+  after every user, a read-only check of the source; a change attributed to Bitport kills the
+  run (children included); the guard's auto-stop escalates to SIGKILL after 30 s. Review, merge,
+  full suite (rc=0), deploy at a safe point.
+
 ## Work list, in order
 
 ### A. Finish the dharan run (each step through the UI)
@@ -78,6 +88,7 @@ Built and deployed (`copy_safety.py`, card on Migration detail, `POST /api/v2/co
       setting change on dharan and needs their explicit yes. Never do it on your own.
 
 ### C. UI gaps found during this run (build, test, deploy at a safe point)
+- [ ] Migrate dialog → More options → "Check each user as it finishes" (StartMigration.check_each_user → FIRST_PASS_ACCEPTANCE for that run); then remove the box drop-in above.
 - [ ] A superadmin viewing another account sees its running job under "Running now" on Jobs
       (today only in the queue line).
 - [ ] A finished migration is listed on Jobs; History rows open their log.
