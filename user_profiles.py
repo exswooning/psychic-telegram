@@ -106,6 +106,10 @@ def profile_body(user, target_email, mapping):
             for k, v in (user.get(field) or {}).items()
             if k in allowed.split()
         }
+    # Notes with no text (a contentType alone) is no note: Google refuses to create an
+    # account carrying one -- live, audit@ on s.: "Required parameter: [resource.about.Value]".
+    if not out["notes"].get("value"):
+        out["notes"] = {}
     for relation in out["relations"]:
         if "value" in relation:
             relation["value"] = mapping.get(

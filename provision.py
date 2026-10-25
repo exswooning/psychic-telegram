@@ -113,7 +113,9 @@ def ensure_users(directory, emails: list[str], dry_run: bool = False, *,
         if profile is not None:
             from copy import deepcopy
             from user_profiles import PROFILE_FIELDS
-            body.update({k: deepcopy(v) for k, v in profile.items() if k in PROFILE_FIELDS})
+            # An empty field is left out: a create request has nothing to clear.
+            body.update({k: deepcopy(v) for k, v in profile.items()
+                         if k in PROFILE_FIELDS and v not in ({}, [], None)})
         try:
             directory.users().insert(body=body).execute()
             result["created"].append((email, password))

@@ -376,3 +376,13 @@ class TestCreateUntilFullRetriesTransientErrors:
 ])
 def test_names_are_derived_from_the_localpart(email, expected):
     assert provision._split_name(email) == expected
+
+
+def test_an_empty_profile_field_is_left_out_of_the_create():
+    """Live: Google refused audit@s. -- "Required parameter: [resource.about.Value]"."""
+    d = FakeDirectory(existing=[])
+    profile = {"name": {"givenName": "A", "familyName": "B", "displayName": "A B"},
+               "notes": {}, "phones": [], "includeInGlobalAddressList": True}
+    provision.ensure_users(d, ["audit@x.com"], profiles={"audit@x.com": profile})
+    assert "notes" not in d.inserted[0] and "phones" not in d.inserted[0]
+    assert d.inserted[0]["name"]["familyName"] == "B"

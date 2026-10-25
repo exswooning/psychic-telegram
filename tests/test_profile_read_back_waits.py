@@ -71,3 +71,14 @@ def test_a_write_google_shows_late_is_updated_not_an_error(db, settings, monkeyp
 def test_a_write_that_never_shows_is_still_reported(db, settings):
     row = _run(db, settings, stale_reads=99)
     assert row["status"] == "ERROR" and "still differs after" in row["error"]
+
+
+def test_a_note_with_no_text_is_no_note():
+    """Live, audit@dharan -> s.: the account was never created -- Google refused
+    "Required parameter: [resource.about.Value]" for notes holding only a contentType."""
+    import user_profiles
+    user = {"name": {"givenName": "A", "familyName": "B"}, "notes": {"contentType": "text_plain"},
+            "primaryEmail": "a@src"}
+    assert user_profiles.profile_body(user, "a@tgt", {})["notes"] == {}
+    user["notes"]["value"] = "hello"
+    assert user_profiles.profile_body(user, "a@tgt", {})["notes"] == {"contentType": "text_plain", "value": "hello"}
