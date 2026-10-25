@@ -603,7 +603,10 @@ def migrate_user(auth: AuthManager, db: MigrationDB, settings: Settings,
             result["acceptance"] = acceptance.finish(repair=True,
                 progress=lambda message: log.info("[%s] acceptance: %s", source_user,message))
             if not result["acceptance"]["complete"]:
-                failures["acceptance"] = "Selected scope has unresolved validation, inventory or source-change findings"
+                import known_issues
+                why = known_issues.user_reason(db.conn, source_user)
+                failures["acceptance"] = (f"open findings: {why}" if why else
+                                          "Selected scope has unresolved validation, inventory or source-change findings")
             else:
                 # Fresh same-job acceptance can resolve a deterministic initial copy failure.
                 for service in list(failures):

@@ -6232,6 +6232,21 @@ def _repair_payload(d, account_id: int, since: str | None = None) -> dict:
             out["families"].append(
                 {"key": key, "count": s[key], "label": label, "fix": fix})
     out["unclassified"] = max(0, s["total"] - named)
+    # Run failures by kind (known_issues.RUN_KINDS): every cause a run has taught Bitport,
+    # open and fixed, with whether it fixes itself. Replaces the remainder above, which read
+    # all 194 of dharan -> s.'s failures as "not yet classified".
+    try:
+        import known_issues
+        rk = known_issues.run_failure_summary(d.conn)
+        for k in rk["kinds"]:
+            if k["id"] == "unclassified":
+                continue
+            out["families"].append({"key": k["id"], "count": k["open"], "fixed": k["fixed"],
+                                    "label": k["title"], "cause": k["cause"], "auto": k["auto"],
+                                    "fix": "fixed automatically" if k["auto"] else "needs a person"})
+        out["unclassified"] = rk["unclassified"]
+    except sqlite3.Error as exc:
+        log.warning("run failure kinds unavailable for account %s: %r", account_id, exc)
     # Scoped to this run: stale rows from before a wipe otherwise "activate"
     # as their folders are re-created, and the warning climbs on its own
     # while every folder it names actually holds the grant.

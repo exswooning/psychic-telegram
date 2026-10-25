@@ -561,8 +561,14 @@ export const MigrationDetail: React.FC = () => {
                                       fontVariantNumeric: 'tabular-nums' }}>
                       {f.count.toLocaleString()}
                     </Typography>
-                    <Typography variant="body2">{f.label}</Typography>
-                    <Chip size="small" variant="outlined" label={f.fix} />
+                    <Typography variant="body2" title={f.cause}>{f.label}</Typography>
+                    <Chip size="small" variant="outlined" label={f.fix}
+                          color={f.auto === true ? 'success' : f.auto === false ? 'warning' : 'default'} />
+                    {!!f.fixed && (
+                      <Typography variant="caption" color="success.main" data-testid={`repair-fixed-${f.key}`}>
+                        {f.fixed.toLocaleString()} fixed
+                      </Typography>
+                    )}
                   </Stack>
                 ))}
                 {repair.unclassified > 0 && (
@@ -574,7 +580,7 @@ export const MigrationDetail: React.FC = () => {
                       {repair.unclassified.toLocaleString()}
                     </Typography>
                     <Typography variant="body2" color="text.secondary">
-                      not yet classified — these need a person
+                      not a known kind yet — read and given a fix after this run
                     </Typography>
                   </Stack>
                 )}

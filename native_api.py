@@ -232,6 +232,36 @@ def _hold_jumps(item: dict) -> list[tuple] | None:
     return held
 
 
+def _without_images(creates: list, made: list, jumps: list) -> tuple[list, list, list, int]:
+    """The createItem requests with every image removed: an image item is dropped (and
+    the indexes after it close up), an image on a question or option is taken off."""
+    dropped, kept, kept_made, index_map = 0, [], [], {}
+
+    def strip(node):
+        nonlocal dropped
+        if isinstance(node, dict):
+            if "image" in node and isinstance(node["image"], dict):
+                node.pop("image")
+                dropped += 1
+            for v in node.values():
+                strip(v)
+        elif isinstance(node, list):
+            for v in node:
+                strip(v)
+    for i, (req, src_id) in enumerate(zip(creates, made)):
+        item = req["createItem"]["item"]
+        if "imageItem" in item:
+            dropped += 1
+            continue
+        strip(item)
+        index_map[i] = len(kept)
+        req["createItem"]["location"]["index"] = len(kept)
+        kept.append(req)
+        kept_made.append(src_id)
+    kept_jumps = [(index_map[i], held) for i, held in jumps if i in index_map]
+    return kept, kept_made, kept_jumps, dropped
+
+
 def copy_form(src_forms, tgt_forms, file_id: str, name: str,
               run=lambda req: req.execute()) -> tuple[str, str]:
     """Rebuild a Form on the target from forms.get: read-only on the source, so a
@@ -274,8 +304,21 @@ def copy_form(src_forms, tgt_forms, file_id: str, name: str,
         made.append(item.get("itemId"))
     ids: list[str] = []
     if creates:
-        reply = run(tgt_forms.forms().batchUpdate(
-            formId=form_id, body={"requests": creates, "includeFormInResponse": True}))
+        try:
+            reply = run(tgt_forms.forms().batchUpdate(
+                formId=form_id, body={"requests": creates, "includeFormInResponse": True}))
+        except Exception as exc:      # noqa: BLE001 - only the one refusal is handled
+            # Live, dharan -> s.: "Failed to fetch image from source_uri" -- an image's
+            # address is the source's own, which the target's Forms service cannot reach, and
+            # the batch is all-or-nothing, so the whole Form never landed. The same batch
+            # again without its images: the Form lands, the images are named as left out.
+            if "Failed to fetch image" not in str(exc):
+                raise
+            creates, made, jumps, dropped = _without_images(creates, made, jumps)
+            left_out.append(f"{dropped} image(s) the target could not fetch from the source")
+            reply = run(tgt_forms.forms().batchUpdate(
+                formId=form_id, body={"requests": creates, "includeFormInResponse": True})) \
+                if creates else {"replies": [], "form": {}}
         ids = [r.get("createItem", {}).get("itemId") for r in reply.get("replies", [])]
     if jumps:
         new_id = dict(zip(made, ids))

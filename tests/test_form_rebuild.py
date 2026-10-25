@@ -2,6 +2,7 @@
 target gets the questions, sections, quiz and branching. Live, dharan.gov.np: copying a
 Form across organisations made Google drop a "Copy of" into the source owner's Drive."""
 import copy
+import json
 
 import native_api
 
@@ -146,3 +147,26 @@ def test_a_line_break_in_displayed_text_becomes_a_space_and_is_counted():
     assert item["title"] == "Name and ward" and item["description"] == "keeps\nits break"
     assert item["questionItem"]["question"]["choiceQuestion"]["options"][0]["value"] == "Yes please"
     assert "2 title(s) or choice(s) had a line break" in note
+
+
+def test_a_form_whose_images_cannot_be_fetched_still_lands_without_them():
+    """Live, dharan -> s.: 'Failed to fetch image from source_uri' -- the batch is
+    all-or-nothing, so the whole Form never landed."""
+    form = {"info": {"title": "Survey"}, "items": [
+        {"itemId": "a", "title": "Logo", "imageItem": {"image": {"contentUri": "https://src/img1"}}},
+        {"itemId": "b", "title": "Q1", "questionItem": {"question": {"textQuestion": {}},
+                                                         "image": {"contentUri": "https://src/img2"}}},
+        {"itemId": "c", "title": "Q2", "questionItem": {"question": {"textQuestion": {}}}}]}
+    tgt = FakeForms({})
+    real = tgt.batchUpdate
+
+    def batch(formId, body):
+        if any("sourceUri" in json.dumps(r) for r in body.get("requests", [])):
+            raise Exception('HttpError 400 "Failed to fetch image from source_uri: https://src/img1"')
+        return real(formId, body)
+    tgt.batchUpdate = batch
+    form_id, note = native_api.copy_form(FakeForms(form), tgt, "SRC", "Survey")
+    sent = [c for c in tgt.calls if c[0] == "batchUpdate"][-1][1]["requests"]
+    assert [r["createItem"]["item"]["title"] for r in sent] == ["Q1", "Q2"]
+    assert [r["createItem"]["location"]["index"] for r in sent] == [0, 1]
+    assert "2 image(s)" in note

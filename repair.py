@@ -617,6 +617,56 @@ def unresolved_shortcut_users(db) -> list[str]:
                           AND n.created_at > a.timestamp)""")]
 
 
+NOT_FOUND = "File not found"
+
+
+def retry_unreadable_reads(auth, db, settings, apply: bool = False) -> dict:
+    """Retry the share list and comments of copied files whose source read answered 404.
+
+    Live, dharan -> s.: older link-shared files need their resource key on every read
+    (resource_keys.py); without it the file itself, its permissions and its comments read
+    "File not found". A re-walk retries an uncopied file, but skips one already copied --
+    so its share list and comments would stay failed for good. Runs after the re-walk,
+    whose listings have put the keys in the ledger."""
+    rows = db.conn.execute(
+        "SELECT a.source_user, a.item_id, a.item_type FROM audit_log a WHERE a.status='FAILED' "
+        "AND a.item_type IN ('acl','comment') AND a.error_message LIKE ? "
+        "AND a.id=(SELECT MAX(id) FROM audit_log b WHERE b.source_user=a.source_user "
+        "AND b.item_id=a.item_id AND b.item_type=a.item_type) "
+        "AND (a.item_type='comment' OR a.item_id LIKE '%:(list-failed)')",
+        (f"%{NOT_FOUND}%",)).fetchall()
+    out = {"candidates": len(rows), "fixed": 0, "errors": []}
+    if not apply or not rows:
+        return out
+    from drive_engine import DriveMigrator, DailyQuotaGuard
+    migrators: dict[str, DriveMigrator] = {}
+    for user, item_id, kind in rows:
+        sid = item_id.split(":(list-failed)")[0]
+        tid = db.target_for_source_id(sid)
+        if not tid:
+            continue                       # not copied yet: the re-walk's job
+        try:
+            if user not in migrators:
+                tgt = db.resolve_identity(user) or user
+                migrators[user] = DriveMigrator(auth, db, settings, user, tgt,
+                                                DailyQuotaGuard(db, tgt, settings.effective_upload_cap()))
+            m = migrators[user]
+            if kind == "acl":
+                m.reapply_acls(sid, tid)
+            else:
+                n = m._sync_comments(sid, tid)
+                if n:
+                    mtime = db.last_synced_modified_time(user, sid, "file")
+                    m._restore_modified_time(tid, {"id": sid, "modifiedTime": mtime}, n)
+            latest = db.get_audit(user, item_id, kind)
+            if latest is None or latest["status"] == "FAILED":
+                db.log_audit(user, item_id, kind, "SUCCESS", "re-read with the file's resource key")
+            out["fixed"] += 1
+        except Exception as exc:      # noqa: BLE001 - one item never stops the rest
+            out["errors"].append(f"{user} {sid} {kind}: {str(exc)[:160]}")
+    return out
+
+
 def unmapped_source_users(db) -> list[str]:
     """Source users the one-to-one check found a source Drive file with no copy for, still
     open. Not a failure row: the walk never saw it (live, dharan: files personal accounts
@@ -1202,7 +1252,7 @@ def clean_staging_drives(auth, db, settings, apply: bool = False) -> dict:
 
 
 REPAIR_STEPS = ("file times", "owed shares", "leftover staging drives", "form links", "failure survey", "contact names",
-                "stale grantees and users", "shared drives", "Drive stragglers (re-walk)",
+                "stale grantees and users", "shared drives", "Drive stragglers (re-walk)", "unreadable shares and comments",
                 "folder grants and ACL reconcile", "stranded mail and events", "re-apply grants")
 
 
@@ -1366,6 +1416,14 @@ def run_all(db, auth, settings, apply: bool = False,
             out["errors"].extend(dr["errors"])
         except Exception as exc:      # noqa: BLE001
             out["errors"].append(f"drive stragglers: {str(exc)[:160]}")
+
+    step("unreadable shares and comments")
+    try:
+        ur = retry_unreadable_reads(auth, db, settings, apply=apply)
+        out["unreadable_reads"] = ur
+        out["errors"].extend(ur["errors"])
+    except Exception as exc:      # noqa: BLE001
+        out["errors"].append(f"unreadable reads: {str(exc)[:160]}")
 
     # Folders first, always. Their grants are what everything inside
     # inherits, so repairing a folder can restore access to hundreds of

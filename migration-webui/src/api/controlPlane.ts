@@ -2165,6 +2165,11 @@ export interface RepairFamily {
   count: number
   label: string
   fix: string
+  /** known_issues.RUN_KINDS: how many of this kind a later run or repair has fixed, and
+   *  whether Bitport fixes it on its own. Absent on the legacy families. */
+  fixed?: number
+  auto?: boolean
+  cause?: string
 }
 
 export interface RepairSurvey {

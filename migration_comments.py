@@ -108,7 +108,15 @@ def reconcile(migrator, sid, tid):
 
     def deliver(key, kind, body, candidates, call):
         nonlocal written
+        # Keyed by file: a comment id is unique within one file only -- live, ss@'s two
+        # copies of one Doc both carried AAABghWPKe8, the second found the first's mapping
+        # and stopped ("Mapped comment/reply is missing"). An old unscoped mapping counts
+        # only when its comment is on THIS file's copy.
+        legacy = migrator.db.get_target_id(migrator.source_user, key, kind)
+        key = f"{sid}::{key}"
         mapped = migrator.db.get_target_id(migrator.source_user, key, kind)
+        if not mapped and legacy and any(r["id"] == legacy for r in candidates):
+            mapped = legacy
         if mapped:
             found = next((r for r in candidates if r["id"] == mapped), None)
             if not found:

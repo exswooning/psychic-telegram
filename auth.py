@@ -130,10 +130,12 @@ class ReadOnlyDrive:
     one), files.update that moves a file INTO that drive and changes nothing else.
     Anything else raises SourceWriteRefused."""
 
-    def __init__(self, svc, copy_into: str | None = None, moves: bool = False):
+    def __init__(self, svc, copy_into: str | None = None, moves: bool = False,
+                 keys_db: str | None = None):
         object.__setattr__(self, "_svc", svc)
         object.__setattr__(self, "_copy_into", copy_into)
         object.__setattr__(self, "_moves", moves)
+        object.__setattr__(self, "_keys_db", keys_db)
 
     def __setattr__(self, name, value):      # transparent: a test fake's flags land on it
         setattr(self._svc, name, value)
@@ -143,17 +145,22 @@ class ReadOnlyDrive:
         if name not in _DRIVE_READS:
             return attr
         return lambda *a, **k: _ReadOnlyCollection(attr(*a, **k), name, self._copy_into,
-                                                   self._moves)
+                                                   self._moves, self._keys_db)
 
 
 class _ReadOnlyCollection:
-    def __init__(self, res, name: str, copy_into: str | None, moves: bool = False):
+    def __init__(self, res, name: str, copy_into: str | None, moves: bool = False,
+                 keys_db: str | None = None):
         self._res, self._name, self._copy_into, self._moves = res, name, copy_into, moves
+        self._keys_db = keys_db
 
     def __getattr__(self, method):
         fn = getattr(self._res, method)
         if method in _DRIVE_READS[self._name]:
-            return fn
+            # Resource keys: asked for on listings, sent on every later read of the file
+            # (resource_keys.py) -- without them Google answers 404 for older link-shared files.
+            import resource_keys
+            return resource_keys.keyed(fn, self._name, method, self._keys_db)
         if self._name == "files" and method == "copy" and self._copy_into:
             def copy(*a, **kw):
                 parents = (kw.get("body") or {}).get("parents")
@@ -183,7 +190,7 @@ def allow_copy_into(svc, staging: str | None, moves: bool = False):
     """The same source Drive, also allowed to copy into `staging` -- and with `moves`,
     to move a file into it."""
     if isinstance(svc, ReadOnlyDrive) and staging:
-        return ReadOnlyDrive(svc._svc, staging, moves)
+        return ReadOnlyDrive(svc._svc, staging, moves, svc._keys_db)
     return svc
 
 
@@ -406,7 +413,7 @@ class AuthManager:
             domain_guard.require_not_source(self.settings.source_domain,
                                             self.settings.source_domain)
         svc = self._service("source", "drive", user)
-        return ReadOnlyDrive(svc)
+        return ReadOnlyDrive(svc, keys_db=getattr(self.settings, "db_path", None))
 
     def target_drive(self, user: str):
         return self._service("target", "drive", user)

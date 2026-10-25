@@ -210,6 +210,22 @@ def _open_rows(conn) -> list[tuple[str, str, str]]:
     return out
 
 
+def user_reason(conn, source_user: str, limit: int = 4) -> str:
+    """One user's open findings by kind, most first -- what a failed acceptance says
+    instead of "Selected scope has unresolved ... findings" (live, 6 dharan users read
+    only that; their findings were Doc/Slide rebuilds and files not copied yet)."""
+    counts: dict[str, int] = {}
+    for issue, _category, user in _open_rows(conn):
+        if user == source_user:
+            counts[issue] = counts.get(issue, 0) + 1
+    if not counts:
+        return ""
+    parts = [f"{n} {BY_ID[k][3] if k in BY_ID else 'not a known kind yet'}"
+             for k, n in sorted(counts.items(), key=lambda kv: -kv[1])[:limit]]
+    more = len(counts) - limit
+    return "; ".join(parts) + (f"; and {more} more kind(s)" if more > 0 else "")
+
+
 def summary(conn) -> dict:
     """Every known kind with its counts (open now, by category; fixed so far; last
     fixed), plus the latest fixes -- for the One-to-one page and the pair card."""
@@ -248,3 +264,93 @@ def users_for(conn, issue: str) -> list[dict]:
             row = per.setdefault(user, {"user": user, "open": 0, "fixed": 0, "lastFixed": None})
             row["fixed"], row["lastFixed"] = n, at
     return sorted(per.values(), key=lambda r: (-(r["open"] + r["fixed"]), r["user"]))
+
+
+# ---------------------------------------------------------------------------
+# Run failures: what a migration itself could not do (FAILED rows in audit_log), named the
+# same way the one-to-one findings above are. Each run that finds a new cause adds one here,
+# with a fix -- automatic where it can be -- so the next run handles it on its own. Taken
+# from dharan.gov.np -> s. (2026-10-25), where all 194 failures read "not yet classified".
+# id, item types (None = any), matches(error text), title, cause, fix, auto
+RUN_KINDS = [
+    ("run.resource_key", ("file", "shortcut", "acl", "comment"),
+     lambda t: "File not found" in t,
+     "Source file read 'not found' (resource key)",
+     "An older file shared by link, reached through a shared folder, opens by id only with its "
+     "resource key; without it Google answers 404.",
+     "Keys are read from listings, kept in the ledger and sent on every read (resource_keys.py); "
+     "repair re-walks the file and re-reads its shares and comments.", True),
+    ("run.disk_full", None,
+     lambda t: "No space left on device" in t or "disk is full" in t,
+     "This server's disk was full",
+     "Download-and-upload stages each file on the server; failed downloads left their files "
+     "behind until the disk filled.",
+     "Failed downloads remove their file; scratch is swept every 15 minutes (housekeeping.py); "
+     "repair re-walks what failed.", True),
+    ("run.db_rollback", None,
+     lambda t: "cannot rollback - no transaction is active" in t,
+     "A ledger write failed (seen as a rollback error)",
+     "A full disk failed the write; the rollback after it raised and hid the real error.",
+     "The real error is kept now (db.write); repair re-walks what failed.", True),
+    ("run.malware_flag", ("file",),
+     lambda t: "cannotDownloadAbusiveFile" in t,
+     "Google flagged the file as malware or spam",
+     "Google refuses to let it be downloaded, even with the acknowledgement flag.",
+     "None by download: only a server-side copy carries it (pending the copy safety test).", False),
+    ("run.form_rebuild", ("file",),
+     lambda t: "forms.googleapis.com" in t and "INVALID_ARGUMENT" in t,
+     "A Form could not be rebuilt",
+     "An image's address is the source's own, which the target's Forms service cannot fetch "
+     "('Failed to fetch image from source_uri'); the batch is all-or-nothing, so nothing landed.",
+     "The rebuild retries without the images it cannot fetch and names them as left out "
+     "(native_api._without_images); the next run rebuilds the Form.", True),
+    ("run.comment_missing", ("comment",),
+     lambda t: "Mapped comment/reply is missing" in t,
+     "A copied comment is missing on the target",
+     "Comment ids are unique within one file only: two copies of one Doc shared an id, and the "
+     "second file found the first file's mapping.",
+     "Comment mappings are keyed by file (migration_comments.reconcile); the next run copies "
+     "the second file's comment.", True),
+    ("run.held_for_drive", None,
+     lambda t: "held: this user's Drive did not migrate" in t,
+     "Mail or calendar held back for Drive",
+     "Their links would keep pointing at the source while the user's Drive is unfinished.",
+     "Runs on its own once the user's Drive succeeds (the next run).", True),
+]
+RUN_BY_ID = {k[0]: k for k in RUN_KINDS}
+
+
+def classify_failure(item_type: str, text: str) -> str:
+    for kind, types, matches, *_ in RUN_KINDS:
+        if (types is None or item_type in types) and matches(text or ""):
+            return kind
+    return "unclassified"
+
+
+def run_failure_summary(conn) -> dict:
+    """Run failures by kind: open (audit_log still FAILED) and fixed (item_retries: a FAILED
+    row later replaced by anything else, and still not failed). Corpus-scoped like
+    repair.survey."""
+    scope = ("(NOT EXISTS (SELECT 1 FROM identity_map) OR EXISTS (SELECT 1 FROM identity_map m "
+             "WHERE m.source_email={t}.source_user))")
+    kinds = {k[0]: {"id": k[0], "title": k[3], "cause": k[4], "fix": k[5], "auto": k[6],
+                    "open": 0, "fixed": 0} for k in RUN_KINDS}
+    kinds["unclassified"] = {"id": "unclassified", "title": "Not a known kind yet", "cause": "",
+                             "fix": "Read, named and given a fix after this run.", "auto": False,
+                             "open": 0, "fixed": 0}
+    for item_type, text in conn.execute(
+            "SELECT a.item_type, a.error_message FROM audit_log a WHERE a.status='FAILED' AND "
+            + scope.format(t="a")).fetchall():
+        kinds[classify_failure(item_type, text or "")]["open"] += 1
+    tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    if "item_retries" in tables:
+        for item_type, text in conn.execute(
+                "SELECT r.item_type, r.prev_error FROM item_retries r WHERE r.id=(SELECT MAX(id) "
+                "FROM item_retries x WHERE x.source_user=r.source_user AND x.item_id=r.item_id "
+                "AND x.item_type=r.item_type) AND r.new_status!='FAILED' AND NOT EXISTS (SELECT 1 "
+                "FROM audit_log a WHERE a.source_user=r.source_user AND a.item_id=r.item_id AND "
+                "a.item_type=r.item_type AND a.status='FAILED') AND " + scope.format(t="r")).fetchall():
+            kinds[classify_failure(item_type, text or "")]["fixed"] += 1
+    return {"kinds": [v for v in kinds.values() if v["open"] or v["fixed"]],
+            "open": sum(v["open"] for v in kinds.values()),
+            "unclassified": kinds["unclassified"]["open"]}

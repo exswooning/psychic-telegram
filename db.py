@@ -619,7 +619,14 @@ class MigrationDB:
                 yield conn
                 conn.execute("COMMIT")
             except Exception:
-                conn.execute("ROLLBACK")
+                # SQLite may have rolled back already (a full disk does): a second ROLLBACK
+                # then raised "no transaction is active" and hid the real error -- live,
+                # 10 dharan failures read so instead of "database or disk is full".
+                if conn.in_transaction:
+                    try:
+                        conn.execute("ROLLBACK")
+                    except sqlite3.Error:
+                        pass
                 raise
 
     def init_schema(self) -> None:
