@@ -3353,6 +3353,21 @@ class TestForceStop:
         assert sent == [(4242, 2), (4242, 2)]
 
 
+class TestCopySafetyEndpoints:
+    def test_start_is_an_admitted_job_and_a_government_source_is_refused(self, cp, monkeypatch):
+        import api_server
+        started = []
+        monkeypatch.setattr(api_server, "_run_admitted", lambda *a, **k: started.append(a) or (True, "x"))
+        body = {"reason": "safety test", "user": "u@s.test", "per_type": 2, "settle_min": 1}
+        monkeypatch.setenv("SOURCE_DOMAIN", "sandbox.test")
+        assert cp.post("/api/v2/copy-safety/start", headers=ADMIN, json=body).json()["ok"] is True
+        assert started[0][2] == "copy-safety" and "--apply" in started[0][0]
+        started.clear()
+        monkeypatch.setenv("SOURCE_DOMAIN", "dharan.gov.np")
+        r = cp.post("/api/v2/copy-safety/start", headers=ADMIN, json=body).json()
+        assert r["ok"] is False and "government" in r["detail"] and not started
+
+
 class TestChosenUsersMoveTheirOwnMail:
     """With no mode named, a few chosen users get the engine: the DMS is only started
     after a whole-tenant run, so mail split off for them would not arrive on its own.
@@ -3422,6 +3437,26 @@ class TestReuseKey:
         refused = cp.post("/api/v2/setup/reuse-key", headers=ADMIN, json=body).json()
         assert refused["ok"] is False and "never overwritten" in refused["detail"]
         assert json.loads(dest.read_text())["client_id"] == "OTHER"
+
+    def test_a_source_key_can_be_given_as_a_target(self, cp, tmp_path, monkeypatch):
+        import accounts_auth, api_server
+        monkeypatch.setattr(api_server, "HERE", str(tmp_path))
+        donor = self._acct(cp, "reusedonor2@ex.com")
+        self._donor(tmp_path, donor, "d.com")
+        boss = self._acct(cp, "reuseboss2@ex.com")
+        accounts_auth.promote_to_superadmin("reuseboss2@ex.com")
+        cp.post("/api/v2/auth/login", json={"email": "reuseboss2@ex.com", "password": "hunter22222"})
+        r = cp.post("/api/v2/setup/reuse-key", headers=ADMIN, json={
+            "reason": "test reuse", "side": "target", "from_side": "source", "from_account_id": donor})
+        assert r.json()["ok"] is True
+        assert json.loads((tmp_path / "keys" / str(boss) / "target-sa.json").read_text())["client_id"] == "111"
+        cfg = accounts_auth.get_tenant_config(boss, "target")
+        assert (cfg["domain"], cfg["admin_email"]) == ("d.com", "admin@d.com")
+        assert not accounts_auth.get_tenant_config(boss, "source")["domain"]
+        # no target key on the donor: side alone still means the same side
+        r = cp.post("/api/v2/setup/reuse-key", headers=ADMIN, json={
+            "reason": "test reuse", "side": "target", "from_account_id": donor})
+        assert r.json()["ok"] is False
 
 
 class TestCapacity:
