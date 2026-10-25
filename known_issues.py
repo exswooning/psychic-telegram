@@ -285,8 +285,9 @@ RUN_KINDS = [
      "This server's disk was full",
      "Download-and-upload stages each file on the server; failed downloads left their files "
      "behind until the disk filled.",
-     "Failed downloads remove their file; scratch is swept every 15 minutes (housekeeping.py); "
-     "repair re-walks what failed.", True),
+     "Files of 256 MB and over are streamed straight into the upload, never staged "
+     "(drive_engine.STREAM_ABOVE_BYTES); failed downloads remove their file; scratch is swept "
+     "every 15 minutes (housekeeping.py); repair re-walks what failed.", True),
     ("run.db_rollback", None,
      lambda t: "cannot rollback - no transaction is active" in t,
      "A ledger write failed (seen as a rollback error)",

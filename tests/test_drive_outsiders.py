@@ -104,3 +104,22 @@ def test_a_download_that_fails_leaves_no_file_behind(migrator, settings, tmp_pat
     except OSError:
         pass
     assert os.listdir(settings.scratch_dir) == []
+
+
+def test_a_large_file_is_streamed_never_staged_on_disk(migrator, auth, db, settings, tmp_path, monkeypatch):
+    """Live: four 2.4-3.4 GB files downloading at once held 11 GB of the box's 38 GB disk."""
+    import os
+    import drive_engine
+    monkeypatch.setattr(drive_engine, "STREAM_ABOVE_BYTES", 4)
+    settings.scratch_dir = str(tmp_path / "scratch")
+    staged = []
+    real = drive_engine.DriveMigrator._scratch_path
+    monkeypatch.setattr(drive_engine.DriveMigrator, "_scratch_path",
+                        lambda self: staged.append(1) or real(self))
+    src = auth.source_drive(SRC_USER)
+    fid = src.add_binary("big.mp4", data=b"0123456789", mime="video/mp4")
+    migrator.run()
+    tid = db.get_target_id(SRC_USER, fid, "file")
+    assert tid and auth.target_drive(TGT_USER).content[tid] == b"0123456789"
+    assert staged == []                                   # nothing went through scratch
+    assert "streamed" in db.get_audit(SRC_USER, fid, "file")["error_message"]

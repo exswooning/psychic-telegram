@@ -451,6 +451,10 @@ def _grant_key(p: dict) -> tuple:
             p.get("role"))
 
 
+# Files at least this big go source -> target by byte range, never through scratch on disk.
+STREAM_ABOVE_BYTES = 256 * 1024 ** 2
+
+
 def _named(item: dict, reason: str) -> str:
     """A skip no Google API can undo, with the file's NAME on its own first line: the
     ledger keys it by id, and "recreate these by hand" needs to say which file
@@ -2202,7 +2206,7 @@ class DriveMigrator:
             # Neither: still on the source (the walk moves it again), or in another
             # shared drive's staging drive (that drive's run finishes it).
 
-    def _upload_streamed(self, item: dict, tgt_parent: str, why: str) -> None:
+    def _upload_streamed(self, item: dict, tgt_parent: str, why: str, daily_cap: bool = True) -> None:
         """A file bigger than any account may COPY in a day goes up as one UPLOAD: Google
         lets an upload already under way finish past its 750 GB (its own help; the account
         then uploads nothing more that day). Read from the source by byte range a chunk at
@@ -2233,12 +2237,13 @@ class DriveMigrator:
                                           fields="id,md5Checksum,modifiedTime")
             return self._retry(req.execute, label="drive.files.create")   # same request: resumes
 
-        log.info("[%s] %s is too big to copy in a day; uploading it through this host (%s GB)",
-                 self.source_user, item.get("name"), f"{size / 1024 ** 3:,.1f}")
+        log.info("[%s] %s: streaming it through this host, nothing on disk (%s GB)%s",
+                 self.source_user, item.get("name"), f"{size / 1024 ** 3:,.1f}",
+                 " -- too big to copy in a day" if daily_cap else "")
         try:
             result = with_carried_fallback(upload, body)
         except (PermanentAPIError, RuntimeError) as exc:
-            if "userRateLimitExceeded" in str(exc):
+            if daily_cap and "userRateLimitExceeded" in str(exc):
                 self._over_daily_cap(item, f"{why}, and the target could not upload it today "
                                            "either. The next run tries again")
             else:
@@ -2256,12 +2261,13 @@ class DriveMigrator:
                               "checksum mismatch after uploading it through this host")
             self._bump("failed")
             return
-        if not self.server_side:
+        if daily_cap and not self.server_side:
             # This guard paces the target's own uploads in this mode, and Google lets it
             # upload nothing more today. (Server-side, it paces the SOURCE's copies.)
             self.quota.exhaust()
         self._landed(item, result["id"], tgt_parent, result, bytes_moved=size,
-                     note=f"uploaded through this host: more than one account may copy in a day, {why}")
+                     note=(f"uploaded through this host: more than one account may copy in a day, {why}"
+                           if daily_cap else "streamed through this host, nothing staged on disk"))
 
     def _over_daily_cap(self, item: dict, why: str) -> None:
         """Leave a file bigger than one account's daily allowance for a person (or the
@@ -2296,6 +2302,12 @@ class DriveMigrator:
     def _sync_binary(self, item: dict, tgt_parent: str) -> None:
         size = int(item.get("size") or 0)
         self.quota.reserve(size)   # QuotaExhausted propagates and halts the user
+        if size >= STREAM_ABOVE_BYTES:
+            # A large file is never staged on disk: live, dharan -> s., four 2.4-3.4 GB files
+            # downloading at once held 11 GB of a 38 GB disk, and an earlier full disk failed
+            # every ledger write. Streamed by byte range straight into the upload instead.
+            self._upload_streamed(item, tgt_parent, "", daily_cap=False)
+            return
 
         try:
             path, _ = self._download_flagged_too(item)
