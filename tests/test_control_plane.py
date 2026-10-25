@@ -3482,3 +3482,14 @@ def test_capacity_tries_the_wider_scope_when_the_narrow_one_is_refused(monkeypat
     monkeypatch.setattr("googleapiclient.discovery.build", lambda *a, **k: "svc")
     assert tenant_capacity._service("k", "a@x", "drive", "v3", ("drive.readonly", "drive")) == "svc"
     assert [t.rsplit("/", 1)[1] for t in tried] == ["drive.readonly", "drive"]
+
+
+def test_capacity_counts_the_share_each_new_account_brings():
+    """Live: s. had one account (32.2 GB pool) before taking dharan's 45 (474.7 GB used)."""
+    import tenant_capacity
+    gb = 1_000_000_000
+    tgt = {"users": 2, "storage": {"limit": 64 * gb, "usage": 3 * gb}}
+    src = {"users": 45, "storage": {"usage": 475 * gb}}
+    assert tenant_capacity.refusal(tgt, src) is None                       # 64 + 43 x 32 = 1,440 GB
+    assert tenant_capacity.refusal(tgt, {"users": 10, "storage": {"usage": 475 * gb}})  # 64 + 8 x 32
+    assert tenant_capacity.refusal({"users": 47, "storage": {"limit": 0, "usage": 5}}, src)

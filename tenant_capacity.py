@@ -77,8 +77,17 @@ def refusal(target: dict, source: dict, whole_tenant: bool = True) -> str | None
         return None            # unknown, or unlimited
     if t["limit"] == 0:
         return "the target has a storage limit of 0, so it cannot store any files"
-    if whole_tenant and s and s.get("usage") is not None and t["limit"] - t["usage"] < s["usage"]:
+    if not (whole_tenant and s and s.get("usage") is not None):
+        return None
+    # A pooled tenant's limit grows by one account's share with every licensed account the
+    # run creates (Business Starter: 30 GB each) -- live, s. held 32.2 GB for its one account
+    # before taking dharan's 45. Projected from the target's own share per account.
+    limit = t["limit"]
+    tu, su = target.get("users"), source.get("users")
+    if tu and su and su > tu:
+        limit += t["limit"] // tu * (su - tu)
+    if limit - t["usage"] < s["usage"]:
         gb = lambda b: f"{b / 1e9:.1f} GB"      # noqa: E731
-        return (f"the target has {gb(t['limit'] - t['usage'])} free but the source uses "
-                f"{gb(s['usage'])}")
+        return (f"the target will have {gb(limit - t['usage'])} free once its accounts exist, "
+                f"but the source uses {gb(s['usage'])}")
     return None
