@@ -851,3 +851,48 @@ Sharing reverses `_drop_replaced_source_grants` (TARGET_GRANT_REPLACED). On succ
 mapping is forgotten and the file reads MOVED_BACK, so undo can then clear the empty target
 folders and the rest. Needs the TARGET admin's distributing setting (`move_preflight(back=True)`);
 refuses while the mirror follows those users -- it would copy every file straight back.
+
+**Run failures are named, and every run teaches Bitport** (`known_issues.RUN_KINDS`, shown on
+Migration detail under "What the N failures are" with open / fixed / automatic). Each kind has
+its cause, fix and whether Bitport repairs it on its own; "fixed" counts come from
+`item_retries` (a FAILED row later replaced). dharan → s. (2026-10-25) named all 194:
+- **Resource keys** (`resource_keys.py`): an older file shared by link, reached through a folder
+  shared in from outside, opens by id only with its key -- without it Google answers 404 "File
+  not found" for the file, its permissions and its comments. Every source read goes through
+  `auth.ReadOnlyDrive`, which asks listings for `resourceKey`, keeps keys in the ledger
+  (`resource_keys` table) and sends `X-Goog-Drive-Resource-Keys` on every later read; repair's
+  `retry_unreadable_reads` re-reads shares and comments of files already copied.
+- **Disk** (`housekeeping.py`, the API's `_housekeeping_loop`): download-and-upload stages files in
+  scratch; a failed download now removes its file (`DriveMigrator._download_via`), stale unopened
+  scratch is swept every 15 min, the journal is trimmed at 85% and an incident opens at 90%; the
+  header shows Disk. A full disk failed every ledger write; `db.write` now keeps the real error
+  instead of "cannot rollback - no transaction is active".
+- **Forms**: an image whose address only the source can fetch ("Failed to fetch image from
+  source_uri") sank the all-or-nothing rebuild; it retries without such images and names them.
+- **Comments are keyed by file** (`migration_comments.reconcile`): ids are unique within one file
+  only, and two copies of a Doc shared one.
+- A failed acceptance says which findings, by kind (`known_issues.user_reason`).
+
+**A target's storage is checked before a run** (`tenant_capacity.py`, `GET /api/v2/setup/capacity`,
+shown on each Setup card): a known limit of 0 refuses any run; a whole-tenant run is refused when
+the target's free space -- projected with one share per account the run will create -- is under the
+source's use. mdharan.com read 0 on all 46 accounts (suspended), s. 32.2 GB for its one account.
+
+**A superadmin sees every account** ("Viewing account" in the header; `?account=` on Setup,
+Migration detail, One-to-one, Verification, Jobs; actions on another account's Setup are off, its
+"Check again" stays). Admin → Accounts → "Use a key…" gives an account a key already on the box
+(`POST /api/v2/setup/reuse-key`, superadmin, never overwrites a different key, the same key
+completes its domain and admin, either side). The control-plane database is never an account's
+ledger: `control_plane_db._db_path` ignores a `MIGRATION_DB` under `data/accounts/`.
+
+**The server-side copy safety test** (`copy_safety.py`, card on Migration detail): copies a few files
+of each type server-side into its own staging drive on the target and reports, per type, whether
+anything changed on the copying side. Refuses a government source; touches the source only with
+list and files.copy (through `ReadOnlyDrive`); cleanup deletes only its own target drive.
+
+**Forms are relinked to their responses Sheet** by repair's "form links" step (`form_relink.py`,
+the target admin in each Form's Responses tab, the Sheet's URL pasted into the picker; no API can).
+Google then adds an empty "Form Responses" tab to the Sheet, which the check names
+(`drive.form_relinked`).
+
+Open work and the handoff to Codex: `docs/CODEX_HANDOFF.md`.
