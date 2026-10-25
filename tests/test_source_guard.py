@@ -173,3 +173,82 @@ def test_first_changed_at_is_the_start_of_the_current_unbroken_run_of_changed(db
             c.execute("INSERT INTO source_guard_checks(checked_at, since, verdict, report) VALUES (?,?,?,?)",
                       (at, "s", v, "{}"))
     assert G.latest(db)["firstChangedAt"] == "t3"
+
+
+# -- per-user check, kill on a change Bitport made ---------------------------------
+def _hook(monkeypatch, db, settings, report):
+    import domain_guard
+    import main
+    import run_watch
+    import source_guard
+    calls = {"kill": 0, "incidents": []}
+    monkeypatch.setattr(domain_guard, "is_protected", lambda d: True)
+    monkeypatch.setattr(source_guard, "snapshot_taken", lambda d: "t")
+    if isinstance(report, Exception):
+        def boom(*a, **k):
+            raise report
+        monkeypatch.setattr(source_guard, "check_user", boom)
+    else:
+        monkeypatch.setattr(source_guard, "check_user", lambda *a, **k: report)
+    monkeypatch.setattr(main, "_kill_run", lambda: calls.__setitem__("kill", calls["kill"] + 1))
+    monkeypatch.setattr(run_watch, "open_incident", lambda **k: calls["incidents"].append(k))
+    result = {}
+    main._guard_source_after_user(None, db, settings, "a@src", result)
+    return calls, result
+
+
+def test_a_change_bitport_made_kills_the_run_and_opens_an_incident(monkeypatch, db, settings):
+    rep = {"verdict": "CHANGED", "changes": [], "byBitport": [{"event": "copy", "item": "Copy of Form"}]}
+    calls, _ = _hook(monkeypatch, db, settings, rep)
+    assert calls["kill"] == 1 and calls["incidents"][0]["kind"] == "source_changed_by_bitport"
+    assert db.conn.execute("SELECT COUNT(*) FROM audit_log WHERE status='SOURCE_CHANGED_BY_BITPORT'").fetchone()[0] == 1
+
+
+def test_a_change_by_the_sources_own_user_is_recorded_not_fatal(monkeypatch, db, settings):
+    rep = {"verdict": "CHANGED", "byBitport": [], "changes": [{"what": "file modified", "name": "Plan"}]}
+    calls, result = _hook(monkeypatch, db, settings, rep)
+    assert calls["kill"] == 0 and calls["incidents"] == [] and result["source_guard"] == rep
+    assert db.conn.execute("SELECT COUNT(*) FROM audit_log WHERE status='SOURCE_CHANGED_BY_USER'").fetchone()[0] == 1
+
+
+def test_a_check_that_raises_or_is_incomplete_never_kills(monkeypatch, db, settings):
+    assert _hook(monkeypatch, db, settings, RuntimeError("boom"))[0]["kill"] == 0
+    assert _hook(monkeypatch, db, settings, {"verdict": "INCOMPLETE", "byBitport": [], "changes": []})[0]["kill"] == 0
+
+
+def test_check_user_splits_bitport_from_a_person(db, settings, tmp_path):
+    bulk_seed_identities(db, [("a@src", "a@tgt")])
+    G.snapshot(None, settings, db, read=lambda *a: _state({"f1": ["Plan", "t1"]}))
+    key = tmp_path / "k.json"
+    key.write_text('{"client_id": "42"}')
+    settings.source_sa_key = str(key)
+    log = {"byBitport": [{"actor": "a@src", "app": "drive", "event": "create", "item": "x"},
+                         {"actor": "b@src", "app": "drive", "event": "create", "item": "other user"}],
+           "byGoogle": [], "deletionsByOthers": [{"actor": "a@src", "event": "trash", "item": "Plan"}]}
+    rep = G.check_user(settings, None, "a@src", "since", db=db, read=lambda *a: _state({"f1": ["Plan", "t1"]}),
+                       audit_fn=lambda *a: log)
+    assert [r["item"] for r in rep["byBitport"]] == ["x"] and rep["verdict"] == "CHANGED"
+    assert rep["changes"][0]["name"] == "Plan"
+    clean = G.check_user(settings, None, "a@src", "since", db=db, read=lambda *a: _state({"f1": ["Plan", "t1"]}),
+                         audit_fn=lambda *a: {})
+    assert clean["verdict"] == "CLEAN"
+
+
+def test_stop_account_jobs_escalates_to_sigkill_after_30s(monkeypatch):
+    import api_server
+    import run_watch
+    sent, sleeps = [], []
+    monkeypatch.setattr(api_server, "_account_jobs", lambda aid: [{"pid": 4242, "job_name": "migrate"}])
+    monkeypatch.setattr(api_server.os, "kill", lambda pid, sig: sent.append((pid, sig)))
+    monkeypatch.setattr(api_server.os, "getpgid", lambda pid: 1)
+    monkeypatch.setattr(api_server.subprocess, "run", lambda *a, **k: sent.append(("pkill", a[0][-1])))
+    monkeypatch.setattr(api_server.time, "sleep", lambda s: sleeps.append(s))
+    monkeypatch.setattr(api_server.job_admission, "note_stop", lambda pid: None)
+    monkeypatch.setattr(api_server.threading, "Thread",
+                        lambda target, args, daemon: type("T", (), {"start": lambda self: target(*args)})())
+    monkeypatch.setattr(run_watch, "open_incident", lambda **k: (1, True))
+    monkeypatch.setattr(api_server.cpdb, "begin_action", lambda *a, **k: 1)
+    monkeypatch.setattr(api_server.cpdb, "finish_action", lambda *a, **k: None)
+    api_server._stop_account_jobs(5, "test")
+    assert (4242, 2) in sent and (4242, 0) in sent and (4242, 9) in sent and sleeps == [30]
+    assert "source-guard.kill" in run_watch.STOP_ACTIONS

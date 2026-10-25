@@ -276,7 +276,7 @@ def set_status(incident_id: int, status: str, note: str = "") -> bool:
         return cur.rowcount > 0
 
 
-STOP_ACTIONS = ("job.stop", "job.force-stop", "stop job", "stop job (force)", "source-guard.auto-stop")
+STOP_ACTIONS = ("job.stop", "job.force-stop", "stop job", "stop job (force)", "source-guard.auto-stop", "source-guard.kill")
 
 
 def stopped_by(pid, since: str | None) -> str | None:

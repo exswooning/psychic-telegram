@@ -4983,6 +4983,31 @@ def _account_jobs(aid) -> list[dict]:
     return [r for r in job_admission.list_active() if r.get("account_id") == aid]
 
 
+SOURCE_GUARD_KILL_AFTER_SEC = 30
+
+
+def _kill_if_alive(pid: int, aid, why: str) -> None:
+    """A cooperative Stop took 40 minutes live; against a source change that is too slow.
+    Still running 30 s after the SIGINT: SIGKILL it, its shards and its group."""
+    time.sleep(SOURCE_GUARD_KILL_AFTER_SEC)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return
+    action = cpdb.begin_action("system", "system", "source-guard.kill", why, str(pid), {"pid": pid}, None, aid)
+    try:
+        subprocess.run(["pkill", "-KILL", "-P", str(pid)], timeout=5)
+        try:
+            if os.getpgid(pid) == pid:
+                os.killpg(pid, 9)
+        except OSError:
+            pass
+        os.kill(pid, 9)
+        cpdb.finish_action(action, "OK", f"SIGKILL -> {pid} (alive {SOURCE_GUARD_KILL_AFTER_SEC}s after SIGINT)")
+    except ProcessLookupError:
+        cpdb.finish_action(action, "OK", f"{pid} exited")
+
+
 def _stop_account_jobs(aid, why: str) -> int:
     """The source guard's automatic Stop: every running job of this account gets the
     same cooperative SIGINT an operator's Stop sends, recorded as a Stop (never resumed
@@ -4999,6 +5024,7 @@ def _stop_account_jobs(aid, why: str) -> int:
             job_admission.note_stop(pid)
             cpdb.finish_action(action, "OK", f"SIGINT -> {pid}")
             stopped += 1
+            threading.Thread(target=_kill_if_alive, args=(pid, aid, why), daemon=True).start()
         except ProcessLookupError:
             cpdb.finish_action(action, "OK", f"{pid} had already exited")
     import run_watch

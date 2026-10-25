@@ -418,6 +418,67 @@ def inline_acceptance_enabled(settings, *, delta=False, track_status=True):
             and not getattr(settings,"mail_only_with_links",False))
 
 
+_PROCESS_STARTED = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+
+def _kill_run() -> None:
+    """SIGKILL the whole run now: the shards, the parent of a shard (and its process group
+    when it leads one), then this process. Not a Stop: nothing more may be copied."""
+    SHUTDOWN.set()
+    for h in logging.getLogger().handlers:
+        with contextlib.suppress(Exception):
+            h.flush()
+    root = int(os.getenv("SHARD_PARENT") or os.getpid())
+    with contextlib.suppress(Exception):
+        import subprocess
+        subprocess.run(["pkill", "-KILL", "-P", str(root)], timeout=5)
+    with contextlib.suppress(Exception):
+        if os.getpgid(root) == root:
+            os.killpg(root, signal.SIGKILL)
+    with contextlib.suppress(Exception):
+        os.kill(root, signal.SIGKILL)
+    os.kill(os.getpid(), signal.SIGKILL)
+
+
+def _guard_source_after_user(auth, db, settings, source_user: str, result: dict) -> None:
+    """A protected source is re-read after every user. A change Bitport made kills the
+    run; a change its own people made is recorded; a check that fails changes nothing."""
+    try:
+        import domain_guard
+        import source_guard
+        if settings.dry_run or not domain_guard.is_protected(settings.source_domain or ""):
+            return
+        if not source_guard.snapshot_taken(db):
+            return
+        rep = source_guard.check_user(settings, auth, source_user, _PROCESS_STARTED, db=db)
+    except Exception as exc:      # noqa: BLE001 - never fails or kills the run
+        log.warning("[%s] source guard check failed: %s", source_user, exc)
+        return
+    result["source_guard"] = rep
+    if rep["verdict"] == "INCOMPLETE":
+        log.warning("[%s] source guard could not check the source: %s", source_user, rep.get("why", "unreadable"))
+    mine = rep.get("byBitport") or []
+    if rep.get("changes"):
+        with contextlib.suppress(Exception):
+            db.log_audit(source_user, source_user, "source_guard", "SOURCE_CHANGED_BY_USER",
+                         json.dumps(rep["changes"][:20])[:1000])
+    if not mine:
+        return
+    first = f"{mine[0].get('event')} {mine[0].get('item')!r}"
+    msg = f"{len(mine)} change(s) on {settings.source_domain} for {source_user}, e.g. {first}"
+    log.critical("SOURCE CHANGED BY BITPORT: %s -- killing the run", msg)
+    with contextlib.suppress(Exception):
+        db.log_audit(source_user, source_user, "source_guard", "SOURCE_CHANGED_BY_BITPORT", msg[:1000])
+    with contextlib.suppress(Exception):
+        import run_watch
+        aid = getattr(settings, "account_id", None)
+        run_watch.open_incident(kind="source_changed_by_bitport",
+                                title=f"Bitport changed something on {settings.source_domain}; run killed",
+                                summary=msg, account_id=aid, job_name="source-guard",
+                                fingerprint=f"source-guard-kill:{aid}")
+    _kill_run()
+
+
 def migrate_user(auth: AuthManager, db: MigrationDB, settings: Settings,
                  source_user: str, target_user: str, services: set[str],
                  delta: bool, delta_days: int) -> dict:
@@ -722,6 +783,7 @@ def migrate_user(auth: AuthManager, db: MigrationDB, settings: Settings,
         from resilience import retry_on_google_error
         VERIFY.submit(tally.tally_user_and_save, auth, db, settings, source_user, target_user,
                       retry_on_google_error(max_retries=settings.max_retries))
+    _guard_source_after_user(auth, db, settings, source_user, result)
     return result
 
 

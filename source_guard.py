@@ -261,6 +261,42 @@ def check(auth, settings, db, client_id: str, read=read_user, audit_fn=audit, ex
     return report
 
 
+def check_user(settings, auth, user: str, since_iso: str, db=None, read=read_user, audit_fn=audit) -> dict:
+    """One user, right after a migration finished them: their current counts against the
+    stored baseline, and Google's audit log since `since_iso` for their address. Reads
+    only. byBitport = changes from this tool's addresses plus Google acting for the user
+    (no app, no address) -- the run is killed on these; `changes` are everything else
+    (the source's own people), recorded, never a reason to stop.
+    # ponytail: the log query is tenant-wide per user; batch it per N users if slow."""
+    own = db is None
+    if own:
+        from db import MigrationDB
+        db = MigrationDB(settings.db_path)
+    try:
+        ensure_tables(db)
+        row = db.conn.execute("SELECT state FROM source_guard_snapshot WHERE source_user=?", (user,)).fetchone()
+    finally:
+        if own:
+            db.close()
+    if not row:
+        return {"verdict": "INCOMPLETE", "byBitport": [], "changes": [], "why": "no baseline for this user"}
+    after = read(auth, settings, user)
+    changes = [{"user": user, **c} for c in compare(json.loads(row["state"]), after)]
+    incomplete = bool(after["errors"])
+    try:
+        with open(settings.source_sa_key, encoding="utf-8") as fh:
+            client_id = json.load(fh).get("client_id")
+        log_part = audit_fn(settings, since_iso, client_id)
+    except Exception:      # noqa: BLE001
+        log_part, incomplete = {}, True
+    mine = lambda rows: [r for r in rows or [] if (r.get("actor") or "").lower() == user.lower()]      # noqa: E731
+    by_bitport = [r for r in mine(log_part.get("byBitport")) if r.get("app") != "admin"] + mine(log_part.get("byGoogle"))
+    changes += [{"user": user, "what": f"{r.get('event')} (by a person)", "name": r.get("item")}
+                for r in mine(log_part.get("deletionsByOthers"))]
+    verdict = "CHANGED" if by_bitport or changes else "INCOMPLETE" if incomplete else "CLEAN"
+    return {"verdict": verdict, "byBitport": by_bitport, "changes": changes}
+
+
 def latest(db) -> dict:
     ensure_tables(db)
     r = db.conn.execute("SELECT report FROM source_guard_checks ORDER BY id DESC LIMIT 1").fetchone()
