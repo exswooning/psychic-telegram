@@ -90,3 +90,17 @@ def test_an_old_misread_shared_drive_skip_is_a_gap_not_a_decision():
     assert accounted_for("SKIPPED_OTHER_ORG_SHARED_DRIVE", "x\nin another organisation's shared drive (drive 0A1)")
     assert not accounted_for("SKIPPED_OTHER_ORG_SHARED_DRIVE", "x\nin another organisation's shared drive, shared with")
     assert accounted_for("SKIPPED_NO_DOWNLOAD", "")
+
+
+def test_a_download_that_fails_leaves_no_file_behind(migrator, settings, tmp_path):
+    """Live: failed downloads left 6.9 GB of partial files in scratch and filled the box."""
+    import os
+    settings.scratch_dir = str(tmp_path / "scratch")
+
+    def broken():
+        raise OSError(28, "No space left on device")
+    try:
+        migrator._download_via(broken)
+    except OSError:
+        pass
+    assert os.listdir(settings.scratch_dir) == []

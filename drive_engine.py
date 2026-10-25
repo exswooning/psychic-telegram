@@ -767,6 +767,18 @@ class DriveMigrator:
         whatever the link allows.
         """
         path = self._scratch_path()
+        try:
+            return self._drain_to(path, request_factory)
+        except BaseException:
+            # A download that fails partway (a refusal, a dropped link, a full disk) left its
+            # partial file behind: live, 6.9 GB of them filled the box during dharan -> s.
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+            raise
+
+    def _drain_to(self, path: str, request_factory) -> tuple[str, int]:
         request = request_factory()
         self.limiter.acquire()
         started = time.monotonic()

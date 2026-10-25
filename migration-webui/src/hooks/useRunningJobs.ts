@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import {
   fetchTenantConfigStatus, fetchFullSetupStatus, fetchFleet, FleetNode,
-  fetchActiveJobs, fetchMe, stopJob as stopFleetJob,
+  fetchActiveJobs, fetchMe, fetchMigrations, stopJob as stopFleetJob,
   fetchProvisionStatus, ProvisionStatus } from '@/api/controlPlane'
 import { fetchJob, stopJob as stopSeedJob } from '@/api/client'
 
@@ -117,6 +117,13 @@ export function useRunningJobs() {
   const refresh = useCallback(async () => {
     setLoading(true)
     try {
+      // Every account's pair, to label a job with its own: a few rows, read with the rest.
+      const pairs: Record<number, string> = {}
+      await Promise.resolve().then(() => fetchMigrations()).then((r) => r.migrations.forEach((m) => {
+        if (m.accountId != null && m.sourceDomain && m.targetDomain) {
+          pairs[m.accountId] = `${m.sourceDomain} → ${m.targetDomain}`
+        }
+      })).catch(() => {})
       const [srcCfg, tgtCfg, srcSetup, tgtSetup, job, nodes, activeJobs, me] = await Promise.all([
         fetchTenantConfigStatus('source').catch(() => null),
         fetchTenantConfigStatus('target').catch(() => null),
@@ -196,7 +203,12 @@ export function useRunningJobs() {
         // A job that names its side acts on that side: "reset target", "wipe target
         // data", "delete all target users". Resets alone used to be read this way, so
         // deleting target2's users was shown against the source domain.
-        const jobDomain = kind !== 'migrate' && /\btarget\b/i.test(job.name)
+        // The job's OWN account's pair when the admission row names it: the configs above
+        // are the viewer's account, and a superadmin watching another account's run saw it
+        // labelled with their own pair (dharan.gov.np -> mdharan.com for account 7's run).
+        const ownPair = admission?.account_id != null ? pairs[admission.account_id] : undefined
+        const jobDomain = ownPair && kind === 'migrate' ? ownPair
+          : kind !== 'migrate' && /\btarget\b/i.test(job.name)
           ? tgtCfg?.domain
           // A migration (or delta) reads the source and writes the target -- naming only
           // one tenant left "where is this going?" answered nowhere on the card or the

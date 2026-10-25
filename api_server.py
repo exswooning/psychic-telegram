@@ -884,6 +884,7 @@ async def lifespan(_: FastAPI):
     mirrors = asyncio.create_task(_mirror_loop())
     ends = asyncio.create_task(_lifecycle_loop())
     owed = asyncio.create_task(_owed_grants_loop())
+    housekeep = asyncio.create_task(_housekeeping_loop())
     guard = asyncio.create_task(_source_guard_loop())
     guard_fast = asyncio.create_task(_source_guard_fast_loop())
     verification_repairs_task = asyncio.create_task(_verification_repair_loop())
@@ -891,6 +892,7 @@ async def lifespan(_: FastAPI):
         yield
     finally:
         verification_repairs_task.cancel()
+        housekeep.cancel()
         guard.cancel()
         guard_fast.cancel()
         task.cancel()
@@ -5151,6 +5153,38 @@ async def _owed_grants_loop() -> None:
             raise
         except Exception as exc:      # noqa: BLE001 - the loop must outlive a bad pass
             log.warning("owed-grant sweep failed: %r", exc)
+
+
+HOUSEKEEPING_SEC = 900
+
+
+async def _housekeeping_loop() -> None:
+    """Every 15 minutes: clear stale scratch files, trim the journal on a full-ish disk, and
+    open an incident before the disk is full (housekeeping.py) -- live, a full disk failed
+    every write of the dharan -> s. run."""
+    import housekeeping
+    import run_watch
+    from config import Settings
+    while True:
+        try:
+            await asyncio.sleep(HOUSEKEEPING_SEC)
+            r = await _off_loop(housekeeping.run, Settings().scratch_dir)
+            sc = r["scratch"]
+            if sc["removed"]:
+                log.info("housekeeping: removed %d stale scratch entr(ies), %.1f MB",
+                         sc["removed"], sc["bytes"] / 1e6)
+            if r["disk"]["pct"] >= housekeeping.WARN_AT_PCT:
+                await _off_loop(lambda: run_watch.open_incident(
+                    kind="disk_full", title=f"Disk {r['disk']['pct']}% full on this server",
+                    summary=(f"{r['disk']['free'] / 1e9:.1f} GB free. A full disk fails every ledger "
+                             "write of a running migration. Stale scratch files were already "
+                             "cleared; find what else is growing."),
+                    account_id=None, job_name="housekeeping", fingerprint="disk_full",
+                    severity="error"))
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:      # noqa: BLE001 - the loop must outlive a bad pass
+            log.warning("housekeeping failed: %r", exc)
 
 
 class StartTeardown(WriteAction):

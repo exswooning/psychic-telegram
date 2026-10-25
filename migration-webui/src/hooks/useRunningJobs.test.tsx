@@ -40,7 +40,7 @@ const RunningNow: React.FC = () => {
 const cp = vi.hoisted(() => ({
   fetchTenantConfigStatus: vi.fn(), fetchFullSetupStatus: vi.fn(),
   fetchFleet: vi.fn(), fetchActiveJobs: vi.fn(), fetchMe: vi.fn(),
-  stopJob: vi.fn(), fetchProvisionStatus: vi.fn(),
+  stopJob: vi.fn(), fetchProvisionStatus: vi.fn(), fetchMigrations: vi.fn(),
 }))
 const client = vi.hoisted(() => ({ fetchJob: vi.fn(), stopJob: vi.fn() }))
 
@@ -78,6 +78,19 @@ describe('Running Now', () => {
     })
     render(<RunningNow />)
     await waitFor(() => expect(screen.getByText('seed')).toBeTruthy())
+  })
+
+  it("names another account's run with that account's own pair", async () => {
+    // Live: account 7's dharan -> s. run read "dharan.gov.np -> mdharan.com" to a superadmin.
+    cp.fetchTenantConfigStatus.mockImplementation((side: string) => Promise.resolve(
+      { side, domain: side === 'source' ? 'dharan.gov.np' : 'mdharan.com', hasKey: true }))
+    cp.fetchMigrations.mockResolvedValue({ migrations: [
+      { accountId: 7, sourceDomain: 'dharan.gov.np', targetDomain: 's.example' }] })
+    cp.fetchActiveJobs.mockResolvedValue([{ account_id: 7, job_name: 'migrate', pid: 5, started_at: 'x' }])
+    client.fetchJob.mockResolvedValue({ running: true, name: 'migrate', external: true, pid: 5, elapsed: 60, lines: [] })
+    render(<RunningNow />)
+    await waitFor(() => expect(screen.getByText('dharan.gov.np → s.example')).toBeTruthy())
+    expect(screen.queryByText('dharan.gov.np → mdharan.com')).toBeNull()
   })
 
   it('says such a job is detached rather than pretending it is tracked', async () => {

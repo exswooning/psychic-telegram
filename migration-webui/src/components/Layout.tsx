@@ -298,6 +298,9 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
   }
 
   const memoryPct = metrics?.ram?.percentage ?? 0
+  // The box's own disk: download-and-upload stages files here, and a full disk once
+  // failed every write of a running migration.
+  const diskPct = metrics?.disk?.percentage ?? 0
   const ledgerProgress = users.length > 0
     ? Math.round(users.reduce((sum, u) => sum + u.progress, 0) / users.length)
     : 0
@@ -531,6 +534,17 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
               <LinearProgress
                 variant="determinate" value={memoryPct}
                 color={memoryPct >= 85 ? 'error' : memoryPct >= 65 ? 'warning' : 'primary'}
+                sx={{ height: 4 }}
+              />
+            </Box>
+            <Box sx={{ width: 90 }} data-testid="header-disk">
+              <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
+                <Typography variant="caption" color="text.secondary">Disk</Typography>
+                <Typography variant="caption" color="text.secondary" sx={{ fontVariantNumeric: 'tabular-nums' }}>{diskPct}%</Typography>
+              </Box>
+              <LinearProgress
+                variant="determinate" value={diskPct}
+                color={diskPct >= 90 ? 'error' : diskPct >= 75 ? 'warning' : 'primary'}
                 sx={{ height: 4 }}
               />
             </Box>
