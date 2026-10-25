@@ -150,6 +150,14 @@ describe('a running migrate job\'s own metrics', () => {
     expect(fetchMyMetrics).not.toHaveBeenCalled()
   })
 
+  it("reads the job's own account, never the header's selected migration", async () => {
+    // Live: account 7's run (dharan -> s.) showed account 5's figures and "uploaded to mdharan.com".
+    fetchMyMetrics.mockResolvedValue(snapshot({}))
+    render(<RunningJobDetail job={job({ kind: 'migrate', accountId: 7 })} onClose={() => {}} />)
+    await waitFor(() => expect(fetchMyMetrics).toHaveBeenCalled())
+    expect(fetchMyMetrics.mock.calls[0][3]).toBe(7)
+  })
+
   it('shows the measured total and the done amount once discovery has a baseline', async () => {
     fetchMyMetrics.mockResolvedValue(snapshot({
       bytesMovedTotal: 3 * 1024 ** 3, expectedBytes: 2 * 1024 ** 4,
@@ -186,7 +194,7 @@ describe('a running migrate job\'s own metrics', () => {
     fetchMyMetrics.mockResolvedValue(snapshot())
     render(<RunningJobDetail job={job({ kind: 'migrate', users: ['george@src'],
                                         startedAt: '2026-10-03T15:00:29Z' })} onClose={() => {}} />)
-    await waitFor(() => expect(fetchMyMetrics).toHaveBeenCalledWith(120, ['george@src'], '2026-10-03T15:00:29Z'))
+    await waitFor(() => expect(fetchMyMetrics).toHaveBeenCalledWith(120, ['george@src'], '2026-10-03T15:00:29Z', undefined))
   })
 
   it('says when metrics could not be read, rather than showing nothing', async () => {

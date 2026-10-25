@@ -37,6 +37,8 @@ export interface RunningJob {
   kind: JobKind
   /** The tenant this is happening to, when the source knows it. */
   domain?: string
+  /** The account the job belongs to, when its admission row says. */
+  accountId?: number
   // What the job has printed, newest last: the webui.py Job entry (seed, reset,
   // migrate) and full setup (its stderr transcript). Fleet/cross-account entries
   // have no output source at all. The Jobs card shows it as a live log.
@@ -230,6 +232,7 @@ export function useRunningJobs() {
           // migration or delta reads one and writes the other, so jobDomain above
           // already carries both.
           domain: jobDomain,
+          accountId: admission?.account_id ?? undefined,
           label: job.name,
           // "1928s elapsed" was the whole description of a 32-minute run.
           // The job's own newest line says what it is doing right now --

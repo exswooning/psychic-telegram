@@ -1705,8 +1705,10 @@ export const fetchMetrics = (accountId: number, history = 60) =>
   cpFetch<MetricsSnapshot>(`/api/v2/metrics/${accountId}?history=${history}`)
 
 /** Metrics without an account in context -- what the sidebar entry uses. */
-export const fetchMyMetrics = (history = 60, users?: string[], since?: string) =>
-  cpFetch<MetricsSnapshot>(`/api/v2/metrics?history=${history}${
+export const fetchMyMetrics = (history = 60, users?: string[], since?: string, accountId?: number) =>
+  // accountId: a job's own account. Without it the server picks the one "in context" -- the
+  // header's selected migration -- and account 7's run showed account 5's figures and domains.
+  cpFetch<MetricsSnapshot>(`/api/v2/metrics${accountId != null ? `/${accountId}` : ''}?history=${history}${
     users?.length ? `&users=${encodeURIComponent(users.join(','))}` : ''}${
     since ? `&since=${encodeURIComponent(since)}` : ''}`)
 
