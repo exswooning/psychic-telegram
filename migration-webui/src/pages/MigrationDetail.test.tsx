@@ -159,6 +159,15 @@ describe('MigrationDetail', () => {
     expect(screen.getByTestId('stat-itemsfailed')).toHaveTextContent('30')
   })
 
+  it('sends a pair with no mapped users to Identities instead of offering "all 0 users"', async () => {
+    show(detail({ failures: [], failedUsers: [], users: [],
+                  progress: { users: 0, done: 0, running: 0, failed: 0,
+                              pending: 0, items: 0, itemsFailed: 0 } }))
+    await waitFor(() => expect(screen.getByTestId('no-users-mapped')).toBeTruthy())
+    expect(screen.queryByTestId('who')).toBeNull()
+    expect((screen.getByTestId('migrate-start') as HTMLButtonElement).disabled).toBe(true)
+  })
+
   it('says plainly when there are no failures', async () => {
     show(detail({ failures: [], failedUsers: [], users: [],
                   progress: { users: 5, done: 5, running: 0, failed: 0,

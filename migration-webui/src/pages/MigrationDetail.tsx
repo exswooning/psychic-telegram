@@ -123,6 +123,7 @@ export const MigrationDetail: React.FC = () => {
   const [repairError, setRepairError] = useState<string | null>(null)
 
   const id = Number(accountId)
+  const mapped = d?.users?.length || d?.progress?.users || 0
 
   const refresh = useCallback(() => {
     if (!Number.isFinite(id)) return
@@ -269,7 +270,8 @@ export const MigrationDetail: React.FC = () => {
             <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 1 }}>
               <Typography variant="subtitle1" sx={{ fontWeight: 700, flexGrow: 1 }}>Migrate users</Typography>
               <Button variant="contained" size="small" data-testid="migrate-start"
-                      disabled={(d.writing ?? d.running) || (who === 'some' && picked.length === 0)}
+                      disabled={(d.writing ?? d.running) || (who === 'some' && picked.length === 0)
+                        || mapped === 0}
                       onClick={() => {
                         // Chosen users get no DMS afterwards, so split would leave their
                         // mail waiting: this tool moves all of it unless changed below.
@@ -279,9 +281,16 @@ export const MigrationDetail: React.FC = () => {
                 {(d.writing ?? d.running) ? 'migration running'
                   : who === 'some'
                     ? `Migrate ${picked.length} chosen user${picked.length === 1 ? '' : 's'}…`
-                    : `Migrate all ${(d.users?.length ?? d.progress?.users ?? 0).toLocaleString()} users…`}
+                    : `Migrate all ${mapped.toLocaleString()} users…`}
               </Button>
             </Stack>
+              {!(d.writing ?? d.running) && mapped === 0 ? (
+                <Alert severity="warning" data-testid="no-users-mapped"
+                       action={<Button size="small" onClick={() => navigate(`/identities?account=${accountId}`)}>Open Identities</Button>}>
+                  No users are mapped for this pair yet. Each migration has its own ledger, so users
+                  mapped for another target do not carry over. Build the identity map on Identities first.
+                </Alert>
+              ) : (
               <Box data-testid="who">
                 <Typography variant="subtitle2" sx={{ fontWeight: 700, mb: 0.5 }}>
                   Who to migrate?
@@ -292,7 +301,7 @@ export const MigrationDetail: React.FC = () => {
                   if (v === 'some') setMailBy('engine')
                 }}>
                   <FormControlLabel value="all" control={<Radio size="small" />} data-testid="who-all"
-                    label={<Typography variant="body2"><strong>All {(d?.users?.length ?? d?.progress?.users ?? 0).toLocaleString()} users</strong> — anyone already finished is skipped.</Typography>} />
+                    label={<Typography variant="body2"><strong>All {mapped.toLocaleString()} users</strong> — anyone already finished is skipped.</Typography>} />
                   <FormControlLabel value="some" control={<Radio size="small" />} data-testid="who-some"
                     label={<Typography variant="body2"><strong>Only the users I choose</strong></Typography>} />
                 </RadioGroup>
@@ -352,6 +361,7 @@ export const MigrationDetail: React.FC = () => {
                   )
                 })()}
               </Box>
+              )}
           </Paper>
 
           {/* What the last quick migration found when it checked its own work. Fetched
@@ -905,7 +915,7 @@ export const MigrationDetail: React.FC = () => {
               <strong>Who:</strong>{' '}
               {who === 'some'
                 ? `${picked.length} chosen user${picked.length === 1 ? '' : 's'}: ${picked.slice(0, 5).join(', ')}${picked.length > 5 ? ` and ${picked.length - 5} more` : ''}`
-                : `all ${(d?.users?.length ?? d?.progress?.users ?? 0).toLocaleString()} users`}.
+                : `all ${mapped.toLocaleString()} users`}.
               {' '}Change it in the Migrate users card on the page.
             </Typography>
             Copies what is not migrated yet; anything already done is skipped, so it is safe
