@@ -50,7 +50,7 @@ is the live work list. Tick items here (`[x]` + date + commit) as you finish the
   — Docs and Slides rebuilt by the read-only route. Only a server-side copy fixes it.
 
 - **Box setting (2026-10-25):** `/etc/systemd/system/bitport-api.service.d/speed.conf` sets
-  `FIRST_PASS_ACCEPTANCE=false`, so runs copy at full speed (the per-user check held each worker
+  `FIRST_PASS_ACCEPTANCE=false` and `MAIL_WORKERS=8` (8 messages at once per mailbox; was 2 under memory pressure), so runs copy at full speed (the per-user check held each worker
   for hours at ~3 files/min). The One-to-one checks every item after the run. Replace it with a
   per-run tick-box in the Migrate dialog ("Check each user as it finishes", item C) and then
   delete the drop-in.
