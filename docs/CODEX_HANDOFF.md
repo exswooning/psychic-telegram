@@ -73,6 +73,14 @@ is the live work list. Tick items here (`[x]` + date + commit) as you finish the
       Google-made "Copy of" Forms already on dharan (from an exact-copy run on 10-19);
       info@s.'s 426 test files.
 
+### A2. Scheduled for 2026-10-30 (operator: not before)
+- [ ] 2 x "Untitled video" (finance@dharan.gov.np): "no API rebuild for application/vnd…" -- a Google Vids
+      file has no copy or export route; find one (server-side copy if the safety test allows it) or keep it
+      listed under "Bitport can't move these" with what to do by hand.
+- [ ] suchanaadhikari@ and ward1@ failed: "drive: failed -- Full source/destination ID coverage is
+      incomplete; findings scheduled for repair". Read their open findings (One-to-one), name each kind,
+      fix, re-walk.
+
 ### B. Server-side copy safety test (decides the rebuilt Docs/Slides)
 Built and deployed (`copy_safety.py`, card on Migration detail, `POST /api/v2/copy-safety/start`).
 - [ ] Admin → Accounts → create account 8 "mdharan.com → s.sarafgloabalexim.com" (UI), then
