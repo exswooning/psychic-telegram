@@ -324,6 +324,7 @@ def run_full_setup(
     """
     if side not in ("source", "target"):
         raise ValueError("side must be 'source' or 'target'")
+    dwd_helper.BILLING_NOTICES.clear()
 
     # The 2-Step prompt, if one is on screen right now. Held here rather
     # than passed through _progress's callers: the sign-in that raises it is
@@ -343,7 +344,8 @@ def run_full_setup(
             with open(tmp, "w", encoding="utf-8") as fh:
                 json.dump({"pct": pct, "label": label,
                            "challenge": _challenge["text"],
-                           "handoff": _handoff["v"]}, fh)
+                           "handoff": _handoff["v"],
+                           "notices": dwd_helper.BILLING_NOTICES}, fh)
             os.replace(tmp, progress_file)
         except OSError:
             pass
@@ -359,6 +361,11 @@ def run_full_setup(
         _progress(_last_pct["v"], _last_label["v"])
 
     signin_challenge.REPORTER = _on_challenge
+
+    def _on_billing_notice(_notice: dict) -> None:
+        _progress(_last_pct["v"], _last_label["v"])
+
+    dwd_helper.BILLING_NOTICE_REPORTER = _on_billing_notice
 
     def _on_handoff(h: dict | None) -> None:
         """Google keeps challenging the server's browser (live: it asked it for a phone
@@ -890,10 +897,13 @@ def run_full_setup(
         # the one and only verification gate now; this call only ever needs
         # to know whether Authorize was accepted.
         crash_detail = None
+        console_blocker = None
         try:
             # Already challenged once on this server: straight to the device.
             rc = 1 if _handoff["used"] else dwd_helper.run(client_id, scopes, timeout,
                                                            headful=True)
+        except dwd_helper.AdminConsoleBlocked as exc:
+            rc, console_blocker = 1, exc.as_dict()
         except Exception as exc:      # noqa: BLE001
             rc, crash_detail = None, str(exc)[:200]
         finally:
@@ -905,6 +915,15 @@ def run_full_setup(
                 else:
                     os.environ[var] = val
         admin_password = None  # noqa: F841 - drop the only local reference
+
+        if console_blocker is not None:
+            # Billing requires an operator decision. Do not hide it behind another
+            # 30-minute delegation handoff or report a generic password/2FA error.
+            p.status, p.detail = "blocked", console_blocker["detail"]
+            _progress(80, "Action required: review Google's subscription notice")
+            return {"side": side, "domain": domain, "ok": False,
+                    "phases": [x.as_dict() for x in phases], "clientId": client_id,
+                    "actionRequired": console_blocker}
 
         # A failed grant attempt is not automatically a failed setup.
         #
@@ -1286,6 +1305,9 @@ def main(argv: list[str] | None = None) -> int:
         scopes_override=[s for s in args.scopes.split(",") if s.strip()]
         or None)
     password = None  # noqa: F841
+
+    if dwd_helper.BILLING_NOTICES:
+        result["notices"] = list(dwd_helper.BILLING_NOTICES)
 
     if args.json:
         print(json.dumps(result, indent=2))

@@ -2441,10 +2441,18 @@ def cmd_mirror(args, settings: Settings, db: MigrationDB, auth: AuthManager) -> 
             print("MIRROR " + json.dumps({"decision": args.decide, **out}), flush=True)
             return 0
         cfg = ms.get_settings(aid)
+        import background_delta as bg
+        background = bg.config(aid)
+        if background.get("background"):
+            bg.install(settings)
         out = mirror.Cycle(auth, db, settings, deletion_mode=cfg["deletion_mode"],
                            cap_pct=cfg["cap_pct"], deletions_paused=cfg["deletions_paused"],
                            on_hold=lambda n, cap: ms.hold_deletions(aid, n, cap),
-                           only=cfg.get("users")).run()
+                           only=cfg.get("users"),
+                           workers=1 if background.get("background") else None,
+                           check_users=not background.get("background")).run()
+        if background.get("background"):
+            bg.finish(aid, db, out, getattr(settings, "_follow_observation", None))
     print("MIRROR " + json.dumps({k: out.get(k) for k in (
         "status", "cycle", "seconds", "calls", "counts", "deletions", "conflicts")}), flush=True)
     for line in out.get("errors") or []:
@@ -3095,8 +3103,21 @@ def _claim_ledger(settings) -> None:
     mirror is switched off, since it follows the old pair's users."""
     import db as ledger
     try:
-        archived = ledger.claim_for_pair(settings.db_path, settings.source_domain,
-                                         settings.target_domain)
+        if getattr(settings, "account_id", None) is not None and not hasattr(settings, "_follow_ledger_pair"):
+            import control_plane_db as cpdb
+            import sqlite3
+            with cpdb.ro() as c:
+                exists = c.execute("SELECT 1 FROM sqlite_master WHERE name='tenant_follow_bindings' AND type='table'").fetchone()
+                pinned = c.execute("SELECT ledger_source,ledger_target FROM tenant_follow_bindings WHERE account_id=? AND side='source'",
+                    (settings.account_id,)).fetchone() if exists else None
+            if pinned:
+                expected = (pinned[0], pinned[1])
+                with sqlite3.connect(f"file:{settings.db_path}?mode=ro", uri=True) as c:
+                    current = ledger._ledger_pair_of(c)
+                if current != expected or (settings.source_domain, settings.target_domain) != expected:
+                    raise ValueError("This ledger has pinned tenant identities. Use the verified handover workflow; changing domain strings must not archive its mappings.")
+        pair = getattr(settings, "_follow_ledger_pair", (settings.source_domain, settings.target_domain))
+        archived = ledger.claim_for_pair(settings.db_path, *pair)
     except Exception as exc:      # noqa: BLE001 - a ledger we cannot judge is refused, not guessed at
         print(f"LEDGER CHECK FAILED: {exc}", flush=True)
         raise SystemExit(2)
@@ -3139,8 +3160,27 @@ def main(argv: list[str] | None = None) -> int:
         log.warning("DRY RUN — no writes will be made to %s",
                     settings.target_domain)
 
+    if args.command == "mirror" and not args.decide:
+        import background_delta as bg
+        cfg = bg.config(settings.account_id)
+        if cfg.get("background"):
+            bg.install(settings)
+        if cfg.get("follow_domains"):
+            try:
+                import tenant_follow
+                tenant_follow.prepare(settings, cfg["recovery_admins"])
+            except bg.Deferred as exc:
+                bg.state(settings.account_id, "WAITING", str(exc))
+                return STOPPED_RC
+            except Exception as exc:
+                bg.state(settings.account_id, "BLOCKED", str(exc))
+                log.error("Domain-following delta refused before opening its ledger: %s", exc)
+                return 2
     _claim_ledger(settings)
     db = MigrationDB(settings.db_path)
+    if hasattr(settings, "_follow_subjects"):
+        from tenant_follow import FollowingLedger
+        db = FollowingLedger(db, settings._follow_subjects)
     auth = AuthManager(settings)
 
     try:

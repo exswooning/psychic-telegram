@@ -898,6 +898,24 @@ const QuickTenantSetup: React.FC<{
           back. */}
       <MfaBanner challenge={status?.challenge} />
       <DeviceHandoff side={side} handoff={status?.handoff} />
+      {(status?.running || resultHere) && (status?.notices ?? result?.notices ?? []).map((notice) => (
+        <Alert key={notice.observedAt} severity="warning" sx={{ mb: 2 }}
+               data-testid={`qts-${side}-billing-notice`}>
+          <Typography variant="body2" sx={{ fontWeight: 600 }}>
+            {notice.daysRemaining === null ? 'Google subscription reminder'
+              : `${notice.daysRemaining} ${notice.daysRemaining === 1 ? 'day' : 'days'} remaining — reported by Google`}
+          </Typography>
+          <Typography variant="body2">{notice.message}</Typography>
+          <Typography variant="body2" sx={{ mt: 0.5 }}>
+            {notice.continued ? 'Reminder postponed. Setup continued; billing still needs attention.'
+              : status?.running ? 'Checking whether Google offers an option to do this later.'
+              : 'The reminder could not be postponed automatically. Review it in Google Admin.'}
+          </Typography>
+          <Typography variant="caption" color="text.secondary">
+            Observed {new Date(notice.observedAt).toLocaleString()}
+          </Typography>
+        </Alert>
+      ))}
 
       {/* No narration: full_setup.py's own step text ("signing in to
           Google Cloud as ...") used to render here verbatim. The bar and
@@ -1289,10 +1307,30 @@ const QuickTenantSetup: React.FC<{
         <Box sx={{ mt: 2 }}>
           <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 0.5 }}>
             <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>Result</Typography>
-            <Chip size="small" label={result.ok ? 'ok' : result.interrupted ? 'interrupted' : 'failed'}
-                  color={result.ok ? 'success' : result.interrupted ? 'warning' : 'error'}
+            <Chip size="small" label={result.ok ? 'ok' : result.actionRequired ? 'Action required' : result.interrupted ? 'interrupted' : 'failed'}
+                  color={result.ok ? 'success' : result.actionRequired || result.interrupted ? 'warning' : 'error'}
                   variant={result.ok ? 'outlined' : 'filled'} />
           </Stack>
+          {result.actionRequired && (
+            <Alert severity="warning" sx={{ mb: 1 }} data-testid={`qts-${side}-action-required`}>
+              <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                {result.actionRequired.title}
+              </Typography>
+              <Typography variant="body2" sx={{ my: 1 }}>
+                {result.actionRequired.detail} The existing Cloud project and key are kept.
+              </Typography>
+              {result.actionRequired.kind === 'admin_billing_notice' && (
+                <Typography variant="body2" sx={{ mb: 1 }}>
+                  On retry, Bitport can select “Do this later” for a payment reminder
+                  and continue setup. Google's reported days remaining stay visible.
+                </Typography>
+              )}
+              <Button size="small" variant="outlined" href="https://admin.google.com/"
+                      target="_blank" rel="noopener noreferrer" startIcon={<OpenIcon />}>
+                Review in Google Admin
+              </Button>
+            </Alert>
+          )}
           {result.error && (
             <Alert severity={result.interrupted ? 'warning' : 'error'} sx={{ mb: 1 }}>
               {result.error}

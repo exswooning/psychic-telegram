@@ -64,7 +64,7 @@ export const QuickVerification: React.FC<{
         {t.differences > 0 && ` ${t.differences} differ.`}
         {t.missing > 0 && ` ${t.missing} missing on the target.`}
         {t.duplicates > 0 && ` ${t.duplicates} copied twice.`}
-        {t.notCopied > 0 && ` ${t.notCopied} failed to copy.`}
+        {t.notCopied > 0 && ` ${t.notCopied} unresolved copy or access findings.`}
         {t.errors > 0 && ` ${t.errors} check(s) could not be made.`}
         {t.extras > 0 && ` ${t.extras} other item(s) on the target that this migration did not create.`}
       </Typography>

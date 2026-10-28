@@ -644,9 +644,15 @@ export const enableApis = (reason: string) =>
 
 // -- Full setup: one tenant, one call ------------------------------------------
 export interface FullSetupPhase { name: string; status: string; detail: string }
+export interface SetupBillingNotice {
+  kind: 'billing_grace'; daysRemaining: number | null; suspensionDate: string | null
+  message: string; observedAt: string; continued: boolean
+}
 export interface FullSetupResult {
   side: string; ok: boolean; phases: FullSetupPhase[]
   clientId?: string; missingScopes?: string[]
+  actionRequired?: { kind: string; title: string; detail: string; url: string }
+  notices?: SetupBillingNotice[]
   /** Set when the run never got to report phases -- e.g. a restart killed it
    *  (interrupted). Without it the result rendered as a bare "failed". */
   error?: string; interrupted?: boolean
@@ -655,6 +661,7 @@ export interface FullSetupResult {
 }
 export interface FullSetupStatus {
   running: boolean; result: FullSetupResult | null
+  notices?: SetupBillingNotice[]
   /** Live progress while running -- null before the first checkpoint, and
    * whenever nothing is currently running (see api_server.py's
    * full_setup_status: a finished/crashed run's last checkpoint would
@@ -1800,6 +1807,20 @@ export const quickReportUrl = (accountId?: number) =>
 
 /* One-to-one check: each user compared against both tenants as they finish (verify_sample.py). */
 export type OneToOneVerdict = 'IDENTICAL' | 'DIFFERENCES' | 'INCOMPLETE' | 'NOT_VERIFIED'
+export interface RetainedCopyResolution {
+  source: string
+  target: string
+  state: 'COPY_EXISTS' | 'COPY_MISSING' | 'COPY_NOT_VERIFIED'
+  label: string
+  name?: string
+  targetUrl?: string
+  checkedAt: string
+  contentState: string
+  contentScope: string
+  sharingResolved: false
+  authorizationResolved: false
+  note?: string
+}
 export interface OneToOneService {
   service: string
   itemVerdict?: OneToOneVerdict
@@ -1822,7 +1843,8 @@ export interface OneToOneService {
   differences?: Array<{ item?: string; path?: string; diffs?: string[] }>
   missing?: Array<{ name?: string; why?: string }>
   duplicates?: Array<{ name?: string; messageId?: string; path?: string }>
-  notCopied?: Array<{ id?: string; error?: string }>
+  notCopied?: Array<{ id?: string; error?: string; type?: string; target?: string; copyResolution?: RetainedCopyResolution }>
+  copyResolutions?: RetainedCopyResolution[] | null
   errors?: string[]
   notes?: string[]
 }
@@ -2038,6 +2060,14 @@ export interface MirrorView {
   conflicts?: MirrorConflict[]
   conflictCount?: number
   cannotMirror?: string[]
+  backgroundFollowup?: {
+    background: boolean
+    follow_domains: boolean
+    recovery_admins: { source?: string[]; target?: string[] }
+    state?: string
+    detail?: string | null
+    observation?: { sourceDomain: string; targetDomain: string; handover: boolean } | null
+  }
 }
 export const fetchMirror = (accountId?: number) =>
   cpFetch<MirrorView>(`/api/v2/mirror${accountId ? `?account_id=${accountId}` : ''}`)
@@ -2045,13 +2075,15 @@ export const fetchMirror = (accountId?: number) =>
 export const saveMirrorSettings = (
   reason: string,
   s: { enabled: boolean; intervalMin: number; deletionMode: MirrorDeletionMode; capPct: number;
-       users?: string[] | null },
+       users?: string[] | null; background?: boolean; followDomains?: boolean;
+       sourceRecoveryAdmins?: string[]; targetRecoveryAdmins?: string[] },
   accountId?: number,
 ) => cpFetch<ActionResult>('/api/v2/mirror/settings', {
   method: 'PUT',
   body: JSON.stringify({ reason, account_id: accountId ?? null, enabled: s.enabled,
     interval_min: s.intervalMin, deletion_mode: s.deletionMode, cap_pct: s.capPct,
-    users: s.users ?? null }),
+    users: s.users ?? null, background: s.background, follow_domains: s.followDomains,
+    source_recovery_admins: s.sourceRecoveryAdmins, target_recovery_admins: s.targetRecoveryAdmins }),
 })
 
 /** A migration a mirror can follow: a launch that started, with the users it chose. */

@@ -248,7 +248,9 @@ class Scheduler:
                              "the source are not reaching the target. Newest: "
                              + "; ".join(str(e)[:300] for e in errs[:3])))
             day = datetime.fromtimestamp(now, timezone.utc)
-            if day.hour == NIGHTLY_TALLY_HOUR_UTC and s["last_tally_on"] != day.date().isoformat():
+            import background_delta
+            if (not background_delta.config(aid).get("background") and
+                    day.hour == NIGHTLY_TALLY_HOUR_UTC and s["last_tally_on"] != day.date().isoformat()):
                 ok, _d = self.start_tally(aid)
                 if ok:
                     _mark(aid, "last_tally_on", day.date().isoformat())

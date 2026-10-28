@@ -1185,17 +1185,26 @@ class DriveMigrator:
         file has no parent inside the user's own tree, so there is no source
         hierarchy to mirror.
         """
-        q = "sharedWithMe = true and trashed = false"
+        # Public/link-accessible files can be visible to the user without
+        # sharedWithMe=true. The coverage inventory includes these too.
+        q = "not 'me' in owners and trashed = false"
         token = None
         while True:
             resp = self._retry(lambda t=token: self.src.files().list(
                 q=q, pageSize=LIST_PAGE_SIZE, pageToken=t,
-                fields=f"nextPageToken, files({ITEM_FIELDS},owners)",
+                fields=f"nextPageToken, files({ITEM_FIELDS},owners,driveId)",
                 spaces="drive", supportsAllDrives=True,
             ).execute(), label="drive.files.list.sharedWithMe", write=False,
                                tenant="source")
             for f in resp.get("files", []):
                 if self._owned_by_source_org(f):
+                    continue
+                # A server-side copy remains readable by its source caller.
+                # Never feed our target copies back into this broader walk.
+                target_domain = (self.settings.target_domain or "").lower()
+                if f.get("driveId") or any(
+                        (o.get("emailAddress") or "").lower().endswith("@" + target_domain)
+                        for o in f.get("owners") or []):
                     continue
                 self._sync_shared_item(f, tgt_root, depth=1)
             token = resp.get("nextPageToken")
@@ -2526,6 +2535,8 @@ class DriveMigrator:
         import link_rewrite
         fixed = 0
         for item, tgt_id, export_mime in self._pending_link_rewrites:
+            if getattr(self.settings, "_background_delta", False) and shutdown_requested():
+                return
             try:
                 path, _size = self._download_via(
                     lambda: self.src.files().export_media(
@@ -2589,6 +2600,8 @@ class DriveMigrator:
             _native_project_limiter(kind, op).acquire()
 
         def one(pending) -> int:
+            if getattr(self.settings, "_background_delta", False) and shutdown_requested():
+                return 0  # Keep its durable links_pass marker for the next cycle.
             item, tgt_id = pending
             kind = _NATIVE_KIND[item["mimeType"]]
             try:
@@ -2735,6 +2748,8 @@ class DriveMigrator:
 
     def _fixup_shortcuts(self) -> None:
         for item, tgt_parent in self._pending_shortcuts:
+            if getattr(self.settings, "_background_delta", False) and shutdown_requested():
+                return
             target_id = (item.get("shortcutDetails") or {}).get("targetId")
             # This user's own copy first; else whoever's copy exists. A shortcut usually
             # points at a colleague's file -- live, dharan: ward7 and info@ each had one

@@ -2945,6 +2945,11 @@ def _mirror_busy(account_id: int | None) -> bool:
     """A mirror job running or queued for this pair. The cycle refuses to overlap
     itself anyway; this is what stops asking for one that would only be refused."""
     try:
+        import background_delta
+        if background_delta.config(account_id).get("background"):
+            why = background_delta.waiting_reason(account_id)
+            if why:
+                return True
         # A migration or delta of the same pair is writing to the same items: a cycle
         # waits for it rather than racing it.
         if any(r["account_id"] == account_id and r["job_name"] in ("mirror", "migrate", "delta")
@@ -2957,12 +2962,32 @@ def _mirror_busy(account_id: int | None) -> bool:
 
 
 def _start_mirror(account_id: int | None, decide: str | None = None) -> tuple[bool, str]:
+    import background_delta
+    if background_delta.config(account_id).get("background") and not decide:
+        why = background_delta.waiting_reason(account_id)
+        if why:
+            background_delta.state(account_id, "OFF" if "switched off" in why else "WAITING", why)
+            return False, why
     if _mirror_busy(account_id):
         return False, ("a mirror cycle, a migration or a delta of this pair is already running "
                        "or queued -- a cycle waits for it rather than racing it")
     argv = [PY, "main.py"] + _account_argv(account_id) + ["mirror"]
     if decide:
         argv += ["--decide", decide]
+    if background_delta.config(account_id).get("background") and not decide:
+        why = background_delta.waiting_reason(account_id)
+        if why:
+            background_delta.state(account_id, "WAITING", why)
+            return False, why
+        admitted, detail = job_admission.try_admit(account_id, "mirror")
+        if not admitted:
+            return False, detail  # Background work never occupies a foreground queue place.
+        try:
+            return _start_admitted(argv, account_id, "mirror", dict(os.environ,
+                USER_WORKERS="1", DRIVE_FILE_WORKERS="1", MIGRATE_PROCESSES="1"))
+        except Exception:
+            job_admission.release(account_id, "mirror")
+            raise
     return _run_admitted(argv, account_id, "mirror")
 
 
@@ -2980,6 +3005,7 @@ def _mirror_view(account_id: int) -> dict:
     from config import Settings
     st = Settings(account_id=account_id)
     cfg = ms.get_settings(account_id)
+    import background_delta
     out: dict = {
         "accountId": account_id, "sourceDomain": st.source_domain, "targetDomain": st.target_domain,
         "settings": {"enabled": cfg["enabled"], "intervalMin": cfg["interval_min"],
@@ -2988,11 +3014,17 @@ def _mirror_view(account_id: int) -> dict:
                      "updatedBy": cfg["updated_by"], "updatedAt": cfg["updated_at"],
                      "users": cfg.get("users")},
         "minIntervalMin": ms.MIN_INTERVAL_MIN, "lagIntervals": ms.LAG_INTERVALS,
-        "running": _mirror_busy(account_id), "cycles": [], "lastCycle": None,
+        "running": any(r['account_id'] == account_id and r['job_name'] == 'mirror'
+                       for r in job_admission.list_active()), "cycles": [], "lastCycle": None,
         "lastGoodAt": None, "lagSeconds": None, "behind": None,
         "waiting": {"retry": 0, "held": 0}, "held": [], "conflicts": [], "conflictCount": 0,
         "cannotMirror": mirror.CANNOT_MIRROR,
+        "backgroundFollowup": background_delta.config(account_id),
     }
+    if cfg['enabled'] and out['backgroundFollowup'].get('background'):
+        why = background_delta.waiting_reason(account_id)
+        if why and not out['running']:
+            out['backgroundFollowup'].update(state='WAITING', detail=why)
     path = _ledger_path(account_id)
     if not os.path.isfile(path):
         return out
@@ -3052,6 +3084,10 @@ class MirrorSettingsBody(WriteAction):
     cap_pct: float = Field(gt=0, le=100)
     # One migration's users, or None for every user a migration finished.
     users: list[str] | None = None
+    background: bool | None = None
+    follow_domains: bool | None = None
+    source_recovery_admins: list[str] | None = Field(default=None, max_length=3)
+    target_recovery_admins: list[str] | None = Field(default=None, max_length=3)
 
 
 class MirrorAccount(WriteAction):
@@ -3110,10 +3146,30 @@ async def mirror_settings(body: MirrorSettingsBody, op: Operator = Depends(opera
 
     def go() -> tuple[bool, str]:
         try:
+            import background_delta as bg
+            prior = bg.config(account_id)
+            background = body.background if body.background is not None else prior.get('background', False)
+            follow = body.follow_domains if body.follow_domains is not None else prior.get('follow_domains', False)
+            recovery = {"source": body.source_recovery_admins if body.source_recovery_admins is not None else prior.get('recovery_admins', {}).get('source', []),
+                        "target": body.target_recovery_admins if body.target_recovery_admins is not None else prior.get('recovery_admins', {}).get('target', [])}
+            for candidates in recovery.values():
+                if any(e.count('@') != 1 or not all(e.split('@')) or any(ch.isspace() for ch in e) for e in candidates):
+                    raise ValueError("Recovery administrators must be complete email addresses")
+            if follow and not background:
+                raise ValueError("Domain follow-up requires background mode")
+            if follow:
+                from config import Settings
+                import tenant_follow
+                tenant_follow.arm(Settings(account_id=account_id), body.users, recovery)
+            with cpdb.rw() as c:
+                c.execute("INSERT INTO background_deltas(account_id,background,follow_domains,recovery_admins,state,updated_at) VALUES(?,?,?,?,?,?) "
+                    "ON CONFLICT(account_id) DO UPDATE SET background=excluded.background,follow_domains=excluded.follow_domains,recovery_admins=excluded.recovery_admins,state=excluded.state,quiet_since=NULL,completed_at=NULL,updated_at=excluded.updated_at",
+                    (account_id, int(background), int(follow), json.dumps(recovery),
+                     'FOLLOWING' if background and body.enabled else 'OFF', bg.now()))
             saved = ms.save_settings(account_id, enabled=body.enabled, interval_min=body.interval_min,
                                      deletion_mode=body.deletion_mode, cap_pct=body.cap_pct, by=op.name,
                                      users=body.users)
-        except ValueError as exc:
+        except (ValueError, OSError) as exc:
             return False, str(exc)
         return True, ("mirror on, every %d min" % saved["interval_min"]) if saved["enabled"] else "mirror off"
     return await _gated(op, "mirror.settings", body, str(account_id), go)
@@ -4743,6 +4799,7 @@ async def full_setup_status(side: str, account: int | None = None,
             result = {**result, "domain": launched_for}
 
         progress_pct = progress_label = challenge = handoff = None
+        notices = (result or {}).get("notices", [])
         if running:
             # Only meaningful while something is actually running -- once
             # it isn't, this is the last checkpoint a (possibly crashed)
@@ -4759,6 +4816,7 @@ async def full_setup_status(side: str, account: int | None = None,
                 challenge = prog.get("challenge") or None
                 # A sign-in moved to the operator's own device: what to open there.
                 handoff = prog.get("handoff") or None
+                notices = prog.get("notices", [])
             except (OSError, ValueError):
                 pass
         # The run's own transcript (its stderr, truncated at each launch), for the Jobs
@@ -4827,10 +4885,26 @@ async def full_setup_status(side: str, account: int | None = None,
                     "name": f"setup ({side})", "status": "failed",
                     "detail": why[:300],
                 }]}
+        # Older versions waited at a billing notice and eventually reported a
+        # generic timeout/interruption. Keep the interruption, but explain the
+        # observed blocker without rerunning sign-in or changing saved state.
+        if not running and result and not result.get("ok") and not result.get("actionRequired"):
+            try:
+                from dwd_helper import recorded_console_blocker
+                err_path = os.path.join(os.path.dirname(out), f"full-setup-{side}.err")
+                with open(err_path, encoding="utf-8", errors="replace") as fh:
+                    fh.seek(0, os.SEEK_END)
+                    fh.seek(max(0, fh.tell() - 100_000))
+                    previous_lines = fh.read().splitlines()
+                blocked = recorded_console_blocker(previous_lines)
+                if blocked:
+                    result = {**result, "actionRequired": blocked}
+            except (OSError, ValueError):
+                pass
         return {"running": running, "pid": pid, "result": result,
                 "progressPct": progress_pct, "progressLabel": progress_label,
                 "challenge": challenge, "handoff": handoff,
-                "resultAt": result_at, "lines": log_lines}
+                "resultAt": result_at, "lines": log_lines, "notices": notices}
     return await _off_loop(_read)
 
 

@@ -23,7 +23,7 @@ const SERVICE_ORDER = ['gmail', 'drive', 'tasks', 'calendar', 'contacts', 'chat'
 const PARTS = [
   { key: 'differences', label: 'differ' },
   { key: 'missing', label: 'missing' },
-  { key: 'notCopied', label: 'not copied' },
+  { key: 'notCopied', label: 'copy or access findings' },
   { key: 'errors', label: "couldn't check" },
 ] as const
 const n = (x: number) => x.toLocaleString()

@@ -75,11 +75,17 @@ def try_admit(account_id: int | None, job_name: str, pid: int | None = None) -> 
         # every other job for this account, atomically with admission.
         same_account = conn.execute(
             "SELECT job_name FROM active_jobs WHERE account_id IS ?", (account_id,)).fetchall()
-        exclusive = {"verify", "user-profiles", "provision-users"}
+        exclusive = {"verify", "user-profiles", "provision-users", "mirror"}
         if same_account and (job_name in exclusive or any(r[0] in exclusive for r in same_account)):
             conn.rollback()
             return False, "this account has a job running; verification and repairs wait for it"
         count = conn.execute("SELECT COUNT(*) FROM active_jobs").fetchone()[0]
+        if job_name == "mirror":
+            import background_delta
+            if background_delta.config(account_id).get("background") and (
+                    count or conn.execute("SELECT 1 FROM job_queue WHERE status IN ('queued','running') AND job_name!='mirror' LIMIT 1").fetchone()):
+                conn.rollback()
+                return False, "background delta waits for foreground migrations, verification and queued work"
         if count >= MAX_CONCURRENT_TENANT_JOBS:
             conn.rollback()
             return False, ("capacity is full -- another job is already "

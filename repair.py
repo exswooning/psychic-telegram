@@ -217,8 +217,15 @@ def repair_verified_missing_mail(auth, db, settings, report: dict, apply: bool =
     out = {"candidates": 0, "attempted": 0, "mapped": 0, "errors": []}
     for user, services in (report.get("users") or {}).items():
         ids = sorted({i["id"] for i in (services.get("gmail") or {}).get("notCopied", [])
-                      if (i.get("status") == "UNMAPPED_SOURCE" or "Missing Message-ID" in i.get("error", ""))
+                      if (i.get("status") == "UNMAPPED_SOURCE" or "Missing Message-ID" in i.get("error", "")
+                          or "Existing destination Message-ID" in i.get("error", "")
+                          or "Split classification incomplete" in i.get("error", ""))
                       and i.get("type") == "message" and i.get("id")})
+        # Split deliberately owes these to DMS. Recovery must not silently
+        # replace the chosen transport by copying the entire deferred mailbox.
+        from config import DEFERRED_TO_DMS
+        ids = [mid for mid in ids if not (
+            (row := db.get_audit(user, mid, "message")) and row["status"] == DEFERRED_TO_DMS)]
         if not ids:
             continue
         out["candidates"] += len(ids)
@@ -244,7 +251,15 @@ def repair_verified_missing_mail(auth, db, settings, report: dict, apply: bool =
             def one(mid):
                 _stop_check()
                 if not db.get_target_id(user, mid, "message"):
+                    prior = db.get_audit(user, mid, "message")
                     gm._migrate_one_message({"id": mid})
+                    if (prior and "Split classification incomplete" in (prior["error_message"] or "")
+                            and "404" in (prior["error_message"] or "")
+                            and db.get_target_id(user, mid, "message")):
+                        db.log_audit(user, mid, "source_link_reference", "NEEDS_ATTENTION",
+                                     "Source message contained a Drive reference unreadable before recovery. "
+                                     "Available mappings were rewritten; the unavailable original URL was preserved. "
+                                     "Target message content can match without establishing access to that source reference.")
                 return bool(db.get_target_id(user, mid, "message"))
             # Bound submissions as well as concurrency; raw attachments stay
             # inside workers, never queued for the entire mailbox.

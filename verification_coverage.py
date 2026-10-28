@@ -47,6 +47,7 @@ def add(v, result, key, label, fn):
 
 def drive(v, result):
     src = v.auth.source_drive(v.src_user)
+    external_items = []
 
     def inventory():
         files = pages(
@@ -58,7 +59,7 @@ def drive(v, result):
                 pageToken=token,
                 includeItemsFromAllDrives=True,
                 supportsAllDrives=True,
-                fields="nextPageToken,files(id,name,mimeType,parents,shortcutDetails,ownedByMe,owners(emailAddress),driveId)",
+                fields="nextPageToken,files(id,name,mimeType,parents,shortcutDetails,ownedByMe,owners(emailAddress),driveId,capabilities(canShare))",
             ),
             "files",
         )
@@ -89,6 +90,8 @@ def drive(v, result):
                 excluded += 1
                 continue
             in_scope.append(file["id"])
+            if carried:
+                external_items.append(file)
             if not carried:
                 owned_items.append(file)
         from migration_checks import accounted_for, drive_decisions
@@ -216,6 +219,23 @@ def drive(v, result):
         )
 
     add(v, result, "drive.inventory", "Source item coverage", inventory)
+    if external_items:
+        from external_sharing import inspect
+
+        def external_permissions():
+            evidence = inspect(v, result, external_items)
+            statuses = {row["status"] for row in evidence["items"]}
+            status = ("INCOMPLETE" if "INCOMPLETE" in statuses else
+                      "DIFFERENCES" if "DIFFERENCES" in statuses else
+                      "NOT_VERIFIED" if evidence["unverified"] or evidence["notChecked"] else
+                      "MATCHED")
+            return check("drive.externalSharing", "External original access and shortcut placement",
+                         status, evidence["compared"],
+                         sum(row["status"] == "MATCHED" for row in evidence["items"]),
+                         "Same original ID, effective user role and capabilities, shortcut placement, and private fallback are checked independently.")
+
+        add(v, result, "drive.externalSharing", "External file sharing inspection",
+            external_permissions)
     result.setdefault("checks", []).append(
         check(
             "drive.items",
@@ -250,13 +270,21 @@ def drive(v, result):
                 for item in result["differences"]
             )
             else "NOT_VERIFIED"
-            if sharing.get("notReproduced")
+            if sharing.get("notReproduced") or result.get("not_owner") or (
+                result.get("carriedIn") and (
+                    not result.get("externalSharing")
+                    or result["externalSharing"].get("unverified")
+                    or result["externalSharing"].get("notChecked")))
             else "MATCHED"
             if sharing.get("filesCompared", 0)
             else "NOT_VERIFIED",
             sharing.get("filesCompared", 0),
             sharing.get("matched", 0),
-            f"{sharing.get('matched', 0)} grants matched; {sharing.get('notReproduced', 0)} deliberately skipped grants are not certified.",
+            f"{sharing.get('matched', 0)} grants matched; {sharing.get('notReproduced', 0)} deliberately skipped grants "
+            f"and permissions on {result.get('not_owner', 0)} unreadable source items and "
+            f"{(result.get('externalSharing') or {}).get('matched', 0)} external originals have equivalent access and verified shortcuts; "
+            f"{(result.get('externalSharing') or {}).get('unverified', result.get('carriedIn', 0))} remain unverified. "
+            "External originals keep their owners and collaborators; retained private copies are content fallbacks.",
         )
     )
     native_checked=sum(bool(e.get("nativeFeaturesChecked")) for e in v.evidence if e.get("service")=="drive")
@@ -738,18 +766,6 @@ def chat(v):
             result["identical"] += 1
     if not spaces:
         result["emptySource"] = True
-    for key, label in [
-        ("members", "Chat membership and roles"),
-        ("attachments", "Chat attachments"),
-        ("reactions", "Chat reactions"),
-        ("threads", "Chat authors and thread structure"),
-    ]:
-        result.setdefault("checks", []).append(
-            check(
-                "chat." + key,
-                label,
-                "EMPTY" if result.get("emptySource") else "NOT_VERIFIED",
-                note="Full feature comparison is not implemented; text equality cannot clear this scope.",
-            )
-        )
+    from chat_coverage import add_checks
+    add_checks(v, result, src, tgt, spaces)
     return result

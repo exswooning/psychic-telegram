@@ -346,6 +346,13 @@ class Cycle:
             # the same file, the only one. Its source vanishing is the move, not a delete.
             return
         with self._lock:
+            if getattr(self.settings, "_background_delta", False):
+                with self.db.write() as conn:
+                    old = conn.execute("SELECT id FROM mirror_deletions WHERE source_user=? AND service=? AND item_id=? AND target_id=? AND status IN ('proposed','awaiting') LIMIT 1",
+                        (d["source_user"], d["service"], d["item_id"], d["target_id"])).fetchone()
+                d["_deletion_id"] = old[0] if old else self.db.mirror_record_deletion(self.cycle_id, d, "proposed")
+                if any(p.get("_deletion_id") == d["_deletion_id"] for p in self.proposed):
+                    return
             self.proposed.append(d)
 
     def conflict(self, source_user: str, service: str, item_id: str,
@@ -355,6 +362,18 @@ class Cycle:
         self.db.mirror_conflict(self.cycle_id, source_user, service, item_id, target_id,
                                 name, detail)
         self.count(service, "conflict")
+
+    def cancel_proposal(self, user, service, item_id):
+        """A later restore must cancel an interrupted cycle's durable proposal too."""
+        with self._lock:
+            keep = []
+            for d in self.proposed:
+                if d["source_user"] == user and d["service"] == service and d["item_id"] == item_id:
+                    if d.get("_deletion_id"):
+                        self.db.set_mirror_deletion(d["_deletion_id"], "kept", "Source item restored before deletion was applied")
+                else:
+                    keep.append(d)
+            self.proposed = keep
 
     # -- the run ----------------------------------------------------------------------
     def run(self) -> dict:
@@ -373,12 +392,22 @@ class Cycle:
                     if r["entity_type"] == "user" and r["status"] == "DONE"
                     and (self.only is None or r["source_email"].lower() in self.only)]
             pairs = [(r["source_email"], r["target_email"]) for r in rows]
+            subjects = getattr(self.settings, "_follow_subjects", None)
+            if subjects is not None and any(("source", s.lower()) not in subjects or
+                    ("target", t.lower()) not in subjects for s, t in pairs):
+                raise RuntimeError("The selected users differ from the pinned handover scope; review bindings before copying")
+            if subjects is not None:
+                pairs = [(s, subjects[("target", t.lower())]) for s, t in pairs]
             # A service is mirrored only for a user the ledger shows it done for. DONE
             # alone is not enough: a ledger reset of Drive leaves a user DONE on the
             # strength of contacts, tasks and chat, and mirroring their Drive would
             # copy all of it again as "new".
             self.done = {r["source_email"]: set(filter(None, (r["services_done"] or "").split(",")))
                          for r in rows}
+            if getattr(self.settings, "_background_delta", False):
+                for d in self.db.mirror_deletions("proposed"):
+                    if d["source_user"] in self.done:
+                        self.proposed.append({**d, "_deletion_id": d["id"]})
             if self.check_users:
                 self._check_users(pairs)
             self._each(pairs, self._drive_user, "Drive")
@@ -392,7 +421,8 @@ class Cycle:
             status = "failed"
             self.error("cycle", exc)
         if shutdown_requested():
-            status = "stopped"
+            import background_delta
+            status = "yielded" if background_delta.yield_reason() else "stopped"
         elif status == "ok" and self.errors:
             status = "partial"
         totals: dict = defaultdict(int)
@@ -527,7 +557,8 @@ class Cycle:
         DriveSync(self, dm, key_user=src, target_user=tgt, service="drive", owner=src).run()
 
     def _shared_drives(self) -> None:
-        admin, tadmin = self.settings.source_admin, self.settings.target_admin
+        logical = getattr(self.settings, "_follow_logical_admins", {})
+        admin, tadmin = logical.get("source", self.settings.source_admin), logical.get("target", self.settings.target_admin)
         if not admin or not tadmin:
             return
         mapped = self.db.mapped_ids(admin, ("shared_drive",))
@@ -539,7 +570,7 @@ class Cycle:
         mig = SharedDriveMigrator(self.auth, self.db, self.settings, admin, tadmin)
         try:
             for d in mig.list_source_drives(all_drives=True):
-                if d["id"] not in mapped and not shutdown_requested():
+                if d["id"] not in mapped and not shutdown_requested() and not getattr(self.settings, "_background_delta", False):
                     mig._safe_migrate_one(d)
                     self.count("drive", "new_shared_drive")
         except Exception as exc:      # noqa: BLE001
@@ -586,11 +617,14 @@ class Cycle:
         gm.run(delta=False, drive_in_scope=self.db.has_drive_mappings())
         self.count("gmail", "new", max(0, len(self.db.mapped_ids(src, ("message",))) - len(before)))
         self._gmail_drafts(gm, src)
-        self.db.set_mirror_marker(src, "gmail", hid)
+        if not shutdown_requested():
+            self.db.set_mirror_marker(src, "gmail", hid)
 
     def _gmail_history(self, gm, src: str, tgt: str, marker: str) -> None:
         records, token, newest = [], None, marker
         while True:
+            if shutdown_requested():
+                return
             resp = _call(lambda t=token: gm.src.users().history().list(
                 userId="me", startHistoryId=marker, pageToken=t, maxResults=500,
                 historyTypes=["messageAdded", "messageDeleted", "labelAdded", "labelRemoved"],
@@ -615,6 +649,8 @@ class Cycle:
                 gm._migrate_one_message({"id": m["id"]})
                 if self.db.get_target_id(src, m["id"], "message"):
                     self.count("gmail", "new")
+                else:
+                    raise RuntimeError("Changed message has no confirmed target mapping; history cursor retained")
             for kind, add in (("labelsAdded", True), ("labelsRemoved", False)):
                 for e in r.get(kind, []):
                     self._gmail_labels(gm, src, tgt, e["message"]["id"], e.get("labelIds") or [], add)
@@ -641,9 +677,7 @@ class Cycle:
             if not add:
                 # Trashed and restored within one cycle: the deletion queued for the end
                 # of the cycle would otherwise bin the copy AFTER this untrash.
-                with self._lock:
-                    self.proposed = [d for d in self.proposed if not (
-                        d["service"] == "gmail" and d["item_id"] == mid)]
+                self.cancel_proposal(src, "gmail", mid)
                 _call(lambda: gm.tgt.users().messages().untrash(userId="me", id=tid).execute())
                 self.count("gmail", "restored")
         mapped = gm._map_label_ids(labels)
@@ -750,6 +784,7 @@ class Cycle:
                              item_type="event", item_id=key, target_id=tid,
                              container=tgt_cal, name=item.get("summary"))
             return
+        self.cancel_proposal(src, "calendar", key)
         if tid and fresh and not item.get("recurringEventId"):
             # The feed says it changed: update in place, whatever the ledger's own
             # staleness stamp says (events copied before it existed have none).
@@ -792,7 +827,11 @@ class Cycle:
                 kw["syncToken"] = marker
             resp = _call(lambda k=kw: cm.src.people().connections().list(**k).execute())
             for person in resp.get("connections", []):
+                if shutdown_requested():
+                    return None
                 rid = person.get("resourceName")
+                if not (person.get("metadata") or {}).get("deleted"):
+                    self.cancel_proposal(src, "contacts", rid)
                 seen.add(rid)
                 tid = self.db.get_target_id(src, rid, "contact")
                 if (person.get("metadata") or {}).get("deleted"):
@@ -834,7 +873,8 @@ class Cycle:
         started = _now_iso()
         if marker is None:
             tm.run()
-            self.db.set_mirror_marker(src, "tasks", started)
+            if not shutdown_requested():
+                self.db.set_mirror_marker(src, "tasks", started)
             return
         for tl in tm._iter_lists():
             if shutdown_requested():
@@ -846,6 +886,8 @@ class Cycle:
                 continue
             changed, page = [], None
             while True:
+                if shutdown_requested():
+                    return
                 resp = _call(lambda l=tl["id"], p=page: tm.src.tasks().list(
                     tasklist=l, updatedMin=marker, showDeleted=True, showHidden=True,
                     showCompleted=True, maxResults=100, pageToken=p).execute())
@@ -855,6 +897,8 @@ class Cycle:
                     break
             create = False
             for t in changed:
+                if shutdown_requested():
+                    return
                 tid = self.db.get_target_id(src, t["id"], "task")
                 if t.get("deleted"):
                     if tid:
@@ -868,7 +912,8 @@ class Cycle:
                 before = len(self.db.mapped_ids(src, ("task",)))
                 tm._migrate_tasks(tl["id"], tgt_list)
                 self.count("tasks", "new", len(self.db.mapped_ids(src, ("task",))) - before)
-        self.db.set_mirror_marker(src, "tasks", started)
+        if not shutdown_requested():
+            self.db.set_mirror_marker(src, "tasks", started)
 
     # -- Chat ---------------------------------------------------------------------------
     def _chat_user(self, src: str, tgt: str) -> None:
@@ -888,7 +933,10 @@ class Cycle:
             return
         if self.deletion_mode == "keep":
             for d in props:
-                self.db.mirror_record_deletion(self.cycle_id, d, "kept", "keep mode never deletes")
+                if d.get("_deletion_id"):
+                    self.db.set_mirror_deletion(d["_deletion_id"], "kept", "keep mode never deletes")
+                else:
+                    self.db.mirror_record_deletion(self.cycle_id, d, "kept", "keep mode never deletes")
                 self.count(d["service"], "deletions_kept")
             return
         # Of what this mirror follows: the whole ledger would let a one-user mirror bin
@@ -898,13 +946,18 @@ class Cycle:
             why = ("deletions are paused for this pair" if self.deletions_paused else
                    f"{len(props)} deletions is more than this pair's cap of {cap}")
             for d in props:
-                self.db.mirror_record_deletion(self.cycle_id, d, "awaiting", why)
+                if d.get("_deletion_id"):
+                    self.db.set_mirror_deletion(d["_deletion_id"], "awaiting", why)
+                else:
+                    self.db.mirror_record_deletion(self.cycle_id, d, "awaiting", why)
             self.held = len(props)
             if self.on_hold:
                 self.on_hold(len(props), cap)
             return
         for d in props:
-            did = self.db.mirror_record_deletion(self.cycle_id, d, "proposed")
+            if shutdown_requested():
+                return
+            did = d.get("_deletion_id") or self.db.mirror_record_deletion(self.cycle_id, d, "proposed")
             ok, detail = apply_deletion(self.auth, self.db, d)
             self.db.set_mirror_deletion(did, "applied" if ok else "failed", detail)
             if ok:
@@ -941,6 +994,16 @@ class DriveSync:
         dm._open_file_pool()
         finished = False
         try:
+            if getattr(self.c.settings, "_background_delta", False):
+                from drive_engine import _NATIVE_KIND
+                pending = self.db.conn.execute("SELECT item_id FROM audit_log WHERE source_user=? AND item_type='links_pass' AND status='PENDING'", (self.key,)).fetchall()
+                for row in pending:
+                    if shutdown_requested():
+                        break
+                    item = _call(lambda sid=row[0]: dm.src.files().get(fileId=sid, fields=self._fields(), supportsAllDrives=True).execute())
+                    tid = self.db.get_target_id(self.key, row[0], "file")
+                    if tid and item.get("mimeType") in _NATIVE_KIND:
+                        dm._pending_native.append((item, tid))
             marker = self.db.mirror_marker(self.key, self.service)
             if marker is None:
                 self._rescan(first=True)
@@ -957,11 +1020,18 @@ class DriveSync:
         finally:
             dm._close_file_pool()
             try:
+                if getattr(self.c.settings, "_background_delta", False):
+                    for item, _tid, _mime in dm._pending_link_rewrites:
+                        self.db.mark_links_pending(self.key, item["id"])
                 dm._fixup_shortcuts()
                 dm._rewrite_pending_links()
                 # A server-side copy and a re-imported edit are native: their links are
                 # repointed in place, as the migration does (it was missing here).
                 dm._rewrite_native_links()
+                if getattr(self.c.settings, "_background_delta", False) and shutdown_requested():
+                    for item, _parent in dm._pending_shortcuts:
+                        if not self.db.get_target_id(self.key, item["id"], "shortcut"):
+                            self.db.mirror_retry_add(self.key, self.service, item["id"], "Shortcut finalization deferred while yielding")
                 # No _verify_modified_times here: its 4-minute settle held mail, calendar
                 # and the rest back (live, one cycle ran 6 minutes). A time that a late
                 # bump moves is put back next cycle, by _mirror_side_edits.
@@ -969,7 +1039,7 @@ class DriveSync:
                 if dm._staging_drive_id and not self.c.settings.dry_run:
                     dm._teardown_staging_drive()
             self._record_target_versions()
-        if finished:
+        if finished and not shutdown_requested():
             # Taken after every write of this cycle, so the next cycle's look at the
             # target feed sees other people's changes, not our own.
             self.db.set_mirror_marker(self.key, self.target_service, self._start_token(self.dm.tgt,
@@ -984,6 +1054,8 @@ class DriveSync:
     def _changes(self, svc, token: str, drive_id: Optional[str], fields: str):
         out = []
         while True:
+            if shutdown_requested():
+                return out, None
             kw = {"pageToken": token, "pageSize": 1000, "includeRemoved": True,
                   "spaces": "drive", "supportsAllDrives": True,
                   "fields": f"nextPageToken,newStartPageToken,changes(fileId,removed,file({fields}))"}
@@ -1005,7 +1077,8 @@ class DriveSync:
             if shutdown_requested():
                 return      # the marker stays: the next cycle re-reads these
             self._one(ch["fileId"], ch.get("file"), bool(ch.get("removed")))
-        self.db.set_mirror_marker(self.key, self.service, new_marker)
+        if not shutdown_requested() and new_marker is not None:
+            self.db.set_mirror_marker(self.key, self.service, new_marker)
 
     def _mirror_side_edits(self) -> None:
         tmark = self.db.mirror_marker(self.key, self.target_service)
@@ -1085,6 +1158,8 @@ class DriveSync:
 
     # -- one change ---------------------------------------------------------------------
     def apply(self, item_id: str, f: Optional[dict], removed: bool) -> set[str]:
+        if f and not removed and not f.get("trashed"):
+            self.c.cancel_proposal(self.key, "drive", item_id)
         tid, item_type = self._mapped(item_id)
         fp = self.db.mirror_fingerprint(self.key, item_id)
         if removed or not f or f.get("trashed"):
@@ -1153,6 +1228,8 @@ class DriveSync:
     def _write(self, f: dict, fp: Optional[dict], tid: str, kinds: set[str],
                force_record: bool = False) -> None:
         dm, item_id, mime = self.dm, f["id"], f.get("mimeType")
+        if getattr(self.c.settings, "_background_delta", False) and "edited" in kinds and is_native(mime):
+            raise RuntimeError("Native edit held for a feature-preserving migration/repair; background deltas do not re-import native files through Office formats")
         if not kinds:
             self._fingerprint(f, fp)
             if force_record:
@@ -1436,6 +1513,8 @@ class DriveSync:
         """After every write of the unit, the modifiedTime corrections included: the
         version each target copy now has. Anything else next time is someone else."""
         for tid, item_id in self.touched.items():
+            if getattr(self.c.settings, "_background_delta", False) and shutdown_requested():
+                return
             tv = self._target(tid)
             if tv is not None:
                 self.db.put_mirror_fingerprint(self.key, item_id, tgt_version=str(tv.get("version")))
@@ -1459,6 +1538,8 @@ class DriveSync:
                 return
             parent = stack.pop()
             for f in self._children(self.dm.src, parent, self.drive_id, self._fields()):
+                if shutdown_requested():
+                    return
                 seen.add(f["id"])
                 if f.get("mimeType") == FOLDER_MIME:
                     stack.append(f["id"])
@@ -1468,7 +1549,7 @@ class DriveSync:
                 try:
                     if tid is None:
                         self._create(f)
-                    elif first:
+                    elif first and not getattr(self.c.settings, "_background_delta", False):
                         self._fingerprint(f, None)
                         if tid in tversions:
                             self.db.put_mirror_fingerprint(self.key, f["id"],
@@ -1491,7 +1572,8 @@ class DriveSync:
                     self.c.propose(service="drive", source_user=self.key,
                                    target_user=self.target_user, item_type=t, item_id=sid,
                                    target_id=tid, container=self.drive_id, name=fp.get("name"))
-        self.db.set_mirror_marker(self.key, self.service, token)
+        if not shutdown_requested():
+            self.db.set_mirror_marker(self.key, self.service, token)
 
     def _gone_from_source(self, sid: str) -> bool:
         """A mapped item the walk did not reach: really gone, or only outside it (a file
@@ -1509,8 +1591,12 @@ class DriveSync:
         out: dict[str, str] = {}
         stack = [tgt_root]
         while stack:
+            if shutdown_requested():
+                return out
             parent = stack.pop()
             for f in self._children(self.dm.tgt, parent, tdrive, "id,mimeType,version"):
+                if shutdown_requested():
+                    return out
                 out[f["id"]] = f.get("version")
                 if f.get("mimeType") == FOLDER_MIME:
                     stack.append(f["id"])

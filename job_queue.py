@@ -18,9 +18,8 @@ WHAT IT DELIBERATELY DOES NOT DO
     it immediately. Modelling flags as columns would mean a migration every
     time one is added, and two landed this week.
 
-    It does not reorder. Oldest first, no priorities: the first thing anyone
-    asks for when a queue has priorities is a way to see why theirs is not
-    running, and FIFO needs no such explanation.
+    Foreground requests remain oldest first. Opt-in background mirrors wait
+    behind foreground requests; their displayed position uses the same order.
 """
 
 from __future__ import annotations
@@ -30,6 +29,13 @@ from typing import Any, Callable
 
 import control_plane_db as cpdb
 import job_admission
+
+
+def _priority(conn):
+    """Only opt-in background mirrors yield queue order; foreground stays FIFO."""
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='background_deltas'").fetchone():
+        return "CASE WHEN job_name='mirror' AND EXISTS(SELECT 1 FROM background_deltas b WHERE b.account_id=job_queue.account_id AND b.background=1) THEN 1 ELSE 0 END"
+    return "0+0"
 
 
 # The two processes that launch heavy jobs. Constants, not string literals
@@ -75,12 +81,8 @@ def enqueue(account_id: int | None, job_name: str, payload: dict,
 def position_of(queue_id: int) -> int:
     """1-based place in line, or 0 once it is no longer waiting."""
     with cpdb.ro() as conn:
-        row = conn.execute(
-            "SELECT COUNT(*) n FROM job_queue WHERE status='queued' AND id<=? "
-            "AND EXISTS (SELECT 1 FROM job_queue q WHERE q.id=? "
-            "            AND q.status='queued')",
-            (queue_id, queue_id)).fetchone()
-    return int(row["n"]) if row else 0
+        rows = conn.execute("SELECT id FROM job_queue WHERE status='queued' ORDER BY " + _priority(conn) + ",id").fetchall()
+    return next((i for i, row in enumerate(rows, 1) if row['id'] == queue_id), 0)
 
 
 def waiting(account_id: int | None = None) -> list[dict]:
@@ -91,8 +93,8 @@ def waiting(account_id: int | None = None) -> list[dict]:
     if account_id is not None:
         sql += " AND account_id=?"
         args.append(account_id)
-    sql += " ORDER BY id"
     with cpdb.ro() as conn:
+        sql += " ORDER BY " + _priority(conn) + ",id"
         return [dict(r) for r in conn.execute(sql, args)]
 
 
@@ -153,7 +155,7 @@ def dispatch_one(starter: Callable[[int | None, str, dict], tuple[bool, str]],
         # here would run the work correctly into a log nothing is watching.
         row = conn.execute(
             "SELECT id, account_id, job_name, payload FROM job_queue "
-            "WHERE status='queued' AND runner=? ORDER BY id LIMIT 1",
+            "WHERE status='queued' AND runner=? ORDER BY " + _priority(conn) + ",id LIMIT 1",
             (runner,)).fetchone()
     if row is None:
         return None

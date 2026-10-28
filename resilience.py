@@ -359,6 +359,8 @@ def shutdown_requested() -> bool:
     finished importing, so this is a cheap sys.modules lookup, not a
     re-execution."""
     import main
+    import background_delta
+    background_delta.checkpoint()
     return main.SHUTDOWN.is_set()
 
 

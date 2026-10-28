@@ -27,6 +27,7 @@ const STATUS: Record<string, { color: 'success' | 'warning' | 'error' | 'info' |
   partial: { color: 'warning', label: 'Partial' },
   failed: { color: 'error', label: 'Failed' },
   stopped: { color: 'default', label: 'Stopped' },
+  yielded: { color: 'info', label: 'Yielded to foreground work' },
   interrupted: { color: 'warning', label: 'Interrupted' },
   running: { color: 'info', label: 'Running' },
 }
@@ -47,7 +48,8 @@ const Mirror: React.FC = () => {
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null)
   const [ask, setAsk] = useState<Ask>(null)
   const [busy, setBusy] = useState(false)
-  const [draft, setDraft] = useState<{ enabled: boolean; intervalMin: string; deletionMode: MirrorDeletionMode; capPct: string; users: string[] | null } | null>(null)
+  const [draft, setDraft] = useState<{ enabled: boolean; intervalMin: string; deletionMode: MirrorDeletionMode; capPct: string; users: string[] | null;
+    background: boolean; followDomains: boolean; sourceRecovery: string; targetRecovery: string } | null>(null)
   // The migrations this mirror can follow, newest first.
   const [migrations, setMigrations] = useState<MirrorMigration[]>([])
 
@@ -72,6 +74,10 @@ const Mirror: React.FC = () => {
   const form = draft ?? (saved ? {
     enabled: saved.enabled, intervalMin: String(saved.intervalMin),
     deletionMode: saved.deletionMode, capPct: String(saved.capPct), users: saved.users ?? null,
+    background: view?.backgroundFollowup?.background ?? false,
+    followDomains: view?.backgroundFollowup?.follow_domains ?? false,
+    sourceRecovery: view?.backgroundFollowup?.recovery_admins.source?.join(', ') ?? '',
+    targetRecovery: view?.backgroundFollowup?.recovery_admins.target?.join(', ') ?? '',
   } : null)
   const minInterval = view?.minIntervalMin ?? 5
   const intervalOk = form !== null && Number(form.intervalMin) >= minInterval
@@ -92,6 +98,9 @@ const Mirror: React.FC = () => {
         ? await saveMirrorSettings(reason, {
           enabled: form.enabled, intervalMin: Number(form.intervalMin),
           deletionMode: form.deletionMode, capPct: Number(form.capPct), users: form.users,
+          background: form.background, followDomains: form.followDomains,
+          sourceRecoveryAdmins: form.sourceRecovery.split(',').map(e => e.trim().toLowerCase()).filter(Boolean),
+          targetRecoveryAdmins: form.targetRecovery.split(',').map(e => e.trim().toLowerCase()).filter(Boolean),
         }, accountId)
         : ask === 'run'
           ? await runMirrorCycle(reason, accountId)
@@ -208,6 +217,24 @@ const Mirror: React.FC = () => {
                 </MenuItem>
               ))}
             </TextField>
+            <FormControlLabel label="Run in the background, yielding to migrations and checks"
+              control={<Switch checked={form.background} onChange={e => setDraft({ ...form,
+                background: e.target.checked, followDomains: e.target.checked && form.followDomains })} />} />
+            {form.background && <Alert severity="info">Uses one worker and paced API calls. Waits for foreground work and memory/CPU headroom; yields cooperatively without killing an upload. Full nightly tallies and automatic new-user provisioning are disabled for this mode. Native edits that need an Office round trip are held for a feature-preserving repair.</Alert>}
+            {form.background && <FormControlLabel label="Detect the domain handover, finish catching up, then stop"
+              control={<Switch checked={form.followDomains} onChange={e => setDraft({ ...form, followDomains: e.target.checked })} />} />}
+            {form.followDomains && <>
+              <Alert severity="info">Set this up before the domain switch. Pins the existing Google tenant/user IDs and keeps migration mappings. Requires Directory user and customer read-only access on both tenants. After the source primary domain moves and the target adopts its former name, stops after a clean catch-up and a later quiet pass at least five minutes apart. This does not certify full 1:1. Google domains and DNS are not changed by this setting.</Alert>
+              <TextField size="small" label="Source admin after the switch" value={form.sourceRecovery}
+                helperText="Optional known recovery addresses, separated by commas; for example info@old.example.com. No guessed domains or passwords."
+                onChange={e => setDraft({ ...form, sourceRecovery: e.target.value })} />
+              <TextField size="small" label="Target admin after the switch" value={form.targetRecovery}
+                onChange={e => setDraft({ ...form, targetRecovery: e.target.value })} />
+            </>}
+            {view?.backgroundFollowup?.background && <Alert severity={view.backgroundFollowup.state === 'BLOCKED' ? 'warning' : 'info'}>
+              {view.backgroundFollowup.state}: {view.backgroundFollowup.detail || 'Waiting for its next idle interval.'}
+              {view.backgroundFollowup.observation && ` Confirmed domains: ${view.backgroundFollowup.observation.sourceDomain} → ${view.backgroundFollowup.observation.targetDomain}.`}
+            </Alert>}
             <Stack direction="row" spacing={2}>
               <TextField size="small" type="number" label="Every (minutes)" value={form.intervalMin}
                          error={!intervalOk} helperText={intervalOk ? ' ' : `At least ${minInterval} minutes`}

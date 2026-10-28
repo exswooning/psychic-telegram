@@ -329,6 +329,13 @@ class AuthManager:
         )
 
     def _credentials(self, tenant: str, user: str):
+        subjects = getattr(self.settings, "_follow_subjects", None)
+        if subjects is not None:
+            key_user = user.lower()
+            if (tenant, key_user) in subjects:
+                user = subjects[(tenant, key_user)]
+            elif key_user not in {value for (side, _), value in subjects.items() if side == tenant} and key_user != getattr(self.settings, tenant + "_admin", "").lower():
+                raise RuntimeError("Domain-following run refused an unpinned delegated user")
         key = (tenant, user)
         with self._lock:
             creds = self._creds_cache.get(key)

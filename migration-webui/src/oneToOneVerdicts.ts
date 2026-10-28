@@ -15,7 +15,7 @@ export const VERDICT: Record<OneToOneVerdict, { color: 'success' | 'error' | 'wa
 export const ORDER: OneToOneVerdict[] = ['DIFFERENCES', 'INCOMPLETE', 'NOT_VERIFIED', 'IDENTICAL']
 
 const WRONG: Array<[keyof NonNullable<OneToOneService['counts']>, string]> = [
-  ['differences', 'not identical'], ['missing', 'missing on the target'], ['notCopied', 'not copied'],
+  ['differences', 'not identical'], ['missing', 'missing on the target'], ['notCopied', 'copy or access findings'],
   ['duplicates', 'copied twice'], ['extras', 'on the target only'], ['errors', 'could not be compared'],
 ]
 

@@ -23,6 +23,7 @@ import ReasonCodeDialog from '@/components/ReasonCodeDialog'
 import TenantOneToOne from '@/components/TenantOneToOne'
 import KnownIssuesPanel from '@/components/KnownIssuesPanel'
 import RepairPolicySwitch from '@/components/RepairPolicySwitch'
+import RetainedCopyResolutions from '@/components/RetainedCopyResolutions'
 import { fetchMe, fetchOneToOne, runOneToOne, migrationOf } from '@/api/controlPlane'
 import type { OneToOneService, OneToOneUser, OneToOneVerdict, OneToOneView } from '@/api/controlPlane'
 
@@ -51,7 +52,7 @@ const Findings: React.FC<{ s: OneToOneService }> = ({ s }) => {
   const rows: string[] = []
   for (const d of s.differences ?? []) rows.push(`${d.path ?? d.item ?? 'item'}: ${(d.diffs ?? []).slice(0, 3).join(' · ')}`)
   for (const m of s.missing ?? []) rows.push(`missing — ${m.name ?? ''} ${m.why ?? ''}`)
-  for (const n of s.notCopied ?? []) rows.push(`failed to copy — ${n.error ?? n.id ?? ''}`)
+  for (const n of s.notCopied ?? []) rows.push(`${n.type === 'external_access' ? (n.copyResolution?.state === 'COPY_EXISTS' ? 'copy exists — original access unresolved' : 'original access unresolved') : 'failed to copy'} — ${n.error ?? n.id ?? ''}`)
   for (const e of s.errors ?? []) rows.push(`could not check — ${e}`)
   for (const d of s.duplicates ?? []) rows.push(`copied twice — ${d.name ?? d.messageId ?? d.path ?? ''}`)
   // Only the kinds listed above: strays are informational and are not among them, so counting
@@ -65,6 +66,7 @@ const Findings: React.FC<{ s: OneToOneService }> = ({ s }) => {
         {s.service} · {VERDICT[s.verdict].label}
         {s.completion === 'INCOMPLETE' ? ' · check incomplete' : ''} · {when(s.verifiedAt)}
       </Typography>
+      <RetainedCopyResolutions rows={s.copyResolutions} />
       {rows.slice(0, 8).map((r, i) => (
         <Typography key={i} variant="body2" sx={{ fontFamily: 'ui-monospace, monospace', fontSize: 12, wordBreak: 'break-word' }}>{r}</Typography>
       ))}

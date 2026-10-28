@@ -378,6 +378,7 @@ class GmailMigrator:
         msgid = self._message_id_header(raw)
 
         def adopt_if_already_delivered():
+            nonlocal replacing
             if not msgid:
                 return None
             existing = self._find_by_message_id(msgid, ignore=replacing)
@@ -390,6 +391,29 @@ class GmailMigrator:
                 decode = lambda r: base64.urlsafe_b64decode(r + "=" * (-len(r) % 4))
                 verdict, _ = compare_message(decode(raw), decode(target.get("raw", "")))
                 if verdict == "different":
+                    # A target reset left the old, unrewritten copy in Trash.
+                    # Preserve it there. Explicit missing-item recovery may
+                    # insert the freshly re-read source version even if that
+                    # old copy contains links from a previous, wiped mapping.
+                    # No existing message is edited or deleted; live conflicts
+                    # remain blocked, and retries ignore the retained old copy.
+                    if (source_id and "TRASH" in (target.get("labelIds") or [])
+                            and self.settings.rewrite_drive_links):
+                        original = self._retry(lambda: self.src.users().messages().get(
+                            userId="me", id=source_id, format="raw").execute())
+                        old_verdict, _ = compare_message(
+                            decode(original.get("raw", "")), decode(target.get("raw", "")))
+                        expected, count = rewrite_raw(original["raw"], self._drive_link_target)
+                        from verify_sample import normalise_message
+                        same_headers = normalise_message(decode(original["raw"]))[0] == normalise_message(decode(target["raw"]))[0]
+                        eligible = old_verdict != "different" or (
+                            getattr(self, "recover_unmapped", False) and same_headers)
+                        if eligible and count and decode(expected) == decode(raw):
+                            replacing = existing
+                            self.db.log_audit(self.source_user, source_id, "reset_link_recovery",
+                                              "PENDING", "Target copy " + existing + " retained unchanged in Trash; "
+                                              "fresh source content with current link mappings will be inserted separately")
+                            return None
                     raise RuntimeError("Existing destination Message-ID has different content; manual review required")
                 return {"id": existing, "threadId": target.get("threadId"), "adopted": True}
             log.info("[%s] a previous attempt had already delivered %s; "
@@ -466,7 +490,8 @@ class GmailMigrator:
         loop now simply returns."""
         mid = ref["id"]
         prior = self.db.get_audit(self.source_user, mid, "message")
-        if prior and prior["status"] == "FAILED_SPLIT" and not self.settings.mail_only_with_links:
+        if (prior and prior["status"] == "FAILED_SPLIT" and not self.settings.mail_only_with_links
+                and not getattr(self, "recover_unmapped", False)):
             self._bump("failed")
             return
         already = self.db.get_target_id(self.source_user, mid, "message")
@@ -693,12 +718,21 @@ class GmailMigrator:
         self.db.log_audit(self.source_user, mid, "message", "SUCCESS",
                           bytes_moved=approx_bytes)
         self._bump("inserted")
-        if getattr(self.settings, "migration_checks_enabled", False) or self.settings.mail_only_with_links:
+        if (getattr(self.settings, "migration_checks_enabled", False) or self.settings.mail_only_with_links
+                or getattr(self, "recover_unmapped", False)):
             from migration_checks import verify_written_mail
-            if not verify_written_mail(self, mid, result["id"], raw, mapped_labels,
-                                       allow_label_fix=not result.get("adopted", False)):
+            verified = verify_written_mail(self, mid, result["id"], raw, mapped_labels,
+                                            allow_label_fix=(not result.get("adopted", False)
+                                                             or getattr(self, "recover_unmapped", False)))
+            if not verified:
                 with self._stats_lock:
                     self.stats["inline_verification_failed"] = self.stats.get("inline_verification_failed", 0) + 1
+            prior_reset = self.db.get_audit(self.source_user, mid, "reset_link_recovery")
+            if prior_reset and prior_reset["status"] == "PENDING":
+                self.db.log_audit(self.source_user, mid, "reset_link_recovery",
+                                  "SUCCESS" if verified else "NEEDS_ATTENTION",
+                                  "Old target copy retained in Trash; fresh copy " + result["id"] +
+                                  (" content and labels verified" if verified else " requires verification"))
 
     def run(self, delta: bool = False, since_epoch_days: int = 0,
             drive_in_scope: bool = True) -> dict:

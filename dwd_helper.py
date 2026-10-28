@@ -40,8 +40,131 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from urllib.parse import urlsplit
+from datetime import datetime, timezone
+from typing import Callable
 
 import signin_challenge
+
+# Per setup process; full_setup publishes these in its progress and final result.
+BILLING_NOTICES: list[dict] = []
+BILLING_NOTICE_REPORTER: Callable[[dict], None] | None = None
+
+
+class AdminConsoleBlocked(RuntimeError):
+    """A signed-in administrator must review a Google billing notice."""
+
+    def __init__(self):
+        super().__init__(
+            "Google signed the administrator in, then redirected to a billing "
+            "or subscription notice before opening delegation. Open Google Admin "
+            "as this tenant's administrator and review the notice, then retry "
+            "setup. Bitport has not accepted terms or changed billing.")
+
+    def as_dict(self) -> dict:
+        return {"kind": "admin_billing_notice",
+                "title": "Review Google's subscription notice",
+                "detail": str(self), "url": "https://admin.google.com/"}
+
+
+def _billing_interstitial(url: str) -> bool:
+    """Only Google's Admin billing interstitial, not ordinary billing pages."""
+    parsed = urlsplit(url)
+    return (parsed.scheme == "https" and parsed.hostname == "admin.google.com"
+            and re.match(r"^/(?:u/\d+/)?ac/billing/interstitial(?:/|$)",
+                         parsed.path) is not None)
+
+
+def _billing_notice(text: str) -> dict:
+    """Report Google's own countdown; do not infer days from the local clock."""
+    days = re.search(r"\b(\d{1,3})\s+days?\s+(?:from now|left|remaining)\b", text, re.I)
+    date = re.search(r"suspension of your service on\s+([^\n(]+)", text, re.I)
+    remaining = int(days.group(1)) if days else None
+    suspension = date.group(1).strip().rstrip('.,')[:80] if date else None
+    message = (f"Google reports {remaining} day(s) before service suspension."
+               if remaining is not None else
+               "Google is showing a payment reminder; it did not report a days-left count.")
+    if suspension:
+        message += f" Suspension date shown by Google: {suspension}."
+    return {"kind": "billing_grace", "daysRemaining": remaining,
+            "suspensionDate": suspension, "message": message,
+            "observedAt": datetime.now(timezone.utc).isoformat(), "continued": False}
+
+
+def _publish_billing_notice(notice: dict) -> None:
+    if BILLING_NOTICES:
+        BILLING_NOTICES[-1] = dict(notice)
+    else:
+        BILLING_NOTICES.append(dict(notice))
+    log("  [BILLING NOTICE] " + notice["message"])
+    if BILLING_NOTICE_REPORTER:
+        try:
+            BILLING_NOTICE_REPORTER(dict(notice))
+        except Exception:  # noqa: BLE001 - reporting cannot change the console action
+            logging.getLogger(__name__).debug("billing notice reporter failed", exc_info=True)
+
+
+def _check_console_blocker(browser, attempted: set[str], destination: str) -> bool:
+    """Dismiss only an explicitly postponable grace reminder, once per URL.
+
+    Payment, upgrade, agreement and generic Next/Continue controls are never
+    clicked. Unknown or repeated interstitials keep the operator handoff.
+    """
+    for context in browser.contexts:
+        for page in context.pages:
+            if _billing_interstitial(page.url):
+                current = page.url.split('?', 1)[0]
+                try:
+                    text = page.inner_text("body", timeout=5000)[:12000]
+                except Exception:  # noqa: BLE001 - unknown page is a blocker
+                    text = ""
+                notice = _billing_notice(text)
+                _publish_billing_notice(notice)
+                grace = "/interstitial/gracesubscription/" in current
+                reminder = bool(re.search(r"couldn[’']t process your last payment", text, re.I))
+                if grace and reminder and current not in attempted:
+                    attempted.add(current)
+                    # These labels explicitly postpone the notice; Next may
+                    # instead confirm payment or an agreement on another page.
+                    labels = re.compile(r"^(?:DO THIS LATER|REMIND ME LATER|NOT NOW)$", re.I)
+                    for role in ("button", "link"):
+                        candidates = page.get_by_role(role, name=labels)
+                        if candidates.count() != 1 or not candidates.is_visible() or not candidates.is_enabled():
+                            continue
+                        try:
+                            candidates.click(timeout=5000)
+                            redirected = False
+                            for _ in range(32):
+                                page.wait_for_timeout(250)
+                                # Some Admin Console versions dismiss the overlay
+                                # without changing its URL. Resume the original
+                                # requested page only after the reminder vanishes.
+                                if _billing_interstitial(page.url) and not redirected:
+                                    current_text = page.inner_text("body", timeout=2000)
+                                    if not re.search(r"couldn[’']t process your last payment", current_text, re.I):
+                                        redirected = True
+                                        page.goto(destination, wait_until="domcontentloaded", timeout=30000)
+                                if not _billing_interstitial(page.url):
+                                    notice["continued"] = True
+                                    _publish_billing_notice(notice)
+                                    log("  billing reminder postponed; continuing the requested setup")
+                                    return True
+                        except Exception:  # noqa: BLE001 - require the operator on uncertainty
+                            logging.getLogger(__name__).debug("billing reminder did not clear", exc_info=True)
+                        break
+                log("  [ACTION REQUIRED] " + str(AdminConsoleBlocked()))
+                browser.close()
+                raise AdminConsoleBlocked()
+    return False
+
+
+def recorded_console_blocker(lines: list[str]) -> dict | None:
+    """Explain older stopped attempts using their actual last recorded page."""
+    last_tabs = next((line for line in reversed(lines) if "[dwd]   tabs: " in line), "")
+    urls = re.findall(r"https://[^\s|]+", last_tabs)
+    if any(_billing_interstitial(url) for url in urls):
+        return AdminConsoleBlocked().as_dict()
+    return None
 
 
 def log(msg: str) -> None:
@@ -464,7 +587,8 @@ def _open_dwd_console(p, headful: bool, timeout: int, url: str = DWD_URL,
     """
     browser = _installed_browser_launch(p, headful)
     page = browser.new_page()
-    nav = max(timeout * 1000, 30000)
+    # A single redirect must not consume the entire sign-in deadline.
+    nav = min(max(timeout * 1000, 1000), 30000)
     page.goto(url, wait_until="domcontentloaded", timeout=nav)
 
     log("SIGN IN BY HAND now (password, 2FA, SSO...). "
@@ -492,6 +616,7 @@ def _open_dwd_console(p, headful: bool, timeout: int, url: str = DWD_URL,
     auto_email = os.getenv("DWD_EMAIL", "").strip()
     auto_pw = os.getenv("DWD_PASSWORD", "")
     typed_email = typed_pw = False
+    billing_attempted: set[str] = set()
 
     # Google's email box is `type="text"` with id=identifierId -- NOT
     # type="email". Selecting on the obvious `input[type="email"]`
@@ -522,6 +647,8 @@ def _open_dwd_console(p, headful: bool, timeout: int, url: str = DWD_URL,
         return False
 
     while time.time() < deadline:
+        if _check_console_blocker(browser, billing_attempted, url):
+            continue
         if auto_email and auto_pw:
             for pg in browser.contexts[0].pages:
                 try:
@@ -571,10 +698,14 @@ def _open_dwd_console(p, headful: bool, timeout: int, url: str = DWD_URL,
             return None
         if admin_page is not None:
             page = admin_page
+            if _check_console_blocker(browser, billing_attempted, url):
+                continue
             if not page.url.startswith(ready_prefix):
                 page.goto(url,
                           wait_until="domcontentloaded", timeout=nav)
                 page.wait_for_timeout(1500)
+                if _check_console_blocker(browser, billing_attempted, url):
+                    continue
             # ready_text, not a hardcoded "Add new": that string belongs to
             # the Domain-Wide Delegation page. A caller landing anywhere
             # else waited the full timeout ON THE CORRECT PAGE and then

@@ -707,8 +707,14 @@ class Verifier:
                     sc[sid] = sm
                 except Exception as exc:      # noqa: BLE001
                     if _gone_from_source(exc, res):
+                        if kind == "file":
+                            from copy_resolution import record
+                            record(self, res, sid, tid, source_unreadable=True)
                         continue
                     res["errors"].append(f"{kind} {sid}: could not read the SOURCE: {error_detail(exc)}")
+                    if kind == "file":
+                        from copy_resolution import record
+                        record(self, res, sid, tid, source_unreadable=True)
                     continue
                 try:
                     tm = self._drive_meta_from_batch(tgt, tid, target_meta, target_errors)
@@ -743,6 +749,7 @@ class Verifier:
                     reused = drive_content_cache_get(self.db, self.src_user, sid, tid, sm, tm)
                     if reused is not None:
                         diffs += reused["diffs"]
+                        content = reused["diffs"]
                         ev.update(reused["ev"])
                         ev.update(reused=True, how=f"{reused['ev'].get('how', 'compared')} -- neither copy has "
                                                    f"changed since {reused['at']}, so that comparison is reused")
@@ -752,6 +759,8 @@ class Verifier:
                         diffs += content
                         if not ev.get("error"):
                             drive_content_cache_put(self.db, self.src_user, sid, tid, sm, tm, content, ev)
+                    from copy_resolution import remember_content
+                    remember_content(self, sid, tid, sm, tm, ev, content)
                     if ev.get("error"):
                         res["errors"].append(f"file {sid}: {ev.pop('error')}")
                     if getattr(self.settings, "rewrite_drive_links", False):
@@ -1303,6 +1312,18 @@ class Verifier:
             res["errors"].append(f"could not list the target's mailbox: {error_detail(exc)}")
         res["notCopied"] = self._failed(("message", "gmail"))
         self._source_mail_coverage(src, res)
+        reference_gaps = self.db.conn.execute(
+            "SELECT item_id,error_message FROM audit_log WHERE source_user=? "
+            "AND item_type='source_link_reference' AND status='NEEDS_ATTENTION'",
+            (self.src_user,)).fetchall()
+        if reference_gaps:
+            from verification_coverage import check
+            res.setdefault("checks", []).append(check(
+                "gmail.sourceReferences", "Access to original unavailable Drive references", "NOT_VERIFIED",
+                checked=len(reference_gaps), note="Original unavailable URLs were preserved; "
+                "restoring their access requires the original file owner. Message equality does not establish link access."))
+            res["notes"].append(f"{len(reference_gaps)} source message(s) retain original unavailable Drive references; "
+                                "their content is preserved, but referenced-file access remains unverified")
         try:
             cache.finish()
         except Exception as exc:
@@ -2069,11 +2090,11 @@ def to_markdown(report: dict) -> str:
          f"- **{t['identical']:,} of {t['checked']:,}** paired items identical; {t['filesOpened']:,} Drive files opened "
          f"and compared; {t['bytesCompared']:,} bytes read from each side",
          f"- differences {t['differences']}, missing on target {t['missing']}, duplicates {t['duplicates']}, "
-         f"strays on target {t['extras']}, not copied (failed) {t['notCopied']}, checks that could not be made {t['errors']}", ""]
+         f"strays on target {t['extras']}, unresolved copy or access findings {t['notCopied']}, checks that could not be made {t['errors']}", ""]
     if report["reasons"]:
         L += ["## Why not IDENTICAL", ""] + [f"- {r}" for r in report["reasons"]] + [""]
     for user, per in report["users"].items():
-        L += [f"## {user}", "", "| service | completion | checked | identical | differences | missing | duplicates | strays | not copied | could not check |",
+        L += [f"## {user}", "", "| service | completion | checked | identical | differences | missing | duplicates | strays | copy or access findings | could not check |",
               "|---|---|---|---|---|---|---|---|---|---|"]
         for svc, r in per.items():
             completion = "COMPLETE" if service_complete(r) else "INCOMPLETE"
@@ -2086,6 +2107,13 @@ def to_markdown(report: dict) -> str:
                     L.append(f"- **{svc} / {label}**: {json.dumps(item, default=str)[:400]}")
             for n in r["notes"][:10]:
                 L.append(f"- {svc} note: {n}")
+            if r.get("copyResolutions"):
+                L += ["", f"### {svc}: retained target copies", "",
+                      "Copy presence does not resolve source authorization or original sharing. Content comparison scope is shown separately.", ""]
+                for copy in r["copyResolutions"]:
+                    link = f"[Open copy]({copy['targetUrl']})" if copy.get("targetUrl") else "No readable copy confirmed"
+                    L.append(f"- **{copy['label']}** — {copy['source']}: {link}. "
+                             f"{copy['contentScope']} Checked {copy['checkedAt']}.")
         L.append("")
     opened = [e for e in report["evidence"] if e.get("opened")][:60]
     if opened:
@@ -2146,7 +2174,7 @@ def save_user_results(db, report: dict) -> None:
                 "counts": {k: len(r[k]) for k in ("differences", "missing", "duplicates", "extras", "notCopied", "errors")},
                 **{k: r[k][:25] for k in ("differences", "missing", "duplicates", "notCopied", "errors")},
                 "extras": r["extras"][:10], "notes": r["notes"][:10], "sampled": r.get("sampled"),
-                **{key: r.get(key) for key in ("scopeVersion", "coverageComplete", "checks", "sharing", "sourceInventory", "emptySource", "cache")}})
+                **{key: r.get(key) for key in ("scopeVersion", "coverageComplete", "checks", "sharing", "sourceInventory", "emptySource", "cache", "copyResolutions")}})
 
 
 def verify_user(auth, db, settings, source_user: str, services, limit: int | None, retry=lambda f: f) -> str | None:

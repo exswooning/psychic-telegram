@@ -95,7 +95,7 @@ def enabled(db):
         return False
 
 
-REPAIR_CAPABILITY_VERSION = 4
+REPAIR_CAPABILITY_VERSION = 9
 
 
 def _newly_supported(rows):
@@ -103,6 +103,9 @@ def _newly_supported(rows):
     # fingerprint is attempted once per capability version, never every tick.
     for row in rows:
         service = row.get("service")
+        if service == "drive" and any(c.get("key") in ("drive.permissions", "drive.externalSharing")
+                and c.get("status") == "NOT_VERIFIED" for c in row.get("checks", [])):
+            return True
         if service in ("tasks", "drive", "calendar", "directory") and (row.get("differences") or row.get("duplicates")):
             return True
         if service == "gmail" and (row.get("differences") or row.get("notCopied")):
@@ -272,6 +275,9 @@ def scoped_repair(auth, db, settings, user, per):
         out["tasks"] = finding_repairs.repair_tasks(auth, db, st, user, per["tasks"], apply=True)
     if "drive" in per:
         out["drive_findings"] = finding_repairs.repair_drive(auth, db, st, user, per["drive"], apply=True)
+        if ((per["drive"].get("sharing") or {}).get("external") or {}).get("items"):
+            import external_access
+            out["external_access"] = external_access.repair(auth, db, st, user, per["drive"])
     read_errors = [e for result in per.values() for e in result.get("errors", [])
                    if any(code in str(e) for code in ("400", "cannotDownloadAbusiveFile", "Invalid range"))]
     if read_errors:
@@ -284,13 +290,19 @@ def scoped_repair(auth, db, settings, user, per):
     types = (("message", "draft") if "gmail" in per else ()) + (("event",) if "calendar" in per else ())
     if types:
         out["failed_items"] = retry_failed.retry(auth, db, st, apply=True, users={user}, item_types=types)
-    if any((i.get("status") == "UNMAPPED_SOURCE" or "Missing Message-ID" in i.get("error", ""))
+    if any((i.get("status") == "UNMAPPED_SOURCE" or "Missing Message-ID" in i.get("error", "")
+            or "Existing destination Message-ID" in i.get("error", "")
+            or "Split classification incomplete" in i.get("error", ""))
            and i.get("type") == "message"
            for i in (per.get("gmail") or {}).get("notCopied", [])):
         out["missing_mail"] = repair.repair_verified_missing_mail(
             auth, db, st, {"users": {user: per}}, apply=True)
     out["gmail_labels"] = repair.repair_verified_gmail_labels(
         auth, db, st, {"users": {user: per}}, apply=True)
+    if any(i.get("type") == "draft" and i.get("status") == "UNMAPPED_SOURCE"
+           for i in (per.get("gmail") or {}).get("notCopied", [])):
+        import draft_recovery
+        out["missing_drafts"] = draft_recovery.recover(auth, db, st, user, per["gmail"])
     drive = per.get("drive") or {}
     if any(any(d.startswith("links inside still point at the source (") for d in item.get("diffs", []))
            for item in drive.get("differences", [])):
@@ -310,7 +322,7 @@ def affected_services(out):
     """Conservative invalidation: recheck writes, attempted repairs and failed reads only."""
     affected=set((out.get("read_retry") or {}).get("services",[]))
     for service, keys in {
-        "gmail":("gmail_labels","missing_mail"), "drive":("drive_findings","native_links","drive_retry","modified_times"),
+        "gmail":("gmail_labels","missing_mail","missing_drafts"), "drive":("drive_findings","native_links","drive_retry","modified_times","external_access"),
         "calendar":("calendar_scope",), "contacts":("contacts",), "tasks":("tasks",), "directory":("directory",)}.items():
         for key in keys:
             row=out.get(key) or {}
@@ -341,11 +353,13 @@ def finished_user(auth, db, settings, user, per, limit, retry, progress=print):
                     + sum((out.get("failed_items") or {}).get(k, 0) for k in ("messages", "events", "drafts"))
                     + (out.get("gmail_labels") or {}).get("candidates", 0)
                     + (out.get("missing_mail") or {}).get("attempted", 0)
+                    + (out.get("missing_drafts") or {}).get("attempted", 0)
                     + (out.get("native_links") or {}).get("candidates", 0)
                     + (out.get("drive_retry") or {}).get("attempted", 0)
                     + (out.get("modified_times") or {}).get("drifted", 0)
                     + (out.get("tasks") or {}).get("candidates", 0)
                     + (out.get("drive_findings") or {}).get("candidates", 0)
+                    + (out.get("external_access") or {}).get("candidates", 0)
                     + (out.get("read_retry") or {}).get("candidates", 0)
                     + (out.get("calendar_scope") or {}).get("candidates", 0)
                     + (out.get("directory") or {}).get("candidates", 0))
@@ -366,7 +380,7 @@ def finished_user(auth, db, settings, user, per, limit, retry, progress=print):
             affected.add("directory")
         failed = out.get("failed_items") or {}
         if any((out.get(k) or {}).get("candidates", 0) or (out.get(k) or {}).get("attempted", 0)
-               for k in ("gmail_labels", "missing_mail")) or failed.get("messages") or failed.get("drafts"):
+               for k in ("gmail_labels", "missing_mail", "missing_drafts")) or failed.get("messages") or failed.get("drafts"):
             affected.add("gmail")
         if failed.get("events") or (out.get("calendar_scope") or {}).get("candidates"):
             affected.add("calendar")
@@ -375,6 +389,8 @@ def finished_user(auth, db, settings, user, per, limit, retry, progress=print):
         if (out.get("tasks") or {}).get("changed") or (out.get("tasks") or {}).get("verified"):
             affected.add("tasks")
         if ((out.get("drive_findings") or {}).get("changed")
+                or (out.get("external_access") or {}).get("changed")
+                or (out.get("external_access") or {}).get("verified")
                 or (out.get("drive_findings") or {}).get("verified")
                 or (out.get("native_links") or {}).get("changed")
                 or (out.get("drive_retry") or {}).get("attempted")
@@ -390,7 +406,7 @@ def finished_user(auth, db, settings, user, per, limit, retry, progress=print):
         combined = copy.deepcopy(per)
         updated = partial["users"][user]
         combined.update(updated)
-        for service, key_name in (("drive", "drive_findings"), ("tasks", "tasks"), ("calendar", "calendar_scope"), ("directory", "directory")):
+        for service, key_name in (("drive", "drive_findings"), ("drive", "external_access"), ("tasks", "tasks"), ("calendar", "calendar_scope"), ("directory", "directory")):
             errors = (out.get(key_name) or {}).get("errors", [])
             if errors and service in combined:
                 combined[service]["errors"].extend("Repair remains incomplete: " + str(e) for e in errors)
@@ -405,7 +421,11 @@ def finished_user(auth, db, settings, user, per, limit, retry, progress=print):
         summary = json.dumps({"user": user, "services": list(per), "state": state, "repairs": out,
                               "checkLimit": limit, "recheckedServices": list(recheck),
                               "verdict": fresh["verdict"], "reasons": fresh["reasons"]}, default=str)
-        _finish(db, user, [key, final_key], state, summary)
+        # A recheck can discover a NEW repair family (e.g. recovering a reset
+        # mailbox exposes TRASH labels). It was never attempted by this run.
+        # Claim only the input fingerprint unless the final check passed;
+        # otherwise the bounded scheduler must be able to handle the new one.
+        _finish(db, user, [key, final_key] if state == "VERIFIED" else [key], state, summary)
         db.repair_finished(run_id, summary)
         progress(f"repair: {user} {state}; verdict={fresh['verdict']}")
         return fresh
