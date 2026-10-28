@@ -1,9 +1,12 @@
+import { appLink, workspaceUI } from '@/workspace'
 import React, { useState } from 'react'
 import { Link as RouterLink } from 'react-router-dom'
 import {
   Box, Paper, Typography, TextField, Button, Stack, Alert, Link,
 } from '@mui/material'
 import { RocketLaunch as BrandIcon, CheckCircle as CheckIcon } from '@mui/icons-material'
+import BitportMark from '@/components/BitportMark'
+import WorkspaceLogin from '@/components/WorkspaceLogin'
 import { login } from '@/api/controlPlane'
 
 const Login: React.FC = () => {
@@ -31,7 +34,7 @@ const Login: React.FC = () => {
       // (main.tsx) the way <Navigate>/navigate() are -- webui.py's own
       // top-level routing only serves the SPA under /app and /app/*, so
       // the bare path 404s at the server before React ever sees it.
-      window.location.href = '/app/mission-control'
+      window.location.href = appLink(workspaceUI ? '/overview' : '/mission-control')
     } catch (err: unknown) {
       setError((err instanceof Error ? err.message : String(err)) || 'sign in failed')
     } finally {
@@ -41,6 +44,8 @@ const Login: React.FC = () => {
       setBusy(false)
     }
   }
+
+  if (workspaceUI) return <WorkspaceLogin email={email} password={password} busy={busy} error={error} onEmail={setEmail} onPassword={setPassword} onCloseError={() => setError('')} onSubmit={handleSubmit} />
 
   return (
     <Box sx={{
@@ -58,7 +63,7 @@ const Login: React.FC = () => {
       }}>
         <Box sx={{
           flex: 1, p: 5, display: { xs: 'none', sm: 'flex' }, flexDirection: 'column', justifyContent: 'space-between',
-          bgcolor: 'primary.main', color: 'primary.contrastText', position: 'relative', overflow: 'hidden',
+          bgcolor: workspaceUI ? 'background.default' : 'primary.main', color: workspaceUI ? 'text.primary' : 'primary.contrastText', position: 'relative', overflow: 'hidden',
         }}>
           <Box sx={{
             position: 'absolute', right: -60, bottom: -60, width: 260, height: 260, borderRadius: '50%',
@@ -69,7 +74,7 @@ const Login: React.FC = () => {
               width: 36, height: 36, borderRadius: '50%', bgcolor: 'rgba(255,255,255,.16)',
               display: 'flex', alignItems: 'center', justifyContent: 'center',
             }}>
-              <BrandIcon sx={{ fontSize: 20 }} />
+              {workspaceUI ? <BitportMark /> : <BrandIcon sx={{ fontSize: 20 }} />}
             </Box>
             <Typography sx={{ fontWeight: 700, fontSize: 18 }}>
               Bitport
@@ -77,9 +82,9 @@ const Login: React.FC = () => {
           </Stack>
           <Box sx={{ position: 'relative' }}>
             <Typography variant="h4" sx={{ fontWeight: 700, maxWidth: '22ch', color: 'inherit', mb: 1.5 }}>
-              Move a Workspace tenant with proof, not promises.
+              {workspaceUI ? 'A clearer way to move your Workspace.' : 'Move a Workspace tenant with proof, not promises.'}
             </Typography>
-            <Typography variant="body2" sx={{ color: 'rgba(255,255,255,.85)', maxWidth: '32ch' }}>
+            <Typography variant="body2" sx={{ color: workspaceUI ? 'text.secondary' : 'rgba(255,255,255,.85)', maxWidth: '32ch' }}>
               Provision tenants, run migrations, and verify every file and permission that lands — before you call it done.
             </Typography>
           </Box>
@@ -90,8 +95,8 @@ const Login: React.FC = () => {
               'Resumable, per-service migration ledger',
             ].map((line) => (
               <Stack key={line} direction="row" spacing={1} alignItems="flex-start">
-                <CheckIcon sx={{ fontSize: 16, mt: 0.25, color: 'rgba(255,255,255,.85)' }} />
-                <Typography variant="caption" sx={{ color: 'rgba(255,255,255,.85)' }}>{line}</Typography>
+                <CheckIcon sx={{ fontSize: 16, mt: 0.25, color: workspaceUI ? 'text.secondary' : 'rgba(255,255,255,.85)' }} />
+                <Typography variant="caption" sx={{ color: workspaceUI ? 'text.secondary' : 'rgba(255,255,255,.85)' }}>{line}</Typography>
               </Stack>
             ))}
           </Stack>

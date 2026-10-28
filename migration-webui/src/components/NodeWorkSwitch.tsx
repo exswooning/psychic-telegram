@@ -1,3 +1,4 @@
+import { appLink } from '@/workspace'
 /**
  * Start and stop the work a tenant's nodes do.
  *
@@ -51,7 +52,7 @@ export const NodeWorkSwitch: React.FC<{ accountId?: number }> = ({ accountId }) 
       </Typography>
       <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>
         Nodes run <strong>whatever this tenant has switched on</strong> under{' '}
-        <Link href="/app/services">Other services</Link>, and each one claims
+        <Link href={appLink("/services")}>Other services</Link>, and each one claims
         users from this coordinator one at a time — that is the chunking, and
         it needs no setting here. There was a Services box; it did nothing a
         per-node override should do, and it defaulted to Gmail, which is

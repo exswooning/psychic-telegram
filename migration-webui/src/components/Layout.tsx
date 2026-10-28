@@ -1,3 +1,4 @@
+import { appLink, workspaceUI } from '@/workspace'
 import React, { useEffect, useRef, useState } from 'react'
 import { useNavigate, useLocation } from 'react-router-dom'
 import {
@@ -66,6 +67,8 @@ import { fetchMe, fetchOwedGrants, logout, Account, OwedGrants } from '@/api/con
 import { formatDuration } from '@/utils/formatters'
 import { formatPct } from '@/utils/formatPct'
 import { jobProgressPct } from './RunningJobDetail.utils'
+import WorkspaceShell from './WorkspaceShell'
+import { HomeOutlined, SecurityOutlined } from '@mui/icons-material'
 import Menu from '@mui/material/Menu'
 import MenuItem from '@mui/material/MenuItem'
 import Logout from '@mui/icons-material/Logout'
@@ -195,6 +198,11 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
        { path: '/admin/accounts', label: 'Accounts (admin)',
          icon: <AdminIconNav />, group: 'Admin' }]
     : [...NAV_ITEMS, ...seedItem]
+  if (workspaceUI) {
+    navItems.unshift({ path: '/overview', label: 'Overview', icon: <HomeOutlined />, group: 'Set up' })
+    navItems.push({ path: '/users', label: 'People', icon: <PeopleIcon />, group: 'Check' }, { path: '/settings', label: 'Settings', icon: <SettingsIcon />, group: 'Admin' })
+    if (account?.is_superadmin) navItems.push({ path: '/deadman', label: 'Safety monitor', icon: <SecurityOutlined />, group: 'Operate' })
+  }
   const [notifAnchor, setNotifAnchor] = useState<null | HTMLElement>(null)
   const [profileAnchor, setProfileAnchor] = useState<null | HTMLElement>(null)
 
@@ -216,7 +224,7 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
     // bounce straight back into the app the session that just ended.
     // /app prefix required -- see Login.tsx's comment: this is a raw
     // browser navigation, not routed through react-router's basename.
-    logout().finally(() => { window.location.href = '/app/login' })
+    logout().finally(() => { window.location.href = appLink('/login') })
   }
 
   // Fetched once, not polled: a process's own hostname/code path/pid never
@@ -328,6 +336,8 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
     if (!confirm(`Interrupt the running job (${job?.name})?`)) return
     stopJob()
   }
+
+  if (workspaceUI) return <WorkspaceShell account={account} config={cfg} host={host} job={job} owed={owed} navItems={navItems} progress={progressIndeterminate ? null : progressPct} onSignOut={handleSignOut} onInterrupt={handleInterrupt}>{children}</WorkspaceShell>
 
   const drawerContent = (
     <Box sx={{ display: 'flex', flexDirection: 'column', height: '100%' }}>

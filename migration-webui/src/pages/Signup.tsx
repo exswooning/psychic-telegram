@@ -1,3 +1,4 @@
+import { appLink, workspaceUI } from '@/workspace'
 import React, { useState } from 'react'
 import { useSearchParams, Link as RouterLink } from 'react-router-dom'
 import {
@@ -35,7 +36,7 @@ const Signup: React.FC = () => {
       // straight back to /login before the fresh session is ever seen.
       // /app prefix required -- see Login.tsx's comment: this is a raw
       // browser navigation, not routed through react-router's basename.
-      window.location.href = '/app/mission-control'
+      window.location.href = appLink(workspaceUI ? '/overview' : '/mission-control')
     } catch (err: unknown) {
       setError((err instanceof Error ? err.message : String(err)) || 'could not create account')
     } finally {

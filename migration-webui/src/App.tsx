@@ -1,6 +1,10 @@
 import React, { Suspense, lazy, useEffect, useState } from 'react'
 import { Routes, Route, Navigate, useLocation } from 'react-router-dom'
 import Layout from '@/components/Layout'
+import WorkspacePageBoundary from '@/components/WorkspacePageBoundary'
+import { workspaceUI } from '@/workspace'
+const WorkspaceTools = lazy(() => import('@/pages/WorkspaceTools'))
+const WorkspaceOverview = lazy(() => import('@/pages/WorkspaceOverview'))
 import Login from '@/pages/Login'
 import Signup from '@/pages/Signup'
 import Pricing from '@/pages/Pricing'
@@ -50,7 +54,6 @@ const PUBLIC_PATHS = ['/login', '/signup', '/pricing']
 const App: React.FC = () => {
   // Mounted once, at the root, so every routed page shares one poll loop
   // rather than each page starting (and losing) its own on navigation.
-  useMigration()
 
   const location = useLocation()
   // undefined = "haven't asked the server yet" (distinct from null, "asked
@@ -58,6 +61,7 @@ const App: React.FC = () => {
   // hold rendering for one round trip instead of flashing the app shell
   // and then yanking it away the instant fetchMe() comes back 401.
   const [account, setAccount] = useState<Account | null | undefined>(undefined)
+  useMigration(account != null)
 
   // Checked once on mount, not on every navigation: this is a real network
   // round trip to api_server.py, and re-running it on every in-app click
@@ -85,14 +89,16 @@ const App: React.FC = () => {
 
   return (
     <Routes>
-      <Route path="/login" element={account ? <Navigate to="/mission-control" replace /> : <Login />} />
-      <Route path="/signup" element={account ? <Navigate to="/mission-control" replace /> : <Signup />} />
+      <Route path="/login" element={account ? <Navigate to={workspaceUI ? "/overview" : "/mission-control"} replace /> : <Login />} />
+      <Route path="/signup" element={account ? <Navigate to={workspaceUI ? "/overview" : "/mission-control"} replace /> : <Signup />} />
       <Route path="/pricing" element={<Pricing />} />
       <Route path="/*" element={
         <Layout>
-          <Suspense fallback={<LinearProgress />}>
+          <WorkspacePageBoundary key={location.pathname}><Suspense fallback={<LinearProgress />}>
             <Routes>
-              <Route path="/" element={<Navigate to="/mission-control" replace />} />
+              <Route path="/" element={<Navigate to={workspaceUI ? "/overview" : "/mission-control"} replace />} />
+              <Route path="/overview" element={<WorkspaceOverview />} />
+              <Route path="/tools" element={<WorkspaceTools />} />
               <Route path="/mission-control" element={<MissionControl />} />
               <Route path="/jobs" element={<Jobs />} />
               <Route path="/pipeline" element={<Pipeline />} />
@@ -136,8 +142,9 @@ const App: React.FC = () => {
               <Route path="/gcp-teardown" element={<GcpTeardown />} />
               <Route path="/deadman" element={<Deadman />} />
               <Route path="/admin/accounts" element={<AdminAccounts />} />
+              <Route path="*" element={<Navigate to={workspaceUI ? "/overview" : "/mission-control"} replace />} />
             </Routes>
-          </Suspense>
+          </Suspense></WorkspacePageBoundary>
         </Layout>
       } />
     </Routes>

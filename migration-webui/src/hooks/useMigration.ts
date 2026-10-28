@@ -28,7 +28,7 @@ import {
 const POLL_MS = 4000
 const HISTORY_POINTS = 30
 
-const useMigration = () => {
+const useMigration = (enabled = true) => {
   const {
     users, setUsers, setStages, setMetrics, setActivities, setVerification,
     setReport, setLastUpdate, setError, setLoading,
@@ -118,12 +118,13 @@ const useMigration = () => {
      setLastUpdate, setError, setLoading])
 
   useEffect(() => {
+    if (!enabled) return
     poll()
     intervalRef.current = setInterval(poll, POLL_MS)
     return () => {
       if (intervalRef.current) clearInterval(intervalRef.current)
     }
-  }, [poll])
+  }, [poll, enabled])
 
   return { users, setUsers, setMetrics }
 }

@@ -97,8 +97,8 @@ describe('where the differences come from', () => {
 
   it('answers "email or Drive?" per service, summed from the one-to-one rows', async () => {
     await open()
-    expect(screen.getByTestId('svc-bar-gmail')).toHaveTextContent("4,329 differ · 0 missing · 12 not copied · 0 couldn't check")
-    expect(screen.getByTestId('svc-bar-drive')).toHaveTextContent("9 differ · 0 missing · 0 not copied · 34 couldn't check")
+    expect(screen.getByTestId('svc-bar-gmail')).toHaveTextContent("4,329 differ · 0 missing · 12 copy or access findings · 0 couldn't check")
+    expect(screen.getByTestId('svc-bar-drive')).toHaveTextContent("9 differ · 0 missing · 0 copy or access findings · 34 couldn't check")
   })
 
   it('a bar shows its cause, its fix and the users it affects', async () => {

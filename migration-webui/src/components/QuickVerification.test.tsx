@@ -63,7 +63,7 @@ describe('QuickVerification', () => {
     render(<QuickVerification accountId={3} />)
     expect((await screen.findByTestId('quick-verdict')).className).toMatch(/colorError/)
     const text = screen.getByTestId('quick-summary').textContent
-    for (const s of ['2 differ', '1 missing on the target', '1 copied twice', '1 failed to copy']) expect(text).toContain(s)
+    for (const s of ['2 differ', '1 missing on the target', '1 copied twice', '1 unresolved copy or access findings']) expect(text).toContain(s)
     expect(screen.getByTestId('quick-cell-george-drive')).toHaveTextContent('1/4 · 4 problems')
     expect(screen.getByTestId('quick-cell-george-gmail')).toHaveTextContent('4/4')
   })

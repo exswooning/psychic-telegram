@@ -9,7 +9,8 @@
     "preview": "vite preview",
     "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "build:workspace": "VITE_WORKSPACE_UI=1 VITE_APP_BASE=/next/ tsc && VITE_WORKSPACE_UI=1 VITE_APP_BASE=/next/ vite build"
   },
   "dependencies": {
     "@emotion/react": "^11.11.4",

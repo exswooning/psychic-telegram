@@ -1,0 +1,27 @@
+/** Compositor-friendly motion. Operational values remain exact while surfaces move. */
+export const workspaceMotion = {
+  '@keyframes workspaceEnter': { from: { opacity: 0, transform: 'translateY(8px)' }, to: { opacity: 1, transform: 'translateY(0)' } },
+  '@keyframes workspacePanel': { from: { opacity: 0, transform: 'translateY(5px)' }, to: { opacity: 1, transform: 'translateY(0)' } },
+  '@keyframes workspaceDialog': { from: { opacity: 0, transform: 'translateY(8px) scale(.985)' }, to: { opacity: 1, transform: 'translateY(0) scale(1)' } },
+  '@keyframes workspaceLive': { '0%, 100%': { opacity: 1 }, '50%': { opacity: .4 } },
+  '[data-workspace-page]': { animation: 'workspaceEnter 240ms cubic-bezier(.2,0,0,1) both' },
+  '[data-workspace-page] [role="tabpanel"]': { animation: 'workspacePanel 200ms cubic-bezier(.2,0,0,1) both' },
+  '[data-workspace-page] tbody tr': { animation: 'workspacePanel 220ms cubic-bezier(.2,0,0,1) both' },
+  '[data-workspace-page] tbody tr:nth-of-type(2)': { animationDelay: '20ms' },
+  '[data-workspace-page] tbody tr:nth-of-type(3)': { animationDelay: '40ms' },
+  '[data-workspace-page] tbody tr:nth-of-type(4)': { animationDelay: '60ms' },
+  '[data-workspace-page] tbody tr:nth-of-type(5)': { animationDelay: '80ms' },
+  '[data-workspace-page] .MuiChip-root': { transition: 'background-color 180ms, color 180ms, border-color 180ms' },
+  'a.MuiPaper-root': { transition: 'transform 180ms cubic-bezier(.2,0,0,1), border-color 180ms, background-color 180ms' },
+  'a.MuiPaper-root:hover': { transform: 'translateY(-2px)' },
+  'a.MuiPaper-root:active': { transform: 'translateY(0)' },
+  '.MuiButton-root': { transition: 'background-color 160ms, box-shadow 160ms, border-color 160ms, color 160ms' },
+  '.MuiIconButton-root': { transition: 'background-color 160ms, transform 120ms' },
+  '.MuiIconButton-root:active': { transform: 'scale(.94)' },
+  '.MuiListItemButton-root': { transition: 'background-color 180ms, color 180ms' },
+  '.MuiDialog-paper': { animation: 'workspaceDialog 220ms cubic-bezier(.2,0,0,1) both' },
+  '.workspace-live-dot': { animation: 'workspaceLive 2s ease-in-out infinite' },
+  '@media (prefers-reduced-motion: reduce)': {
+    '*, *::before, *::after': { animation: 'none !important', transition: 'none !important', scrollBehavior: 'auto !important' },
+  },
+}

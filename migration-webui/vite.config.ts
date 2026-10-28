@@ -8,7 +8,8 @@ export default defineConfig({
   // with that file's own inline setup-wizard page at "/". Asset URLs in the
   // built index.html need this prefix or they resolve to webui.py's own
   // routes instead of the SPA's files.
-  base: '/app/',
+  base: process.env.VITE_APP_BASE || '/app/',
+  build: { outDir: process.env.VITE_WORKSPACE_UI === '1' ? 'dist-workspace' : 'dist' },
   plugins: [react()],
   resolve: {
     alias: {

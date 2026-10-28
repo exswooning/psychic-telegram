@@ -140,7 +140,7 @@ describe('settings', () => {
     fireEvent.click(screen.getByTestId('mirror-save'))
     await confirm('slower at night')
     await waitFor(() => expect(cp.save).toHaveBeenCalledWith('slower at night',
-      { enabled: true, intervalMin: 30, deletionMode: 'keep', capPct: 2, users: null }, 3))
+      { enabled: true, intervalMin: 30, deletionMode: 'keep', capPct: 2, users: null, background: false, followDomains: false, sourceRecoveryAdmins: [], targetRecoveryAdmins: [] }, 3))
   })
 
   it('runs a cycle now after a reason', async () => {
