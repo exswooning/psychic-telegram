@@ -1,0 +1,4 @@
+# Optional Microsoft provider; no change to the Google engine environment.
+msal>=1.31,<2
+cryptography>=43
+requests>=2.32,<3

@@ -69,3 +69,6 @@ env.sh
 # developer machine every deploy: rsync overwrote the box, so a stale
 # dry_run:true silently turned every action into a no-op.
 /run_state.json
+
+# Microsoft inventories, encrypted application credentials and local vault keys.
+/data/microsoft365/

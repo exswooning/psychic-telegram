@@ -5,6 +5,7 @@ import WorkspacePageBoundary from '@/components/WorkspacePageBoundary'
 import { workspaceUI } from '@/workspace'
 const WorkspaceTools = lazy(() => import('@/pages/WorkspaceTools'))
 const WorkspaceOverview = lazy(() => import('@/pages/WorkspaceOverview'))
+const MicrosoftMigration = lazy(() => import('@/pages/MicrosoftMigration'))
 import Login from '@/pages/Login'
 import Signup from '@/pages/Signup'
 import Pricing from '@/pages/Pricing'
@@ -99,6 +100,7 @@ const App: React.FC = () => {
               <Route path="/" element={<Navigate to={workspaceUI ? "/overview" : "/mission-control"} replace />} />
               <Route path="/overview" element={<WorkspaceOverview />} />
               <Route path="/tools" element={<WorkspaceTools />} />
+              <Route path="/microsoft" element={<MicrosoftMigration />} />
               <Route path="/mission-control" element={<MissionControl />} />
               <Route path="/jobs" element={<Jobs />} />
               <Route path="/pipeline" element={<Pipeline />} />

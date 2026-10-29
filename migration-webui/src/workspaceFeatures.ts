@@ -5,6 +5,7 @@ export const workspaceFeatures: WorkspaceFeature[] = [
   { path: '/tools', label: 'All tools', description: 'Find every tool available to your account.', group: 'Manage' },
   { path: '/overview', label: 'Overview', description: 'Your migration at a glance and the next place to go.', group: 'Start' },
   { path: '/wizard', label: 'Setup Wizard', description: 'Connect tenants, credentials, scopes and account provisioning.', group: 'Start' },
+  { path: '/microsoft', label: 'Microsoft 365', description: 'Microsoft tenant discovery, exact profiles, coverage, transfer planning and guarded sandbox copies.', group: 'Start' },
   { path: '/migrations', label: 'Migrations', description: 'Tenant pairs, users, service progress and migration reports.', group: 'Move' },
   { path: '/jobs', label: 'Jobs', description: 'Run, queue, resume and stop work. Drive transfer methods and hybrid email.', group: 'Move' },
   { path: '/mirror', label: 'Mirror', description: 'Incremental sync, low priority background deltas and domain handover.', group: 'Move' },

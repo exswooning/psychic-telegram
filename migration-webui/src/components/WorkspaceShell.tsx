@@ -12,7 +12,7 @@ import { workspaceFeatures } from '@/workspaceFeatures'
 import { formatDuration } from '@/utils/formatters'
 export interface WorkspaceNavItem { path: string; label: string; icon: ReactNode; group: string }
 interface Props extends WorkspaceState { children: ReactNode; navItems: WorkspaceNavItem[]; onSignOut: () => void; onInterrupt: () => void; progress: number | null }
-const primaryOrder = ['/overview', '/migrations', '/mirror', '/jobs', '/users', '/services', '/verification', '/one-to-one', '/activity']
+const primaryOrder = ['/overview', '/migrations', '/microsoft', '/mirror', '/jobs', '/users', '/services', '/verification', '/one-to-one', '/activity']
 export default function WorkspaceShell({ children, navItems, onSignOut, onInterrupt, progress, ...state }: Props) {
   const { account, job, host, owed } = state
   const { darkMode, toggleDarkMode, sidebarOpen, toggleSidebar } = useMigrationStore()
