@@ -738,7 +738,9 @@ class TestCloudTermsReview:
 
     def test_declined_terms_stop_setup_and_no_prompt_does_nothing(self, monkeypatch):
         from types import SimpleNamespace
-        page = SimpleNamespace(goto=lambda *a, **k: None, wait_for_timeout=lambda n: None)
+        page = SimpleNamespace(goto=lambda *a, **k: None, wait_for_timeout=lambda n: None,
+            inner_text=lambda _: 'Cloud project form', get_by_role=lambda *a, **k: SimpleNamespace(
+                count=lambda: 1 if a[0] == 'textbox' else 0, is_visible=lambda: True))
         monkeypatch.setattr(ga, 'HANDOFF', lambda v: None)
         monkeypatch.setattr(ga, 'NOTICE_FILE', '/private/test-response')
         monkeypatch.setattr(ga.setup_notices, 'current_notice', lambda *a: dict(category='cloud_console_terms'))
@@ -746,3 +748,16 @@ class TestCloudTermsReview:
         assert 'declined' in ga._review_cloud_console_terms(page, 'nest@target.example', 60)
         monkeypatch.setattr(ga.setup_notices, 'current_notice', lambda *a: None)
         assert ga._review_cloud_console_terms(page, 'nest@target.example', 60) == ''
+
+    def test_console_loading_is_not_mistaken_for_absent_terms(self, monkeypatch):
+        from types import SimpleNamespace
+        waits = []
+        page = SimpleNamespace(goto=lambda *a, **k: None, wait_for_timeout=waits.append,
+            get_by_role=lambda *a, **k: SimpleNamespace(count=lambda: 0, is_visible=lambda: False))
+        notices = [None] * 4 + [dict(category='cloud_console_terms'), None]
+        monkeypatch.setattr(ga, 'HANDOFF', lambda v: None)
+        monkeypatch.setattr(ga, 'NOTICE_FILE', '/private/test-response')
+        monkeypatch.setattr(ga.setup_notices, 'current_notice', lambda *a: notices.pop(0))
+        monkeypatch.setattr(ga.setup_notices, 'await_review', lambda *a: 'approved')
+        assert ga._review_cloud_console_terms(page, 'nest@target.example', 60) == ''
+        assert waits.count(1000) == 5

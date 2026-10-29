@@ -437,12 +437,25 @@ def _review_cloud_console_terms(page, email: str, timeout: float) -> str:
     """Prepare the visible Cloud dialog and continue only after its own approval."""
     try:
         page.goto("https://console.cloud.google.com/projectcreate", wait_until="domcontentloaded", timeout=30000)
-        page.wait_for_timeout(3000)
-        notice = setup_notices.current_notice(page, email)
+        notice = None
+        # The console shell can precede its account/terms dialog by seconds.
+        # A loaded navigation response is not proof that no agreement is due.
+        for attempt in range(25):
+            page.wait_for_timeout(1000)
+            notice = setup_notices.current_notice(page, email)
+            if notice:
+                break
+            dialog = page.get_by_role("dialog", name="Google Cloud", exact=True)
+            if dialog.count() == 1 and dialog.is_visible():
+                continue  # allow the account and country to finish rendering
+            field = page.get_by_role("textbox", name="Project name", exact=True)
+            if attempt >= 7 and field.count() == 1 and field.is_visible():
+                log("  Cloud project form ready; no first-use notice is present")
+                return ""
         if not notice:
-            # No legal button is touched if the account, dialog or screen differs.
-            log("  Cloud first-use notice not present; provisioning will check project eligibility")
-            return ""
+            summary = _signin_screen_summary([page])
+            log("  Cloud first-use review unavailable: " + summary)
+            return "Google Cloud first-use review could not be confirmed. Visible screen: " + summary
         if HANDOFF is None or not NOTICE_FILE:
             return "Google Cloud Platform terms require account-specific review in the setup UI."
         result = setup_notices.await_review(page, email, None, HANDOFF, NOTICE_FILE, timeout, log)
