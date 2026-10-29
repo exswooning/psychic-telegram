@@ -94,6 +94,7 @@ const NAV_GROUP_ORDER = ['Set up', 'Migrate', 'Check', 'Operate', 'Admin'] as co
 
 const NAV_ITEMS = [
   { path: '/wizard', label: 'Setup Wizard', icon: <WizardIconNav /> , group: 'Set up' },
+  { path: '/microsoft', label: 'Microsoft 365', icon: <HostIcon />, group: 'Set up' },
   // Every account has a tenant pair, so this is not gated -- a client
   // sees only its own, which the endpoint enforces rather than the nav.
   { path: '/migrations', label: 'Migrations', icon: <MigrationsIconNav /> , group: 'Migrate' },

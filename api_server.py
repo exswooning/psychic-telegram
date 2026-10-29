@@ -9035,6 +9035,26 @@ async def heartbeat(hb: Heartbeat, _: None = Depends(node_auth)):
     return {"ok": True}
 
 
+def _microsoft_launch(argv: list[str], account_id: int, job_name: str) -> tuple[bool, str]:
+    """Microsoft jobs share admission and stop handling with existing tenant jobs."""
+    admitted, detail = job_admission.try_admit(account_id, job_name)
+    if not admitted:
+        return False, detail
+    try:
+        return _start_admitted(argv, account_id, job_name)
+    except Exception:
+        job_admission.release(account_id, job_name)
+        raise
+
+
+from microsoft365.routes import router as _microsoft_router
+
+app.include_router(_microsoft_router(
+    operator=operator, require_login=require_login, require_admin=require_admin,
+    require_active_subscription=require_active_subscription,
+    launch=_microsoft_launch, off_loop=_off_loop))
+
+
 def main(argv: list[str] | None = None) -> int:
     import uvicorn
 

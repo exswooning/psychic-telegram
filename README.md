@@ -3,6 +3,13 @@
 A modular Google Workspace migration engine (tenantA.com → tenantB.com) covering
 Drive with ACL translation, Gmail, and Calendar.
 
+## Microsoft 365 workspace (experimental)
+
+The Microsoft page adds tenant discovery, coverage planning, exact profile mapping,
+and guarded sandbox profile/OneDrive content-copy pilots. Full Microsoft production
+migration is not implemented or qualified yet. See [setup, coverage and remaining
+work](docs/MICROSOFT365.md). Google migrations retain their existing engines.
+
 ```
 migration_engine/
 ├── config.py           # scopes, tunables, MIME export map
