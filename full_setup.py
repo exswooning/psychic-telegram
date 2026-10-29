@@ -332,7 +332,7 @@ def run_full_setup(
     # the phases in between know or care that a phone is buzzing.
     _challenge = {"text": ""}
     # A sign-in moved to the operator's own device (see _on_handoff below).
-    _handoff: dict = {"v": None, "used": False}
+    _handoff: dict = {"v": None, "used": False, "resumeLabel": ""}
     _last_pct, _last_label = {"v": 0}, {"v": ""}
 
     def _progress(pct: int, label: str) -> None:
@@ -370,15 +370,20 @@ def run_full_setup(
     def _on_handoff(h: dict | None) -> None:
         """Google keeps challenging the server's browser (live: it asked it for a phone
         number), so the sign-in is finished where the admin already is signed in."""
+        if h is not None and _handoff["v"] is None:
+            _handoff["resumeLabel"] = _last_label["v"]
         _handoff["v"] = h
-        _handoff["used"] = _handoff["used"] or h is not None
+        _handoff["used"] = _handoff["used"] or bool(h and h.get("kind") in ("signin", "dwd"))
         _challenge["text"] = ""
-        _progress(_last_pct["v"], _last_label["v"])
+        label = ("Needs approval: " + h.get("title", "Google setup notice")
+                 if h and h.get("kind") == "review" else _handoff["resumeLabel"] or _last_label["v"])
+        _progress(_last_pct["v"], label)
 
     if progress_file:
         signin_challenge.HANDOFF_AFTER = 45
         gcloud_browser_auth.HANDOFF = _on_handoff
         gcloud_browser_auth.CODE_FILE = progress_file + ".code"
+        gcloud_browser_auth.NOTICE_FILE = progress_file + ".notice-response"
 
     def _allow_drive_sdk() -> None:
         import project_creation

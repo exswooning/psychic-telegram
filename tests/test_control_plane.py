@@ -61,6 +61,53 @@ ADMIN = {"X-Operator": "boss", "X-Operator-Token": OPERATOR_TOKEN}
 VIEWER = {"X-Operator": "intern", "X-Operator-Token": OPERATOR_TOKEN}
 
 
+class TestRunScopedSetupNotice:
+    def pending(self, monkeypatch, tmp_path):
+        import api_server
+        monkeypatch.setattr(api_server, "HERE", str(tmp_path))
+        monkeypatch.setattr(api_server, "_full_setup_pid", lambda side, aid: 1234)
+        request = {"kind": "review", "requestId": "a" * 48, "noticeHash": "b" * 64,
+                   "expiresAt": time.time() + 300, "adminEmail": "nest@target.example"}
+        path = api_server._full_setup_state_path("target", None) + ".progress"
+        with open(path, "w") as f: json.dump({"handoff": request}, f)
+        return path
+
+    def body(self):
+        return {"reason": "reviewed account notice", "side": "target", "request_id": "a" * 48,
+                "notice_hash": "b" * 64, "decision": "approve"}
+
+    def test_admin_response_is_audited_and_does_not_click_a_browser(self, monkeypatch, tmp_path, cp):
+        path = self.pending(monkeypatch, tmp_path)
+        response = cp.post('/api/v2/full-setup/notice', json=self.body(), headers=ADMIN)
+        assert response.status_code == 200 and response.json()['ok']
+        assert json.loads(open(path + '.notice-response').read())['decision'] == 'approve'
+        rows = cpdb.recent_actions(10)
+        assert any(r['action'] == 'full_setup.notice' and r['outcome'] == 'OK' for r in rows)
+
+    def test_viewer_cannot_submit_or_create_an_approval_file(self, monkeypatch, tmp_path, cp):
+        path = self.pending(monkeypatch, tmp_path)
+        response = cp.post('/api/v2/full-setup/notice', json=self.body(), headers=VIEWER)
+        assert response.status_code == 403
+        assert not os.path.exists(path + '.notice-response')
+
+    def test_expired_run_and_stale_request_are_refused(self, monkeypatch, tmp_path, cp):
+        import api_server
+        path = self.pending(monkeypatch, tmp_path)
+        body = self.body(); body['request_id'] = 'c' * 48
+        response = cp.post('/api/v2/full-setup/notice', json=body, headers=ADMIN)
+        assert not response.json()['ok']
+        monkeypatch.setattr(api_server, '_full_setup_pid', lambda side, aid: None)
+        response = cp.post('/api/v2/full-setup/notice', json=self.body(), headers=ADMIN)
+        assert not response.json()['ok']
+        assert not os.path.exists(path + '.notice-response')
+
+    def test_reason_and_strict_request_shape_remain_required(self, cp):
+        body = self.body(); body.pop('reason')
+        assert cp.post('/api/v2/full-setup/notice', json=body, headers=ADMIN).status_code == 422
+        body = self.body(); body['decision'] = 'approve-all-future-notices'
+        assert cp.post('/api/v2/full-setup/notice', json=body, headers=ADMIN).status_code == 422
+
+
 class TestReasonCodeIsMandatory:
     def test_a_write_without_a_reason_is_rejected_before_any_logic(self, cp):
         """422 from the schema, not 400 from a handler. A new write endpoint

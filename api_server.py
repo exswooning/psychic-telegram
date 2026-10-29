@@ -4733,6 +4733,34 @@ class FullSetupCode(WriteAction):
                       exclude=True)
 
 
+class FullSetupNotice(WriteAction):
+    account_id: int | None = None
+    side: Literal["source", "target"]
+    request_id: str = Field(pattern=r"^[a-f0-9]{48}$")
+    notice_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
+    decision: Literal["approve", "decline"]
+
+
+@app.post("/api/v2/full-setup/notice")
+async def full_setup_notice(body: FullSetupNotice, op: Operator = Depends(operator)):
+    """Audited, account/run-specific approval, never a saved blanket acceptance."""
+    require_admin(op)
+    aid = _resolve_account(body, op)
+
+    def _respond() -> tuple[bool, str]:
+        if _full_setup_pid(body.side, aid) is None:
+            return False, f"no {body.side} setup is running"
+        import setup_notices
+        try:
+            setup_notices.write_decision(
+                _full_setup_state_path(body.side, aid) + ".progress",
+                body.request_id, body.notice_hash, body.decision)
+        except (OSError, ValueError, KeyError) as exc:
+            return False, str(exc)
+        return True, "Notice response recorded for this setup only; Google must still confirm the next step."
+    return await _gated(op, "full_setup.notice", body, body.side, _respond)
+
+
 @app.post("/api/v2/full-setup/code")
 async def full_setup_code(body: FullSetupCode, op: Operator = Depends(operator)):
     """The code Google showed the operator after they signed in on their own device,

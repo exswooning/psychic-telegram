@@ -699,7 +699,21 @@ def test_a_handed_over_sign_in_takes_the_code_pasted_on_the_card(monkeypatch, tm
             pasted.append(code_file.write_text("4/0AbC-d_e\n"))
     monkeypatch.setattr(g.time, "sleep", _sleep)
     proc = _Proc()
-    g._await_device(proc, "https://accounts.google.com/o/oauth2/auth?x", 60)
+    assert g._await_device(proc, "https://accounts.google.com/o/oauth2/auth?x", 60)
     assert proc.stdin.getvalue() == "4/0AbC-d_e\n"
-    assert seen == [{"kind": "signin", "url": "https://accounts.google.com/o/oauth2/auth?x"}, None]
+    assert seen[0]["kind"] == "signin"
+    assert seen[0]["url"] == "https://accounts.google.com/o/oauth2/auth?x"
+    assert seen[0]["expiresAt"] > 0
+    assert seen[-1] is None
     assert not code_file.exists()
+
+
+def test_authentication_details_redact_complete_and_truncated_parameters():
+    detail = ga._safe_auth_detail('Google error https://accounts.google.com/auth?state=private state=leftover code_challenge=private ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890')
+    assert 'Google error' in detail
+    assert 'private' not in detail and 'leftover' not in detail
+    assert 'ABCDEFGHIJKLMNOPQRSTUVWXYZ' not in detail
+
+
+def test_legal_and_access_buttons_are_not_generic_navigation():
+    assert ga._CONSENT_LABELS == ('Continue',)

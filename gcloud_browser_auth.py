@@ -56,6 +56,7 @@ import tempfile
 import time
 
 import signin_challenge
+import setup_notices
 
 
 def log(msg: str) -> None:
@@ -71,9 +72,16 @@ def log(msg: str) -> None:
 # shows them is pasted on the setup card and lands in CODE_FILE.
 HANDOFF: "Callable[[dict | None], None] | None" = None
 CODE_FILE = ""
+NOTICE_FILE = ""
 _HANDED_OVER = "\0handed-over"
 
 _AUTH_URL_RE = re.compile(r"https://accounts\.google\.com/o/oauth2/auth\S+")
+
+
+def _safe_auth_detail(text: str) -> str:
+    text = re.sub(r"https?://\S+", "[Google sign-in link]", text)
+    text = re.sub(r"(?i)\b(code_challenge|state|code|rapt|xsrf)=[^\s&]+", r"\1=[redacted]", text)
+    return re.sub(r"[A-Za-z0-9_./~+-]{32,}", "[redacted]", text)
 
 
 def login(email: str, password: str, timeout: int = 180) -> tuple[bool, str, str]:
@@ -127,19 +135,24 @@ def login(email: str, password: str, timeout: int = 180) -> tuple[bool, str, str
         proc.kill()
         rest = proc.stdout.read() if proc.stdout else ""
         shutil.rmtree(cloudsdk_config, ignore_errors=True)
-        return False, (buf + rest).strip()[-300:] or "gcloud printed no sign-in URL", ""
+        return False, _safe_auth_detail((buf + rest).strip())[-300:] or "gcloud printed no sign-in URL", ""
 
     log(f"driving browser sign-in for {email}")
     no = _drive_browser(proc, url, email, password, timeout)
     if no == _HANDED_OVER:
-        _await_device(proc, url, timeout)
+        completed = _await_device(proc, url, timeout)
+        if completed is False:
+            if proc.poll() is None:
+                proc.kill()
+            shutil.rmtree(cloudsdk_config, ignore_errors=True)
+            return False, "On-device sign-in expired. Start setup again for a fresh Google link; old codes cannot resume it.", ""
         if proc.poll() is None:
             proc.kill()
         no = ""
     if no:
         proc.kill()
         shutil.rmtree(cloudsdk_config, ignore_errors=True)
-        return False, f"Google refused the sign-in for {email}: {no}", ""
+        return False, f"Google refused the sign-in for {email}: {_safe_auth_detail(no)}", ""
 
     try:
         rc = proc.wait(timeout=max(timeout - 20, 10))
@@ -147,7 +160,7 @@ def login(email: str, password: str, timeout: int = 180) -> tuple[bool, str, str
         proc.kill()
         rc = -1
     rest = proc.stdout.read() if proc.stdout else ""
-    full_out = (buf + rest).strip()
+    full_out = _safe_auth_detail((buf + rest).strip())
 
     if rc == 0 and "You are now logged in as" in full_out:
         log(f"signed in as {email}")
@@ -183,7 +196,9 @@ def cleanup(cloudsdk_config_dir: str) -> None:
 # present on the identifier page.
 _EMAIL_SEL = '#identifierId, input[name="identifier"], input[type="email"]'
 _PW_SEL = 'input[type="password"][name="Passwd"], input[type="password"]'
-_CONSENT_LABELS = ("Allow", "Continue", "I agree", "Got it")
+# Account acknowledgements and Cloud SDK access require the run-scoped review
+# below. Never treat an arbitrary "I agree"/"Allow" as navigation.
+_CONSENT_LABELS = ("Continue",)
 
 # Where Google shows the verification code at the end of the out-of-band
 # sign-in flow. It has moved between a readonly <input>, a <textarea>, and a
@@ -245,12 +260,12 @@ def _fill_visible(pg, selector: str, value: str) -> bool:
     return False
 
 
-def _await_device(proc, url: str, timeout: int) -> None:
+def _await_device(proc, url: str, timeout: int) -> bool:
     """The same gcloud sign-in, finished on the operator's device: they open `url`
     where they are already signed in, Google shows them a code, they paste it on the
     setup card, and it is handed to the gcloud still waiting for it here."""
-    HANDOFF({"kind": "signin", "url": url})
     deadline = time.time() + timeout
+    HANDOFF({"kind": "signin", "url": url, "expiresAt": deadline})
     try:
         while time.time() < deadline and proc.poll() is None:
             if CODE_FILE and os.path.exists(CODE_FILE):
@@ -262,6 +277,7 @@ def _await_device(proc, url: str, timeout: int) -> None:
                     proc.stdin.flush()
                     log("  handed the operator's code to gcloud")
             time.sleep(1)
+        return proc.poll() is not None
     finally:
         HANDOFF(None)
 
@@ -323,8 +339,24 @@ def _drive_browser(proc, url: str, email: str, password: str, timeout: int) -> s
                         password_at = time.time()
                         continue
                     if typed_pw:
+                        notice = setup_notices.detect(pg.url, pg.inner_text("body"), email)
+                        if notice:
+                            if HANDOFF is None or not NOTICE_FILE:
+                                browser.close()
+                                return "Google needs an account-specific notice review. Use the setup UI."
+                            outcome = setup_notices.await_review(
+                                pg, email, proc, HANDOFF, NOTICE_FILE,
+                                max(deadline - time.time(), 1), log)
+                            if outcome in ("declined", "expired"):
+                                browser.close()
+                                return "Google setup notice review " + outcome + ". Start setup again when ready."
+                            password_at = time.time()
+                            pg.wait_for_timeout(1000)
+                            # Do not click any second consent button using this
+                            # notice's approval; inspect the next page afresh.
+                            continue
                         for label in _CONSENT_LABELS:
-                            btn = pg.get_by_role("button", name=label)
+                            btn = pg.get_by_role("button", name=label, exact=True)
                             if btn.count() > 0 and btn.first.is_visible():
                                 btn.first.click()
                                 pg.wait_for_timeout(1500)

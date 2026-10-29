@@ -4,6 +4,7 @@ import {
   fetchActiveJobs, fetchMe, fetchMigrations, stopJob as stopFleetJob,
   fetchProvisionStatus, ProvisionStatus } from '@/api/controlPlane'
 import { fetchJob, stopJob as stopSeedJob } from '@/api/client'
+import type { FullSetupStatus } from '@/api/controlPlane'
 
 /** What the job IS, so a card can say so rather than showing a bare name.
  *  Derived from the job's own name because that is the only thing every
@@ -32,7 +33,7 @@ export interface RunningJob {
   startedAt?: string
   key: string; label: string; detail: string; pct: number | null
   /** A setup waiting on the operator's own device: the card carries what to open. */
-  handoff?: { side: 'source' | 'target'; kind: 'signin' | 'dwd'; url: string; clientId?: string; scopes?: string } | null
+  handoff?: (NonNullable<FullSetupStatus['handoff']> & { side: 'source' | 'target' }) | null
   /** seed | migrate | ... -- what the rectangle announces. */
   kind: JobKind
   /** The tenant this is happening to, when the source knows it. */

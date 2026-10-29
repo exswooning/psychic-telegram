@@ -685,7 +685,9 @@ export interface FullSetupStatus {
   /** Google kept challenging the server's browser, so this sign-in is finished on the
    *  operator's own device: open `url` there (and, for `signin`, paste back the code
    *  Google shows). Null when the server is doing it itself. */
-  handoff?: { kind: 'signin' | 'dwd'; url: string; clientId?: string; scopes?: string } | null
+  handoff?: { kind: 'signin' | 'dwd' | 'review'; url?: string; clientId?: string; scopes?: string
+    requestId?: string; noticeHash?: string; adminEmail?: string; expiresAt?: number
+    category?: string; title?: string; text?: string; buttonLabel?: string } | null
   /** The running setup's own transcript, newest last -- empty when nothing runs. */
   lines?: string[]
 }
@@ -707,6 +709,12 @@ export const sendFullSetupCode = (side: 'source' | 'target', code: string) =>
   cpFetch<ActionResult>('/api/v2/full-setup/code', {
     method: 'POST',
     body: JSON.stringify({ side, code, reason: 'signed in on own device' }),
+  })
+export const sendFullSetupNotice = (side: 'source' | 'target', requestId: string,
+  noticeHash: string, decision: 'approve' | 'decline') =>
+  cpFetch<ActionResult>('/api/v2/full-setup/notice', {
+    method: 'POST', body: JSON.stringify({ side, request_id: requestId,
+      notice_hash: noticeHash, decision, reason: `Reviewed Google setup notice: ${decision}` }),
   })
 /** Kill a side's running setup (and the browser it drives) so it can be started again. */
 export const stopFullSetup = (side: 'source' | 'target') =>
