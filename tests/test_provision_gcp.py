@@ -499,9 +499,9 @@ class TestOnStepProgress:
 class TestKnownProjectCreateFailures:
     """Confirmed live against a real, brand-new Google account: project
     creation fails with 'Callers must accept Terms of Service' the first
-    time any identity ever tries it. gcloud_browser_auth.py now clears
-    that proactively during sign-in, but this is the fallback explanation
-    if it somehow doesn't -- and the only place billing/quota gates (which
+    time any identity ever tries it. Setup now offers a distinct reviewed
+    notice after sign-in; this is the fallback explanation
+    if that review does not complete -- and the only place billing/quota gates (which
     nothing here can auto-clear) get explained at all."""
 
     def test_tos_error_gets_a_clear_actionable_explanation(self):
@@ -514,7 +514,8 @@ class TestKnownProjectCreateFailures:
         explained = pg._explain_project_create_failure(raw)
         assert "console.cloud.google.com" in explained
         assert "should already have been" not in explained  # not garbled mid-sentence
-        assert "gcloud_browser_auth.py" in explained
+        assert "account-specific notice in Bitport" in explained
+        assert "Sign-in success alone does not satisfy" in explained
 
     def test_billing_error_points_at_billing_not_a_retry(self):
         raw = "ERROR: (gcloud.projects.create) billing account is required"

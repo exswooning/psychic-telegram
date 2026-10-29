@@ -423,12 +423,38 @@ def _drive_browser(proc, url: str, email: str, password: str, timeout: int) -> s
         else:
             # gcloud caught the OAuth redirect -- sign-in genuinely
             # succeeded; return control to the provisioning caller.
-            # Do not accept a legal agreement during automatic setup. If Google
-            # requires Cloud terms, project provisioning reports the console URL
-            # and the operator must review and accept them themselves.
-            log("  signed in; any required Cloud terms must be reviewed by the operator")
+            # Keep this signed-in browser alive for a separately reviewed Cloud
+            # first-use dialog; no generic legal-button acceptance.
+            detail = _review_cloud_console_terms(page, email, max(deadline - time.time(), 1))
+            if detail:
+                browser.close()
+                return detail
         browser.close()
     return ""
+
+
+def _review_cloud_console_terms(page, email: str, timeout: float) -> str:
+    """Prepare the visible Cloud dialog and continue only after its own approval."""
+    try:
+        page.goto("https://console.cloud.google.com/projectcreate", wait_until="domcontentloaded", timeout=30000)
+        page.wait_for_timeout(3000)
+        notice = setup_notices.current_notice(page, email)
+        if not notice:
+            # No legal button is touched if the account, dialog or screen differs.
+            log("  Cloud first-use notice not present; provisioning will check project eligibility")
+            return ""
+        if HANDOFF is None or not NOTICE_FILE:
+            return "Google Cloud Platform terms require account-specific review in the setup UI."
+        result = setup_notices.await_review(page, email, None, HANDOFF, NOTICE_FILE, timeout, log)
+        if result == "approved":
+            page.wait_for_timeout(2000)
+            if setup_notices.current_notice(page, email):
+                return "Google Cloud terms were submitted but Google has not confirmed them. Retry setup after reviewing the console."
+            return ""
+        return "Google Cloud terms review " + result + ". Restart setup when ready."
+    except Exception:
+        logging.getLogger(__name__).debug("Cloud terms review unavailable", exc_info=True)
+        return "Google Cloud first-use review could not be read. Open the Cloud console as this administrator and review its required notice."
 
 
 # Wording changes without notice (same caveat dwd_helper.py's own

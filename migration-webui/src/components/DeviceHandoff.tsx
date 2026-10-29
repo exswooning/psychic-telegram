@@ -54,6 +54,8 @@ export const DeviceHandoff: React.FC<{
       <Typography variant="body2" sx={{ mt: 1 }}>
         {handoff.category === 'cloud_sdk_access'
           ? 'This grants Google Cloud SDK the Cloud access listed below so setup can create the migration project and credentials.'
+          : handoff.category === 'cloud_console_terms'
+            ? 'This accepts the displayed Google Cloud Platform and applicable service terms for this account. Review the selected country and terms below. Email promotions are not selected.'
           : 'This acknowledges Google’s account terms and your organization administrator’s access to account data.'}
         {' '}Review the notice before continuing. Approval applies once to this account, this screen and this setup run.
       </Typography>

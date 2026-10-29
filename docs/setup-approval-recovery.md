@@ -1,6 +1,6 @@
 # Guided setup approval and recovery
 
-The setup browser recognizes two specific Google screens: the new Workspace account acknowledgement and Google Cloud SDK's Cloud-access consent. These are not generic Next/Allow buttons.
+The setup browser recognizes three specific Google screens: the new Workspace account acknowledgement, Google Cloud SDK's Cloud-access consent, and the first-use Cloud Platform terms dialog. These are not generic Next/Allow buttons.
 
 For a recognized screen, the authenticated setup card and Jobs page show the account, complete bounded notice, action and expiring review request. After an operator reviews and approves that exact step, the server continues automatically. A separate decision is needed if the account, application, terms or permissions change. Decline stops the step.
 
@@ -13,3 +13,5 @@ On-device links now have an expiry state. A timeout gives a clear fresh-link ins
 MFA, CAPTCHA, password changes, new billing decisions and unsupported Google screens retain an operator action or on-device handoff. Once the service account and delegation are ready, ordinary migrations reuse those credentials rather than repeating Cloud setup for each user.
 
 Qualification uses fake browser pages, isolated files and authenticated API/UI tests. Passing these checks does not establish live Google behavior for every locale or future page revision. The broader autonomous incident/agent system is a separate proposed build in autonomous-migration-assurance-plan.md.
+
+The separate first-use Google Cloud Platform terms dialog is reviewed in the same account/run-specific flow after sign-in. Its country and full dialog text are shown. Only its terms checkbox and Agree and continue are submitted after approval; email promotions and free trials are not selected.

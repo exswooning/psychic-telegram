@@ -120,3 +120,60 @@ def test_changed_or_expired_progress_cannot_accept_a_decision(tmp_path, change):
     with pytest.raises(ValueError, match="changed or expired"):
         notices.write_decision(str(progress), original["requestId"], original["noticeHash"], "approve")
     assert not (tmp_path / "progress.notice-response").exists()
+
+CLOUD_URL = 'https://console.cloud.google.com/projectcreate?authuser=3'
+CLOUD_BODY = (f'Welcome Nest Admin!\nCreate and manage your Google Cloud instances, disks, networks, and other resources in one place.\n'
+              f'{EMAIL}\nCountry\nNepal\nTerms of Service\nI agree to the Google Cloud Platform Terms of Service and applicable services and APIs.\n'
+              'Email updates\nI would like to receive periodic emails.\nAgree and continue')
+
+
+class CloudPage:
+    url = CLOUD_URL
+    body = CLOUD_BODY
+    checked = False
+    clicks = 0
+    def get_by_role(self, role, *, name, exact=None):
+        if role == 'dialog':
+            assert name == 'Google Cloud' and exact
+            return self
+        if role == 'checkbox':
+            assert name.search('I agree to the Google Cloud Platform Terms of Service')
+            return self
+        assert role == 'button' and name == 'Agree and continue' and exact
+        return self
+    def count(self): return 1
+    def is_visible(self): return True
+    def is_enabled(self): return True
+    def inner_text(self, *args): return self.body
+    def check(self): self.checked = True
+    def uncheck(self): self.checked = False
+    def click(self):
+        assert self.checked
+        self.clicks += 1
+
+
+def test_cloud_console_terms_bind_country_and_account_and_include_full_dialog():
+    found = notices.current_notice(CloudPage(), EMAIL)
+    assert found['category'] == 'cloud_console_terms'
+    assert 'Nepal' in found['text'] and 'Email updates' in found['text']
+    assert notices.detect(CLOUD_URL, CLOUD_BODY, 'wrong@target.example') is None
+    assert notices.detect(CLOUD_URL.replace('console.cloud.google.com', 'evil.test'), CLOUD_BODY, EMAIL) is None
+    assert notices.detect(CLOUD_URL.replace('projectcreate', 'billing'), CLOUD_BODY, EMAIL) is None
+    assert notices.detect(CLOUD_URL, CLOUD_BODY.replace('Nepal', 'India'), EMAIL)['noticeHash'] != found['noticeHash']
+
+
+@pytest.mark.parametrize('response,expected', [(None, 'expired'), ('approve', 'approved'), ('decline', 'declined')])
+def test_cloud_terms_never_check_or_accept_before_separate_review(tmp_path, response, expected):
+    page = CloudPage(); pending = {}; clock = [0]; path = tmp_path / 'reply'
+    def publish(value):
+        if value: pending.update(value)
+    def sleep(_):
+        clock[0] += 1
+        if response and clock[0] == 1:
+            reply = {k: pending[k] for k in ('requestId', 'noticeHash', 'adminEmail')}
+            path.write_text(json.dumps({**reply, 'decision': response}))
+    result = notices.await_review(page, EMAIL, None, publish, path, 3,
+        lambda _: None, clock=lambda: clock[0], sleep=sleep)
+    assert result == expected
+    assert page.checked == (response == 'approve')
+    assert page.clicks == (1 if response == 'approve' else 0)

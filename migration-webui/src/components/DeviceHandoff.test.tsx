@@ -92,4 +92,12 @@ describe('a sign-in handed to this device', () => {
     fireEvent.click(screen.getByRole('checkbox'))
     expect(screen.getByRole('button', { name: 'Approve and continue' })).toBeEnabled()
   })
+  it('explains Cloud Platform terms separately from SDK permissions', () => {
+    render(<DeviceHandoff side="target" handoff={{ ...notice, category: 'cloud_console_terms',
+      text: 'Country Nepal. Google Cloud Platform Terms of Service.' }} />)
+    expect(screen.getByText(/Review the selected country/)).toBeInTheDocument()
+    expect(screen.getByText(/Email promotions are not selected/)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Approve and continue' })).toBeDisabled()
+  })
+
 })

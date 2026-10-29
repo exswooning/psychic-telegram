@@ -717,3 +717,32 @@ def test_authentication_details_redact_complete_and_truncated_parameters():
 
 def test_legal_and_access_buttons_are_not_generic_navigation():
     assert ga._CONSENT_LABELS == ('Continue',)
+
+class TestCloudTermsReview:
+    def test_new_review_is_requested_after_signin_without_legacy_auto_accept(self, monkeypatch):
+        from types import SimpleNamespace
+        events = []
+        page = SimpleNamespace(goto=lambda *a, **k: events.append('open'), wait_for_timeout=lambda n: None)
+        monkeypatch.setattr(ga, 'HANDOFF', lambda v: None)
+        monkeypatch.setattr(ga, 'NOTICE_FILE', '/private/test-response')
+        calls = [dict(category='cloud_console_terms'), None]
+        monkeypatch.setattr(ga.setup_notices, 'current_notice', lambda *a: calls.pop(0))
+        def review(*args):
+            assert args[2] is None
+            events.append('review')
+            return 'approved'
+        monkeypatch.setattr(ga.setup_notices, 'await_review', review)
+        monkeypatch.setattr(ga, '_accept_cloud_console_tos', lambda *a, **k: (_ for _ in ()).throw(AssertionError('legacy acceptance forbidden')))
+        assert ga._review_cloud_console_terms(page, 'nest@target.example', 60) == ''
+        assert events == ['open', 'review']
+
+    def test_declined_terms_stop_setup_and_no_prompt_does_nothing(self, monkeypatch):
+        from types import SimpleNamespace
+        page = SimpleNamespace(goto=lambda *a, **k: None, wait_for_timeout=lambda n: None)
+        monkeypatch.setattr(ga, 'HANDOFF', lambda v: None)
+        monkeypatch.setattr(ga, 'NOTICE_FILE', '/private/test-response')
+        monkeypatch.setattr(ga.setup_notices, 'current_notice', lambda *a: dict(category='cloud_console_terms'))
+        monkeypatch.setattr(ga.setup_notices, 'await_review', lambda *a: 'declined')
+        assert 'declined' in ga._review_cloud_console_terms(page, 'nest@target.example', 60)
+        monkeypatch.setattr(ga.setup_notices, 'current_notice', lambda *a: None)
+        assert ga._review_cloud_console_terms(page, 'nest@target.example', 60) == ''
