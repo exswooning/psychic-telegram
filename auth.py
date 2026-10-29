@@ -460,7 +460,7 @@ class AuthManager:
         """
         from config import DIRECTORY_WRITE_SCOPE, GROUP_WRITE_SCOPE
 
-        if writable:
+        if writable or groups:
             import domain_guard
             domain = (self.settings.source_domain if tenant == "source"
                       else self.settings.target_domain)

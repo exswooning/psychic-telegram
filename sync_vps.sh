@@ -156,7 +156,7 @@ if [[ ( -n "$RUNTIME_CHANGES" || "${FORCE_RESTART:-0}" == "1" ) && "${DEPLOY_OVE
  WAITED=0
  while :; do
   BUSY="$("${SSH[@]}" "$TARGET" "cd '$DEST' 2>/dev/null || exit 0
-ps -eo pid=,args= | grep -iE '^ *[0-9]+ +[^ ]*python[0-9.]* +([^ ]*/)?(main\.py .*(migrate|delta|mirror|discover|run-shard)|(seed_sandbox|reset_target|wipe_target|wipe_tenant|remove_tenant_setup|tally|verify_sample|dms_migrate|full_setup)\.py)'
+ps -eo pid=,args= | grep -iE '^ *[0-9]+ +[^ ]*python[0-9.]* +([^ ]*/)?(main\.py .*(migrate|delta|mirror|discover|run-shard)|(seed_sandbox|reset_target|wipe_target|wipe_tenant|remove_tenant_setup|tally|verify_sample|dms_migrate|full_setup|workspace_configuration)\.py)'
 for db in data/accounts/*/migration.db; do [ -f \"\$db\" ] && .venv/bin/python -c 'import sqlite3,sys
 c = sqlite3.connect(\"file:\" + sys.argv[1] + \"?mode=ro\", uri=True)
 for r in c.execute(\"SELECT id, started_at FROM repair_runs WHERE finished_at IS NULL AND started_at >= strftime(\x27%Y-%m-%dT%H:%M:%SZ\x27, \x27now\x27, \x27-12 hours\x27)\"): print(\"repair\", r[0], \"unfinished since\", r[1], \"in\", sys.argv[1])' \"\$db\" 2>/dev/null; done; true" 2>/dev/null || true)"

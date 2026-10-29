@@ -266,6 +266,29 @@ def _await_device(proc, url: str, timeout: int) -> None:
         HANDOFF(None)
 
 
+def _signin_screen_summary(pages) -> str:
+    """Visible-page context for the authenticated UI log, without auth codes/URLs."""
+    for page in pages:
+        try:
+            body = page.inner_text("body")
+            if any(marker in body.lower() for marker in signin_challenge._NOT_A_CHALLENGE):
+                return "Google's terminal verification page is open; waiting for the sign-in callback."
+            body = re.sub(r"https?://\S+", "[link on Google page]", body)
+            body = re.sub(r"[A-Za-z0-9_./-]{24,}", "[redacted]", body)
+            body = re.sub(r"\b\d{6,}\b", "[redacted]", body)
+            text = " / ".join(line.strip() for line in body.splitlines() if line.strip())
+            if text:
+                return text[:700]
+        except Exception:  # the page can be navigating between reads
+            continue
+    return "Google's sign-in screen could not be read."
+
+
+def _device_handoff_due(password_at: float | None, sent_code: bool, clock: float) -> bool:
+    return bool(HANDOFF is not None and password_at is not None
+                and not sent_code and clock - password_at >= 60)
+
+
 def _drive_browser(proc, url: str, email: str, password: str, timeout: int) -> str:
     """Types email/password, clicks through gcloud's own OAuth consent
     screen, then just watches `proc` -- the local `gcloud auth login`
@@ -281,8 +304,10 @@ def _drive_browser(proc, url: str, email: str, password: str, timeout: int) -> s
         page.goto(url, wait_until="domcontentloaded", timeout=30000)
 
         typed_email = typed_pw = sent_code = False
+        password_at = None
         challenge = signin_challenge.Watcher(log)
         deadline = time.time() + timeout
+        next_screen_note = time.time() + 30
         while time.time() < deadline and proc.poll() is None:
             for pg in list(browser.contexts[0].pages):
                 try:
@@ -295,6 +320,7 @@ def _drive_browser(proc, url: str, email: str, password: str, timeout: int) -> s
                         log("  entered the password")
                         pg.wait_for_timeout(4000)
                         typed_pw = True
+                        password_at = time.time()
                         continue
                     if typed_pw:
                         for label in _CONSENT_LABELS:
@@ -335,30 +361,40 @@ def _drive_browser(proc, url: str, email: str, password: str, timeout: int) -> s
                     log(f"  REFUSED: {no}")
                     browser.close()
                     return no
+            if _device_handoff_due(password_at, sent_code, time.time()):
+                # Google changes its prompt wording. An unrecognised page must
+                # not wait fifteen minutes just because the phrase list missed it.
+                log("  sign-in did not finish on the server; continue on this device in the setup UI")
+                log("  last Google screen: " + _signin_screen_summary(browser.contexts[0].pages))
+                browser.close()
+                return _HANDED_OVER
+            if typed_pw and time.time() >= next_screen_note:
+                log("  waiting on Google: " + _signin_screen_summary(browser.contexts[0].pages))
+                next_screen_note = time.time() + 60
             time.sleep(1)
 
         if proc.poll() is None:
             stuck = challenge.check(browser.contexts[0].pages)
             if stuck:
                 log(f"  stalled ON A 2-STEP PROMPT, unanswered: {stuck}")
-            log("  stalled -- likely 2FA/captcha. Saving a screenshot for "
-                "diagnosis; connect over VNC (see connect_vps.sh) to finish "
-                "signing in by hand, then re-run.")
+            detail = stuck or _signin_screen_summary(browser.contexts[0].pages)
+            log("  sign-in timed out: " + detail)
             try:
                 for i, pg in enumerate(browser.contexts[0].pages):
                     pg.screenshot(path=f"/tmp/gcloud-auth-timeout-{i}.png")
             except Exception:      # noqa: BLE001 - diagnostics only
                 logging.getLogger(__name__).debug("ignored an error", exc_info=True)
+            browser.close()
+            # A non-empty result ends login() immediately. Previously this fell
+            # through to a second proc.wait(timeout), doubling the silent wait.
+            return "Sign-in timed out. " + detail
         else:
             # gcloud caught the OAuth redirect -- sign-in genuinely
-            # succeeded. Same authenticated session, one more thing to
-            # clear before handing back to the caller: see
-            # _accept_cloud_console_tos()'s own docstring for why.
-            try:
-                outcome = _accept_cloud_console_tos(page, timeout=30)
-                log(f"  Cloud Console ToS check: {outcome}")
-            except Exception as exc:      # noqa: BLE001 - best-effort
-                log(f"  Cloud Console ToS check raised ({exc}) -- continuing anyway")
+            # succeeded; return control to the provisioning caller.
+            # Do not accept a legal agreement during automatic setup. If Google
+            # requires Cloud terms, project provisioning reports the console URL
+            # and the operator must review and accept them themselves.
+            log("  signed in; any required Cloud terms must be reviewed by the operator")
         browser.close()
     return ""
 

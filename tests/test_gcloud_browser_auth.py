@@ -25,6 +25,52 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import gcloud_browser_auth as ga  # noqa: E402
 
 
+class TestSigninScreenSummary:
+    def test_unrecognized_prompt_offers_ui_handoff_after_one_minute(self, monkeypatch):
+        monkeypatch.setattr(ga, "HANDOFF", lambda v: None)
+        assert not ga._device_handoff_due(None, False, 100)
+        assert not ga._device_handoff_due(0, False, 59)
+        assert ga._device_handoff_due(0, False, 60)
+        assert not ga._device_handoff_due(0, True, 100)
+        monkeypatch.setattr(ga, "HANDOFF", None)
+        assert not ga._device_handoff_due(0, False, 100)
+    def test_context_reaches_the_ui_log_without_tokens_or_codes(self):
+        page = type("Page", (), {"inner_text": lambda self, selector:
+            "Verify it's you\nEnter code 123456\nhttps://accounts.google.com/auth?code=secret\nabcdefghijklmnopqrstuvwxyz0123456789"})()
+        summary = ga._signin_screen_summary([page])
+        assert "Verify it's you" in summary
+        assert "123456" not in summary and "code=secret" not in summary
+        assert "abcdefghijklmnopqrstuvwxyz" not in summary
+
+    def test_terminal_auth_code_page_is_never_logged(self):
+        page = type("Page", (), {"inner_text": lambda self, selector:
+            "Sign in to the gcloud CLI\ncopy this verification code: SECRET-CODE"})()
+        assert "SECRET-CODE" not in ga._signin_screen_summary([page])
+
+    def test_navigation_failure_is_not_reported_as_success(self):
+        assert "could not be read" in ga._signin_screen_summary([])
+
+    def test_browser_timeout_does_not_fall_through_to_another_wait(self, monkeypatch):
+        import types
+        import dwd_helper
+        page = types.SimpleNamespace(goto=lambda *a, **k: None,
+                                     inner_text=lambda selector: "Choose how to verify",
+                                     screenshot=lambda **k: None)
+        browser = types.SimpleNamespace(new_page=lambda: page,
+            contexts=[types.SimpleNamespace(pages=[page])], close=lambda: None)
+        class Context:
+            def __enter__(self): return object()
+            def __exit__(self, *args): return False
+        monkeypatch.setitem(sys.modules, "playwright.sync_api",
+                            types.SimpleNamespace(sync_playwright=Context))
+        monkeypatch.setattr(dwd_helper, "_installed_browser_launch", lambda *a, **k: browser)
+        monkeypatch.setattr(ga.signin_challenge, "Watcher", lambda log:
+                            types.SimpleNamespace(check=lambda pages: ""))
+        result = ga._drive_browser(types.SimpleNamespace(poll=lambda: None),
+                                   "https://accounts.google.com/", "admin@example.test", "not-a-secret", 0)
+        assert result.startswith("Sign-in timed out.")
+
+
 class _FakeLocator:
     """Mirrors test_dwd_helper.py's _FakeLocator, extended with the
     is_visible/is_enabled/click/type surface _fill_visible actually uses."""

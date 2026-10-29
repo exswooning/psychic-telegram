@@ -12,6 +12,8 @@ import JobRunner from '@/components/JobRunner'
 import TenantScopePicker from '@/components/TenantScopePicker'
 import DmsImportButton from '@/components/DmsImportButton'
 import DmsMetrics from '@/components/DmsMetrics'
+import ConfigurationReport from '@/components/ConfigurationReport'
+import { fetchMe, migrationOf } from '@/api/controlPlane'
 
 /**
  * The migration capabilities that the per-user run does not cover.
@@ -43,6 +45,10 @@ const Services: React.FC = () => {
   const [scopeAccount, setScopeAccount] = useState<number | undefined>()
 
   useEffect(() => {
+    // The global migration picker is authoritative. A second selector here
+    // previously defaulted to the login id while the header named another pair.
+    fetchMe().then(me => setScopeAccount(migrationOf(me)))
+      .catch(e => setErr(`Cannot resolve the selected migration: ${String(e)}`))
     fetchActions().then(setActions).catch((e) => setErr(String(e)))
     fetchToggles()
       .then((t) => { setSvc(t.toggles.services || {}); setDry(!!t.toggles.dry_run) })
@@ -65,7 +71,7 @@ const Services: React.FC = () => {
     }
   }
 
-  const has = (k: string) => Boolean(actions[k])
+  const has = (k: string) => scopeAccount !== undefined && Boolean(actions[k])
 
   return (
     <Box>
@@ -79,13 +85,16 @@ const Services: React.FC = () => {
         the migrate step would touch.
       </Typography>
 
-      <TenantScopePicker accountId={scopeAccount}
-                         onAccountChange={setScopeAccount} />
+      {scopeAccount !== undefined && <TenantScopePicker accountId={scopeAccount}
+                         onAccountChange={setScopeAccount} locked />}
 
       {err && <Alert severity="warning" sx={{ mb: 3 }}>{err}</Alert>}
       {Object.keys(actions).length === 0 && !err && (
         <Typography variant="body2" color="text.secondary">Loading…</Typography>
       )}
+
+      {scopeAccount !== undefined && <ConfigurationReport key={scopeAccount}
+        accountId={scopeAccount} actions={actions} />}
 
       {(has('shared_drives_inventory') || has('shared_drives_migrate')) && (
         <Card elevation={0} sx={{ borderRadius: 2, border: '1px solid', borderColor: 'divider', mb: 3 }}>
@@ -154,9 +163,10 @@ const Services: React.FC = () => {
               lists, shared mailboxes, and every Drive share that names a
               group rather than a person. Migrate these <strong>before</strong>
               {' '}auditing ACLs, or every group-based grant looks like a share
-              to an address the target does not have. Group settings (who can
-              post, who reads the archive) are not copied: the target&apos;s
-              defaults apply, which are more restrictive rather than less.
+              to an address the target does not have. The legacy pass below copies
+              groups and members. Use the configuration report above to compare
+              aliases, roles, posting, archive visibility and moderation settings.
+              Target defaults may differ from the source.
             </Alert>
             <Stack spacing={2}>
               {has('groups_inventory') &&

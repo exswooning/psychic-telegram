@@ -788,7 +788,7 @@ def run_full_setup(
     if dry_run:
         phases.append(Phase("domain-wide delegation (skipped: dry run)"))
         return {"side": side, "ok": True, "phases": [x.as_dict() for x in phases],
-                "clientId": client_id}
+                "clientId": client_id, "dryRun": True}
 
     # -- 2. Domain-wide delegation, driven end to end -----------------------
     p = Phase(f"domain-wide delegation ({side})")

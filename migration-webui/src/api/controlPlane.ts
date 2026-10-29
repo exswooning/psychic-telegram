@@ -650,6 +650,7 @@ export interface SetupBillingNotice {
 }
 export interface FullSetupResult {
   side: string; ok: boolean; phases: FullSetupPhase[]
+  dryRun?: boolean
   clientId?: string; missingScopes?: string[]
   actionRequired?: { kind: string; title: string; detail: string; url: string }
   notices?: SetupBillingNotice[]

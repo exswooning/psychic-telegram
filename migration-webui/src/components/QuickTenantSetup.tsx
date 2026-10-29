@@ -530,9 +530,11 @@ const QuickTenantSetup: React.FC<{
   const alreadyHere = !!tenantCfg?.hasKey
     && (tenantCfg.domain || '').toLowerCase() === domain.trim().toLowerCase()
   const result = status?.result
+  const previewOnly = !!result?.dryRun || !!result?.phases.some(p =>
+    p.name.includes('skipped: dry run') || p.detail === 'dry run')
   // Only a result for THIS domain: the slot's last run may have been another tenant's
   // (target2.sarafgloabalexim.com's "Setup done" and its users showed on mdharan.com).
-  const setUpOk = !!result?.ok && !status?.running && (result.domain
+  const setUpOk = !!result?.ok && !previewOnly && !status?.running && (result.domain
     ? result.domain === domain.trim().toLowerCase() : alreadyHere)
   // Once per key on file for this domain, and again when a setup run finishes.
   const readinessKey = alreadyHere && !status?.running
@@ -1482,7 +1484,10 @@ const QuickTenantSetup: React.FC<{
         </Box>
       )}
 
-      {setUpOk && showProvisionUsers && side === 'target' && (
+      {previewOnly && <Alert severity="info" sx={{ mt: 2 }}>
+        Preview complete. No tenant connection or users were created. Run setup and pass the readiness checks before provisioning accounts.
+      </Alert>}
+      {setUpOk && alreadyHere && readyHere && showProvisionUsers && side === 'target' && (
         <Box sx={{ mt: 2, pt: 2, borderTop: '1px solid', borderColor: 'divider' }}>
           <Typography variant="subtitle2" sx={{ fontWeight: 700, mb: 1 }}>
             Setup done — provision accounts
