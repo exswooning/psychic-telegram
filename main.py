@@ -811,10 +811,8 @@ def _services_already_done(db, r, services) -> bool:
     return set(services) <= done
 
 
-def run_batch(auth: AuthManager, db: MigrationDB, settings: Settings,
-              services: set[str], delta: bool, delta_days: int,
-              only: list[str] | None = None) -> list[dict]:
-    """Fan out across users with a bounded thread pool."""
+def _pass_user_pairs(db, settings, services, delta, only):
+    """Eligible users for one pass, before process sharding or profile writes."""
     rows = [r for r in db.all_identities() if r["entity_type"] == "user"]
 
     def _already_done(r) -> bool:
@@ -846,6 +844,14 @@ def run_batch(auth: AuthManager, db: MigrationDB, settings: Settings,
         wanted = {u.lower() for u in only}
         pairs = [p for p in pairs if p[0] in wanted]
 
+    return pairs
+
+
+def run_batch(auth: AuthManager, db: MigrationDB, settings: Settings,
+              services: set[str], delta: bool, delta_days: int,
+              only: list[str] | None = None) -> list[dict]:
+    """Fan out across users with a bounded thread pool."""
+    pairs = _pass_user_pairs(db, settings, services, delta, only)
     # One process of a pass split across several (_run_pass_in_processes): a
     # disjoint, stable slice of the users, so no two processes ever hold one.
     shard = os.getenv("MIGRATE_SHARD")
@@ -1768,6 +1774,12 @@ def _run_pass(auth, db, settings, services, delta, delta_days, only) -> list[dic
     n = int(getattr(settings, "migrate_processes", 0) or 0)
     if n <= 0 and settings is not None and not settings.dry_run and not os.getenv("MIGRATE_SHARD"):
         n = _auto_processes()
+        eligible = len(_pass_user_pairs(db, settings, services, delta, only))
+        bounded = min(n, max(eligible, 1))
+        if bounded != n:
+            log.info("processes for this pass capped from %d to %d: %d eligible user(s)",
+                     n, bounded, eligible)
+        n = bounded
     if n <= 1 or getattr(settings, "dry_run", False) or os.getenv("MIGRATE_SHARD"):
         return run_batch(auth, db, settings, services, delta=delta,
                          delta_days=delta_days, only=only)

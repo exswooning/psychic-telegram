@@ -124,7 +124,8 @@ class TestWiring:
 
         import main
 
-        assert "_services_already_done" in inspect.getsource(main.run_batch)
+        assert "_pass_user_pairs" in inspect.getsource(main.run_batch)
+        assert "_services_already_done" in inspect.getsource(main._pass_user_pairs)
         src = inspect.getsource(main._services_already_done)
         assert "services_done" in src
         assert "<= done" in src
