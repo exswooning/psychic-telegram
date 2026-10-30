@@ -37,4 +37,22 @@ The operator requested: pause sandbox account 3, deploy fixes, prefer Google DMS
 
 ## Next Claude task — search-first mail scanning
 
-- [ ] Implement [Gmail search-first link rewriting, then DMS](tasks/claude-gmail-search-first-dms.md). The current runtime still scans every source message body. The task defines candidate-search coverage qualification, count completion, optional strict checks, UI visibility, benchmarks and safe deployment. Adding this task does not change or restart the running migration.
+- [~] BUILT, NOT DEPLOYED (see "Search-first: rollout state" below): [Gmail search-first link rewriting, then DMS](tasks/claude-gmail-search-first-dms.md). The current runtime still scans every source message body. The task defines candidate-search coverage qualification, count completion, optional strict checks, UI visibility, benchmarks and safe deployment. Adding this task does not change or restart the running migration.
+
+## Search-first: rollout state (Claude, 30 October 2026)
+
+**Code:** local commit on `codex/google-configuration-ui`; the box still runs `8bc97a5` (read live 05:53Z, PID 3265024 on account 3 still running the old exhaustive scan). Not deployed: a job is active.
+
+- `gmail_engine._scan_split_before_delivery`: `MAIL_LINK_SCAN=search` (new default) runs 12 separate id-only searches (`LINK_SEARCHES`: has:drive/document/spreadsheet/presentation, "drive.google.com", "docs.google.com", filename:txt/htm/html/csv/ics/eml), paginated and unioned, then reads only those bodies. `exhaustive` is the old read-everything scan. Unknown value raises.
+- Messages already proved link-bearing in the ledger (rewritten, or blocked on a link) are always read; the number the search missed is reported as `recallMissed`. A delta run cannot judge recall and says null.
+- Unread messages route to the DMS with the audit line "not named by Gmail's link search, so its body was not read". Drafts/chats found via `in:drafts` / `in:chats` keep their own handling.
+- Report per user in table `mail_link_scans` (mode, state SEARCHING/READING/DONE/BLOCKED/INTERRUPTED, per-search counts, candidates, bodies/bytes/attachment reads, list calls, search and scan seconds, peak RSS). Served as `mailLinkScans` in the metrics payload; shown on Migration detail's job card and Metrics (`MailLinkScans.tsx`).
+- API/UI: `StartMigration.mail_link_scan` (split only); the Migrate dialog offers "Search-first (fast)" / "Exhaustive link scan". A queued or older launch gets the server default (search).
+- `_default_mail_mode`: split whenever Drive and mail are in the run and it is not a sample (Codex's rule had also made chosen users split; kept, the DMS still never auto-starts for them).
+- Known limit, pinned by a test: a link inside base64-encoded mail is invisible to phrase search. Search-first sends it to the DMS unrewritten; exhaustive catches it. Live recall is NOT yet measured: run `exhaustive` once on the sandbox and compare `recallMissed`.
+
+**Tests:** new `tests/test_mail_link_search.py` (8: only candidates read vs exhaustive reads all, duplicate hits, delta bound, interrupted, hidden-link limit, ledger-known link). Python suite: 5 failures that predate this change (verified on the stashed tree): `test_dms_action::test_a_finished_import_is_tallied`, `test_every_action_is_reachable::...hides_its_card_rather_than_crashing`, `test_move_mode::...mirror_never_deletes_a_moved_file`, `test_stop_reaches_the_engines::...does_not_exit_0`, `test_verification_repairs::...does_not_hide_other_historical_findings`. UI: 1,170 tests pass in both `/app/` and `/next/` builds; tsc and lint clean (fixed one existing exhaustive-deps warning in `WorkspaceOverview.tsx`).
+
+**Live state read 05:53Z (account 3):** 13,678 messages copied, 0 in the last 10 min; 776 messages FAILED_SPLIT in the pre-delivery scan: 695 are a source Drive file that answers 404, 24 unresolved mappings, 12 "multipart body has no readable parts". These block the DMS handoff and are NOT fixed by search-first: `_split_unknown_link` treats a 404 as unresolved. Needs its own investigation (are the 404 files in other users' Drives or deleted?) before any claim of a clean handoff.
+
+**Not done:** deploy (run active), live recall measurement, throughput/latency benchmark against the sandbox, background-delta review.

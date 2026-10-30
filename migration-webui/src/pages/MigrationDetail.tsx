@@ -18,7 +18,7 @@ import {
   fetchMigrationDetail, startDelta, startMigration, runRepair,
   MigrationDetail as Detail, RepairSurvey,
 } from '@/api/controlPlane'
-import type { MailMode, TransferMode } from '@/api/controlPlane'
+import type { MailLinkScan, MailMode, TransferMode } from '@/api/controlPlane'
 import SourceGuardPanel from '@/components/SourceGuardPanel'
 import UserProfilesPanel from '@/components/UserProfilesPanel'
 import ReasonCodeDialog from '@/components/ReasonCodeDialog'
@@ -78,6 +78,7 @@ export const MigrationDetail: React.FC = () => {
   const [askFull, setAskFull] = useState(false)
   // Source remains unchanged: link mail first, then Google's mailbox import.
   const [mailBy, setMailBy] = useState<MailMode>('split')
+  const [linkScan, setLinkScan] = useState<MailLinkScan>('search')
   const [moreOpen, setMoreOpen] = useState(false)
   // Start Google's DMS on its own (api_server._start_dms); on unless switched off.
   const [dmsAuto, setDmsAuto] = useState(true)
@@ -949,7 +950,7 @@ export const MigrationDetail: React.FC = () => {
                   label={
                     <Typography variant="body2">
                       <strong>Link scan + Google DMS</strong> — Drive first, then scan every
-                      email before delivery and copy mail whose mapped Drive links change. Google&apos;s
+                      email that mentions Drive before delivery and copy mail whose mapped Drive links change. Google&apos;s
                       Data Migration Service imports the mailbox afterward, including
                       mail the tool already copied. Routine completion compares mailbox counts;
                       equal counts do not prove content, labels or duplicate identity. Full 1:1
@@ -983,6 +984,19 @@ export const MigrationDetail: React.FC = () => {
                     </Typography>
                   } />
               </RadioGroup>
+              {mailBy === 'split' && (
+                <RadioGroup value={linkScan} sx={{ pl: 4 }} data-testid="link-scan"
+                            onChange={(e) => setLinkScan(e.target.value as MailLinkScan)}>
+                  <FormControlLabel value="search" control={<Radio size="small" />} data-testid="link-scan-search"
+                    label={<Typography variant="body2"><strong>Search-first (fast)</strong> — Gmail&apos;s own
+                      search names the mail that mentions Drive; only those messages are read. A link Gmail
+                      does not index goes to the DMS unrewritten. Messages already known to carry a link
+                      are always read, and each scan reports any of them the search missed.</Typography>} />
+                  <FormControlLabel value="exhaustive" control={<Radio size="small" />} data-testid="link-scan-exhaustive"
+                    label={<Typography variant="body2"><strong>Exhaustive link scan</strong> — read every
+                      message before delivery. Slower; nothing depends on Gmail&apos;s index.</Typography>} />
+                </RadioGroup>
+              )}
               {mailBy !== 'engine' && (
                 <FormControlLabel
                   sx={{ mt: 1 }}
@@ -1115,7 +1129,8 @@ export const MigrationDetail: React.FC = () => {
                                              mappingCacheUserCap: num(tuneCacheCap),
                                              processes: num(tuneProcesses) },
                                            who === 'some' && redoLinks,
-                                           transferMode === 'move' ? confirmMove : undefined)
+                                           transferMode === 'move' ? confirmMove : undefined,
+                                           mailBy === 'split' ? linkScan : undefined)
             if (!r.ok) throw new Error(r.detail || 'could not start')
             setAskFull(false)
             setStarted(r.detail || 'migration started')

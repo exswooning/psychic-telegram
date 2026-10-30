@@ -774,6 +774,9 @@ class Settings:
     # Routine mail completion is cheap accounting; full body/label verification
     # is an explicit option, never implied by matching counts.
     mail_completion_check: str = field(default_factory=lambda: os.getenv("MAIL_COMPLETION_CHECK", "counts").strip().lower())
+    # Split mail: "search" reads only the bodies Gmail's own search names as link
+    # candidates; "exhaustive" reads every message. Search is not proof of coverage.
+    mail_link_scan: str = field(default_factory=lambda: os.getenv("MAIL_LINK_SCAN", "search").strip().lower())
     first_pass_acceptance: bool = field(default_factory=lambda: _env_bool("FIRST_PASS_ACCEPTANCE", True))
     acceptance_repair_rounds: int = field(default_factory=lambda: min(2, max(0, int(os.getenv("ACCEPTANCE_REPAIR_ROUNDS", "1")))))
     verification_cache_enabled: bool = field(default_factory=lambda: _env_bool("VERIFICATION_CACHE", True))

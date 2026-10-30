@@ -979,6 +979,7 @@ class FakeGmail(FakeService):
         super().__init__(owner, tenant)
         self.messages: dict[str, dict] = {}
         self.drafts: dict[str, dict] = {}
+        self.chip_hits: dict[str, set] = {}
         self.filters: list[dict] = []
         # Every mailbox has a primary send-as entry for its own address.
         self.send_as: list[dict] = [
@@ -1137,12 +1138,33 @@ class _GmailMessages:
             wanted = q.split(":", 1)[1].strip().strip("<>")
             ids = [i for i in ids if str(BytesHeaderParser().parsebytes(
                 base64.urlsafe_b64decode(self.s.messages[i]["raw"])).get("Message-ID", "")).strip().strip("<>") == wanted]
+        elif q and not q.startswith("newer_than:"):
+            ids = [i for i in ids if self._search(q, i, self.s.messages[i])]
         start = int(pageToken or 0)
         page = ids[start: start + maxResults]
         out: dict[str, Any] = {"messages": [{"id": i} for i in page]}
         if start + maxResults < len(ids):
             out["nextPageToken"] = str(start + maxResults)
         return out
+
+    def _search(self, q, mid, m):
+        """The few Gmail operators split mail's search uses. A chip (has:drive ...) has
+        no bytes to match, so a test lists its hits in `chip_hits`."""
+        import re as _re
+        term = _re.sub(r"\s*newer_than:\S+", "", q).strip()
+        raw = base64.urlsafe_b64decode((m.get("raw") or "") + "=" * (-len(m.get("raw") or "") % 4))
+        if term.startswith("has:"):
+            return mid in self.s.chip_hits.get(term, ())
+        if term == "in:drafts":
+            return "DRAFT" in (m.get("labelIds") or [])
+        if term == "in:chats":
+            return "CHAT" in (m.get("labelIds") or [])
+        if term.startswith("filename:"):
+            ext = term.split(":", 1)[1].encode()
+            return bool(_re.search(rb'filename="?[^"\r\n]*\.' + ext + rb'"?', raw, _re.I))
+        if term.startswith('"'):
+            return term.strip('"').encode().lower() in raw.lower()
+        return True
 
     def get(self, **kw):
         return _Call(self.s, "messages.get", self._get, kw)

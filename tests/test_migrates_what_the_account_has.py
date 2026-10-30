@@ -61,6 +61,7 @@ class FakeSettings:
     migrate_contacts = migrate_tasks = True
     mail_only_with_links = False
     migration_checks_enabled = False
+    mail_completion_check = "full"    # counts would read both tenants; not the subject
     def effective_upload_cap(self): return 10 ** 12
 
 

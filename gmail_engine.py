@@ -19,6 +19,9 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import json
+import sys
+import time
 import logging
 import os
 import concurrent.futures as futures
@@ -42,6 +45,18 @@ from resilience import (PermanentAPIError, RateLimiter, TransportExhausted,
 OPTIONAL_PASS_ERRORS = (PermanentAPIError, RuntimeError, RefreshError)
 
 log = logging.getLogger(__name__)
+
+# Split mail's candidate searches, run separately (ids only) and unioned, so a report
+# can say what each form found. Gmail search is not proof of coverage: a link Gmail did
+# not index is missed, which is why every full run also re-reads the messages this
+# ledger already proved link-bearing and reports any the searches did not name.
+LINK_SEARCHES = ("has:drive", "has:document", "has:spreadsheet", "has:presentation",
+                 '"drive.google.com"', '"docs.google.com"',
+                 # text attachments are read by the classifier, and a forwarded .eml blocks
+                 "filename:txt", "filename:htm", "filename:html", "filename:csv",
+                 "filename:ics", "filename:eml")
+NOT_A_CANDIDATE = ("not named by Gmail's link search, so its body was not read; "
+                   "awaiting verified DMS delivery")
 
 SYSTEM_LABELS = {
     "INBOX", "SENT", "DRAFT", "SPAM", "TRASH", "UNREAD", "STARRED",
@@ -114,6 +129,8 @@ class GmailMigrator:
         self._src_override = None
         self._tgt_override = None
         self._stats_lock = threading.Lock()
+        self._scan_lock = threading.Lock()
+        self._link_scan: dict = {}
         self._conv_locks: dict[str, threading.Lock] = {}
         self._conv_locks_guard = threading.Lock()
         self.limiter = RateLimiter(settings.per_user_qps)
@@ -476,10 +493,13 @@ class GmailMigrator:
         self.limiter.acquire()
         full = self._retry(lambda: self.src.users().messages().get(
             userId="me", id=mid, format="full").execute(), label="gmail.split.text")
+        self._scan_count("bodiesRead", 1)
+        self._scan_count("bytesRead", int(full.get("sizeEstimate") or 0))
         if set(full.get("labelIds") or []) & {"DRAFT", "CHAT"}:
             return full, None
         def text_attachment(aid):
             self.limiter.acquire()
+            self._scan_count("attachmentReads", 1)
             return self._retry(lambda: self.src.users().messages().attachments().get(
                 userId="me", messageId=mid, id=aid).execute(), label="gmail.split.text_attachment")
         return full, classify_payload(full, self._drive_link_target, text_attachment, self._split_unknown_link)
@@ -514,9 +534,9 @@ class GmailMigrator:
                     raise RuntimeError("Unresolved Drive link mapping: " + ", ".join(plan["unresolved"]))
                 if plan and plan["route"] == "DMS":
                     prior = self.db.get_audit(self.source_user, mid, "message")
+                    detail = plan.get("why") or "no changed Drive link; awaiting verified DMS delivery"
                     if not (prior and prior["status"] == DELIVERED_BY_DMS):
-                        self.db.log_audit(self.source_user, mid, "message", DEFERRED_TO_DMS,
-                                          "no changed Drive link; awaiting verified DMS delivery")
+                        self.db.log_audit(self.source_user, mid, "message", DEFERRED_TO_DMS, detail)
                     self._bump("skipped")
                     return
                 if plan and not self.settings.rewrite_drive_links:
@@ -736,15 +756,87 @@ class GmailMigrator:
                                   "Old target copy retained in Trash; fresh copy " + result["id"] +
                                   (" content and labels verified" if verified else " requires verification"))
 
-    def _scan_split_before_delivery(self, query):
-        """Classify EVERY source message before the first content insert.
+    def _scan_count(self, key, n):
+        with self._scan_lock:
+            self._link_scan[key] = self._link_scan.get(key, 0) + n
 
+    def _list_ids(self, q):
+        ids, token = set(), None
+        while True:
+            self.limiter.acquire()
+            resp = self._retry(lambda t=token: self.src.users().messages().list(
+                userId="me", maxResults=500, pageToken=t, q=q, includeSpamTrash=True,
+            ).execute(), label="gmail.split.search")
+            self._scan_count("listCalls", 1)
+            ids.update(m["id"] for m in resp.get("messages", []))
+            token = resp.get("nextPageToken")
+            if not token:
+                return ids
+
+    def _known_link_ids(self):
+        """Messages an earlier full read proved carry a Drive link: rewritten, or blocked
+        on one. Independent of Gmail's search, so they measure its recall."""
+        rows = self.db.conn.execute(
+            "SELECT item_id FROM audit_log WHERE source_user=? AND ("
+            "(item_type='link_rewrite' AND status='SUCCESS') OR (item_type='message' "
+            "AND status='FAILED_SPLIT' AND error_message LIKE '%Unresolved Drive link%'))",
+            (self.source_user,)).fetchall()
+        return {r[0] for r in rows}
+
+    def _save_link_scan(self):
+        with self._scan_lock:
+            report = dict(self._link_scan)
+        rss = __import__("resource").getrusage(__import__("resource").RUSAGE_SELF).ru_maxrss
+        report["maxRssMb"] = round(rss / (1 << 20 if sys.platform == "darwin" else 1 << 10), 1)
+        with self.db.write() as conn:
+            conn.execute("CREATE TABLE IF NOT EXISTS mail_link_scans (source_user TEXT NOT NULL, "
+                         "started_at TEXT NOT NULL, report TEXT NOT NULL, "
+                         "PRIMARY KEY (source_user, started_at))")
+            conn.execute("INSERT OR REPLACE INTO mail_link_scans VALUES (?,?,?)",
+                         (self.source_user, report["startedAt"], json.dumps(report)))
+
+    def _scan_split_before_delivery(self, query):
+        """Classify source mail before the first content insert.
+
+        Exhaustive mode reads every message. Search mode reads only the candidates
+        Gmail's own search names (LINK_SEARCHES, plus every message this ledger already
+        proved link-bearing); the rest are routed to the DMS unread and say so.
         Keep only route/label metadata, never raw mail/attachments. A blocked
-        reference or unread message prevents DMS handoff and any content copy.
+        reference or unread candidate prevents DMS handoff and any content copy.
         Existing target mappings must not exempt source mail from this scan.
         """
+        from db import utc_now
+        mode = (getattr(self.settings, "mail_link_scan", "search") or "search").lower()
+        if mode not in ("search", "exhaustive"):
+            raise ValueError("MAIL_LINK_SCAN must be search or exhaustive")
         self._split_scan = {}
-        refs, blocked, examined = [], 0, 0
+        self._link_scan = {"mode": mode, "query": query, "startedAt": utc_now(), "state": "SEARCHING",
+                           "examined": 0, "blocked": 0, "notRead": 0, "bodiesRead": 0, "bytesRead": 0,
+                           "attachmentReads": 0, "listCalls": 0}
+        began = time.monotonic()
+        candidates = drafts = chats = None
+        if mode == "search":
+            searches, candidates = {}, set()
+            for term in LINK_SEARCHES:
+                hits = self._list_ids(f"{term} {query}".strip())
+                searches[term] = len(hits)
+                candidates |= hits
+            # A delta window cannot judge recall: the proven ids fall mostly outside it.
+            known = set() if query else self._known_link_ids()
+            missed = known - candidates
+            candidates |= missed
+            drafts = self._list_ids(f"in:drafts {query}".strip())
+            chats = self._list_ids(f"in:chats {query}".strip())
+            self._link_scan.update(searches=searches, candidates=len(candidates),
+                                   knownLinkMessages=None if query else len(known),
+                                   recallMissed=None if query else len(missed),
+                                   searchSeconds=round(time.monotonic() - began, 1))
+            log.info("[%s] mail link search: %d candidates (%s); %s known link messages missed by search",
+                     self.source_user, len(candidates), json.dumps(searches),
+                     "n/a" if query else len(missed))
+        self._link_scan["state"] = "READING"
+        self._save_link_scan()
+        refs = []
         workers = max(1, int(getattr(self.settings, "mail_workers", 1) or 1))
 
         def inspect(ref):
@@ -756,7 +848,6 @@ class GmailMigrator:
             return {"labelIds": classified.get("labelIds", [])}, plan
 
         def collect(completed):
-            nonlocal blocked, examined
             for future in completed:
                 mid = pending.pop(future)
                 try:
@@ -764,29 +855,49 @@ class GmailMigrator:
                 except Exception as exc:
                     self.db.log_audit(self.source_user, mid, "message", "FAILED_SPLIT",
                                       "Pre-delivery link scan: " + str(exc)[:300])
-                    blocked += 1
-                examined += 1
-                if examined % 100 == 0:
+                    self._scan_count("blocked", 1)
+                self._scan_count("examined", 1)
+                if self._link_scan["examined"] % 500 == 0:
+                    self._save_link_scan()
+                if self._link_scan["examined"] % 100 == 0:
                     log.info("[%s] mail pre-delivery scan: %d examined, %d blocked",
-                             self.source_user, examined, blocked)
+                             self.source_user, self._link_scan["examined"], self._link_scan["blocked"])
 
-        with futures.ThreadPoolExecutor(max_workers=workers, thread_name_prefix="mail-scan") as pool:
-            pending = {}
-            for ref in self._iter_messages(query):
-                if shutdown_requested():
-                    raise RuntimeError("Mail link scan interrupted; DMS handoff not ready")
-                refs.append(ref)
-                pending[pool.submit(inspect, ref)] = ref["id"]
-                if len(pending) >= workers * 2:
+        pending = {}
+        try:
+            with futures.ThreadPoolExecutor(max_workers=workers, thread_name_prefix="mail-scan") as pool:
+                for ref in self._iter_messages(query):
+                    if shutdown_requested():
+                        raise RuntimeError("Mail link scan interrupted; DMS handoff not ready")
+                    refs.append(ref)
+                    mid = ref["id"]
+                    if candidates is not None and mid not in candidates:
+                        labels = ["DRAFT"] if mid in drafts else ["CHAT"] if mid in chats else None
+                        self._split_scan[mid] = (({"labelIds": labels}, None) if labels else
+                                                 ({"labelIds": []}, {"route": "DMS", "changed": {},
+                                                  "unresolved": [], "linkIds": [], "why": NOT_A_CANDIDATE}))
+                        self._scan_count("notRead", 1)
+                        continue
+                    pending[pool.submit(inspect, ref)] = mid
+                    if len(pending) >= workers * 2:
+                        completed, _ = futures.wait(pending, return_when=futures.FIRST_COMPLETED)
+                        collect(completed)
+                while pending:
+                    if shutdown_requested():
+                        raise RuntimeError("Mail link scan interrupted; DMS handoff not ready")
                     completed, _ = futures.wait(pending, return_when=futures.FIRST_COMPLETED)
                     collect(completed)
-            while pending:
-                if shutdown_requested():
-                    raise RuntimeError("Mail link scan interrupted; DMS handoff not ready")
-                completed, _ = futures.wait(pending, return_when=futures.FIRST_COMPLETED)
-                collect(completed)
-        log.info("[%s] mail pre-delivery scan complete: %d examined, %d blocked",
-                 self.source_user, len(refs), blocked)
+        except RuntimeError:
+            self._link_scan["state"] = "INTERRUPTED"
+            self._save_link_scan()
+            raise
+        blocked = self._link_scan["blocked"]
+        self._link_scan.update(state="BLOCKED" if blocked else "DONE", messages=len(refs),
+                               scanSeconds=round(time.monotonic() - began, 1), finishedAt=utc_now())
+        self._save_link_scan()
+        log.info("[%s] mail pre-delivery scan complete (%s): %d messages, %d bodies read, %d not read, %d blocked",
+                 self.source_user, mode, len(refs), self._link_scan["bodiesRead"],
+                 self._link_scan["notRead"], blocked)
         if blocked:
             self._split_scan.clear()
             raise RuntimeError(f"Mail link scan blocked on {blocked} messages; DMS not ready")

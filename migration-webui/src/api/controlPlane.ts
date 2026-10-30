@@ -416,11 +416,23 @@ export interface MigrationTuning {
   processes?: number
 }
 
+/** Split mail's link scan: Gmail search names the candidates, or every message is read. */
+export type MailLinkScan = 'search' | 'exhaustive'
+
+/** One user's latest split-mail link scan, as the engine recorded it. */
+export interface MailLinkScanReport {
+  source: string; mode: MailLinkScan; state: 'SEARCHING' | 'READING' | 'DONE' | 'BLOCKED' | 'INTERRUPTED'
+  startedAt: string; finishedAt?: string; messages?: number; candidates?: number
+  searches?: Record<string, number>; knownLinkMessages?: number | null; recallMissed?: number | null
+  examined: number; blocked: number; notRead: number; bodiesRead: number; bytesRead: number
+  attachmentReads: number; listCalls: number; searchSeconds?: number; scanSeconds?: number; maxRssMb?: number
+}
+
 export const startMigration = (
   reason: string, services: string[], users: string[], dryRun = false,
   accountId?: number, mailMode?: MailMode, sample?: number, dmsAfter?: boolean,
   transferMode?: TransferMode, tuning?: MigrationTuning, redoLinks = false,
-  confirmMove?: string) =>
+  confirmMove?: string, mailLinkScan?: MailLinkScan) =>
   cpFetch<ActionResult>('/api/v2/migrate/start', {
     method: 'POST',
     // accountId is the migration on screen. Without it the server falls back
@@ -431,6 +443,7 @@ export const startMigration = (
     body: JSON.stringify({ reason, services, users, dry_run: dryRun,
                            account_id: accountId ?? null,
                            ...(mailMode ? { mail_mode: mailMode } : {}),
+                           ...(mailLinkScan ? { mail_link_scan: mailLinkScan } : {}),
                            ...(sample ? { sample } : {}),
                            // off only when asked; the server starts the DMS on its own otherwise
                            ...(dmsAfter === false ? { dms_after: false } : {}),
@@ -1624,6 +1637,8 @@ export interface MetricsSnapshot {
     users: { source: string; target: string; sourceMessages?: number; targetMessages?: number;
       difference?: number; verdict: string; error?: string }[]
   }
+  /** Each user's latest split-mail link scan: what was searched, read and left unread. */
+  mailLinkScans?: MailLinkScanReport[]
   movement?: Movement
   volume?: { itemType: string; status: string; count: number }[]
   mappings?: { type: string; count: number }[]

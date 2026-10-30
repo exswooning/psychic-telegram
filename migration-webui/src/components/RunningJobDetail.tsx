@@ -12,6 +12,7 @@
  * those, clearly labelled as the projection it is rather than a measurement.
  */
 import React, { useEffect, useState } from 'react'
+import { MailLinkScans } from './MailLinkScans'
 import {
   Alert, Box, Chip, CircularProgress, Dialog, DialogContent, DialogTitle, Divider,
   IconButton, LinearProgress, Stack, Table, TableBody, TableCell, TableContainer,
@@ -223,6 +224,7 @@ export const RunningJobDetail: React.FC<{
             target {u.targetMessages?.toLocaleString() ?? 'unknown'} — {u.verdict}
           </Typography>)}
         </Alert>}
+        {isMigrate && <MailLinkScans scans={m?.mailLinkScans} />}
 
         {verifyMetrics && verifyMetrics.services.length > 0 && (
           <Box sx={{ mb: 2 }}>

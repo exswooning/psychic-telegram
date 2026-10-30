@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react'
+import { MailLinkScans } from '../components/MailLinkScans'
 import { useParams } from 'react-router-dom'
 import {
   Alert, Box, Chip, CircularProgress, IconButton, Paper, Stack,
@@ -173,6 +174,7 @@ export const Metrics: React.FC = () => {
           target {u.targetMessages?.toLocaleString() ?? 'unknown'} — {u.verdict}
         </Typography>)}
       </Alert>}
+      <MailLinkScans scans={m?.mailLinkScans} />
       {m?.error && (
         <Alert severity="info" sx={{ mb: 2 }} data-testid="metrics-empty">
           {m.error}

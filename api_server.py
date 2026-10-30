@@ -343,6 +343,10 @@ class StartMigration(WriteAction):
     #   split   default for full mail runs: scan all source messages, copy changed-link
     #           mail, then DMS imports the mailbox. Counts do not prove 1:1 fidelity.
     mail_mode: Literal["engine", "dms", "split"] | None = None
+    # Split mail's link scan: "search" (Gmail's own search names the candidates; only
+    # their bodies are read) or "exhaustive" (every message read). None = this
+    # server's MAIL_LINK_SCAN, "search" unless set. Ignored by engine and dms.
+    mail_link_scan: Literal["search", "exhaustive"] | None = None
     # A SAMPLE run: consider at most this many items of each service per user
     # (the first N found), and leave the users UNFINISHED so the next full
     # migration still copies the rest. For a quick copy small enough to check one to
@@ -2071,7 +2075,9 @@ def _default_mail_mode(body: "StartMigration") -> str:
     A bounded sample must remain a bounded engine job. Counts are accounting,
     not a release of any outstanding full-verification findings.
     """
-    return "engine" if body.sample is not None or not ({"all", "gmail"} & set(body.services)) else "split"
+    wanted = set(_ALL_SERVICES) if "all" in body.services else set(body.services)
+    # Without Drive in the run there is nothing to rewrite links against.
+    return "split" if body.sample is None and {"gmail", "drive"} <= wanted else "engine"
 
 
 def _export_identities_csv(account_id: int | None) -> tuple[str, int]:
@@ -2502,6 +2508,8 @@ async def migrate_start(body: StartMigration, op: Operator = Depends(operator)):
         env = {**(env or os.environ), "TRANSFER_MODE": body.transfer_mode}
     if body.redo_links:
         env = {**(env or os.environ), "REDO_UNREWRITTEN_LINKS": "true", "REWRITE_DRIVE_LINKS": "true"}
+    if body.mail_link_scan and body.mail_mode == "split":
+        env = {**(env or os.environ), "MAIL_LINK_SCAN": body.mail_link_scan}
     env = _tuning_env(body, env)
     left_off: list[str] = []
     if not body.dry_run:
@@ -7134,6 +7142,12 @@ async def migration_metrics(account_id: int, history: int = 60, users: str = "",
                     counts = conn.execute("SELECT report FROM mail_count_checks ORDER BY checked_at DESC LIMIT 1").fetchone()
                     if counts:
                         out["mailCountCheck"] = json.loads(counts[0])
+                if conn.execute("SELECT 1 FROM sqlite_master WHERE name='mail_link_scans'").fetchone():
+                    # The latest scan per user: search-first or exhaustive, what it read.
+                    out["mailLinkScans"] = [{"source": r[0], **json.loads(r[1])} for r in conn.execute(
+                        "SELECT source_user, report FROM mail_link_scans s WHERE started_at = "
+                        "(SELECT MAX(started_at) FROM mail_link_scans WHERE source_user=s.source_user) "
+                        "ORDER BY source_user").fetchall()]
                 # Same grouped-by-cause failures the Migrations detail page already shows
                 # as a table (see _migration_detail, same query) -- reused here for the
                 # Metrics page's pie chart, so both name the same causes the same way and

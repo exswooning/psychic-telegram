@@ -344,6 +344,26 @@ describe('MigrationDetail: who moves the mail', () => {
     expect(startMigration.mock.calls[0][5]).toBe('dms')
   })
 
+  it('scans for link mail search-first by default', async () => {
+    await openDialog(); await confirm()
+    expect(startMigration.mock.calls[0][12]).toBe('search')
+  })
+
+  it('sends an exhaustive link scan when chosen', async () => {
+    await openDialog()
+    fireEvent.click(screen.getByTestId('link-scan-exhaustive').querySelector('input')!)
+    await confirm()
+    expect(startMigration.mock.calls[0][12]).toBe('exhaustive')
+  })
+
+  it('sends no link scan for an engine run, and does not offer one', async () => {
+    await openDialog()
+    fireEvent.click(screen.getByTestId('mail-by-engine').querySelector('input')!)
+    expect(screen.queryByTestId('link-scan')).toBeNull()
+    await confirm()
+    expect(startMigration.mock.calls[0][12]).toBeUndefined()
+  })
+
   it('asks the server to start the DMS itself, unless the box is unticked', async () => {
     await openDialog(); await confirm()
     expect(startMigration.mock.calls[0][7]).toBeUndefined()

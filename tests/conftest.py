@@ -60,6 +60,7 @@ def settings(tmp_path) -> Settings:
     # Legacy fidelity regressions deliberately exercise full checks. New default
     # counts policy has its own tests and never substitutes for these comparisons.
     s.mail_completion_check = "full"
+    s.mail_link_scan = "exhaustive"
     s.db_path = str(tmp_path / "migration.db")
     s.scratch_dir = str(tmp_path / "scratch")
     s.source_domain = "tenanta.com"
