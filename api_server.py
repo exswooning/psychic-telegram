@@ -4018,6 +4018,73 @@ async def benchmark_running(op: Operator = Depends(operator)):
     return await _off_loop(_check)
 
 
+def ab_view(progress_path: str, results_path: str, now: float | None = None) -> dict:
+    """The controlled A/B (ab_transfer.py): live progress, a real ETA, and the ranked results.
+
+    The ETA exists because this run's total is known before it starts (arms = transfer modes x
+    mail modes), unlike benchmark_run.py's open-ended walk. It is mean(finished arms) for the
+    arms still to go, less what the current one has already used -- and absent until one arm
+    has finished, because one measurement is the least a mean can be made of.
+    """
+    now = time.time() if now is None else now
+    out: dict = {"running": False, "progress": None, "results": None, "ranking": []}
+    try:
+        with open(progress_path) as fh:
+            p = json.load(fh)
+    except (OSError, ValueError):
+        p = None
+    if p:
+        alive = False
+        if p.get("running") and p.get("pid"):
+            try:
+                os.kill(int(p["pid"]), 0)
+                alive = True
+            except (OSError, ValueError):
+                alive = False        # a hard kill leaves running=true behind
+        durations = [d for d in (p.get("durations") or []) if isinstance(d, (int, float))]
+        total, done = int(p.get("total") or 0), int(p.get("done") or 0)
+        eta = None
+        if alive and durations and total > done:
+            mean = sum(durations) / len(durations)
+            used = max(0.0, now - float(p.get("armStartedAt") or now))
+            eta = round(max(mean - used, 0.0) + mean * (total - done - 1))
+        out["running"] = alive
+        out["progress"] = {**{k: p.get(k) for k in ("startedAt", "finishedAt", "updatedAt", "current",
+                                                      "users", "corpus", "total", "done")},
+                           "alive": alive, "etaSeconds": eta, "armsFinished": len(durations),
+                           "meanArmSeconds": round(sum(durations) / len(durations)) if durations else None,
+                           "etaNote": None if eta is not None else (
+                               "no estimate until one arm has finished" if alive else None)}
+    try:
+        with open(results_path) as fh:
+            res = json.load(fh)
+    except (OSError, ValueError):
+        res = None
+    if res:
+        runs = res.get("runs") or []
+        out["results"] = {"source": res.get("source"), "runs": runs}
+        # Fast only counts if it also finished clean. A Drive-only arm has no 1:1 verdict, so it
+        # is "clean" when nothing failed and the target kept every file it was compared on.
+        def clean(r):
+            if "clean" in r and r.get("mailMode"):
+                return bool(r["clean"])
+            f = r.get("fidelity") or {}
+            return r.get("exit") == 0 and not r.get("failed") and not f.get("missing_on_target")
+        out["ranking"] = sorted(
+            ({"arm": r["mode"] + (" + " + r["mailMode"] if r.get("mailMode") else ""),
+              "seconds": r.get("seconds"), "failed": r.get("failed"), "clean": clean(r),
+              "verdicts": r.get("verdicts") or {}} for r in runs),
+            key=lambda a: (not a["clean"], a["seconds"] if a["seconds"] is not None else 1e12))
+    return out
+
+
+@app.get("/api/v2/benchmark/ab")
+async def benchmark_ab(op: Operator = Depends(operator)):
+    require_reader(op)
+    return await _off_loop(ab_view, os.path.join(HERE, "logs", "ab_progress.json"),
+                           os.path.join(HERE, "logs", "ab_results.md.json"))
+
+
 # ======================================================================
 # AI diagnostics
 #

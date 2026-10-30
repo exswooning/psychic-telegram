@@ -573,6 +573,28 @@ export interface BenchmarkRunning {
 export const fetchBenchmarkRunning = () =>
   cpFetch<BenchmarkRunning>('/api/v2/benchmark/running')
 
+/** The controlled A/B (ab_transfer.py): one pinned corpus, one arm per transfer mode x mail mode. */
+export interface AbArm {
+  arm: string; seconds: number | null; failed: number | null; clean: boolean
+  verdicts: Record<string, string>
+}
+export interface AbView {
+  running: boolean
+  progress: {
+    startedAt?: string; finishedAt?: string; updatedAt?: string
+    current?: { mode: string; mailMode: string | null; stage: string } | null
+    users?: string[]; corpus?: { files: number; bytes: number }
+    total?: number; done?: number; alive: boolean; armsFinished: number
+    meanArmSeconds: number | null
+    /** Seconds left. null until one arm has finished: one measurement is not a mean. */
+    etaSeconds: number | null; etaNote: string | null
+  } | null
+  results: { runs: unknown[] } | null
+  /** Clean arms first, fastest first; a fast arm that did not finish clean is listed, never hidden. */
+  ranking: AbArm[]
+}
+export const fetchAbBenchmark = () => cpFetch<AbView>('/api/v2/benchmark/ab')
+
 // -- AI diagnostics ---------------------------------------------------------
 export interface AiStatus {
   configured: boolean; keyMask: string; model: string; logFile: string | null

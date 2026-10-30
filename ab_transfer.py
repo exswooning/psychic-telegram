@@ -49,6 +49,52 @@ from db import MigrationDB            # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PY = sys.executable
+PROGRESS = os.path.join(HERE, "logs", "ab_progress.json")
+ACCOUNT_ENV: dict = {}      # the tenant pair of --account-id, for the child scripts that read env
+ACCOUNT_ARGS: list = []     # main.py takes the account as a flag
+ALL_SERVICES = "drive,gmail,calendar,contacts,tasks,chat"
+
+
+_STATE: dict = {}
+
+
+def stage(name: str) -> None:
+    """Move the live page to the next stage of the current arm."""
+    if _STATE:
+        cur = dict(_STATE.get("current") or {}, stage=name)
+        write_progress(**{**_STATE, "current": cur})
+
+
+def write_progress(**fields) -> None:
+    """The live state the Benchmarks page reads. Written whole each time (tmp + rename) so a
+    reader never sees half a file. Totals are known up front here, so an ETA is a real
+    division of measured trial times, never a guess."""
+    _STATE.clear()
+    _STATE.update(fields)
+    try:
+        os.makedirs(os.path.dirname(PROGRESS), exist_ok=True)
+        tmp = PROGRESS + ".tmp"
+        with open(tmp, "w") as fh:
+            json.dump({**fields, "updatedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                       "pid": os.getpid()}, fh)
+        os.replace(tmp, PROGRESS)
+    except OSError:
+        pass
+
+
+def services_for(mail_mode: str | None) -> str:
+    if mail_mode is None:
+        return "drive"
+    if mail_mode == "dms":      # the DMS carries all mail; this pass moves the rest
+        return ",".join(x for x in ALL_SERVICES.split(",") if x != "gmail")
+    return ALL_SERVICES
+
+
+def mail_env(mail_mode: str | None) -> dict:
+    if mail_mode == "split":    # 2026-10-30: search-first missed 9/9 known links, so exhaustive
+        return {"REWRITE_DRIVE_LINKS": "true", "MAIL_ONLY_WITH_LINKS": "true",
+                "MAIL_LINK_SCAN": "exhaustive"}
+    return {}
 
 NATIVE = "application/vnd.google-apps."
 
@@ -144,9 +190,12 @@ def run(cmd: list[str], env: dict) -> tuple[int, float]:
 
 
 def one_mode(mode: str, settings: Settings, auth: AuthManager,
-             users_src: list[str], users_tgt: list[str], src_snap: dict) -> dict:
+             users_src: list[str], users_tgt: list[str], src_snap: dict,
+             mail_mode: str | None = None) -> dict:
     env = dict(os.environ)
     env["TRANSFER_MODE"] = mode
+    env.update(mail_env(mail_mode))
+    env.update(ACCOUNT_ENV)
     env["SANDBOX_MODE"] = "true"
     env["MIGRATE_COMMENTS"] = "true"
     env["MIGRATE_SECONDARY_CALENDARS"] = "true"
@@ -155,6 +204,7 @@ def one_mode(mode: str, settings: Settings, auth: AuthManager,
 
     print(f"\n=== {mode}: emptying the target ({len(users_src)} user(s)) ===",
           flush=True)
+    stage("reset target")
     reset_rc, _ = run([PY, "reset_target.py", "--confirm-domain", settings.target_domain,
                        "--yes", *scoped], env)
     if reset_rc != 0:
@@ -166,6 +216,7 @@ def one_mode(mode: str, settings: Settings, auth: AuthManager,
     # precisely because it is the only evidence of what happened. An
     # experiment on three mailboxes has no business destroying that.
     print(f"=== {mode}: clearing the ledger for those users ===", flush=True)
+    stage("reset ledger")
     db = MigrationDB(settings.db_path)
     ph = ",".join("?" * len(users_src))
     with db.write() as c:
@@ -185,9 +236,11 @@ def one_mode(mode: str, settings: Settings, auth: AuthManager,
     db._mapping_cache.clear()
     db._mapping_cached_users.clear()
 
-    print(f"=== {mode}: migrating drive ===", flush=True)
+    print(f"=== {mode}: migrating ===", flush=True)
+    stage("migrate")
     net0 = net_bytes()
-    rc, secs = run([PY, "main.py", "migrate", "--services", "drive", *scoped], env)
+    services = services_for(mail_mode)
+    rc, secs = run([PY, "main.py", *ACCOUNT_ARGS, "migrate", "--services", services, *scoped], env)
     net1 = net_bytes()
 
     db = MigrationDB(settings.db_path)
@@ -199,10 +252,26 @@ def one_mode(mode: str, settings: Settings, auth: AuthManager,
         f"AND source_user IN ({ph})", users_src).fetchone()[0]
 
     print(f"=== {mode}: snapshotting the target ===", flush=True)
+    stage("snapshot target")
     tgt_snap = snapshot_drive(auth, users_tgt, "target")
+
+    verdicts = {}
+    if mail_mode is not None:
+        print(f"=== {mode}+{mail_mode}: verifying one to one ===", flush=True)
+        stage("verify 1:1")
+        run([PY, "verify_sample.py", *ACCOUNT_ARGS[:2], *scoped, "--services", "all"], env)
+        db = MigrationDB(settings.db_path)
+        for u in users_src:
+            for svc, v in db.conn.execute(
+                    "SELECT service, verdict FROM user_verification WHERE source_user=?", (u,)):
+                verdicts[f"{u.split('@')[0]}/{svc}"] = v
 
     return {
         "mode": mode,
+        "mailMode": mail_mode,
+        "verdicts": verdicts,
+        "clean": rc == 0 and not failed and all(
+            v in ("IDENTICAL", "COMPLETE") for v in verdicts.values()),
         "exit": rc,
         "seconds": round(secs, 1),
         "migrated": counts,
@@ -223,9 +292,18 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--mode", action="append",
                     choices=["server_side", "download_upload"],
                     help="default: both, server_side first")
+    ap.add_argument("--account-id", type=int,
+                    help="a SaaS account's tenant pair and ledger (default: the box's own)")
+    ap.add_argument("--mail-mode", action="append", choices=["engine", "split", "dms"],
+                    help="also move mail, once per value, crossed with every --mode. "
+                         "Without it this is the Drive-only A/B it always was.")
     args = ap.parse_args(argv)
 
-    settings = Settings()
+    settings = Settings(account_id=args.account_id)
+    if args.account_id is not None:
+        ACCOUNT_ARGS[:] = ["--account-id", str(args.account_id)]
+        ACCOUNT_ENV.update(TARGET_DOMAIN=settings.target_domain, TARGET_ADMIN=settings.target_admin,
+                           TARGET_SA_KEY=settings.target_sa_key, MIGRATION_DB=settings.db_path)
     auth = AuthManager(settings)
     db = MigrationDB(settings.db_path)
     rows = [r for r in db.all_identities() if r["entity_type"] == "user"]
@@ -249,20 +327,34 @@ def main(argv: list[str] | None = None) -> int:
           f"{src_snap['bytes']/1e9:.2f} GB", flush=True)
 
     results = []
-    for mode in (args.mode or ["server_side", "download_upload"]):
+    arms = [(m, mm) for m in (args.mode or ["server_side", "download_upload"])
+            for mm in (args.mail_mode or [None])]
+    started = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    durations: list[float] = []
+    for i, (mode, mail_mode) in enumerate(arms):
+        write_progress(running=True, startedAt=started, total=len(arms), done=i,
+                       armStartedAt=time.time(),
+                       current={"mode": mode, "mailMode": mail_mode, "stage": "starting"},
+                       durations=durations, users=users_src,
+                       corpus={"files": src_snap["files"], "bytes": src_snap["bytes"]})
         results.append(one_mode(mode, settings, auth, users_src, users_tgt,
-                                src_snap))
+                                src_snap, mail_mode))
+        durations.append(results[-1]["seconds"])
         with open(args.report + ".json", "w") as fh:
             json.dump({"source": {k: v for k, v in src_snap.items()
                                   if k != "sample"},
                        "runs": results}, fh, indent=2)
+    write_progress(running=False, startedAt=started, total=len(arms), done=len(arms),
+                   current=None, durations=durations, users=users_src,
+                   finishedAt=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
 
     lines = ["# Transfer mode A/B", "",
              f"Source corpus: **{src_snap['files']} files** "
              f"({src_snap['native']} native, {src_snap['binary']} binary), "
              f"{src_snap['folders']} folders, {src_snap['bytes']/1e9:.2f} GB",
              "",
-             "| metric | " + " | ".join(r["mode"] for r in results) + " |",
+             "| metric | " + " | ".join(
+                 r["mode"] + (f" + {r['mailMode']}" if r.get("mailMode") else "") for r in results) + " |",
              "|---|" + "---|" * len(results)]
 
     def row(name, fn):

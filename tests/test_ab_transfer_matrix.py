@@ -1,0 +1,70 @@
+"""ab_transfer.py's arms and api_server.ab_view: what each arm runs, and what the page may claim."""
+import json
+
+import ab_transfer as AB
+import api_server
+
+
+def test_dms_arm_leaves_mail_out_of_the_migrate_pass_and_drive_only_is_unchanged():
+    assert AB.services_for(None) == "drive"
+    assert "gmail" not in AB.services_for("dms").split(",")
+    assert "gmail" in AB.services_for("split").split(",") and "gmail" in AB.services_for("engine").split(",")
+
+
+def test_split_arm_rewrites_links_link_mail_only_and_reads_every_message():
+    env = AB.mail_env("split")
+    assert env == {"REWRITE_DRIVE_LINKS": "true", "MAIL_ONLY_WITH_LINKS": "true",
+                   "MAIL_LINK_SCAN": "exhaustive"}
+    assert AB.mail_env("engine") == AB.mail_env("dms") == AB.mail_env(None) == {}
+
+
+def _write(tmp_path, progress=None, results=None):
+    pp, rp = tmp_path / "p.json", tmp_path / "r.json"
+    if progress is not None:
+        pp.write_text(json.dumps(progress))
+    if results is not None:
+        rp.write_text(json.dumps(results))
+    return str(pp), str(rp)
+
+
+def test_no_eta_until_one_arm_has_finished_then_a_real_one(tmp_path):
+    import os
+    base = {"running": True, "pid": os.getpid(), "total": 6, "done": 0, "armStartedAt": 1000.0,
+            "current": {"mode": "server_side", "mailMode": "engine", "stage": "migrate"}}
+    pp, rp = _write(tmp_path, base)
+    v = api_server.ab_view(pp, rp, now=1100.0)
+    assert v["running"] and v["progress"]["etaSeconds"] is None
+    assert "no estimate" in v["progress"]["etaNote"]
+
+    pp, rp = _write(tmp_path, {**base, "done": 2, "durations": [300, 500]})
+    v = api_server.ab_view(pp, rp, now=1100.0)            # mean 400; 100 into the current arm
+    assert v["progress"]["etaSeconds"] == (400 - 100) + 400 * 3
+
+
+def test_a_progress_file_left_by_a_killed_run_does_not_read_as_running(tmp_path):
+    pp, rp = _write(tmp_path, {"running": True, "pid": 2 ** 22 - 3, "total": 6, "done": 1,
+                               "durations": [10]})
+    v = api_server.ab_view(pp, rp, now=0.0)
+    assert not v["running"] and v["progress"]["etaSeconds"] is None
+
+
+def test_the_ranking_puts_clean_arms_first_fastest_first_and_never_hides_a_fast_dirty_one(tmp_path):
+    runs = [
+        {"mode": "download_upload", "mailMode": "engine", "seconds": 90, "clean": True, "failed": 0},
+        {"mode": "server_side", "mailMode": "engine", "seconds": 40, "clean": False, "failed": 3,
+         "verdicts": {"audit/gmail": "DIFFERENCES"}},
+        {"mode": "server_side", "mailMode": "split", "seconds": 60, "clean": True, "failed": 0},
+    ]
+    pp, rp = _write(tmp_path, None, {"source": {}, "runs": runs})
+    r = api_server.ab_view(pp, rp)["ranking"]
+    assert [a["arm"] for a in r] == ["server_side + split", "download_upload + engine",
+                                     "server_side + engine"]
+    assert r[-1]["clean"] is False and r[-1]["verdicts"] == {"audit/gmail": "DIFFERENCES"}
+
+
+def test_a_drive_only_arm_is_clean_when_it_lost_nothing(tmp_path):
+    runs = [{"mode": "server_side", "seconds": 5, "exit": 0, "failed": 0, "fidelity": {"missing_on_target": 0}},
+            {"mode": "download_upload", "seconds": 4, "exit": 0, "failed": 0, "fidelity": {"missing_on_target": 2}}]
+    pp, rp = _write(tmp_path, None, {"runs": runs})
+    r = api_server.ab_view(pp, rp)["ranking"]
+    assert [(a["arm"], a["clean"]) for a in r] == [("server_side", True), ("download_upload", False)]
