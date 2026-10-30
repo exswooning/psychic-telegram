@@ -197,7 +197,7 @@ def run_tail(cmd: list[str], env: dict) -> tuple[int, str]:
 
 def one_mode(mode: str, settings: Settings, auth: AuthManager,
              users_src: list[str], users_tgt: list[str], src_snap: dict,
-             mail_mode: str | None = None) -> dict:
+             mail_mode: str | None = None, fresh_target: str | None = None) -> dict:
     env = dict(os.environ)
     env["TRANSFER_MODE"] = mode
     env.update(mail_env(mail_mode))
@@ -211,10 +211,19 @@ def one_mode(mode: str, settings: Settings, auth: AuthManager,
     print(f"\n=== {mode}: emptying the target ({len(users_src)} user(s)) ===",
           flush=True)
     stage("reset target")
-    reset_rc, why = run_tail([PY, "reset_target.py", "--confirm-domain", settings.target_domain,
-                              "--yes", *scoped], env)
-    if reset_rc != 0:
-        raise RuntimeError(f"target reset refused/failed (exit {reset_rc}); ledger is unchanged and migration was not launched: {why}")
+    if fresh_target:
+        # reset_target.py only removes seeder data, never what a migration copied in, so a
+        # second arm into the same account stacks on the first (audit@t.: 758 -> 1,486 messages).
+        # A brand-new empty account per arm is a fair start and deletes nothing.
+        print(f"=== {mode}: fresh empty target {fresh_target} (nothing deleted) ===", flush=True)
+        from db import bulk_seed_identities
+        bulk_seed_identities(MigrationDB(settings.db_path), [(users_src[0], fresh_target)])
+        users_tgt = [fresh_target]
+    else:
+        reset_rc, why = run_tail([PY, "reset_target.py", "--confirm-domain", settings.target_domain,
+                                  "--yes", *scoped], env)
+        if reset_rc != 0:
+            raise RuntimeError(f"target reset refused/failed (exit {reset_rc}); ledger is unchanged and migration was not launched: {why}")
 
     # Scoped to the users under test, never the whole table. On a live tenant
     # the unscoped DELETE threw away 1.27M audit rows -- the record of every
@@ -275,6 +284,7 @@ def one_mode(mode: str, settings: Settings, auth: AuthManager,
     return {
         "mode": mode,
         "mailMode": mail_mode,
+        "targetUser": users_tgt[0] if len(users_tgt) == 1 else None,
         "verdicts": verdicts,
         "clean": rc == 0 and not failed and all(
             v in ("IDENTICAL", "COMPLETE") for v in verdicts.values()),
@@ -298,6 +308,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--mode", action="append",
                     choices=["server_side", "download_upload"],
                     help="default: both, server_side first")
+    ap.add_argument("--fresh-targets", action="store_true",
+                    help="each arm migrates into a brand-new empty target account (one pinned user "
+                         "only). Implied by --mail-mode: a reset cannot empty migrated mail, so a "
+                         "reused account would double. Costs one licence per arm; deletes nothing.")
     ap.add_argument("--account-id", type=int,
                     help="a SaaS account's tenant pair and ledger (default: the box's own)")
     ap.add_argument("--mail-mode", action="append", choices=["engine", "split", "dms"],
@@ -332,6 +346,12 @@ def main(argv: list[str] | None = None) -> int:
           f"{src_snap['binary']} binary), {src_snap['folders']} folders, "
           f"{src_snap['bytes']/1e9:.2f} GB", flush=True)
 
+    fresh = args.fresh_targets or bool(args.mail_mode)
+    if fresh and len(users_src) != 1:
+        print("--fresh-targets/--mail-mode need exactly one --user: a fair comparison pins one "
+              "user's data, and each arm needs its own new account for it.")
+        return 1
+    original_target = users_tgt[0]
     results = []
     arms = [(m, mm) for m in (args.mode or ["server_side", "download_upload"])
             for mm in (args.mail_mode or [None])]
@@ -344,8 +364,13 @@ def main(argv: list[str] | None = None) -> int:
                            current={"mode": mode, "mailMode": mail_mode, "stage": "starting"},
                            durations=durations, users=users_src,
                            corpus={"files": src_snap["files"], "bytes": src_snap["bytes"]})
+            fresh_target = None
+            if fresh:
+                base, _, dom = original_target.partition("@")
+                stamp = started[5:7] + started[8:10] + started[11:13] + started[14:16]
+                fresh_target = f"{base}-ab{i + 1}-{stamp}@{dom}"
             results.append(one_mode(mode, settings, auth, users_src, users_tgt,
-                                    src_snap, mail_mode))
+                                    src_snap, mail_mode, fresh_target))
             durations.append(results[-1]["seconds"])
             with open(args.report + ".json", "w") as fh:
                 json.dump({"source": {k: v for k, v in src_snap.items()
@@ -356,6 +381,10 @@ def main(argv: list[str] | None = None) -> int:
                           "error": f"{type(exc).__name__}: {str(exc)[:600]}",
                           "finishedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())})
         raise
+    finally:
+        if fresh:      # the pinned user goes back to its own target account
+            from db import bulk_seed_identities
+            bulk_seed_identities(MigrationDB(settings.db_path), [(users_src[0], original_target)])
     write_progress(running=False, startedAt=started, total=len(arms), done=len(arms),
                    current=None, durations=durations, users=users_src,
                    finishedAt=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))

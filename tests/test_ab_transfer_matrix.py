@@ -83,3 +83,15 @@ def test_a_refused_reset_keeps_the_refusals_own_words(monkeypatch):
         a, 1, stdout="", stderr="t.example is protected because it is configured on this deployment"))
     rc, why = AB.run_tail(["reset_target.py"], {})
     assert rc == 1 and "protected" in why
+
+
+def test_a_fresh_target_arm_deletes_nothing_and_points_the_user_at_a_new_account(monkeypatch, tmp_path):
+    """reset_target.py cannot empty migrated mail (audit@t. went 758 -> 1,486 across two arms), so a
+    comparison arm gets its own empty account instead of a reset."""
+    import inspect
+    src = inspect.getsource(AB.one_mode)
+    fresh_branch = src[src.index("if fresh_target:"):src.index("else:", src.index("if fresh_target:"))]
+    assert "run_tail(" not in fresh_branch and "bulk_seed_identities" in fresh_branch
+    main_src = inspect.getsource(AB.main)
+    assert "fresh = args.fresh_targets or bool(args.mail_mode)" in main_src
+    assert "finally:" in main_src and "original_target" in main_src.split("finally:")[1]
