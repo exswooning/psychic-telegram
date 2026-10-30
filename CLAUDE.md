@@ -1,3 +1,7 @@
+## Pending Claude implementation task
+
+- [ ] High priority: [Gmail search-first link rewriting → DMS](docs/tasks/claude-gmail-search-first-dms.md). Use server-side search to fetch only candidate email bodies by default; keep exhaustive scans/full 1:1 optional. This task is queued, not implemented. Respect active-job deployment gates.
+
 ## Latest operator handoff — 30 October 2026
 
 Read [docs/claude-handoff-2026-10-30.md](docs/claude-handoff-2026-10-30.md) before migration work. It supersedes older defaults below: full mail runs now prefer complete link scan + DMS, routine mail completion uses counts (not 1:1), and full verification remains optional. The operator explicitly resumed the sandbox run on 30 October 2026; see the current-state note in the handoff.

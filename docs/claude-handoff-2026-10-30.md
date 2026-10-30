@@ -34,3 +34,7 @@ The operator requested: pause sandbox account 3, deploy fixes, prefer Google DMS
 - UI readiness passed for both tenants. PASS 1/3 Drive started. The new cap is qualified live: automatic process allocation reduced eight proposed processes to one for one eligible user.
 - The scan/DMS phases have not completed; no new 1:1 conclusion. Do not stop this resumed run based on the historical pause in earlier notes. No backend deployment while active.
 - Runtime code release remains 8bc97a5d54b38e401cecab022e7c91a9251ce5f5; this handoff update changes documentation only.
+
+## Next Claude task — search-first mail scanning
+
+- [ ] Implement [Gmail search-first link rewriting, then DMS](tasks/claude-gmail-search-first-dms.md). The current runtime still scans every source message body. The task defines candidate-search coverage qualification, count completion, optional strict checks, UI visibility, benchmarks and safe deployment. Adding this task does not change or restart the running migration.
