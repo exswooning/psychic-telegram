@@ -33,17 +33,17 @@ class TestTheChoiceIsOffered:
         for option in ("mail-by-split", "mail-by-engine", "mail-by-dms"):
             assert option in src
 
-    def test_the_dialog_defaults_to_engine_until_split_is_qualified(self):
-        assert "useState<MailMode>('engine')" in _detail()
-        assert "Split (experimental)" in _detail()
+    def test_the_dialog_defaults_to_scan_then_dms_with_scoped_assurance(self):
+        assert "useState<MailMode>('split')" in _detail()
+        assert "Full 1:1" in _detail()
 
     def test_the_api_decides_when_a_caller_names_no_mode(self):
         """DMS is an explicit choice, including for a whole tenant."""
         import api_server
         S = api_server.StartMigration
         assert S.model_fields["mail_mode"].default is None
-        assert api_server._default_mail_mode(S(reason="full run", services=["all"])) == "engine"
-        assert api_server._default_mail_mode(S(reason="one user", services=["all"], users=["a@x.com"])) == "engine"
+        assert api_server._default_mail_mode(S(reason="full run", services=["all"])) == "split"
+        assert api_server._default_mail_mode(S(reason="one user", services=["all"], users=["a@x.com"])) == "split"
         assert api_server._default_mail_mode(S(reason="a sample", services=["all"], sample=5)) == "engine"
         assert api_server._default_mail_mode(S(reason="drive only", services=["drive"])) == "engine"
 

@@ -453,6 +453,9 @@ def migrate_user(auth: AuthManager, db: MigrationDB, settings: Settings,
 
     acceptance = None
     acceptance_enabled = inline_acceptance_enabled(settings,delta=delta,track_status=track_status)
+    from mail_completion import full_mail_check
+    acceptance_services = services if full_mail_check(settings) else services - {"gmail"}
+    acceptance_enabled = acceptance_enabled and bool(acceptance_services)
     prior_status = ""
     if track_status:
         row = db.conn.execute(
@@ -549,7 +552,7 @@ def migrate_user(auth: AuthManager, db: MigrationDB, settings: Settings,
             dependencies = dependency_preflight(auth,db,settings,source_user,target_user)
             if dependencies:
                 result["dependencyFindings"] = dependencies
-            acceptance = Acceptance(auth,db,settings,source_user,target_user,services)
+            acceptance = Acceptance(auth,db,settings,source_user,target_user,acceptance_services)
             result["acceptanceRunId"] = acceptance.run_id
             if not acceptance.ready():
                 raise RuntimeError("Source manifest could not be completed: "+json.dumps(acceptance.errors))
@@ -693,6 +696,12 @@ def migrate_user(auth: AuthManager, db: MigrationDB, settings: Settings,
         result["error"] = detail
 
     result["elapsed_sec"] = round(time.time() - started, 1)
+    if (track_status and "gmail" in services and result.get("status") == "DONE"
+            and not full_mail_check(settings) and not SHUTDOWN.is_set()):
+        from mail_completion import compare_mail_counts
+        result["mailCountCheck"] = compare_mail_counts(auth, db, settings,
+            progress=lambda message: log.info("[%s] %s", source_user, message),
+            source_users=(source_user,))
     if checkpoints:
         from migration_checks import capture_and_save
         result["storage_check"] = capture_and_save(auth, db, source_user, target_user, services, "after")
@@ -706,7 +715,8 @@ def migrate_user(auth: AuthManager, db: MigrationDB, settings: Settings,
         import verify_sample
         from resilience import retry_on_google_error
         done = [s for s in verify_sample.ALL_SERVICES
-                if s == "directory" or s in _services_that_succeeded(result["services"])]
+                if (s == "directory" or s in _services_that_succeeded(result["services"]))
+                and (s != "gmail" or full_mail_check(settings))]
         if done:
             VERIFY.submit(verify_sample.verify_user, auth, db, settings, source_user, tuple(done),
                           settings.verify_sample_per_service,

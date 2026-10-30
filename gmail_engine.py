@@ -508,7 +508,8 @@ class GmailMigrator:
             return
         if self.settings.mail_only_with_links and not already:
             try:
-                classified, plan = self._split_classify(mid)
+                cached = getattr(self, "_split_scan", {}).pop(mid, None)
+                classified, plan = cached if cached is not None else self._split_classify(mid)
                 if plan and plan["route"] == "BLOCKED":
                     raise RuntimeError("Unresolved Drive link mapping: " + ", ".join(plan["unresolved"]))
                 if plan and plan["route"] == "DMS":
@@ -718,7 +719,8 @@ class GmailMigrator:
         self.db.log_audit(self.source_user, mid, "message", "SUCCESS",
                           bytes_moved=approx_bytes)
         self._bump("inserted")
-        if (getattr(self.settings, "migration_checks_enabled", False) or self.settings.mail_only_with_links
+        from mail_completion import full_mail_check
+        if ((getattr(self.settings, "migration_checks_enabled", False) and full_mail_check(self.settings)) or self.settings.mail_only_with_links
                 or getattr(self, "recover_unmapped", False)):
             from migration_checks import verify_written_mail
             verified = verify_written_mail(self, mid, result["id"], raw, mapped_labels,
@@ -733,6 +735,62 @@ class GmailMigrator:
                                   "SUCCESS" if verified else "NEEDS_ATTENTION",
                                   "Old target copy retained in Trash; fresh copy " + result["id"] +
                                   (" content and labels verified" if verified else " requires verification"))
+
+    def _scan_split_before_delivery(self, query):
+        """Classify EVERY source message before the first content insert.
+
+        Keep only route/label metadata, never raw mail/attachments. A blocked
+        reference or unread message prevents DMS handoff and any content copy.
+        Existing target mappings must not exempt source mail from this scan.
+        """
+        self._split_scan = {}
+        refs, blocked, examined = [], 0, 0
+        workers = max(1, int(getattr(self.settings, "mail_workers", 1) or 1))
+
+        def inspect(ref):
+            # Returning only classification metadata bounds retained memory even
+            # when a text part is large. No binary attachment is requested.
+            classified, plan = self._split_classify(ref["id"])
+            if plan and plan["route"] == "BLOCKED":
+                raise RuntimeError("Unresolved Drive link mapping: " + ", ".join(plan["unresolved"]))
+            return {"labelIds": classified.get("labelIds", [])}, plan
+
+        def collect(completed):
+            nonlocal blocked, examined
+            for future in completed:
+                mid = pending.pop(future)
+                try:
+                    self._split_scan[mid] = future.result()
+                except Exception as exc:
+                    self.db.log_audit(self.source_user, mid, "message", "FAILED_SPLIT",
+                                      "Pre-delivery link scan: " + str(exc)[:300])
+                    blocked += 1
+                examined += 1
+                if examined % 100 == 0:
+                    log.info("[%s] mail pre-delivery scan: %d examined, %d blocked",
+                             self.source_user, examined, blocked)
+
+        with futures.ThreadPoolExecutor(max_workers=workers, thread_name_prefix="mail-scan") as pool:
+            pending = {}
+            for ref in self._iter_messages(query):
+                if shutdown_requested():
+                    raise RuntimeError("Mail link scan interrupted; DMS handoff not ready")
+                refs.append(ref)
+                pending[pool.submit(inspect, ref)] = ref["id"]
+                if len(pending) >= workers * 2:
+                    completed, _ = futures.wait(pending, return_when=futures.FIRST_COMPLETED)
+                    collect(completed)
+            while pending:
+                if shutdown_requested():
+                    raise RuntimeError("Mail link scan interrupted; DMS handoff not ready")
+                completed, _ = futures.wait(pending, return_when=futures.FIRST_COMPLETED)
+                collect(completed)
+        log.info("[%s] mail pre-delivery scan complete: %d examined, %d blocked",
+                 self.source_user, len(refs), blocked)
+        if blocked:
+            self._split_scan.clear()
+            raise RuntimeError(f"Mail link scan blocked on {blocked} messages; DMS not ready")
+        return iter(refs)
 
     def run(self, delta: bool = False, since_epoch_days: int = 0,
             drive_in_scope: bool = True) -> dict:
@@ -799,9 +857,11 @@ class GmailMigrator:
         # regardless of how long ago Stop was pressed. A message not yet
         # reached is simply not in the ledger, same as any other
         # not-yet-run one, and a delta/re-run picks it up.
+        refs = (self._scan_split_before_delivery(query) if self.settings.mail_only_with_links
+                else self._iter_messages(query))
         workers = max(1, int(getattr(self.settings, "mail_workers", 1) or 1))
         if workers == 1:
-            for ref in self._iter_messages(query):
+            for ref in refs:
                 if shutdown_requested():
                     log.warning("[%s] stopping mail migration early -- "
                                "signal received", self.source_user)
@@ -811,7 +871,7 @@ class GmailMigrator:
             with futures.ThreadPoolExecutor(max_workers=workers,
                                             thread_name_prefix="gmail") as pool:
                 pending: set = set()
-                for ref in self._iter_messages(query):
+                for ref in refs:
                     if shutdown_requested():
                         log.warning("[%s] stopping mail migration early -- "
                                    "signal received", self.source_user)

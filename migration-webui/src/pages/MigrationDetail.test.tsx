@@ -315,25 +315,25 @@ describe('MigrationDetail: who moves the mail', () => {
     await waitFor(() => expect(startMigration).toHaveBeenCalled())
   }
 
-  it('offers all three and has this tool selected (split is experimental)', async () => {
+  it('offers all three and defaults to link scan plus DMS', async () => {
     await openDialog()
-    expect(screen.getByTestId('mail-by-engine').querySelector('input')).toBeChecked()
-    expect(screen.getByTestId('mail-by-split').querySelector('input')).not.toBeChecked()
+    expect(screen.getByTestId('mail-by-engine').querySelector('input')).not.toBeChecked()
+    expect(screen.getByTestId('mail-by-split').querySelector('input')).toBeChecked()
     expect(screen.getByTestId('mail-by-dms').querySelector('input')).not.toBeChecked()
   })
 
-  it('says split is experimental, runs Drive first and has the DMS import afterward', async () => {
+  it('explains pre-delivery scanning, counts and optional full verification', async () => {
     await openDialog()
     const split = screen.getByTestId('mail-by-split')
-    expect(split).toHaveTextContent('Split (experimental)')
+    expect(split).toHaveTextContent('Link scan + Google DMS')
     expect(split).toHaveTextContent('Drive first')
     expect(split).toHaveTextContent('imports the mailbox afterward')
   })
 
-  it('starts an engine run by default, and asks the server for it', async () => {
+  it('starts a split run by default and keeps the engine available', async () => {
     await openDialog(); await confirm()
     const [, services, users, dry, account, mode] = startMigration.mock.calls[0]
-    expect([services, users, dry, account, mode]).toEqual([['all'], [], false, 7, 'engine'])
+    expect([services, users, dry, account, mode]).toEqual([['all'], [], false, 7, 'split'])
   })
 
   it('sends the mode chosen, and never decides the service list itself', async () => {

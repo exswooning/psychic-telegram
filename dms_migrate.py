@@ -917,6 +917,11 @@ def wait_then_tally(minutes: int, timeout: int, headful: bool) -> int:
                 st = Settings()
                 db = MigrationDB(st.db_path)
                 try:
+                    from mail_completion import compare_mail_counts, full_mail_check
+                    if not full_mail_check(st):
+                        checked = compare_mail_counts(AuthManager(st), db, st, progress=log)
+                        log("DMS count completion (not 1:1): " + json.dumps(checked))
+                        return 2 if checked["blocked"] else 0
                     checked = reconcile_dms(AuthManager(st), db, st, progress=log)
                     log("DMS delivery reconciliation: " + json.dumps(checked, default=str))
                     if checked["blocked"]:

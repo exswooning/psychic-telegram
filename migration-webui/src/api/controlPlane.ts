@@ -387,7 +387,7 @@ export const fetchActions = () => cpFetch<OperatorAction[]>('/api/v2/actions')
 // UI convention that a future caller could skip.
 export interface ActionResult { ok: boolean; actionId: number; detail: string }
 
-/** Who moves the mail. `engine` (the API's own default): this tool moves all of
+/** Who moves the mail. `split` is the full-run default; `engine`: this tool moves all of
  *  it. `dms`: Google's Data Migration Service does, and this run does everything
  *  else. `split`: this tool moves only mail that carries a Drive link, rewriting
  *  it, and the DMS moves the rest AFTER the run. */
@@ -425,7 +425,7 @@ export const startMigration = (
     method: 'POST',
     // accountId is the migration on screen. Without it the server falls back
     // to the caller's own account -- the same trap the delta button hit.
-    // mail_mode omitted means the engine, exactly as before it existed.
+    // Omitted means link scan + DMS for full runs; bounded samples use engine.
     // sample: a quick run that copies only the first N items of each service per
     // user and leaves the users unfinished (see sample_budget.py).
     body: JSON.stringify({ reason, services, users, dry_run: dryRun,
@@ -1610,6 +1610,7 @@ export const runSourceGuard = (action: 'check' | 'baseline', reason: string, acc
  *  each service's method as the running process has it, and done against the source. */
 export interface Movement {
   stage: { pass: number; of: number; services: string } | null
+  driveBaseline?: { done: number; total: number; takenAt: string; scope: string } | null
   drive: { method: string; how: string; filesCopied: number; filesOnSource: number; formsRebuilt: number }
   mail: { method: string; how: string; messagesCopied: number; messagesOnSource: number }
 }
@@ -1617,6 +1618,12 @@ export interface Movement {
 export interface MetricsSnapshot {
   accountId: number
   error: string
+  metricsScope?: string
+  mailCountCheck?: {
+    checkedAt: string; scope: string; blocked: number
+    users: { source: string; target: string; sourceMessages?: number; targetMessages?: number;
+      difference?: number; verdict: string; error?: string }[]
+  }
   movement?: Movement
   volume?: { itemType: string; status: string; count: number }[]
   mappings?: { type: string; count: number }[]

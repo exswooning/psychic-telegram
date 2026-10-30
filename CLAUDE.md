@@ -1,3 +1,7 @@
+## Latest operator handoff — 30 October 2026
+
+Read [docs/claude-handoff-2026-10-30.md](docs/claude-handoff-2026-10-30.md) before migration work. It supersedes older defaults below: full mail runs now prefer complete link scan + DMS, routine mail completion uses counts (not 1:1), and full verification remains optional. Preserve the operator-requested pause.
+
 # CLAUDE.md
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
@@ -218,10 +222,11 @@ audit, with a default reason when none is given. Notifications are opt-in via `I
 (the last opens an issue a Claude Code routine can be pointed at); none is set
 by default and a failed send never fails a run.
 
-**Who moves the mail is a per-run choice (`mail_mode`), and the dialog defaults to
-`engine`.** `engine`: this tool moves all mail, and a caller that names no mode gets it
-(`api_server._default_mail_mode`): split is offered as experimental until the DMS's
-overlap with mail already copied is proven per message. `dms`:
+**Who moves the mail is a per-run choice (`mail_mode`), and full mail runs default to
+`split` (30 October operator change; see latest handoff).** `engine` explicitly moves
+all mail; bounded samples and non-mail runs still use it. A full run with no mode
+uses a complete link scan followed by the DMS hybrid. Count completion is not proof
+of rewritten-content, label or overlap fidelity. `dms`:
 Google's Data Migration Service does, and the run migrates everything else.
 `split`: the engine inserts only mail that carries a Drive link and rewrites it;
 the rest is written `SKIPPED_NO_DRIVE_LINK` (`config.DEFERRED_TO_DMS`) and moved by

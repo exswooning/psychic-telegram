@@ -76,8 +76,8 @@ export const MigrationDetail: React.FC = () => {
      "Start a new migration" on the list page opens the setup wizard for a
      new tenant pair, which is a different thing entirely. */
   const [askFull, setAskFull] = useState(false)
-  // DMS imports a mailbox; overlapping rewritten copies still need qualification.
-  const [mailBy, setMailBy] = useState<MailMode>('engine')
+  // Source remains unchanged: link mail first, then Google's mailbox import.
+  const [mailBy, setMailBy] = useState<MailMode>('split')
   const [moreOpen, setMoreOpen] = useState(false)
   // Start Google's DMS on its own (api_server._start_dms); on unless switched off.
   const [dmsAuto, setDmsAuto] = useState(true)
@@ -948,11 +948,12 @@ export const MigrationDetail: React.FC = () => {
                   data-testid="mail-by-split"
                   label={
                     <Typography variant="body2">
-                      <strong>Split (experimental)</strong> — Drive first, then this
-                      tool copies mail whose mapped Drive links change. Google&apos;s
+                      <strong>Link scan + Google DMS</strong> — Drive first, then scan every
+                      email before delivery and copy mail whose mapped Drive links change. Google&apos;s
                       Data Migration Service imports the mailbox afterward, including
-                      mail the tool already copied. Completion requires checking
-                      destination content, labels and overlapping messages. Unresolved
+                      mail the tool already copied. Routine completion compares mailbox counts;
+                      equal counts do not prove content, labels or duplicate identity. Full 1:1
+                      verification remains available on the Verification page. Unresolved
                       links block a clean handoff. The source admin must authorize
                       the connection before Google imports mail.
                     </Typography>

@@ -337,13 +337,11 @@ class StartMigration(WriteAction):
     account_id: int | None = None
     dry_run: bool = False
     # Who moves the mail.
-    #   engine  this tool moves all of it. What every caller got before this
-    #           field existed, so it stays the API's own default.
+    #   engine  this tool moves all of it (also used for bounded samples).
     #   dms     Google's Data Migration Service moves all of it; this run
     #           migrates everything else.
-    #   split   experimental: this tool copies changed-link mail, then DMS
-    #           imports the mailbox. Fresh reconciliation checks the overlap.
-    # Left out, it is `engine`; unqualified handoff is never the default.
+    #   split   default for full mail runs: scan all source messages, copy changed-link
+    #           mail, then DMS imports the mailbox. Counts do not prove 1:1 fidelity.
     mail_mode: Literal["engine", "dms", "split"] | None = None
     # A SAMPLE run: consider at most this many items of each service per user
     # (the first N found), and leave the users UNFINISHED so the next full
@@ -2068,12 +2066,12 @@ def _mail_plan(services: list[str], mail_mode: str, rewrite: bool = True) -> tup
 
 
 def _default_mail_mode(body: "StartMigration") -> str:
-    """DMS mailbox overlap is not a proven per-message handoff.
+    """Full mail runs scan/rewrite link mail first, then hand off to DMS.
 
-    Keep split available as an explicit choice while sandbox qualification is
-    incomplete. Callers omitting a mode get the tracked engine.
+    A bounded sample must remain a bounded engine job. Counts are accounting,
+    not a release of any outstanding full-verification findings.
     """
-    return "engine"
+    return "engine" if body.sample is not None or not ({"all", "gmail"} & set(body.services)) else "split"
 
 
 def _export_identities_csv(account_id: int | None) -> tuple[str, int]:
@@ -6036,7 +6034,8 @@ def _movement(conn, account_id, run_users=(), qs="") -> dict:
                 stage = {"pass": int(m.group(1)), "of": int(m.group(2)), "services": m.group(3).strip()}
     except Exception:      # noqa: BLE001 - no log: no stage, never a guess
         stage = None
-    return {"stage": stage,
+    from migration_progress import drive_baseline_coverage
+    return {"stage": stage, "driveBaseline": drive_baseline_coverage(conn, run_users),
             "drive": {"method": mode, "how": drive_how, "filesCopied": files,
                       "filesOnSource": exp["f"] if exp else 0, "formsRebuilt": forms},
             "mail": {"method": "split" if split else "engine", "how": mail_how,
@@ -6986,7 +6985,9 @@ async def migration_metrics(account_id: int, history: int = 60, users: str = "",
             return out
         samples = _this_run(samples)
 
-        latest = samples[0]
+        from migration_progress import reporting_process
+        latest = reporting_process(samples)
+        out["metricsScope"] = "busiest fresh reporting process; item totals include all processes"
         out["latest"] = {
             "recordedAt": latest.get("recordedAt"),
             "elapsedSec": latest.get("elapsed_sec", 0),
@@ -7129,6 +7130,10 @@ async def migration_metrics(account_id: int, history: int = 60, users: str = "",
                                          "bytesMovedTotal": moved, "expectedBytes": exp["b"],
                                          "remainingBytes": max(0, exp["b"] - moved) if exp["b"] else 0}
                 out["movement"] = _movement(conn, account_id, run_users, qs)
+                if conn.execute("SELECT 1 FROM sqlite_master WHERE name='mail_count_checks'").fetchone():
+                    counts = conn.execute("SELECT report FROM mail_count_checks ORDER BY checked_at DESC LIMIT 1").fetchone()
+                    if counts:
+                        out["mailCountCheck"] = json.loads(counts[0])
                 # Same grouped-by-cause failures the Migrations detail page already shows
                 # as a table (see _migration_detail, same query) -- reused here for the
                 # Metrics page's pie chart, so both name the same causes the same way and

@@ -163,6 +163,16 @@ export const Metrics: React.FC = () => {
       </Stack>
 
       {error && <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>}
+      {m?.metricsScope && <Alert severity="info" sx={{ mb: 2 }}>
+        API metrics: {m.metricsScope}. Process latency is not a combined tenant benchmark.
+      </Alert>}
+      {m?.mailCountCheck && <Alert severity={m.mailCountCheck.blocked ? 'warning' : 'info'} sx={{ mb: 2 }}>
+        {m.mailCountCheck.scope}. Checked {m.mailCountCheck.checkedAt}.
+        {m.mailCountCheck.users.map((u) => <Typography variant="body2" key={u.source}>
+          {u.source}: source {u.sourceMessages?.toLocaleString() ?? 'unknown'};
+          target {u.targetMessages?.toLocaleString() ?? 'unknown'} — {u.verdict}
+        </Typography>)}
+      </Alert>}
       {m?.error && (
         <Alert severity="info" sx={{ mb: 2 }} data-testid="metrics-empty">
           {m.error}
