@@ -1,6 +1,6 @@
 # Claude handoff — 30 October 2026
 
-The operator requested: pause sandbox account 3, deploy fixes, prefer Google DMS after a complete email link scan, use count completion routinely, and retain optional full 1:1 checks. Keep the workflow paused after deployment; no restart was requested. All tenant operations and diagnostics use the new `/next/` UI.
+The operator requested: pause sandbox account 3, deploy fixes, prefer Google DMS after a complete email link scan, use count completion routinely, and retain optional full 1:1 checks. The deployment pause was superseded by the operator’s explicit resume request on 30 October 2026. All tenant operations and diagnostics use the new `/next/` UI.
 
 ## State and scope
 
@@ -26,3 +26,11 @@ The operator requested: pause sandbox account 3, deploy fixes, prefer Google DMS
 - DMS connection approval/login and current target credentials may still require operator action. No new access grants or legal terms were accepted in this release. No custom IMAP relay/server was deployed.
 - Deploy local commit → GitHub → exact laptop version only, normal `sync_vps.sh` active-job/repair gates, never override. Preserve original `/app/` UI, tenant credentials, data and source protections. Actual deployment receipt is `/opt/bitport/CONFIGURATION_RELEASE.json`; source version is `/opt/bitport/DEPLOYED_COMMIT`. `/next/` has a separately hashed versioned bundle.
 - Post-import count differences, existing native-format checks and unmapped identities remain visible. Use optional full verification to establish 1:1; do not silently clear findings.
+
+## Current state — operator resumed on 30 October 2026
+
+- Resumed through the new UI at 2026-10-30T02:29:55Z (08:14:55 Asia/Kathmandu), PID 3265024, account 3, same single info@s → nest@t identity.
+- Explicit Drive choice: server-side copy. Email: link scan + DMS, automatic DMS handoff selected. Existing target data retained; no wipe.
+- UI readiness passed for both tenants. PASS 1/3 Drive started. The new cap is qualified live: automatic process allocation reduced eight proposed processes to one for one eligible user.
+- The scan/DMS phases have not completed; no new 1:1 conclusion. Do not stop this resumed run based on the historical pause in earlier notes. No backend deployment while active.
+- Runtime code release remains 8bc97a5d54b38e401cecab022e7c91a9251ce5f5; this handoff update changes documentation only.
