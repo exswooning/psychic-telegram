@@ -376,3 +376,25 @@ def test_generic_retry_cannot_bypass_a_blocked_split_route(
     gmail_migrator._migrate_one_message({"id": mid})
     assert auth.target_gmail(TGT_USER).call_count("messages.insert") == 0
     assert db.get_audit(SRC_USER, mid, "message")["status"] == "FAILED_SPLIT"
+
+
+def test_a_link_the_source_answers_404_for_does_not_block_the_scan(settings):
+    """The source answered 404 for the file, so no run can map it: the link reads the same by
+    either route, and one such message used to hold back the whole mailbox (4 of 758, 695 of 36k)."""
+    import threading
+    from gmail_engine import GmailMigrator
+    from resilience import PermanentAPIError
+    m = object.__new__(GmailMigrator)
+    m.settings, m.source_user = settings, SRC_USER
+    m._scan_lock, m._link_scan = threading.Lock(), {}
+
+    def gone(fn, **kw):
+        raise PermanentAPIError("HTTP 404 (notFound): File not found")
+    m._retry = gone
+    m.auth = type("A", (), {"source_drive": lambda self, u: None})()
+    assert m._split_unknown_link("x") == "external"
+    assert m._link_scan["unreachableLinks"] == 1
+    m._retry = lambda fn, **kw: (_ for _ in ()).throw(PermanentAPIError("HTTP 403 (forbidden)"))
+    import pytest
+    with pytest.raises(PermanentAPIError):
+        m._split_unknown_link("x")

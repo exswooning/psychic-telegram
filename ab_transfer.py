@@ -257,6 +257,13 @@ def one_mode(mode: str, settings: Settings, auth: AuthManager,
     services = services_for(mail_mode)
     rc, secs = run([PY, "main.py", *ACCOUNT_ARGS, "migrate", "--services", services, *scoped], env)
     net1 = net_bytes()
+    dms = None
+    if mail_mode in ("dms", "split") and len(users_src) == 1:
+        print(f"=== {mode}+{mail_mode}: Google's mail import ===", flush=True)
+        stage("dms import")
+        dms, dms_secs = dms_tail(settings, users_src, users_tgt, env)
+        secs += dms_secs
+        print(f"=== DMS: {dms} ===", flush=True)
 
     db = MigrationDB(settings.db_path)
     counts = {t: n for t, n in db.conn.execute(
@@ -270,23 +277,28 @@ def one_mode(mode: str, settings: Settings, auth: AuthManager,
     stage("snapshot target")
     tgt_snap = snapshot_drive(auth, users_tgt, "target")
 
-    verdicts = {}
+    verdicts, details = {}, {}
     if mail_mode is not None:
         print(f"=== {mode}+{mail_mode}: verifying one to one ===", flush=True)
         stage("verify 1:1")
         run([PY, "verify_sample.py", *ACCOUNT_ARGS[:2], *scoped, "--services", "all"], env)
         db = MigrationDB(settings.db_path)
         for u in users_src:
-            for svc, v in db.conn.execute(
-                    "SELECT service, verdict FROM user_verification WHERE source_user=?", (u,)):
-                verdicts[f"{u.split('@')[0]}/{svc}"] = v
+            for svc, v, payload in db.conn.execute(
+                    "SELECT service, verdict, payload FROM user_verification WHERE source_user=?", (u,)):
+                key = f"{u.split('@')[0]}/{svc}"
+                verdicts[key] = v
+                if v not in ("IDENTICAL", "COMPLETE"):
+                    details[key] = difference_summary(payload)
 
     return {
         "mode": mode,
         "mailMode": mail_mode,
         "targetUser": users_tgt[0] if len(users_tgt) == 1 else None,
         "verdicts": verdicts,
-        "clean": rc == 0 and not failed and all(
+        "differences": details,
+        "dms": dms,
+        "clean": rc == 0 and not failed and (dms is None or dms == "done") and all(
             v in ("IDENTICAL", "COMPLETE") for v in verdicts.values()),
         "exit": rc,
         "seconds": round(secs, 1),
@@ -296,6 +308,45 @@ def one_mode(mode: str, settings: Settings, auth: AuthManager,
         "target": {k: v for k, v in tgt_snap.items() if k != "sample"},
         "fidelity": fidelity(src_snap, tgt_snap),
     }
+
+
+def dms_tail(settings, users_src, users_tgt, env) -> tuple[str, float]:
+    """Google's import of the mail the engine left owed, for the arm's one user: a one-row identity
+    map, then dms_migrate.py --apply --until-done. Returns (outcome, seconds); the arm's time
+    includes it. "skipped: ..." when the box holds no Admin console login -- the unattended
+    approval cannot run without it, and that is a missing prerequisite, not a failed arm."""
+    import csv
+    import webui
+    denv = webui._dms_env(settings.account_id)
+    if not denv.get("DWD_PASSWORD"):
+        return f"skipped: no Admin console login for {settings.target_admin} in {webui.DWD_ENV_FILE}", 0.0
+    path = os.path.join("logs", "dms", f"ab-{os.getpid()}.csv")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", newline="", encoding="utf-8") as fh:
+        w = csv.writer(fh)
+        w.writerow(("source_email", "target_email"))
+        w.writerow((users_src[0], users_tgt[0]))
+    argv = [PY, "dms_migrate.py", "--apply", "--watch", "60", "--until-done", "1440", "--timeout", "200",
+            "--identities", path, "--source-domain", settings.source_domain,
+            "--target-admin", settings.target_admin]
+    rc, secs = run(argv, {**env, **denv})
+    return ("done" if rc == 0 else f"failed (exit {rc})"), secs
+
+
+def difference_summary(payload, sample: int = 5) -> dict:
+    """What a non-identical verdict was about: the counts and a few examples of each list, so
+    the cause survives the next arm clearing the ledger (the first A/B lost it)."""
+    try:
+        p = json.loads(payload) if isinstance(payload, str) else (payload or {})
+    except ValueError:
+        return {"unreadable": str(payload)[:200]}
+    out = {"counts": p.get("counts"), "completion": p.get("completion")}
+    for k in ("differences", "missing", "extras", "notCopied", "errors"):
+        if p.get(k):
+            out[k] = p[k][:sample]
+    out["failedChecks"] = [c.get("key") for c in p.get("checks", [])
+                           if c.get("status") not in ("IDENTICAL", "MATCH", "EMPTY", "OK")]
+    return out
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -24,6 +24,13 @@ describe('MailLinkScans', () => {
     expect(screen.getByTestId('mail-link-scans').className).toMatch(/Warning/)
   })
 
+  it('counts links to source files that answer 404, without calling them blocking', () => {
+    render(<MailLinkScans scans={[{ ...base, mode: 'exhaustive', unreachableLinks: 4 }]} />)
+    const a = screen.getByTestId('mail-link-scans')
+    expect(a).toHaveTextContent('4 links to source files that answer 404 (left as they are, not blocking)')
+    expect(a.className).toMatch(/Info/)
+  })
+
   it('shows nothing without a scan', () => {
     const { container } = render(<MailLinkScans />)
     expect(container).toBeEmptyDOMElement()

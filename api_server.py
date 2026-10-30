@@ -4073,7 +4073,8 @@ def ab_view(progress_path: str, results_path: str, now: float | None = None) -> 
         out["ranking"] = sorted(
             ({"arm": r["mode"] + (" + " + r["mailMode"] if r.get("mailMode") else ""),
               "seconds": r.get("seconds"), "failed": r.get("failed"), "clean": clean(r),
-              "verdicts": r.get("verdicts") or {}} for r in runs),
+              "verdicts": r.get("verdicts") or {},
+              "differences": r.get("differences") or {}, "dms": r.get("dms")} for r in runs),
             key=lambda a: (not a["clean"], a["seconds"] if a["seconds"] is not None else 1e12))
     return out
 

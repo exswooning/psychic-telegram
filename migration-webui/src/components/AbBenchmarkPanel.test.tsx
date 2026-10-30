@@ -47,6 +47,24 @@ describe('A/B benchmark page', () => {
     expect(screen.getByText('not clean')).toBeTruthy()
   })
 
+  it('shows what differed and the mail-import status in the row, not behind a hover', async () => {
+    fetchAb.mockResolvedValue({ running: false, results: null, progress: progress({ alive: false, done: 4 }),
+      ranking: [
+        { arm: 'server_side + engine', seconds: 1602, failed: 0, clean: false, dms: null,
+          verdicts: { 'audit/gmail': 'DIFFERENCES', 'audit/drive': 'IDENTICAL' },
+          differences: { 'audit/gmail': { counts: { missing: 756, extras: 1451 } } } },
+        { arm: 'server_side + split', seconds: 261, failed: 5, clean: false,
+          dms: 'skipped: no Admin console login for admin@t.example.com',
+          verdicts: { 'audit/gmail': 'DIFFERENCES' } },
+      ] })
+    render(<AbBenchmarkPanel />)
+    await waitFor(() => expect(screen.getAllByTestId('ab-differences')[0]).toHaveTextContent('audit/gmail DIFFERENCES — 756 missing, 1451 extras'))
+    expect(screen.getAllByTestId('ab-differences')[0]).not.toHaveTextContent('audit/drive')
+    expect(screen.getAllByTestId('ab-differences')[1]).toHaveTextContent('5 item(s) failed')
+    expect(screen.getAllByTestId('ab-dms')[1]).toHaveTextContent('skipped: no Admin console login')
+    expect(screen.getAllByTestId('ab-dms')[0]).toHaveTextContent('not run')
+  })
+
   it('the header pill appears only while a run is going', async () => {
     fetchAb.mockResolvedValue({ running: false, progress: progress({ alive: false }), results: null, ranking: [] })
     const { rerender } = render(<MemoryRouter><BenchmarkPill /></MemoryRouter>)

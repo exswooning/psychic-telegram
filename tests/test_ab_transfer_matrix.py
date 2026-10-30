@@ -95,3 +95,50 @@ def test_a_fresh_target_arm_deletes_nothing_and_points_the_user_at_a_new_account
     main_src = inspect.getsource(AB.main)
     assert "fresh = args.fresh_targets or bool(args.mail_mode)" in main_src
     assert "finally:" in main_src and "original_target" in main_src.split("finally:")[1]
+
+
+def test_differences_survive_as_counts_and_a_few_examples():
+    payload = json.dumps({"counts": {"missing": 756}, "completion": "COMPLETE",
+                          "missing": [{"source": str(i)} for i in range(9)],
+                          "checks": [{"key": "mail.items", "status": "DIFFERENCES"},
+                                     {"key": "mail.labels", "status": "IDENTICAL"}]})
+    d = AB.difference_summary(payload)
+    assert d["counts"] == {"missing": 756} and len(d["missing"]) == 5
+    assert d["failedChecks"] == ["mail.items"]
+    assert "unreadable" in AB.difference_summary("not json")
+
+
+def test_a_dms_arm_without_the_console_login_is_skipped_not_failed(monkeypatch):
+    import types
+    import webui
+    monkeypatch.setattr(webui, "_dms_env", lambda account_id: {})
+    st = types.SimpleNamespace(account_id=3, target_admin="admin@t.example")
+    out, secs = AB.dms_tail(st, ["a@s.example"], ["a-ab1@t.example"], {})
+    assert out.startswith("skipped:") and secs == 0.0
+
+
+def test_the_dms_tail_maps_the_one_user_and_runs_until_done(monkeypatch, tmp_path):
+    import csv
+    import types
+    import webui
+    monkeypatch.setattr(webui, "_dms_env", lambda account_id: {"DWD_PASSWORD": "x"})
+    monkeypatch.chdir(tmp_path)
+    seen = {}
+    monkeypatch.setattr(AB, "run", lambda cmd, env: (seen.update(cmd=cmd) or (0, 12.5)))
+    st = types.SimpleNamespace(account_id=3, target_admin="admin@t.example", source_domain="s.example")
+    out, secs = AB.dms_tail(st, ["a@s.example"], ["a-ab1@t.example"], {})
+    assert (out, secs) == ("done", 12.5) and "--until-done" in seen["cmd"] and "--apply" in seen["cmd"]
+    rows = list(csv.reader(open(seen["cmd"][seen["cmd"].index("--identities") + 1])))
+    assert rows[1] == ["a@s.example", "a-ab1@t.example"]
+
+
+def test_the_ranking_carries_each_arms_differences_and_mail_import_status(tmp_path):
+    runs = [{"mode": "server_side", "mailMode": "engine", "seconds": 90, "clean": False, "failed": 0,
+             "verdicts": {"audit/gmail": "DIFFERENCES"},
+             "differences": {"audit/gmail": {"counts": {"missing": 756}}}, "dms": None},
+            {"mode": "server_side", "mailMode": "split", "seconds": 60, "clean": False, "failed": 5,
+             "verdicts": {}, "dms": "skipped: no Admin console login"}]
+    pp, rp = _write(tmp_path, None, {"runs": runs})
+    r = {a["arm"]: a for a in api_server.ab_view(pp, rp)["ranking"]}
+    assert r["server_side + engine"]["differences"] == {"audit/gmail": {"counts": {"missing": 756}}}
+    assert r["server_side + split"]["dms"] == "skipped: no Admin console login"

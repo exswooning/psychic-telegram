@@ -15,6 +15,9 @@ function line(r: MailLinkScanReport): string {
   }
   parts.push(`${kb(r.bytesRead)} of bodies`)
   if (r.blocked) parts.push(`${r.blocked.toLocaleString()} blocked`)
+  if (r.unreachableLinks) {
+    parts.push(`${r.unreachableLinks.toLocaleString()} links to source files that answer 404 (left as they are, not blocking)`)
+  }
   if (typeof r.recallMissed === 'number') {
     parts.push(`search missed ${r.recallMissed} of ${r.knownLinkMessages ?? 0} messages already known to carry a link`)
   }

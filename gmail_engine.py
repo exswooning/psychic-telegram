@@ -483,9 +483,18 @@ class GmailMigrator:
     def _split_unknown_link(self, fid):
         # Positive external ownership evidence is required. A 403/404,
         # source-owned item or unknown Shared Drive cannot be handed off.
-        meta = self._retry(lambda: self.auth.source_drive(self.source_user).files().get(
-            fileId=fid, fields="id,owners(emailAddress),driveId", supportsAllDrives=True).execute(),
-            label="gmail.split.link_owner")
+        try:
+            meta = self._retry(lambda: self.auth.source_drive(self.source_user).files().get(
+                fileId=fid, fields="id,owners(emailAddress),driveId", supportsAllDrives=True).execute(),
+                label="gmail.split.link_owner")
+        except PermanentAPIError as exc:
+            # A definite 404 for an id the run never mapped: nobody can rewrite it, so the link
+            # reads the same by either route. Blocking on it held back every other message of
+            # the mailbox (4 of 758 on audit@s., 695 on info@s.). Counted, never silent.
+            if not str(exc).startswith("HTTP 404"):
+                raise
+            self._scan_count("unreachableLinks", 1)
+            return "external"
         owners = [o.get("emailAddress", "").rsplit("@", 1)[-1].lower() for o in meta.get("owners", [])]
         return "external" if owners and all(x and x != self.settings.source_domain.lower() for x in owners) else "unresolved"
 

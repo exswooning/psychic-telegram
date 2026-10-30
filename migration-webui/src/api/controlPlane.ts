@@ -427,6 +427,8 @@ export interface MailLinkScanReport {
   examined: number; blocked: number; notRead: number; bodiesRead: number; bytesRead: number
   attachmentReads: number; listCalls: number; searchSeconds?: number; scanSeconds?: number; maxRssMb?: number
   scanWorkers?: number; scanQps?: number | null
+  /** Links to source files the source answers 404 for: not rewritten, not blocking. */
+  unreachableLinks?: number
 }
 
 export const startMigration = (
@@ -577,6 +579,8 @@ export const fetchBenchmarkRunning = () =>
 export interface AbArm {
   arm: string; seconds: number | null; failed: number | null; clean: boolean
   verdicts: Record<string, string>
+  dms?: string | null
+  differences?: Record<string, { counts?: Record<string, number> | null; failedChecks?: string[] }>
 }
 export interface AbView {
   running: boolean
