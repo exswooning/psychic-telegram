@@ -426,6 +426,7 @@ export interface MailLinkScanReport {
   searches?: Record<string, number>; knownLinkMessages?: number | null; recallMissed?: number | null
   examined: number; blocked: number; notRead: number; bodiesRead: number; bytesRead: number
   attachmentReads: number; listCalls: number; searchSeconds?: number; scanSeconds?: number; maxRssMb?: number
+  scanWorkers?: number; scanQps?: number | null
 }
 
 export const startMigration = (

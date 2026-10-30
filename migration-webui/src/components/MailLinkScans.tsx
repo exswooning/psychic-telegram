@@ -19,6 +19,7 @@ function line(r: MailLinkScanReport): string {
     parts.push(`search missed ${r.recallMissed} of ${r.knownLinkMessages ?? 0} messages already known to carry a link`)
   }
   if (typeof r.scanSeconds === 'number') parts.push(`${r.scanSeconds}s`)
+  if (r.scanQps) parts.push(`${r.scanWorkers ?? '?'} workers at up to ${r.scanQps}/s`)
   return parts.join(' · ')
 }
 
@@ -32,8 +33,8 @@ export const MailLinkScans: React.FC<{ scans?: MailLinkScanReport[] }> = ({ scan
       Mail link scan (before any mail is copied).
       {scans.map((r) => <Typography variant="body2" key={r.source}>{r.source}: {line(r)}</Typography>)}
       {search && <Typography variant="caption" sx={{ display: 'block', mt: 0.5 }}>
-        Search-first reads only the messages Gmail&apos;s search names as carrying a Drive link. A link
-        Gmail does not index goes to the DMS unrewritten; an Exhaustive link scan reads every message.
+        Search-first reads only the messages Gmail&apos;s search names as carrying a Drive link. Gmail
+        does not index link text, so a link it misses goes to the DMS unrewritten. An exhaustive scan reads every message.
       </Typography>}
     </Alert>
   )

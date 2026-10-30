@@ -776,7 +776,13 @@ class Settings:
     mail_completion_check: str = field(default_factory=lambda: os.getenv("MAIL_COMPLETION_CHECK", "counts").strip().lower())
     # Split mail: "search" reads only the bodies Gmail's own search names as link
     # candidates; "exhaustive" reads every message. Search is not proof of coverage.
-    mail_link_scan: str = field(default_factory=lambda: os.getenv("MAIL_LINK_SCAN", "search").strip().lower())
+    # Measured 2026-10-30 (audit@s., 758 messages): Gmail search found 0 of 9 known link messages (best
+    # sender query 5 of 9), so exhaustive is the default; "search" is an explicit, lossy choice.
+    mail_link_scan: str = field(default_factory=lambda: os.getenv("MAIL_LINK_SCAN", "exhaustive").strip().lower())
+    # The scan only reads. It was held to per_user_qps (3/s) and took 257 s; 10/s took 79 s, 25/s 33 s,
+    # 40/s 23 s (messages.get is 5 of Gmail's 250 quota units per user per second).
+    mail_scan_qps: float = field(default_factory=lambda: float(os.getenv("MAIL_SCAN_QPS", "30")))
+    mail_scan_workers: int = field(default_factory=lambda: max(1, int(os.getenv("MAIL_SCAN_WORKERS", "36"))))
     first_pass_acceptance: bool = field(default_factory=lambda: _env_bool("FIRST_PASS_ACCEPTANCE", True))
     acceptance_repair_rounds: int = field(default_factory=lambda: min(2, max(0, int(os.getenv("ACCEPTANCE_REPAIR_ROUNDS", "1")))))
     verification_cache_enabled: bool = field(default_factory=lambda: _env_bool("VERIFICATION_CACHE", True))

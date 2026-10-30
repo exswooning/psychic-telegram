@@ -344,16 +344,17 @@ describe('MigrationDetail: who moves the mail', () => {
     expect(startMigration.mock.calls[0][5]).toBe('dms')
   })
 
-  it('scans for link mail search-first by default', async () => {
+  it('reads every message for links by default', async () => {
     await openDialog(); await confirm()
-    expect(startMigration.mock.calls[0][12]).toBe('search')
+    expect(startMigration.mock.calls[0][12]).toBe('exhaustive')
   })
 
-  it('sends an exhaustive link scan when chosen', async () => {
+  it('sends a search-first scan only when chosen, and says it is not safe by default', async () => {
     await openDialog()
-    fireEvent.click(screen.getByTestId('link-scan-exhaustive').querySelector('input')!)
+    expect(screen.getByTestId('link-scan-search')).toHaveTextContent('Not safe by default')
+    fireEvent.click(screen.getByTestId('link-scan-search').querySelector('input')!)
     await confirm()
-    expect(startMigration.mock.calls[0][12]).toBe('exhaustive')
+    expect(startMigration.mock.calls[0][12]).toBe('search')
   })
 
   it('sends no link scan for an engine run, and does not offer one', async () => {

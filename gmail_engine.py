@@ -134,6 +134,7 @@ class GmailMigrator:
         self._conv_locks: dict[str, threading.Lock] = {}
         self._conv_locks_guard = threading.Lock()
         self.limiter = RateLimiter(settings.per_user_qps)
+        self.scan_limiter = RateLimiter(getattr(settings, "mail_scan_qps", settings.per_user_qps))
         self.stats = {
             "inserted": 0, "failed": 0, "skipped": 0,
             "drafts_inserted": 0, "drafts_failed": 0, "drafts_skipped": 0,
@@ -490,7 +491,7 @@ class GmailMigrator:
 
     def _split_classify(self, mid):
         from split_mail import classify_payload
-        self.limiter.acquire()
+        self.scan_limiter.acquire()
         full = self._retry(lambda: self.src.users().messages().get(
             userId="me", id=mid, format="full").execute(), label="gmail.split.text")
         self._scan_count("bodiesRead", 1)
@@ -498,7 +499,7 @@ class GmailMigrator:
         if set(full.get("labelIds") or []) & {"DRAFT", "CHAT"}:
             return full, None
         def text_attachment(aid):
-            self.limiter.acquire()
+            self.scan_limiter.acquire()
             self._scan_count("attachmentReads", 1)
             return self._retry(lambda: self.src.users().messages().attachments().get(
                 userId="me", messageId=mid, id=aid).execute(), label="gmail.split.text_attachment")
@@ -806,7 +807,7 @@ class GmailMigrator:
         Existing target mappings must not exempt source mail from this scan.
         """
         from db import utc_now
-        mode = (getattr(self.settings, "mail_link_scan", "search") or "search").lower()
+        mode = (getattr(self.settings, "mail_link_scan", "exhaustive") or "exhaustive").lower()
         if mode not in ("search", "exhaustive"):
             raise ValueError("MAIL_LINK_SCAN must be search or exhaustive")
         self._split_scan = {}
@@ -837,7 +838,9 @@ class GmailMigrator:
         self._link_scan["state"] = "READING"
         self._save_link_scan()
         refs = []
-        workers = max(1, int(getattr(self.settings, "mail_workers", 1) or 1))
+        workers = max(int(getattr(self.settings, "mail_workers", 1) or 1),
+                      int(getattr(self.settings, "mail_scan_workers", 1) or 1))
+        self._link_scan.update(scanWorkers=workers, scanQps=getattr(self.scan_limiter, "rate", None))
 
         def inspect(ref):
             # Returning only classification metadata bounds retained memory even
@@ -899,9 +902,23 @@ class GmailMigrator:
                  self.source_user, mode, len(refs), self._link_scan["bodiesRead"],
                  self._link_scan["notRead"], blocked)
         if blocked:
+            self._owe_clean_mail_to_dms()
             self._split_scan.clear()
             raise RuntimeError(f"Mail link scan blocked on {blocked} messages; DMS not ready")
         return iter(refs)
+
+    def _owe_clean_mail_to_dms(self):
+        """A blocked scan never reaches delivery, so the mail it proved needs no rewrite would
+        carry no ledger row and read as lost: the repair's missing-mail recovery then copied a whole
+        mailbox through the engine (734 messages, live, 2026-10-30), ahead of the DMS. Record it as
+        owed to the DMS, as delivery would have."""
+        for mid, (_, plan) in self._split_scan.items():
+            if not plan or plan.get("route") != "DMS" or self.db.get_target_id(self.source_user, mid, "message"):
+                continue
+            prior = self.db.get_audit(self.source_user, mid, "message")
+            if not prior or prior["status"] not in (DELIVERED_BY_DMS, "SUCCESS"):
+                detail = plan.get("why") or "no changed Drive link; awaiting verified DMS delivery"
+                self.db.log_audit(self.source_user, mid, "message", DEFERRED_TO_DMS, detail)
 
     def run(self, delta: bool = False, since_epoch_days: int = 0,
             drive_in_scope: bool = True) -> dict:

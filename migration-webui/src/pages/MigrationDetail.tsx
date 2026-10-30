@@ -78,7 +78,7 @@ export const MigrationDetail: React.FC = () => {
   const [askFull, setAskFull] = useState(false)
   // Source remains unchanged: link mail first, then Google's mailbox import.
   const [mailBy, setMailBy] = useState<MailMode>('split')
-  const [linkScan, setLinkScan] = useState<MailLinkScan>('search')
+  const [linkScan, setLinkScan] = useState<MailLinkScan>('exhaustive')
   const [moreOpen, setMoreOpen] = useState(false)
   // Start Google's DMS on its own (api_server._start_dms); on unless switched off.
   const [dmsAuto, setDmsAuto] = useState(true)
@@ -987,14 +987,17 @@ export const MigrationDetail: React.FC = () => {
               {mailBy === 'split' && (
                 <RadioGroup value={linkScan} sx={{ pl: 4 }} data-testid="link-scan"
                             onChange={(e) => setLinkScan(e.target.value as MailLinkScan)}>
-                  <FormControlLabel value="search" control={<Radio size="small" />} data-testid="link-scan-search"
-                    label={<Typography variant="body2"><strong>Search-first (fast)</strong> — Gmail&apos;s own
-                      search names the mail that mentions Drive; only those messages are read. A link Gmail
-                      does not index goes to the DMS unrewritten. Messages already known to carry a link
-                      are always read, and each scan reports any of them the search missed.</Typography>} />
                   <FormControlLabel value="exhaustive" control={<Radio size="small" />} data-testid="link-scan-exhaustive"
-                    label={<Typography variant="body2"><strong>Exhaustive link scan</strong> — read every
-                      message before delivery. Slower; nothing depends on Gmail&apos;s index.</Typography>} />
+                    label={<Typography variant="body2"><strong>Exhaustive link scan (recommended)</strong> — read
+                      every message before delivery, at up to 30 reads a second. Measured on one 758-message
+                      mailbox: 33 s at 25 a second, against 257 s at the old 3 a second. Nothing depends on
+                      Gmail&apos;s index.</Typography>} />
+                  <FormControlLabel value="search" control={<Radio size="small" />} data-testid="link-scan-search"
+                    label={<Typography variant="body2"><strong>Search-first</strong> — Gmail&apos;s own search
+                      names the mail that mentions Drive; only those messages are read. <em>Not safe by
+                      default:</em> Gmail does not index link text. On that mailbox the search found 0 of 9
+                      messages known to carry a Drive link (the best sender query, 5 of 9) and missed 3 of 4
+                      blocking messages. A link it misses goes to the DMS unrewritten.</Typography>} />
                 </RadioGroup>
               )}
               {mailBy !== 'engine' && (

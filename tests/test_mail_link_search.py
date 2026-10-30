@@ -131,3 +131,28 @@ def test_an_unknown_mode_is_refused(mailbox, settings):
     settings.mail_link_scan = "fast"
     with pytest.raises(ValueError, match="MAIL_LINK_SCAN"):
         mailbox[0]._scan_split_before_delivery("")
+
+
+def test_a_blocked_scan_owes_the_clean_mail_to_the_dms_so_repair_cannot_copy_it(mailbox, db, settings):
+    """Live: a blocked scan left no rows, the verifier read 734 messages as lost, and the repair's
+    missing-mail recovery copied the whole mailbox through the engine ahead of the DMS."""
+    migrator, src, ids = mailbox
+    settings.mail_link_scan = "exhaustive"
+    src.messages[ids["linked"]]["raw"] = base64.urlsafe_b64encode(
+        LINKED.replace(SRC_FILE.encode(), b"UNKNOWNFILEID" + b"x" * 21)).decode()
+    with pytest.raises(RuntimeError, match="blocked"):
+        migrator.run()
+    assert db.get_audit(SRC_USER, ids["plain"], "message")["status"] == DEFERRED_TO_DMS
+    assert db.get_audit(SRC_USER, ids["linked"], "message")["status"] == "FAILED_SPLIT"
+    assert not db.get_target_id(SRC_USER, ids["plain"], "message")
+
+
+def test_the_scan_has_its_own_limiter_and_worker_count(mailbox, db, settings):
+    """Live: held to per_user_qps (3/s) the scan took 257 s for 758 messages; at 25/s, 33 s."""
+    migrator, _, _ = mailbox
+    settings.mail_scan_qps, settings.mail_scan_workers, settings.mail_workers = 77.0, 9, 1
+    settings.mail_link_scan = "exhaustive"
+    migrator = type(migrator)(migrator.auth, db, settings, SRC_USER, migrator.target_user)
+    migrator._scan_split_before_delivery("")
+    assert migrator.scan_limiter.rate == 77.0
+    assert (migrator._link_scan["scanWorkers"], migrator._link_scan["scanQps"]) == (9, 77.0)
