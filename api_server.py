@@ -4050,7 +4050,7 @@ def ab_view(progress_path: str, results_path: str, now: float | None = None) -> 
             eta = round(max(mean - used, 0.0) + mean * (total - done - 1))
         out["running"] = alive
         out["progress"] = {**{k: p.get(k) for k in ("startedAt", "finishedAt", "updatedAt", "current",
-                                                      "users", "corpus", "total", "done")},
+                                                      "users", "corpus", "total", "done", "error")},
                            "alive": alive, "etaSeconds": eta, "armsFinished": len(durations),
                            "meanArmSeconds": round(sum(durations) / len(durations)) if durations else None,
                            "etaNote": None if eta is not None else (

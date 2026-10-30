@@ -76,6 +76,12 @@ const AbBenchmarkPanel: React.FC = () => {
         </Box>
       )}
 
+      {p?.error && (
+        <Alert severity="error" sx={{ mt: 2 }} data-testid="ab-error">
+          The run stopped before it finished: {p.error}
+        </Alert>
+      )}
+
       {best && (
         <Alert severity="success" sx={{ mt: 2 }} data-testid="ab-best">
           Fastest that finished clean: <strong>{best.arm}</strong>

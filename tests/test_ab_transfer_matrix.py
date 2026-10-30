@@ -68,3 +68,18 @@ def test_a_drive_only_arm_is_clean_when_it_lost_nothing(tmp_path):
     pp, rp = _write(tmp_path, None, {"runs": runs})
     r = api_server.ab_view(pp, rp)["ranking"]
     assert [(a["arm"], a["clean"]) for a in r] == [("server_side", True), ("download_upload", False)]
+
+
+def test_a_run_that_failed_says_so_with_its_reason_and_is_not_running(tmp_path):
+    pp, rp = _write(tmp_path, {"running": False, "total": 4, "done": 0, "durations": [],
+                               "error": "RuntimeError: target reset refused: t.example is protected"})
+    v = api_server.ab_view(pp, rp)
+    assert not v["running"] and "protected" in v["progress"]["error"]
+
+
+def test_a_refused_reset_keeps_the_refusals_own_words(monkeypatch):
+    import subprocess as sp
+    monkeypatch.setattr(AB.subprocess, "run", lambda *a, **k: sp.CompletedProcess(
+        a, 1, stdout="", stderr="t.example is protected because it is configured on this deployment"))
+    rc, why = AB.run_tail(["reset_target.py"], {})
+    assert rc == 1 and "protected" in why

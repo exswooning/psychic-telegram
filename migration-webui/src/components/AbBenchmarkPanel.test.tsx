@@ -58,3 +58,12 @@ describe('A/B benchmark page', () => {
     expect(screen.getByTestId('benchmark-pill')).toHaveTextContent('~10m 0s left')
   })
 })
+
+describe('A/B benchmark page, a run that failed', () => {
+  it('shows why it stopped instead of reading as 0 of N', async () => {
+    fetchAb.mockResolvedValue({ running: false, results: null, ranking: [],
+      progress: { ...progress({ alive: false, done: 0 }), error: 'RuntimeError: target reset refused: t.example is protected' } })
+    render(<AbBenchmarkPanel />)
+    await waitFor(() => expect(screen.getByTestId('ab-error')).toHaveTextContent('t.example is protected'))
+  })
+})

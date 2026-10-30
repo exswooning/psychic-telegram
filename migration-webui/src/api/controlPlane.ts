@@ -585,6 +585,8 @@ export interface AbView {
     current?: { mode: string; mailMode: string | null; stage: string } | null
     users?: string[]; corpus?: { files: number; bytes: number }
     total?: number; done?: number; alive: boolean; armsFinished: number
+    /** Why the run stopped, when it did not finish: a refusal's own words, never a bare 0 of N. */
+    error?: string | null
     meanArmSeconds: number | null
     /** Seconds left. null until one arm has finished: one measurement is not a mean. */
     etaSeconds: number | null; etaNote: string | null

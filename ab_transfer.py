@@ -189,6 +189,12 @@ def run(cmd: list[str], env: dict) -> tuple[int, float]:
     return p.returncode, time.time() - started
 
 
+def run_tail(cmd: list[str], env: dict) -> tuple[int, str]:
+    """Like run(), but keeps the end of the output: a refusal says why in its last lines."""
+    p = subprocess.run(cmd, cwd=HERE, env=env, capture_output=True, text=True)
+    return p.returncode, (p.stdout + p.stderr).strip()[-500:]
+
+
 def one_mode(mode: str, settings: Settings, auth: AuthManager,
              users_src: list[str], users_tgt: list[str], src_snap: dict,
              mail_mode: str | None = None) -> dict:
@@ -205,10 +211,10 @@ def one_mode(mode: str, settings: Settings, auth: AuthManager,
     print(f"\n=== {mode}: emptying the target ({len(users_src)} user(s)) ===",
           flush=True)
     stage("reset target")
-    reset_rc, _ = run([PY, "reset_target.py", "--confirm-domain", settings.target_domain,
-                       "--yes", *scoped], env)
+    reset_rc, why = run_tail([PY, "reset_target.py", "--confirm-domain", settings.target_domain,
+                              "--yes", *scoped], env)
     if reset_rc != 0:
-        raise RuntimeError(f"target reset refused/failed (exit {reset_rc}); ledger is unchanged and migration was not launched")
+        raise RuntimeError(f"target reset refused/failed (exit {reset_rc}); ledger is unchanged and migration was not launched: {why}")
 
     # Scoped to the users under test, never the whole table. On a live tenant
     # the unscoped DELETE threw away 1.27M audit rows -- the record of every
@@ -331,19 +337,25 @@ def main(argv: list[str] | None = None) -> int:
             for mm in (args.mail_mode or [None])]
     started = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     durations: list[float] = []
-    for i, (mode, mail_mode) in enumerate(arms):
-        write_progress(running=True, startedAt=started, total=len(arms), done=i,
-                       armStartedAt=time.time(),
-                       current={"mode": mode, "mailMode": mail_mode, "stage": "starting"},
-                       durations=durations, users=users_src,
-                       corpus={"files": src_snap["files"], "bytes": src_snap["bytes"]})
-        results.append(one_mode(mode, settings, auth, users_src, users_tgt,
-                                src_snap, mail_mode))
-        durations.append(results[-1]["seconds"])
-        with open(args.report + ".json", "w") as fh:
-            json.dump({"source": {k: v for k, v in src_snap.items()
-                                  if k != "sample"},
-                       "runs": results}, fh, indent=2)
+    try:
+        for i, (mode, mail_mode) in enumerate(arms):
+            write_progress(running=True, startedAt=started, total=len(arms), done=i,
+                           armStartedAt=time.time(),
+                           current={"mode": mode, "mailMode": mail_mode, "stage": "starting"},
+                           durations=durations, users=users_src,
+                           corpus={"files": src_snap["files"], "bytes": src_snap["bytes"]})
+            results.append(one_mode(mode, settings, auth, users_src, users_tgt,
+                                    src_snap, mail_mode))
+            durations.append(results[-1]["seconds"])
+            with open(args.report + ".json", "w") as fh:
+                json.dump({"source": {k: v for k, v in src_snap.items()
+                                      if k != "sample"},
+                           "runs": results}, fh, indent=2)
+    except BaseException as exc:      # the page must say it failed, and why, not sit at "0 of N"
+        write_progress(**{**_STATE, "running": False, "current": None,
+                          "error": f"{type(exc).__name__}: {str(exc)[:600]}",
+                          "finishedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())})
+        raise
     write_progress(running=False, startedAt=started, total=len(arms), done=len(arms),
                    current=None, durations=durations, users=users_src,
                    finishedAt=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
