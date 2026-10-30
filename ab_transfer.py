@@ -411,7 +411,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         for i, (mode, mail_mode) in enumerate(arms):
             write_progress(running=True, startedAt=started, total=len(arms), done=i,
-                           armStartedAt=time.time(),
+                           accountId=args.account_id, armStartedAt=time.time(),
                            current={"mode": mode, "mailMode": mail_mode, "stage": "starting"},
                            durations=durations, users=users_src,
                            corpus={"files": src_snap["files"], "bytes": src_snap["bytes"]})

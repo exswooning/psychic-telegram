@@ -2394,6 +2394,8 @@ def _dispatch_verification_repairs():
         t = _REPAIR_THREADS.get(aid)
         if not path or not os.path.isfile(path) or (t is not None and t.is_alive()):
             continue
+        if _ab_running_for(aid):
+            continue
         d = MigrationDB(path)
         try:
             if not verification_repairs.enabled(d):
@@ -2420,6 +2422,22 @@ def _dispatch_verification_repairs():
         except Exception:
             job_admission.release(aid, "verify")
             raise
+
+
+def _ab_running_for(account_id, progress_path: str | None = None) -> bool:
+    """Is a same-user A/B (ab_transfer.py) alive for this account? It is not an admitted job, so
+    between its own steps the account looks idle and the backlog verifier slipped in: it repaired
+    (copied mail into) the user under test and overwrote its verification rows mid-comparison.
+    A progress file with no account (written before it carried one) holds every account back."""
+    try:
+        with open(progress_path or os.path.join(HERE, "logs", "ab_progress.json")) as fh:
+            p = json.load(fh)
+        if not p.get("running") or not p.get("pid"):
+            return False
+        os.kill(int(p["pid"]), 0)
+    except (OSError, ValueError):
+        return False
+    return p.get("accountId") in (None, account_id)
 
 
 async def _verification_repair_loop():
