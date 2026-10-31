@@ -987,6 +987,17 @@ class Verifier:
                                        "Form is relinked" for d in differences]
                 ev.update(opened=True, how="native Sheet entered values, formulas, cell styles and structures; calculated results excluded",nativeFeaturesChecked=True,nativeFeaturesMatched=not differences)
                 return differences
+            if mime == "application/vnd.google-apps.form":
+                # Rebuilt by the Forms API (native_api.copy_form), so compared the same way: without
+                # this a Form was counted as native and never checked, and every user with one
+                # stayed INCOMPLETE (esc.mrc, live 2026-10-31).
+                from native_fidelity import compare_form
+                differences = self._x(lambda: compare_form(self.auth.api("source", "forms", self.src_user),
+                                                           self.auth.api("target", "forms", self.tgt_user), sid, tid))
+                ev.update(opened=True, nativeFeaturesChecked=True, nativeFeaturesMatched=not differences,
+                          how="Form title, description, quiz setting and every item with its options; "
+                              "generated ids, past responses and the responses-Sheet link excluded")
+                return differences
             if mime in ("application/vnd.google-apps.document", "application/vnd.google-apps.presentation"):
                 from native_fidelity import compare_native
                 differences,scope=self._x(lambda: compare_native(self.auth,self.src_user,self.tgt_user,sid,tid,mime,self.db.target_for_source_id))

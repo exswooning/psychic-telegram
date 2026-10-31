@@ -217,6 +217,21 @@ the default for a new run that names no transfer/mail mode (`api_server.ab_defau
 clears its user's `user_verification` first: `verify_sample --services all` was once dropped as an
 unknown name, so every arm read stray rows from other verify jobs.
 
+**What a 1:1 check downloads, and what it does not (measured 2026-10-31, esc.mrc: 84 -> 23 min,
+same verdicts).** Gmail: a message the engine compared byte for byte as it wrote it
+(`migration_item_receipts`, written when `MAIL_COMPLETION_CHECK=full` or for split link mail) is
+checked by labels, read state, date and Message-ID only -- Gmail cannot change a message's content
+after it is written (`Verifier._receipts`, `VERIFY_USE_RECEIPTS=0` reads every body). Drive: equal
+`md5Checksum` and size on both tenants are taken as identical without downloading either file
+(`VERIFY_TRUST_MD5=0` restores the download). A Form is compared by its body through the Forms API
+(`native_fidelity.compare_form`), never by Drive comments, which answer 404 for a Form. Repair's
+retained `.Repair backup -` copies are Bitport's own, not strays. Benchmark arms skip migrate's
+own acceptance check (their 1:1 check is the judge) and register as `ab-migrate`, so they are
+never judged or reported as a migration. `auth.source_drive(writable=True)` returns the real client
+past the protected-source guard (a98ead0 had returned the read-only wrapper, so no deliberate source
+writer worked). `move_probe.py` tries a one-byte move by each route; Move is offered only after a
+direct pass, and a protected source is never written to.
+
 **Handling an incident.** Read the brief; reproduce from its evidence; fix on
 a **test sandbox tenant**, never a real one; add a test. **Do not deploy
 unattended**: `sync_vps.sh` restarts services and a webui-launched seed or a
