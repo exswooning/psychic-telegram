@@ -68,6 +68,9 @@ DRIVE_META_FIELDS = ("id,name,mimeType,parents,size,md5Checksum,modifiedTime,tra
 # Files larger than this are compared by size and MD5 only. Both sides are read into
 # memory to hash, and a sample is small; a 2 GB video is not what it is for.
 MAX_COMPARE_BYTES = 25 * 1024 * 1024
+# What a receipted message is still read for: the headers the check uses, with the labels, read
+# state and date Gmail returns with any metadata read (see Verifier._receipts).
+RECEIPT_HEADERS = ("Message-ID", "Date")
 NATIVE_EXPORT = {
     "application/vnd.google-apps.document": "text/plain",
     "application/vnd.google-apps.spreadsheet": "text/csv",
@@ -1032,8 +1035,29 @@ class Verifier:
         from verification_reads import gmail_raw
         return gmail_raw(svc, mid, self._x)
 
+    def _receipts(self) -> dict[str, str]:
+        """source message id -> target id the engine compared byte for byte as it wrote it
+        (migration_checks.verify_written_mail: the target read back against the source still in
+        memory). Gmail cannot change a message's content after it is written -- only its labels --
+        so a receipt holds while both ids exist, and the check need not download either message
+        again: it reads their labels, read state, date and Message-ID instead. Turned off with
+        VERIFY_USE_RECEIPTS=0, which reads every message in full as before."""
+        if os.getenv("VERIFY_USE_RECEIPTS", "1").lower() in ("0", "false", "no"):
+            return {}
+        try:
+            return {sid: tid for sid, tid in self.db.conn.execute(
+                "SELECT source_id, target_id FROM migration_item_receipts "
+                "WHERE source_user=? AND service='gmail' AND status='VERIFIED'", (self.src_user,))}
+        except Exception:      # noqa: BLE001 - no table yet: no receipts
+            return {}
+
+    def _head(self, svc, mid) -> tuple[bytes, dict]:
+        """Labels, read state, date and the two headers the check needs -- no body."""
+        return b"", self._x(lambda: svc.users().messages().get(
+            userId="me", id=mid, format="metadata", metadataHeaders=list(RECEIPT_HEADERS)).execute())
+
     def _raw_many(self, svc, message_ids: list[str], side: str, progress_offset: int = 0,
-                  progress_total: int | None = None) -> tuple[dict[int, tuple[bytes, dict]], dict[int, Exception]]:
+                  progress_total: int | None = None, fmt: str = "raw") -> tuple[dict[int, tuple[bytes, dict]], dict[int, Exception]]:
         """Read a bounded batch of raw messages, falling back for test/service adapters.
 
         Gmail has no collection-level raw export. The old loop made two synchronous HTTP
@@ -1046,18 +1070,21 @@ class Verifier:
         values: dict[int, tuple[bytes, dict]] = {}
         errors: dict[int, Exception] = {}
         progress_total = progress_total if progress_total is not None else len(message_ids)
+        one = self._raw if fmt == "raw" else self._head
         if not hasattr(svc, "new_batch_http_request"):
             for index, message_id in enumerate(message_ids):
-                operation = f"Gmail {side} raw message reads"
+                operation = f"Gmail {side} {fmt} message reads"
                 self._report_progress(operation, progress_offset + index, progress_total,
                                       f"message {message_id}")
                 try:
-                    values[index] = self._raw(svc, message_id)
+                    values[index] = one(svc, message_id)
                 except Exception as exc:  # noqa: BLE001 - retain per-message failure
                     errors[index] = exc
             return values, errors
 
         def decode_message(message: dict) -> tuple[bytes, dict]:
+            if fmt != "raw":
+                return b"", message
             raw = message.get("raw", "")
             raw = raw if isinstance(raw, str) else raw.decode()
             return base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4)), message
@@ -1074,7 +1101,7 @@ class Verifier:
             chunk = message_ids[offset:offset + batch_size]
             batch_number = offset // batch_size + 1
             batch_total = (len(message_ids) + batch_size - 1) // batch_size
-            operation = f"Gmail {side} raw message reads"
+            operation = f"Gmail {side} {fmt} message reads"
             item = (f"batch {batch_number}/{batch_total}; messages "
                     f"{progress_offset + offset + 1}-{progress_offset + offset + len(chunk)} "
                     f"of {progress_total}")
@@ -1093,7 +1120,9 @@ class Verifier:
 
             batch = svc.new_batch_http_request(callback=receive)
             for index, message_id in enumerate(chunk):
-                request = svc.users().messages().get(userId="me", id=message_id, format="raw")
+                request = (svc.users().messages().get(userId="me", id=message_id, format="raw") if fmt == "raw"
+                           else svc.users().messages().get(userId="me", id=message_id, format="metadata",
+                                                           metadataHeaders=list(RECEIPT_HEADERS)))
                 batch.add(request, request_id=str(offset + index))
             self._report_progress(operation, progress_offset + offset, progress_total, item)
 
@@ -1123,13 +1152,13 @@ class Verifier:
                     from verification_reads import status_of
                     if status_of(errors[index]) == 400:
                         try:
-                            values[index] = self._raw(svc, message_ids[index])
+                            values[index] = one(svc, message_ids[index])
                             errors.pop(index, None)
                         except Exception as exc:
                             errors[index] = exc
         return values, errors
 
-    def _gmail_raw_chunks(self, pairs):
+    def _gmail_raw_chunks(self, pairs, fmt: str = "raw"):
         """Overlap independent tenant reads without sharing discovery HTTP clients.
 
         AuthManager caches transports per thread. Resolve each service INSIDE its
@@ -1145,7 +1174,7 @@ class Verifier:
             _stop_check()
             svc = (self.auth.source_gmail(self.src_user) if side == "source"
                    else self.auth.target_gmail(self.tgt_user))
-            return self._raw_many(svc, ids, side, offset, total)
+            return self._raw_many(svc, ids, side, offset, total, fmt=fmt)
         # A bounded read-ahead window of batch pairs, yielded in order. One pair at a
         # time left each mailbox ~10x under Gmail's per-user quota and took 8.7-11.5 h
         # for info@'s 39,756 messages (dharan, 2026-10-23). The window bounds memory too:
@@ -1183,6 +1212,40 @@ class Verifier:
         _stop_check()
         return offset, chunk, source_result, target_result
 
+    @staticmethod
+    def _pair_unreadable(index, sid, tid, source_errors, target_errors, res) -> bool:
+        """Record why a pair could not be read; True when it is not compared."""
+        if index in source_errors:
+            exc = source_errors[index]
+            if not _gone_from_source(exc, res):
+                res["errors"].append(f"message {sid}: could not read the SOURCE: {error_detail(exc)}")
+            return True
+        if index in target_errors:
+            exc = target_errors[index]
+            if _is_not_found(exc):
+                res["missing"].append({"source": sid, "target": tid,
+                                       "why": f"not on the target ({str(exc)[:80]})"})
+            else:
+                res["errors"].append(f"message {tid}: could not read the TARGET: {error_detail(exc)}")
+            return True
+        return False
+
+    @staticmethod
+    def _mail_state_diffs(sm, tm, sl, tl, date_header) -> list[str]:
+        """Labels, read state and date of one message pair -- everything Gmail lets change."""
+        diffs = compare_labels({sl.get(i, i) for i in sm.get("labelIds") or []},
+                               {tl.get(i, i) for i in tm.get("labelIds") or []})
+        if ("UNREAD" in (sm.get("labelIds") or [])) != ("UNREAD" in (tm.get("labelIds") or [])):
+            diffs.append("unread state differs")
+        try:
+            hdr_ms = int(parsedate_to_datetime(date_header).timestamp() * 1000)
+        except Exception:      # noqa: BLE001 - no usable Date header
+            hdr_ms = None
+        ti, si = int(tm.get("internalDate") or 0), int(sm.get("internalDate") or 0)
+        if ti and si and ti != si and (hdr_ms is None or abs(ti - hdr_ms) > 1000):
+            diffs.append(f"date differs: source {si}, target {ti}, Date header {hdr_ms}")
+        return diffs
+
     def gmail(self) -> dict:
         res = self._blank()
         src, tgt = self.auth.source_gmail(self.src_user), self.auth.target_gmail(self.tgt_user)
@@ -1212,6 +1275,31 @@ class Verifier:
             self.evidence.append({"service":"gmail", "name":cached.get("messageId") or sid,
                 "how":"validated receipt reused after two-tenant history reconciliation",
                 "opened":False, "sha256":cached["sourceSha256"][:16]})
+        receipts = self._receipts()
+        receipted = [p for p in pending if receipts.get(p[0]) == p[1]]
+        pending = [p for p in pending if receipts.get(p[0]) != p[1]]
+        self._report_progress("Gmail check receipted messages", 0, len(receipted))
+        for offset, chunk, (smeta, serr), (tmeta, terr) in self._gmail_raw_chunks(receipted, fmt="metadata"):
+            for index, (sid, tid, _) in enumerate(chunk):
+                res["checked"] += 1
+                if self._pair_unreadable(index, sid, tid, serr, terr, res):
+                    continue
+                sm, tm = smeta[index][1], tmeta[index][1]
+                head = {h["name"].lower(): h["value"].strip()
+                        for h in (sm.get("payload") or {}).get("headers", [])}
+                msgid = head.get("message-id", "")
+                mapped_msgids.add(msgid)
+                diffs = self._mail_state_diffs(sm, tm, sl, tl, head.get("date"))
+                self.evidence.append({"service": "gmail", "name": msgid or sid, "opened": False,
+                                      "how": "content compared byte for byte when it was copied (receipt); "
+                                             "labels, read state and date read now"})
+                if diffs:
+                    res["differences"].append({"item": msgid or sid, "source": sid, "target": tid, "diffs": diffs})
+                else:
+                    res["identical"] += 1
+            self._report_progress("Gmail check receipted messages", min(offset + len(chunk), len(receipted)),
+                                  len(receipted))
+        res["receipted"] = len(receipted)
         total_messages = len(pending)
         self._report_progress("Gmail compare mapped messages", 0, total_messages)
         for offset, chunk, source_result, target_result in self._gmail_raw_chunks(pending):
@@ -1219,19 +1307,7 @@ class Verifier:
             target_raw, target_errors = target_result
             for index, (sid, tid, _) in enumerate(chunk):
                 res["checked"] += 1
-                if index in source_errors:
-                    exc = source_errors[index]
-                    if _gone_from_source(exc, res):
-                        continue
-                    res["errors"].append(f"message {sid}: could not read the SOURCE: {error_detail(exc)}")
-                    continue
-                if index in target_errors:
-                    exc = target_errors[index]
-                    if _is_not_found(exc):
-                        res["missing"].append({"source": sid, "target": tid,
-                                               "why": f"not on the target ({str(exc)[:80]})"})
-                    else:
-                        res["errors"].append(f"message {tid}: could not read the TARGET: {error_detail(exc)}")
+                if self._pair_unreadable(index, sid, tid, source_errors, target_errors, res):
                     continue
                 sraw, sm = source_raw[index]
                 traw, tm = target_raw[index]
@@ -1248,17 +1324,7 @@ class Verifier:
                 diffs = []
                 if verdict == "different":
                     diffs += [f"message differs: {n}" for n in notes] or ["message differs"]
-                diffs += compare_labels({sl.get(i, i) for i in sm.get("labelIds") or []},
-                                        {tl.get(i, i) for i in tm.get("labelIds") or []})
-                if ("UNREAD" in (sm.get("labelIds") or [])) != ("UNREAD" in (tm.get("labelIds") or [])):
-                    diffs.append("unread state differs")
-                try:
-                    hdr_ms = int(parsedate_to_datetime(source_headers.get("Date")).timestamp() * 1000)
-                except Exception:      # noqa: BLE001 - no usable Date header
-                    hdr_ms = None
-                ti, si = int(tm.get("internalDate") or 0), int(sm.get("internalDate") or 0)
-                if ti and si and ti != si and (hdr_ms is None or abs(ti - hdr_ms) > 1000):
-                    diffs.append(f"date differs: source {si}, target {ti}, Date header {hdr_ms}")
+                diffs += self._mail_state_diffs(sm, tm, sl, tl, source_headers.get("Date"))
                 self.evidence.append({"service": "gmail", "name": msgid or sid, "how": verdict, "bytes": len(sraw),
                                       "sha256": sha256(sraw)[:16], "opened": True})
                 if verdict in ("identical after rewrite", "equivalent"):

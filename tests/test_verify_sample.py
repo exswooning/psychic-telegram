@@ -745,3 +745,54 @@ class TestLinksInsideNativeFilesAreChecked:
         if due:
             d = r["users"][SRC_USER]["drive"]["differences"]
             assert any("still point at the source (2" in x for e in d for x in e["diffs"])
+
+
+@pytest.fixture
+def receipted(auth, db, settings, identity, quota):
+    """The real Gmail engine with MAIL_COMPLETION_CHECK=full: it reads each copy back as it writes it
+    and stores a VERIFIED receipt (migration_checks.verify_written_mail)."""
+    settings.rewrite_drive_links = False
+    settings.mail_completion_check = "full"
+    settings.migration_checks_enabled = True
+    sg = auth.source_gmail(SRC_USER)
+    for n in range(4):
+        sg.add_message(MSG % (n, n, n), ["INBOX"] if n else ["INBOX", "UNREAD"])
+    gmail_engine.GmailMigrator(auth, db, settings, SRC_USER, TGT_USER).run()
+    n = db.conn.execute("SELECT COUNT(*) FROM migration_item_receipts WHERE status='VERIFIED'").fetchone()[0]
+    assert n == 4
+    return type("M", (), {"auth": auth, "db": db, "settings": settings})
+
+
+def _raw_reads(svc):
+    return [kw for kw in svc.calls_to("messages.get") if kw.get("format") == "raw"]
+
+
+class TestReceiptsSpareTheDownloads:
+    """Gmail cannot change a message's content once written, so a byte-for-byte receipt taken
+    at copy time holds while both ids exist: the check reads labels, not bodies."""
+
+    def test_receipted_mail_is_identical_without_downloading_a_single_body(self, receipted):
+        src, tgt = receipted.auth.source_gmail(SRC_USER), receipted.auth.target_gmail(TGT_USER)
+        before = len(_raw_reads(src)), len(_raw_reads(tgt))
+        r = verify(receipted, ("gmail",))["users"][SRC_USER]["gmail"]
+        assert r["identical"] == 4 and r["receipted"] == 4 and not r["differences"]
+        assert (len(_raw_reads(src)), len(_raw_reads(tgt))) == before
+
+    def test_a_label_change_since_the_copy_is_still_found(self, receipted):
+        tg = receipted.auth.target_gmail(TGT_USER)
+        for m in tg.messages.values():
+            m["labelIds"] = [l for l in m["labelIds"] if l != "UNREAD"]
+        r = verify(receipted, ("gmail",))["users"][SRC_USER]["gmail"]
+        assert any("unread" in x for d in r["differences"] for x in d["diffs"])
+
+    def test_a_copy_deleted_since_is_missing(self, receipted):
+        tg = receipted.auth.target_gmail(TGT_USER)
+        del tg.messages[next(iter(tg.messages))]
+        assert len(verify(receipted, ("gmail",))["users"][SRC_USER]["gmail"]["missing"]) == 1
+
+    def test_switched_off_it_reads_every_body_as_before(self, receipted, monkeypatch):
+        monkeypatch.setenv("VERIFY_USE_RECEIPTS", "0")
+        tgt = receipted.auth.target_gmail(TGT_USER)
+        before = len(_raw_reads(tgt))
+        r = verify(receipted, ("gmail",))["users"][SRC_USER]["gmail"]
+        assert r["identical"] == 4 and r["receipted"] == 0 and len(_raw_reads(tgt)) - before == 4

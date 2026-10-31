@@ -1,6 +1,8 @@
 """ab_transfer.py's arms and api_server.ab_view: what each arm runs, and what the page may claim."""
 import json
 
+import pytest
+
 import ab_transfer as AB
 import api_server
 
@@ -374,3 +376,32 @@ def test_an_arm_whose_migration_died_says_why_and_skips_googles_import(monkeypat
     assert r["exit"] == 2 and "tenant_configs" in r["migrateOutput"] and "dms" not in ran and "verify" not in ran
     assert r["verdicts"] == {"verify": "UNVERIFIED"}
     assert AB.arm_errors(r)["judged"] is False and "exited 2" in AB.arm_errors(r)["why"]
+
+
+@pytest.mark.parametrize("given, acceptance, check", [({}, "false", "full"),
+                                                      ({"FIRST_PASS_ACCEPTANCE": "true",
+                                                        "MAIL_COMPLETION_CHECK": "counts"}, "true", "counts")])
+def test_an_arm_skips_the_duplicate_acceptance_check_and_keeps_receipts_unless_told_otherwise(
+        monkeypatch, given, acceptance, check):
+    import types
+    seen = {}
+    for k in ("FIRST_PASS_ACCEPTANCE", "MAIL_COMPLETION_CHECK"):
+        monkeypatch.delenv(k, raising=False)
+    for k, v in given.items():
+        monkeypatch.setenv(k, v)
+    monkeypatch.setattr(AB, "run_tail", lambda cmd, env: seen.update(env) or (2, "stop here"))
+    monkeypatch.setattr(AB, "snapshot_drive", lambda *a: {"files": 0, "folders": 0, "bytes": 0, "native": 0,
+                                                          "binary": 0, "mimes": {}, "sample": {}})
+
+    class Rows(list):
+        def fetchone(self):
+            return (None, None)
+    import contextlib
+    db = types.SimpleNamespace(conn=types.SimpleNamespace(execute=lambda *a, **k: Rows()),
+                               _mapping_cache={}, _mapping_cached_users=set())
+    db.write = contextlib.contextmanager(lambda: (yield types.SimpleNamespace(execute=lambda *a, **k: None)))
+    monkeypatch.setattr(AB, "MigrationDB", lambda p: db)
+    monkeypatch.setattr("db.bulk_seed_identities", lambda *a: None)
+    st = types.SimpleNamespace(db_path="x", target_domain="t.x", scratch_dir="s", target_admin="a@t.x")
+    AB.one_mode("server_side", st, None, ["a@s.x"], ["a@t.x"], {"sample": {}}, "engine", "a-ab1@t.x")
+    assert (seen["FIRST_PASS_ACCEPTANCE"], seen["MAIL_COMPLETION_CHECK"]) == (acceptance, check)

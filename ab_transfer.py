@@ -53,7 +53,7 @@ from db import MigrationDB            # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PY = sys.executable
-PROGRESS = os.path.join(HERE, "logs", "ab_progress.json")
+PROGRESS = os.getenv("AB_PROGRESS") or os.path.join(HERE, "logs", "ab_progress.json")
 ACCOUNT_ENV: dict = {}      # the tenant pair of --account-id, for the child scripts that read env
 ACCOUNT_ARGS: list = []     # main.py takes the account as a flag
 # Chat is left out for now (operator, 2026-10-31): its 4 findings are Chat API limits that add the same
@@ -237,6 +237,13 @@ def one_mode(mode: str, settings: Settings, auth: AuthManager,
         env["BITPORT_LEDGER"] = ledger
         env["SCRATCH_DIR"] = settings.scratch_dir
     env["SANDBOX_MODE"] = "true"
+    # The arm's own 1:1 check below is the judge, so the acceptance check migrate runs inside itself
+    # is a second, slower copy of it (live, 2026-10-31: 71 of it.department's 103 minutes were that
+    # check's Drive pass). Receipts: the engine compares each message as it writes it, so the check
+    # need not download it again (verify_sample.Verifier._receipts). An explicit value still wins.
+    env.setdefault("FIRST_PASS_ACCEPTANCE", "false")
+    env.setdefault("MAIL_COMPLETION_CHECK", "full")
+    env.setdefault("MIGRATION_CHECKS", "true")
     env["MIGRATE_CHAT"] = "true" if "chat" in ALL_SERVICES.split(",") else "false"
     env["MIGRATE_COMMENTS"] = "true"
     env["MIGRATE_SECONDARY_CALENDARS"] = "true"
@@ -320,6 +327,7 @@ def one_mode(mode: str, settings: Settings, auth: AuthManager,
     tgt_snap = snapshot_drive(auth, users_tgt, "target")
 
     verdicts, details = {}, {}
+    verify_secs = None
     if mail_mode is not None and rc != 0:
         verdicts["verify"], details["verify"] = "UNVERIFIED", {"exit": rc, "output": migrate_tail[-500:]}
     elif mail_mode is not None:
@@ -329,7 +337,9 @@ def one_mode(mode: str, settings: Settings, auth: AuthManager,
         # checking nothing, every arm reported a stray backfill's mid-migration rows as its own.
         with db.write() as c:
             c.execute(f"DELETE FROM user_verification WHERE source_user IN ({ph})", users_src)
+        verify_started = time.time()
         vrc, vout = run_tail([PY, "verify_sample.py", *ACCOUNT_ARGS[:2], *scoped, "--services", VERIFY_SERVICES], env)
+        verify_secs = time.time() - verify_started
         db = MigrationDB(settings.db_path)
         for u in users_src:
             for svc, v, payload in db.conn.execute(
@@ -353,6 +363,10 @@ def one_mode(mode: str, settings: Settings, auth: AuthManager,
             v in ("IDENTICAL", "COMPLETE") for v in verdicts.values()),
         "exit": rc,
         "migrateOutput": None if rc == 0 else migrate_tail[-500:],
+        "verifySeconds": None if verify_secs is None else round(verify_secs, 1),
+        "mailPassSeconds": _mail_pass_seconds(db, users_src),
+        "env": {k: env.get(k) for k in ("MAIL_WORKERS", "FIRST_PASS_ACCEPTANCE", "MAIL_COMPLETION_CHECK",
+                                        "VERIFY_USE_RECEIPTS")},
         "seconds": round(secs, 1),
         "migrated": counts,
         "failed": failed,
@@ -361,6 +375,19 @@ def one_mode(mode: str, settings: Settings, auth: AuthManager,
         "target": {k: v for k, v in tgt_snap.items() if k != "sample"},
         "fidelity": fidelity(src_snap, tgt_snap),
     }
+
+
+def _mail_pass_seconds(db, users_src) -> float | None:
+    """First to last message the engine wrote for these users: the mail pass on its own."""
+    ph = ",".join("?" * len(users_src))
+    row = db.conn.execute(
+        f"SELECT MIN(timestamp), MAX(timestamp) FROM audit_log WHERE item_type='message' "
+        f"AND status='SUCCESS' AND source_user IN ({ph})", users_src).fetchone()
+    if not row or not row[0]:
+        return None
+    from datetime import datetime
+    parse = lambda t: datetime.fromisoformat(t.replace("Z", "+00:00"))
+    return round((parse(row[1]) - parse(row[0])).total_seconds(), 1)
 
 
 def mailbox_size(auth: AuthManager, user: str) -> int | None:
