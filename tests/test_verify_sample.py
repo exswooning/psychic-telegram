@@ -168,7 +168,8 @@ class TestARealMigrationIsFoundIdentical:
         assert t["differences"] == t["missing"] == t["duplicates"] == t["notCopied"] == t["errors"] == 0
         assert t["checked"] >= 10 and t["identical"] == t["checked"]
 
-    def test_it_really_opened_the_files_and_read_the_bytes(self, migrated):
+    def test_it_really_opened_the_files_and_read_the_bytes(self, migrated, monkeypatch):
+        monkeypatch.setenv("VERIFY_TRUST_MD5", "0")      # the byte-for-byte path, on request
         r = verify(migrated)
         opened = [e for e in r["evidence"] if e["service"] == "drive" and e.get("opened")]
         assert {e["name"] for e in opened} >= {"report.pdf", "notes.txt", "Plan"}
@@ -239,18 +240,29 @@ class TestEveryKindOfDamageIsFound:
     def test_a_file_whose_content_changed(self, migrated):
         tgt, f = self._drive_target(migrated, "report.pdf")
         tgt.content[f["id"]] = b"tampered" * 10
+        # Real Drive recomputes the MD5 and size from the new bytes.
+        f.update(md5Checksum=hashlib.md5(b"tampered" * 10).hexdigest(), size=str(len(b"tampered" * 10)))
         r = verify(migrated)
         assert r["verdict"] == "DIFFERENCES"
         d = r["users"][SRC_USER]["drive"]["differences"][0]
         assert d["item"] == "report.pdf" and any("content differs" in x for x in d["diffs"])
 
-    def test_a_file_whose_content_changed_even_though_its_metadata_still_matches(self, migrated):
-        """Size and MD5 metadata alone would pass this; opening the file does not."""
+    def test_with_md5_trust_off_a_file_is_opened_even_when_its_metadata_matches(self, migrated, monkeypatch):
+        """VERIFY_TRUST_MD5=0 restores the byte-for-byte download. (On real Drive the MD5 is
+        Google's own, from the stored bytes; this fake can make them disagree, Drive cannot.)"""
+        monkeypatch.setenv("VERIFY_TRUST_MD5", "0")
         tgt, f = self._drive_target(migrated, "notes.txt")
         tgt.content[f["id"]] = b"PLAIN NOTES"                   # same length, metadata untouched
         assert f["md5Checksum"] == hashlib.md5(b"plain notes").hexdigest()
         r = verify(migrated)
         assert any("content differs" in x for d in r["users"][SRC_USER]["drive"]["differences"] for x in d["diffs"])
+
+    def test_matching_md5_and_size_are_trusted_without_downloading_either_side(self, migrated):
+        src, tgt = migrated.auth.source_drive(SRC_USER), migrated.auth.target_drive(TGT_USER)
+        before = len(src.calls_to("files.get_media")), len(tgt.calls_to("files.get_media"))
+        r = verify(migrated, ("drive",))["users"][SRC_USER]["drive"]
+        assert r["identical"] and not r["differences"] and not r["errors"]
+        assert (len(src.calls_to("files.get_media")), len(tgt.calls_to("files.get_media"))) == before
 
     def test_a_native_document_whose_text_changed(self, migrated):
         tgt, f = self._drive_target(migrated, "Plan")
@@ -435,7 +447,8 @@ class TestACopyThatDidNothingIsNotVerified:
 
 
 class TestTheReport:
-    def test_it_is_saved_and_the_latest_can_be_read_back(self, migrated, tmp_path):
+    def test_it_is_saved_and_the_latest_can_be_read_back(self, migrated, tmp_path, monkeypatch):
+        monkeypatch.setenv("VERIFY_TRUST_MD5", "0")      # so report.pdf is listed as opened
         r = verify(migrated)
         jp, mp = V.save(r, base=str(tmp_path))
         assert V.latest(None, base=str(tmp_path))["verdict"] == "IDENTICAL"

@@ -996,6 +996,15 @@ class Verifier:
                 ev["how"] = "not opened: this Google type has no text export"
                 return []
             size = int(sm.get("size") or 0)
+            # Drive's md5Checksum is computed by Google from the bytes it stores, on each tenant. Equal
+            # MD5 and size on both sides already says what downloading both would; downloading them
+            # cost 71 of it.department's 103 minutes (2.6 GB, twice, through the box's uplink). Set
+            # VERIFY_TRUST_MD5=0 to download and compare every byte as before.
+            if (os.getenv("VERIFY_TRUST_MD5", "1").lower() not in ("0", "false", "no")
+                    and sm.get("md5Checksum") and sm.get("md5Checksum") == tm.get("md5Checksum")
+                    and str(sm.get("size")) == str(tm.get("size"))):
+                ev.update(opened=False, how="identical by Drive's own MD5 and size on both tenants (not downloaded)")
+                return []
             if size > MAX_COMPARE_BYTES:
                 ev["how"] = f"not opened: {size:,} bytes is over the {MAX_COMPARE_BYTES:,}-byte comparison limit (size and MD5 only)"
                 return []
