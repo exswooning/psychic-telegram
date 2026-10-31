@@ -168,7 +168,8 @@ class TestARealMigrationIsFoundIdentical:
         assert t["differences"] == t["missing"] == t["duplicates"] == t["notCopied"] == t["errors"] == 0
         assert t["checked"] >= 10 and t["identical"] == t["checked"]
 
-    def test_it_really_opened_the_files_and_read_the_bytes(self, migrated):
+    def test_it_really_opened_the_files_and_read_the_bytes(self, migrated, monkeypatch):
+        monkeypatch.setenv("VERIFY_TRUST_MD5", "0")      # the byte-for-byte path, on request
         r = verify(migrated)
         opened = [e for e in r["evidence"] if e["service"] == "drive" and e.get("opened")]
         assert {e["name"] for e in opened} >= {"report.pdf", "notes.txt", "Plan"}
@@ -239,18 +240,29 @@ class TestEveryKindOfDamageIsFound:
     def test_a_file_whose_content_changed(self, migrated):
         tgt, f = self._drive_target(migrated, "report.pdf")
         tgt.content[f["id"]] = b"tampered" * 10
+        # Real Drive recomputes the MD5 and size from the new bytes.
+        f.update(md5Checksum=hashlib.md5(b"tampered" * 10).hexdigest(), size=str(len(b"tampered" * 10)))
         r = verify(migrated)
         assert r["verdict"] == "DIFFERENCES"
         d = r["users"][SRC_USER]["drive"]["differences"][0]
         assert d["item"] == "report.pdf" and any("content differs" in x for x in d["diffs"])
 
-    def test_a_file_whose_content_changed_even_though_its_metadata_still_matches(self, migrated):
-        """Size and MD5 metadata alone would pass this; opening the file does not."""
+    def test_with_md5_trust_off_a_file_is_opened_even_when_its_metadata_matches(self, migrated, monkeypatch):
+        """VERIFY_TRUST_MD5=0 restores the byte-for-byte download. (On real Drive the MD5 is
+        Google's own, from the stored bytes; this fake can make them disagree, Drive cannot.)"""
+        monkeypatch.setenv("VERIFY_TRUST_MD5", "0")
         tgt, f = self._drive_target(migrated, "notes.txt")
         tgt.content[f["id"]] = b"PLAIN NOTES"                   # same length, metadata untouched
         assert f["md5Checksum"] == hashlib.md5(b"plain notes").hexdigest()
         r = verify(migrated)
         assert any("content differs" in x for d in r["users"][SRC_USER]["drive"]["differences"] for x in d["diffs"])
+
+    def test_matching_md5_and_size_are_trusted_without_downloading_either_side(self, migrated):
+        src, tgt = migrated.auth.source_drive(SRC_USER), migrated.auth.target_drive(TGT_USER)
+        before = len(src.calls_to("files.get_media")), len(tgt.calls_to("files.get_media"))
+        r = verify(migrated, ("drive",))["users"][SRC_USER]["drive"]
+        assert r["identical"] and not r["differences"] and not r["errors"]
+        assert (len(src.calls_to("files.get_media")), len(tgt.calls_to("files.get_media"))) == before
 
     def test_a_native_document_whose_text_changed(self, migrated):
         tgt, f = self._drive_target(migrated, "Plan")
@@ -435,7 +447,8 @@ class TestACopyThatDidNothingIsNotVerified:
 
 
 class TestTheReport:
-    def test_it_is_saved_and_the_latest_can_be_read_back(self, migrated, tmp_path):
+    def test_it_is_saved_and_the_latest_can_be_read_back(self, migrated, tmp_path, monkeypatch):
+        monkeypatch.setenv("VERIFY_TRUST_MD5", "0")      # so report.pdf is listed as opened
         r = verify(migrated)
         jp, mp = V.save(r, base=str(tmp_path))
         assert V.latest(None, base=str(tmp_path))["verdict"] == "IDENTICAL"
@@ -745,3 +758,72 @@ class TestLinksInsideNativeFilesAreChecked:
         if due:
             d = r["users"][SRC_USER]["drive"]["differences"]
             assert any("still point at the source (2" in x for e in d for x in e["diffs"])
+
+
+@pytest.fixture
+def receipted(auth, db, settings, identity, quota):
+    """The real Gmail engine with MAIL_COMPLETION_CHECK=full: it reads each copy back as it writes it
+    and stores a VERIFIED receipt (migration_checks.verify_written_mail)."""
+    settings.rewrite_drive_links = False
+    settings.mail_completion_check = "full"
+    settings.migration_checks_enabled = True
+    sg = auth.source_gmail(SRC_USER)
+    for n in range(4):
+        sg.add_message(MSG % (n, n, n), ["INBOX"] if n else ["INBOX", "UNREAD"])
+    gmail_engine.GmailMigrator(auth, db, settings, SRC_USER, TGT_USER).run()
+    n = db.conn.execute("SELECT COUNT(*) FROM migration_item_receipts WHERE status='VERIFIED'").fetchone()[0]
+    assert n == 4
+    return type("M", (), {"auth": auth, "db": db, "settings": settings})
+
+
+def _raw_reads(svc):
+    return [kw for kw in svc.calls_to("messages.get") if kw.get("format") == "raw"]
+
+
+class TestReceiptsSpareTheDownloads:
+    """Gmail cannot change a message's content once written, so a byte-for-byte receipt taken
+    at copy time holds while both ids exist: the check reads labels, not bodies."""
+
+    def test_receipted_mail_is_identical_without_downloading_a_single_body(self, receipted):
+        src, tgt = receipted.auth.source_gmail(SRC_USER), receipted.auth.target_gmail(TGT_USER)
+        before = len(_raw_reads(src)), len(_raw_reads(tgt))
+        r = verify(receipted, ("gmail",))["users"][SRC_USER]["gmail"]
+        assert r["identical"] == 4 and r["receipted"] == 4 and not r["differences"]
+        assert (len(_raw_reads(src)), len(_raw_reads(tgt))) == before
+
+    def test_a_label_change_since_the_copy_is_still_found(self, receipted):
+        tg = receipted.auth.target_gmail(TGT_USER)
+        for m in tg.messages.values():
+            m["labelIds"] = [l for l in m["labelIds"] if l != "UNREAD"]
+        r = verify(receipted, ("gmail",))["users"][SRC_USER]["gmail"]
+        assert any("unread" in x for d in r["differences"] for x in d["diffs"])
+
+    def test_a_copy_deleted_since_is_missing(self, receipted):
+        tg = receipted.auth.target_gmail(TGT_USER)
+        del tg.messages[next(iter(tg.messages))]
+        assert len(verify(receipted, ("gmail",))["users"][SRC_USER]["gmail"]["missing"]) == 1
+
+    def test_switched_off_it_reads_every_body_as_before(self, receipted, monkeypatch):
+        monkeypatch.setenv("VERIFY_USE_RECEIPTS", "0")
+        tgt = receipted.auth.target_gmail(TGT_USER)
+        before = len(_raw_reads(tgt))
+        r = verify(receipted, ("gmail",))["users"][SRC_USER]["gmail"]
+        assert r["identical"] == 4 and r["receipted"] == 0 and len(_raw_reads(tgt)) - before == 4
+
+
+def test_a_repair_backup_bitport_kept_is_not_a_stray(migrated):
+    """Live: '.Repair backup - <name> (Responses)' read as an extra on it.department -- repair
+    copies a target file before rewriting it and keeps the copy (finding_repairs._backup)."""
+    import finding_repairs
+    tgt = migrated.auth.target_drive(TGT_USER)
+    bid = tgt.add_binary(".Repair backup - notes.txt", data=b"plain notes", mime="text/plain")
+    finding_repairs.record(migrated.db, SRC_USER, "drive-backup", "src-notes:" + bid, "RETAINED", {"backup": bid})
+    r = verify(migrated, ("drive",))["users"][SRC_USER]["drive"]
+    assert r["extras"] == [] and [b["target"] for b in r["repairBackups"]] == [bid]
+
+
+def test_an_unrecorded_copy_with_the_same_name_is_still_a_stray(migrated):
+    tgt = migrated.auth.target_drive(TGT_USER)
+    tgt.add_binary(".Repair backup - notes.txt", data=b"plain notes", mime="text/plain")
+    r = verify(migrated, ("drive",))["users"][SRC_USER]["drive"]
+    assert [e["name"] for e in r["extras"]] == [".Repair backup - notes.txt"]

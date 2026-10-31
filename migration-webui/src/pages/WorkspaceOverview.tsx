@@ -19,12 +19,13 @@ export default function WorkspaceOverview() {
   const [configError, setConfigError] = useState(false)
   const [tab, setTab] = useState(0), [filter, setFilter] = useState('all'), [query, setQuery] = useState('')
   const [detail, setDetail] = useState<ServiceKey | null>(null)
+  const hasCtx = Boolean(ctx), ctxConfig = ctx?.config
   useEffect(() => {
     let alive = true
-    if (ctx) { setConfig(ctx.config); return }
+    if (hasCtx) { setConfig(ctxConfig ?? null); return }
     fetchConfig().then(c => { if (alive) { setConfig(c.config); setConfigError(false) } }).catch(() => { if (alive) setConfigError(true) })
     return () => { alive = false }
-  }, [ctx?.config])
+  }, [hasCtx, ctxConfig])
   const summaries = serviceKeys.map(k => summarizeService(users, k, verification))
   const attentionPeople = users.filter(u => problemStatuses.includes(u.status))
   const finished = users.filter(u => ['completed', 'verified'].includes(u.status)).length

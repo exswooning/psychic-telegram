@@ -80,7 +80,10 @@ async function cpFetch<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 async function cpFetchRaw<T>(path: string, init?: RequestInit): Promise<T> {
+  const read = (init?.method ?? 'GET').toUpperCase() === 'GET'
   const res = await fetch(`${CP_BASE}${path}`, {
+    // Reads give up (see client.ts READ_TIMEOUT_MS); a write is never cut short.
+    ...(read && !init?.signal ? { signal: AbortSignal.timeout(20_000) } : {}),
     ...init,
     // Carries the bp_session cookie an account signed in with -- it lives
     // on this server's own origin (CP_BASE), a different one than the page
@@ -93,6 +96,9 @@ async function cpFetchRaw<T>(path: string, init?: RequestInit): Promise<T> {
       'X-Operator': OPERATOR,
       ...(init?.headers ?? {}),
     },
+  }).catch((e) => {
+    if (e instanceof Error && e.name === 'TimeoutError') throw new Error(`${path}: no answer after 20s`)
+    throw e
   })
   if (!res.ok) {
     // FastAPI puts the human-readable cause in `detail`; surfacing the raw
@@ -387,7 +393,7 @@ export const fetchActions = () => cpFetch<OperatorAction[]>('/api/v2/actions')
 // UI convention that a future caller could skip.
 export interface ActionResult { ok: boolean; actionId: number; detail: string }
 
-/** Who moves the mail. `engine` (the API's own default): this tool moves all of
+/** Who moves the mail. `split` is the full-run default; `engine`: this tool moves all of
  *  it. `dms`: Google's Data Migration Service does, and this run does everything
  *  else. `split`: this tool moves only mail that carries a Drive link, rewriting
  *  it, and the DMS moves the rest AFTER the run. */
@@ -416,21 +422,37 @@ export interface MigrationTuning {
   processes?: number
 }
 
+/** Split mail's link scan: Gmail search names the candidates, or every message is read. */
+export type MailLinkScan = 'search' | 'exhaustive'
+
+/** One user's latest split-mail link scan, as the engine recorded it. */
+export interface MailLinkScanReport {
+  source: string; mode: MailLinkScan; state: 'SEARCHING' | 'READING' | 'DONE' | 'BLOCKED' | 'INTERRUPTED'
+  startedAt: string; finishedAt?: string; messages?: number; candidates?: number
+  searches?: Record<string, number>; knownLinkMessages?: number | null; recallMissed?: number | null
+  examined: number; blocked: number; notRead: number; bodiesRead: number; bytesRead: number
+  attachmentReads: number; listCalls: number; searchSeconds?: number; scanSeconds?: number; maxRssMb?: number
+  scanWorkers?: number; scanQps?: number | null
+  /** Links to source files the source answers 404 for: not rewritten, not blocking. */
+  unreachableLinks?: number
+}
+
 export const startMigration = (
   reason: string, services: string[], users: string[], dryRun = false,
   accountId?: number, mailMode?: MailMode, sample?: number, dmsAfter?: boolean,
   transferMode?: TransferMode, tuning?: MigrationTuning, redoLinks = false,
-  confirmMove?: string) =>
+  confirmMove?: string, mailLinkScan?: MailLinkScan) =>
   cpFetch<ActionResult>('/api/v2/migrate/start', {
     method: 'POST',
     // accountId is the migration on screen. Without it the server falls back
     // to the caller's own account -- the same trap the delta button hit.
-    // mail_mode omitted means the engine, exactly as before it existed.
+    // Omitted means link scan + DMS for full runs; bounded samples use engine.
     // sample: a quick run that copies only the first N items of each service per
     // user and leaves the users unfinished (see sample_budget.py).
     body: JSON.stringify({ reason, services, users, dry_run: dryRun,
                            account_id: accountId ?? null,
                            ...(mailMode ? { mail_mode: mailMode } : {}),
+                           ...(mailLinkScan ? { mail_link_scan: mailLinkScan } : {}),
                            ...(sample ? { sample } : {}),
                            // off only when asked; the server starts the DMS on its own otherwise
                            ...(dmsAfter === false ? { dms_after: false } : {}),
@@ -559,6 +581,48 @@ export interface BenchmarkRunning {
 export const fetchBenchmarkRunning = () =>
   cpFetch<BenchmarkRunning>('/api/v2/benchmark/running')
 
+/** The controlled A/B (ab_transfer.py): one pinned corpus, one arm per transfer mode x mail mode. */
+export interface AbArm {
+  arm: string; seconds: number | null; failed: number | null; clean: boolean
+  /** Failed items + every counted difference. null when the arm is not ranked on it (judged false). */
+  errors?: number | null; judged?: boolean; why?: string | null
+  /** 'alone' = timed with the box to itself; 'side by side' = shared with other arms, so not a speed. */
+  timing?: 'alone' | 'side by side' | null; contendedSeconds?: number | null
+  /** Whose data this arm moved, and how much: arms on different users are compared per item. */
+  corpus?: { user: string; files: number; bytes: number; messages: number | null; items: number } | null
+  errorsPer1k?: number | null; secondsPer100?: number | null
+  verdicts: Record<string, string>
+  dms?: string | null
+  differences?: Record<string, {
+    counts?: Record<string, number> | null; failedChecks?: string[]
+    /** The same findings grouped by known kind, with each kind's cause and whether Bitport fixes it on its own. */
+    kinds?: { kind: string; count: number; title: string; cause?: string | null; fix?: string | null; auto: boolean }[]
+  }>
+}
+export interface AbView {
+  running: boolean
+  progress: {
+    startedAt?: string; finishedAt?: string; updatedAt?: string
+    current?: { mode: string; mailMode: string | null; stage: string } | null
+    /** Every arm in flight: several at once while the arms run side by side. */
+    arms?: { arm: string; stage: string; user?: string }[]; phase?: string | null; skipped?: string[]
+    users?: string[]; corpus?: { files: number; bytes: number }
+    total?: number; done?: number; alive: boolean; armsFinished: number
+    /** Why the run stopped, when it did not finish: a refusal's own words, never a bare 0 of N. */
+    error?: string | null
+    meanArmSeconds: number | null
+    /** Seconds left. null until one arm has finished: one measurement is not a mean. */
+    etaSeconds: number | null; etaNote: string | null
+  } | null
+  results: { runs: unknown[] } | null
+  /** Clean arms first, fastest first; a fast arm that did not finish clean is listed, never hidden. */
+  ranking: AbArm[]
+  /** Fewest errors, then fastest, among arms whose own check ran: what new runs use by default. */
+  best?: { arm: string; mode: string; mailMode: string; errors: number; seconds: number | null
+    errorsPer1k?: number | null; secondsPer100?: number | null } | null
+}
+export const fetchAbBenchmark = () => cpFetch<AbView>('/api/v2/benchmark/ab')
+
 // -- AI diagnostics ---------------------------------------------------------
 export interface AiStatus {
   configured: boolean; keyMask: string; model: string; logFile: string | null
@@ -650,6 +714,7 @@ export interface SetupBillingNotice {
 }
 export interface FullSetupResult {
   side: string; ok: boolean; phases: FullSetupPhase[]
+  dryRun?: boolean
   clientId?: string; missingScopes?: string[]
   actionRequired?: { kind: string; title: string; detail: string; url: string }
   notices?: SetupBillingNotice[]
@@ -684,7 +749,9 @@ export interface FullSetupStatus {
   /** Google kept challenging the server's browser, so this sign-in is finished on the
    *  operator's own device: open `url` there (and, for `signin`, paste back the code
    *  Google shows). Null when the server is doing it itself. */
-  handoff?: { kind: 'signin' | 'dwd'; url: string; clientId?: string; scopes?: string } | null
+  handoff?: { kind: 'signin' | 'dwd' | 'review'; url?: string; clientId?: string; scopes?: string
+    requestId?: string; noticeHash?: string; adminEmail?: string; expiresAt?: number
+    category?: string; title?: string; text?: string; buttonLabel?: string } | null
   /** The running setup's own transcript, newest last -- empty when nothing runs. */
   lines?: string[]
 }
@@ -706,6 +773,12 @@ export const sendFullSetupCode = (side: 'source' | 'target', code: string) =>
   cpFetch<ActionResult>('/api/v2/full-setup/code', {
     method: 'POST',
     body: JSON.stringify({ side, code, reason: 'signed in on own device' }),
+  })
+export const sendFullSetupNotice = (side: 'source' | 'target', requestId: string,
+  noticeHash: string, decision: 'approve' | 'decline') =>
+  cpFetch<ActionResult>('/api/v2/full-setup/notice', {
+    method: 'POST', body: JSON.stringify({ side, request_id: requestId,
+      notice_hash: noticeHash, decision, reason: `Reviewed Google setup notice: ${decision}` }),
   })
 /** Kill a side's running setup (and the browser it drives) so it can be started again. */
 export const stopFullSetup = (side: 'source' | 'target') =>
@@ -1601,6 +1674,7 @@ export const runSourceGuard = (action: 'check' | 'baseline', reason: string, acc
  *  each service's method as the running process has it, and done against the source. */
 export interface Movement {
   stage: { pass: number; of: number; services: string } | null
+  driveBaseline?: { done: number; total: number; takenAt: string; scope: string } | null
   drive: { method: string; how: string; filesCopied: number; filesOnSource: number; formsRebuilt: number }
   mail: { method: string; how: string; messagesCopied: number; messagesOnSource: number }
 }
@@ -1608,6 +1682,14 @@ export interface Movement {
 export interface MetricsSnapshot {
   accountId: number
   error: string
+  metricsScope?: string
+  mailCountCheck?: {
+    checkedAt: string; scope: string; blocked: number
+    users: { source: string; target: string; sourceMessages?: number; targetMessages?: number;
+      difference?: number; verdict: string; error?: string }[]
+  }
+  /** Each user's latest split-mail link scan: what was searched, read and left unread. */
+  mailLinkScans?: MailLinkScanReport[]
   movement?: Movement
   volume?: { itemType: string; status: string; count: number }[]
   mappings?: { type: string; count: number }[]
@@ -2263,6 +2345,25 @@ export interface CopySafetyReport {
   unattributed: { id: string; name: string; kind: string; modifiedTime: string }[]
   auditReadable: boolean; cleanup: { ok: boolean; error?: string }
 }
+// -- Move route probe --------------------------------------------------------
+export interface MoveProbeResult {
+  route: 'direct' | 'source-drive'; ok: boolean | null; step: string; detail: string
+  status: number | null; testedAt: string
+}
+export interface MoveProbe {
+  accountId: number | null; pair: string; results: MoveProbeResult[]
+  /** A direct pass: the one route a move run moves by. */
+  moveAvailable: boolean
+  /** The shared-drive route worked but the direct one did not: the engine cannot use it yet. */
+  otherRouteOnly: boolean
+}
+export const fetchMoveProbe = (accountId?: number) =>
+  cpFetch<MoveProbe>(`/api/v2/move-probe${accountId ? `?account_id=${accountId}` : ''}`)
+export const startMoveProbe = (reason: string, accountId?: number) =>
+  cpFetch<ActionResult>('/api/v2/move-probe/run', {
+    method: 'POST', body: JSON.stringify({ reason, account_id: accountId ?? null }),
+  })
+
 export const fetchCopySafety = (accountId?: number) =>
   cpFetch<CopySafetyReport | null>(`/api/v2/copy-safety/latest${accountId ? `?account_id=${accountId}` : ''}`)
 export const startCopySafety = (reason: string, user: string, perType: number, settleMin: number, accountId?: number) =>

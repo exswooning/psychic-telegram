@@ -22,6 +22,7 @@ const Migrations = lazy(() => import('@/pages/Migrations'))
 const Mirror = lazy(() => import('@/pages/Mirror'))
 const MigrationDetail = lazy(() => import('@/pages/MigrationDetail'))
 const Metrics = lazy(() => import('@/pages/Metrics'))
+const Benchmarks = lazy(() => import('@/pages/Benchmarks'))
 const TestReport = lazy(() => import('@/pages/TestReport'))
 const MissionControl = lazy(() => import('@/pages/MissionControl'))
 const Users = lazy(() => import('@/pages/Users'))
@@ -111,6 +112,7 @@ const App: React.FC = () => {
               <Route path="/migrations/:accountId" element={<MigrationDetail />} />
               <Route path="/mirror" element={<Mirror />} />
               <Route path="/metrics" element={<Metrics />} />
+              <Route path="/benchmarks" element={<Benchmarks />} />
               <Route path="/migrations/:accountId/metrics" element={<Metrics />} />
               <Route path="/tests" element={<TestReport />} />
               <Route path="/wizard" element={<Wizard />} />

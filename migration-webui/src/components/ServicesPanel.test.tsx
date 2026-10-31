@@ -51,4 +51,15 @@ describe('the services, without SSH', () => {
     await waitFor(() => expect(fetchHostServices).toHaveBeenCalled())
     expect(container.textContent).toBe('')
   })
+  it('shows release integrity and reports mismatched files', async () => {
+    fetchHostServices.mockResolvedValue({ ok: true, deployed_commit: 'version', units: [], oom: [], busy: [],
+      releaseCheck: { originalUiSha256: 'original-hash', workspace: null,
+        backend: { commit: 'version', checked: 2, total: 3, mismatches: ['changed.py'], error: '' } } })
+    render(<ServicesPanel />)
+    const checks = await screen.findByTestId('release-checks')
+    expect(checks).toHaveTextContent('2/3 file hashes match')
+    expect(checks).toHaveTextContent('Files differ: changed.py')
+    expect(checks).toHaveTextContent('integrity not checked')
+    expect(checks).toHaveTextContent('original-hash')
+  })
 })

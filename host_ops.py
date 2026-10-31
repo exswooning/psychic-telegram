@@ -10,6 +10,8 @@ rule sync_vps.sh enforces.
 from __future__ import annotations
 
 import glob
+import hashlib
+import json
 import os
 import re
 import shutil
@@ -102,6 +104,56 @@ def stack_dump(pid: int, timeout: int = 30) -> str:
 
 
 # -- the services ---------------------------------------------------------------
+def release_check(root: str = HERE) -> dict:
+    """Expose release integrity in the UI, rather than requiring SSH reads."""
+    from pathlib import Path
+    base = Path(root)
+    result = {"backend": None, "workspace": None, "originalUiSha256": None}
+    original = base / "migration-webui/dist/index.html"
+    try:
+        if original.is_file():
+            result["originalUiSha256"] = hashlib.sha256(original.read_bytes()).hexdigest()
+    except OSError:
+        pass
+    for name, filename in (("backend", "CONFIGURATION_RELEASE.json"),
+                           ("workspace", "UI_PREVIEW_RELEASE.json")):
+        try:
+            manifest = json.loads((base / filename).read_text())
+            entry = {"commit": manifest.get("commit"), "checked": 0,
+                     "total": 0, "mismatches": [], "error": ""}
+            if name == "backend":
+                files, directory = manifest["files"], base
+            else:
+                directory = Path(manifest["destination"])
+                # Only the installed static UI tree, never arbitrary files.
+                if directory.parent != Path("/var/www/bitport-workspace") or not re.fullmatch(r"[a-f0-9]{40}", directory.name):
+                    raise ValueError("unrecognized workspace release path")
+                ui_manifest = json.loads((base / "ui-previews" / directory.name / "UI_MANIFEST.json").read_text())
+                files = {p.removeprefix("dist/"): h for p, h in ui_manifest["files"].items() if p.startswith("dist/")}
+            if not isinstance(files, dict) or not files or len(files) > 1000:
+                raise ValueError("release file list is missing or invalid")
+            entry["total"] = len(files)
+            for relative, expected in files.items():
+                if not isinstance(relative, str) or Path(relative).is_absolute() or ".." in Path(relative).parts:
+                    raise ValueError("invalid release file path")
+                p = directory / relative
+                if not p.resolve().is_relative_to(directory.resolve()):
+                    raise ValueError("invalid release file path")
+                if not re.fullmatch(r"[a-f0-9]{64}", str(expected)):
+                    raise ValueError("invalid release hash")
+                if p.is_file() and hashlib.sha256(p.read_bytes()).hexdigest() == expected:
+                    entry["checked"] += 1
+                else:
+                    entry["mismatches"].append(relative)
+            result[name] = entry
+        except FileNotFoundError:
+            pass
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            result[name] = {"commit": None, "checked": 0, "total": 0,
+                            "mismatches": [], "error": str(exc)}
+    return result
+
+
 def services() -> dict:
     units = []
     for u in UNITS:
@@ -125,7 +177,8 @@ def services() -> dict:
             commit = fh.read().strip()
     except OSError:
         commit = ""
-    return {"units": units, "oom": oom, "deployed_commit": commit}
+    return {"units": units, "oom": oom, "deployed_commit": commit,
+            "releaseCheck": release_check()}
 
 
 def unfinished_repairs(root: str = HERE) -> list[str]:

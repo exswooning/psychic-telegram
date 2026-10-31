@@ -16,6 +16,7 @@ export const workspaceFeatures: WorkspaceFeature[] = [
   { path: '/one-to-one', label: 'One-to-one', description: 'Source and target comparisons, content evidence and copy resolutions.', group: 'Review' },
   { path: '/tally', label: 'Tally', description: 'Source and target item inventories and count gaps.', group: 'Review' },
   { path: '/errors', label: 'Failures', description: 'Inspect errors, retries and unresolved repair findings.', group: 'Review' },
+  { path: '/benchmarks', label: 'Benchmarks', description: 'Which transfer and mail mode is fastest and still ends one to one, with live progress and time left.', group: 'Review' },
   { path: '/metrics', label: 'Metrics', description: 'Transfer speed, API latency, quotas and capacity.', group: 'Review' },
   { path: '/activity', label: 'Activity', description: 'Live events and per-item migration activity.', group: 'Review' },
   { path: '/history', label: 'History', description: 'Previous runs, results and transcripts.', group: 'Review' },

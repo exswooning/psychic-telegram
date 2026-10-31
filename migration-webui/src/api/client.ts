@@ -22,9 +22,20 @@ import {
 } from '@/types'
 import { coalesce } from './inflight'
 
+/** A read gives up after this long. Without it a request a tunnel or a loaded host never answers
+ *  (Cloudflare holds one for ~100 s) leaves its page on a loading bar, and everything that awaits
+ *  it with it. Reads only: a write can legitimately take longer, and aborting one is not safe. */
+export const READ_TIMEOUT_MS = 20_000
+
 async function getJSON<T>(path: string): Promise<T> {
   return coalesce(path, async () => {
-    const res = await fetch(path)
+    let res: Response
+    try {
+      res = await fetch(path, { signal: AbortSignal.timeout(READ_TIMEOUT_MS) })
+    } catch (e) {
+      if (e instanceof Error && e.name === 'TimeoutError') throw new Error(`${path}: no answer after ${READ_TIMEOUT_MS / 1000}s`)
+      throw e
+    }
     if (!res.ok) throw new Error(`${path}: HTTP ${res.status}`)
     return res.json() as Promise<T>
   })
@@ -511,6 +522,11 @@ export interface HostServices {
   units: HostUnit[]; oom: string[]; deployed_commit: string
   /** What a restart would kill right now; a restart is refused while non-empty. */
   busy: string[]
+  releaseCheck?: {
+    backend: { commit: string | null; checked: number; total: number; mismatches: string[]; error: string } | null
+    workspace: { commit: string | null; checked: number; total: number; mismatches: string[]; error: string } | null
+    originalUiSha256: string | null
+  }
 }
 export const fetchHostServices = () => hostJSON<HostServices>('/api/host/services')
 export const restartHostUnit = (unit: string) =>
@@ -1104,6 +1120,40 @@ export interface SharedDriveStats {
   unreadable: number
   failed: number
 }
+
+export interface ConfigurationRead<T> {
+  status: 'read' | 'unreadable' | 'missing'
+  value?: T
+  error?: string
+  checkedAt?: string
+}
+export interface GroupConfiguration {
+  source: string; target: string; exists: boolean
+  status: 'matched' | 'different' | 'not_checked'
+  differences: { field: string; source: unknown; target: unknown }[]
+  blocked: string[]
+  operations: { kind: string; body?: Record<string, unknown>; email?: string; role?: string }[]
+  settings?: { source: ConfigurationRead<Record<string, unknown>>; target: ConfigurationRead<Record<string, unknown>> }
+  members?: { source: ConfigurationRead<{ email?: string; role?: string }[]>; target: ConfigurationRead<{ email?: string; role?: string }[]> }
+  metadata?: { source: Record<string, string>; target: Record<string, string> }
+  aliases?: { source: string[]; target: string[] }
+}
+export interface ConfigurationReport {
+  sourceDomain: string; targetDomain: string; checkedAt: string; planHash: string
+  groups: GroupConfiguration[]
+  targetOnlyGroups?: string[]
+  groupInventory: { source: ConfigurationRead<unknown[]>; target: ConfigurationRead<unknown[]> }
+  storage: { source: string; target: string
+    sourceQuota: ConfigurationRead<Record<string, string | null>>
+    targetQuota: ConfigurationRead<Record<string, string | null>>
+    targetMinusSourceBytes: Record<string, string | null>
+  }[]
+  storagePolicy: { status: string; items: string[]; reason: string }
+  limits: string[]
+  applyResults?: { target: string; kind: string; status: string; error?: string }[]
+}
+export const fetchConfigurationReport = (accountId: number) =>
+  getJSON<{ report: ConfigurationReport | null }>(`/api/configuration-report?account=${accountId}`)
 
 export async function fetchSharedDrives(): Promise<SharedDriveStats | null> {
   const data = await getJSON<{ error: string; sharedDrives: SharedDriveStats }>(

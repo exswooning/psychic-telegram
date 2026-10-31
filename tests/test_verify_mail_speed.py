@@ -58,7 +58,7 @@ def test_independent_sides_overlap_and_resolve_services_on_worker_threads(monkey
         return side
     auth = SimpleNamespace(source_gmail=lambda u:service('source'), target_gmail=lambda u:service('target'))
     v = V.Verifier(auth,None,None,'s','t')
-    def read(svc,ids,side,*args):
+    def read(svc,ids,side,*args,**k):
         barrier.wait(timeout=3)
         return {0:(ids[0].encode(),{})},{}
     monkeypatch.setattr(v,'_raw_many',read)
@@ -72,7 +72,7 @@ def test_parallel_reads_preserve_per_item_failure(monkeypatch):
     monkeypatch.setenv('VERIFY_GMAIL_PARALLEL_SIDES','1')
     v=V.Verifier(SimpleNamespace(source_gmail=lambda u:'s',target_gmail=lambda u:'t'),None,None,'s','t')
     exc=RuntimeError('target unavailable')
-    monkeypatch.setattr(v,'_raw_many',lambda svc,*a: ({0:(b'ok',{})},{}) if svc=='s' else ({},{0:exc}))
+    monkeypatch.setattr(v,'_raw_many',lambda svc,*a,**k: ({0:(b'ok',{})},{}) if svc=='s' else ({},{0:exc}))
     result=list(v._gmail_raw_chunks([('s','t',None)]))[0]
     assert result[3] == ({},{0:exc})
 
@@ -81,7 +81,7 @@ def test_serial_option_and_empty_mailbox(monkeypatch):
     monkeypatch.setenv('VERIFY_GMAIL_PARALLEL_SIDES','0')
     calls=[]
     v=V.Verifier(SimpleNamespace(source_gmail=lambda u:'s',target_gmail=lambda u:'t'),None,None,'s','t')
-    monkeypatch.setattr(v,'_raw_many',lambda svc,*args:calls.append(svc) or ({},{}))
+    monkeypatch.setattr(v,'_raw_many',lambda svc,*args,**k:calls.append(svc) or ({},{}))
     assert not list(v._gmail_raw_chunks([]))
     assert len(list(v._gmail_raw_chunks([('s','t',None)]))) == 1
     assert calls == ['s','t']

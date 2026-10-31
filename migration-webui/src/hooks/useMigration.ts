@@ -47,70 +47,46 @@ const useMigration = (enabled = true) => {
     // describes for the server side of this problem.
     if (inFlight.current) return
     inFlight.current = true
+    // Each domain is applied THE MOMENT ITS OWN request returns, and the first paint is released by
+    // the first one that does. This used to await all six and apply none until the slowest came
+    // back, so one slow endpoint (a big ledger, a loaded host, a Cloudflare hiccup) left every page
+    // on a loading bar with nothing in it, even for data that had arrived seconds earlier.
+    const failures: Record<string, string> = {}
+    const detail = (e: unknown) => (e instanceof Error ? e.message : String(e))
+    const settle = <T,>(name: string, request: Promise<T>, apply: (v: T) => void) =>
+      request.then(
+        (v) => { apply(v); delete failures[name] },
+        (e) => { failures[name] = `${name}: ${detail(e)}` },
+      ).then(() => {
+        setLoading(false)
+        setLastUpdate(new Date().toISOString())
+        setError(Object.keys(failures).length ? Object.values(failures).join('; ') : null)
+      })
     try {
-      // allSettled, not all: this used to be one Promise.all, so a single
-      // endpoint throwing (a report with no data yet, a transient 500 on a
-      // busy host) rejected the WHOLE batch and skipped every setter --
-      // users, stages, metrics, activity, verification, and report all
-      // froze at their last good value together, silently, with no
-      // indication any of it was stale. Confirmed live: Users kept showing
-      // old data with nothing on screen to say a poll had ever failed.
-      // Each domain now succeeds or fails independently, matching what a
-      // human actually wants -- five live panels and one stale one beats
-      // six stale panels because of one.
-      const [users, stages, metrics, activity, verification, report] = await Promise.allSettled([
-        fetchUsers(),
-        fetchStages(),
-        fetchMetrics(),
-        fetchActivity(),
-        fetchVerification(),
-        fetchReport(),
+      await Promise.all([
+        settle('users', fetchUsers(), setUsers),
+        settle('stages', fetchStages(), setStages),
+        settle('metrics', fetchMetrics(), (m) => {
+          history.current = [
+            ...history.current.slice(-(HISTORY_POINTS - 1)),
+            {
+              timestamp: Date.now(),
+              cpu: m.cpu,
+              ram: m.ram.percentage,
+              workers: m.workers.current,
+              uploadQueue: m.uploadQueue,
+              retryQueue: m.retryQueue,
+            },
+          ]
+          setMetrics({ ...m, history: history.current })
+        }),
+        settle('activity', fetchActivity(), setActivities),
+        settle('verification', fetchVerification(), setVerification),
+        settle('report', fetchReport(), (r) => { if (r) setReport(r) }),
       ])
-      const failures: string[] = []
-      const detail = (r: PromiseRejectedResult) =>
-        r.reason instanceof Error ? r.reason.message : String(r.reason)
-
-      if (users.status === 'fulfilled') setUsers(users.value)
-      else failures.push(`users: ${detail(users)}`)
-
-      if (stages.status === 'fulfilled') setStages(stages.value)
-      else failures.push(`stages: ${detail(stages)}`)
-
-      if (metrics.status === 'fulfilled') {
-        history.current = [
-          ...history.current.slice(-(HISTORY_POINTS - 1)),
-          {
-            timestamp: Date.now(),
-            cpu: metrics.value.cpu,
-            ram: metrics.value.ram.percentage,
-            workers: metrics.value.workers.current,
-            uploadQueue: metrics.value.uploadQueue,
-            retryQueue: metrics.value.retryQueue,
-          },
-        ]
-        setMetrics({ ...metrics.value, history: history.current })
-      } else {
-        failures.push(`metrics: ${detail(metrics)}`)
-      }
-
-      if (activity.status === 'fulfilled') setActivities(activity.value)
-      else failures.push(`activity: ${detail(activity)}`)
-
-      if (verification.status === 'fulfilled') setVerification(verification.value)
-      else failures.push(`verification: ${detail(verification)}`)
-
-      if (report.status === 'fulfilled') {
-        if (report.value) setReport(report.value)
-      } else {
-        failures.push(`report: ${detail(report)}`)
-      }
-
-      setLastUpdate(new Date().toISOString())
-      setError(failures.length ? failures.join('; ') : null)
     } finally {
-      // isLoading only ever gates the *first* paint (see store/index.ts) --
-      // it drops to false whether this poll succeeded or failed, so a down
-      // backend shows the real error state instead of a spinner forever.
+      // isLoading only gates the first paint (see store/index.ts); each settled request above has
+      // already released it, and this covers a request that never settled at all.
       setLoading(false)
       inFlight.current = false
     }

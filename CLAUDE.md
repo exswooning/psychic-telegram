@@ -1,3 +1,11 @@
+## Pending Claude implementation task
+
+- [ ] High priority: [Gmail search-first link rewriting → DMS](docs/tasks/claude-gmail-search-first-dms.md). Use server-side search to fetch only candidate email bodies by default; keep exhaustive scans/full 1:1 optional. This task is queued, not implemented. Respect active-job deployment gates.
+
+## Latest operator handoff — 30 October 2026
+
+Read [docs/claude-handoff-2026-10-30.md](docs/claude-handoff-2026-10-30.md) before migration work. It supersedes older defaults below: full mail runs now prefer complete link scan + DMS, routine mail completion uses counts (not 1:1), and full verification remains optional. The operator explicitly resumed the sandbox run on 30 October 2026; see the current-state note in the handoff.
+
 # CLAUDE.md
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
@@ -198,6 +206,32 @@ ignored. Throughput is items written *during the run*, never the ledger total, a
 it divides by the user workers the run could keep busy (`busyWorkers`: the pool, or
 the users it wrote, whichever is smaller) -- never the whole pool.
 
+**The A/B benchmark (`ab_transfer.py`, Benchmarks page) ranks arms by errors, then speed.** Arms run
+side by side by default, each on its own copy of the ledger (`BITPORT_LEDGER`, `ledger_copy`) and
+scratch, then the arm(s) with the fewest errors are re-timed alone -- side-by-side times share one
+box and one Google quota, so they rank errors, not speed. `--sequential` is the old way;
+download_upload + engine is skipped (`--include-slow`); Chat is left out (`ALL_SERVICES`,
+`VERIFY_SERVICES`). `arm_errors` scores failed items + every counted difference, and an arm whose own
+1:1 check did not run (UNVERIFIED) or whose mail import was skipped is never ranked. The winner is
+the default for a new run that names no transfer/mail mode (`api_server.ab_default`). Each arm
+clears its user's `user_verification` first: `verify_sample --services all` was once dropped as an
+unknown name, so every arm read stray rows from other verify jobs.
+
+**What a 1:1 check downloads, and what it does not (measured 2026-10-31, esc.mrc: 84 -> 23 min,
+same verdicts).** Gmail: a message the engine compared byte for byte as it wrote it
+(`migration_item_receipts`, written when `MAIL_COMPLETION_CHECK=full` or for split link mail) is
+checked by labels, read state, date and Message-ID only -- Gmail cannot change a message's content
+after it is written (`Verifier._receipts`, `VERIFY_USE_RECEIPTS=0` reads every body). Drive: equal
+`md5Checksum` and size on both tenants are taken as identical without downloading either file
+(`VERIFY_TRUST_MD5=0` restores the download). A Form is compared by its body through the Forms API
+(`native_fidelity.compare_form`), never by Drive comments, which answer 404 for a Form. Repair's
+retained `.Repair backup -` copies are Bitport's own, not strays. Benchmark arms skip migrate's
+own acceptance check (their 1:1 check is the judge) and register as `ab-migrate`, so they are
+never judged or reported as a migration. `auth.source_drive(writable=True)` returns the real client
+past the protected-source guard (a98ead0 had returned the read-only wrapper, so no deliberate source
+writer worked). `move_probe.py` tries a one-byte move by each route; Move is offered only after a
+direct pass, and a protected source is never written to.
+
 **Handling an incident.** Read the brief; reproduce from its evidence; fix on
 a **test sandbox tenant**, never a real one; add a test. **Do not deploy
 unattended**: `sync_vps.sh` restarts services and a webui-launched seed or a
@@ -218,10 +252,11 @@ audit, with a default reason when none is given. Notifications are opt-in via `I
 (the last opens an issue a Claude Code routine can be pointed at); none is set
 by default and a failed send never fails a run.
 
-**Who moves the mail is a per-run choice (`mail_mode`), and the dialog defaults to
-`engine`.** `engine`: this tool moves all mail, and a caller that names no mode gets it
-(`api_server._default_mail_mode`): split is offered as experimental until the DMS's
-overlap with mail already copied is proven per message. `dms`:
+**Who moves the mail is a per-run choice (`mail_mode`), and full mail runs default to
+`split` (30 October operator change; see latest handoff).** `engine` explicitly moves
+all mail; bounded samples and non-mail runs still use it. A full run with no mode
+uses a complete link scan followed by the DMS hybrid. Count completion is not proof
+of rewritten-content, label or overlap fidelity. `dms`:
 Google's Data Migration Service does, and the run migrates everything else.
 `split`: the engine inserts only mail that carries a Drive link and rewrites it;
 the rest is written `SKIPPED_NO_DRIVE_LINK` (`config.DEFERRED_TO_DMS`) and moved by
@@ -687,9 +722,13 @@ A DMS job survives a webui restart; `_EXT_SCRIPTS` lists it so the Jobs page can
 Before building anything browser-driven here, look for the one-off script that already
 did it (`dms_*.py`, `*_probe.py`) -- the approval was rebuilt once from guesses.
 
-**Full scope, always** (`fidelity.py`): every optional pass -- external-owned shares,
-secondary calendars, groups, Gmail settings, calendar ACLs, rooms, comments, chat,
-contacts, tasks, SSO profiles, form links -- defaults ON in config.py. A run mints ONE token for every
+**Full scope, except Chat** (`fidelity.py`): every optional pass -- external-owned shares,
+secondary calendars, groups, Gmail settings, calendar ACLs, rooms, comments,
+contacts, tasks, SSO profiles, form links -- defaults ON in config.py. **Chat is OFF by default
+(operator, 2026-10-31):** `MIGRATE_CHAT` defaults false, `--services all` expands without it
+(`main.resolve_services`, `api_server._expand_all`, both via `config.chat_by_default`), and
+naming `chat` or setting `MIGRATE_CHAT=true` still turns it on. Its findings are Chat API limits
+(DM becomes a group chat, a bot cannot post or join -- `known_issues` chat.*). A run mints ONE token for every
 scope and one ungranted scope fails every call, so: the launch probes each pass's extra
 scopes and writes it on or off (`plan`, named in the launch detail); the run's own gate
 (`main._gate_on_delegation`) tries scope_guard's unattended re-grant first and otherwise

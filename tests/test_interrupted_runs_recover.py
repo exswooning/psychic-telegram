@@ -27,6 +27,9 @@ def test_an_unchanged_pair_reuses_its_comparison_and_a_changed_one_does_not(migr
     f = next(x for x in tgt.store.values() if x.get("name") == "notes.txt")
     tgt.content[f["id"]] = b"edited on the target"
     f["version"] = "2"                                               # Drive bumps it on any change
+    # ... and recomputes the checksum and size from the new bytes, which the fake does not do itself
+    import hashlib
+    f.update(md5Checksum=hashlib.md5(b"edited on the target").hexdigest(), size=str(len(b"edited on the target")))
     changed = verify(migrated, ("drive",))
     assert any("content differs" in d for x in changed["users"][SRC_USER]["drive"]["differences"]
                for d in x["diffs"])

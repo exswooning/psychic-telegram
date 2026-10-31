@@ -453,6 +453,9 @@ def migrate_user(auth: AuthManager, db: MigrationDB, settings: Settings,
 
     acceptance = None
     acceptance_enabled = inline_acceptance_enabled(settings,delta=delta,track_status=track_status)
+    from mail_completion import full_mail_check
+    acceptance_services = services if full_mail_check(settings) else services - {"gmail"}
+    acceptance_enabled = acceptance_enabled and bool(acceptance_services)
     prior_status = ""
     if track_status:
         row = db.conn.execute(
@@ -549,7 +552,7 @@ def migrate_user(auth: AuthManager, db: MigrationDB, settings: Settings,
             dependencies = dependency_preflight(auth,db,settings,source_user,target_user)
             if dependencies:
                 result["dependencyFindings"] = dependencies
-            acceptance = Acceptance(auth,db,settings,source_user,target_user,services)
+            acceptance = Acceptance(auth,db,settings,source_user,target_user,acceptance_services)
             result["acceptanceRunId"] = acceptance.run_id
             if not acceptance.ready():
                 raise RuntimeError("Source manifest could not be completed: "+json.dumps(acceptance.errors))
@@ -693,6 +696,12 @@ def migrate_user(auth: AuthManager, db: MigrationDB, settings: Settings,
         result["error"] = detail
 
     result["elapsed_sec"] = round(time.time() - started, 1)
+    if (track_status and "gmail" in services and result.get("status") == "DONE"
+            and not full_mail_check(settings) and not SHUTDOWN.is_set()):
+        from mail_completion import compare_mail_counts
+        result["mailCountCheck"] = compare_mail_counts(auth, db, settings,
+            progress=lambda message: log.info("[%s] %s", source_user, message),
+            source_users=(source_user,))
     if checkpoints:
         from migration_checks import capture_and_save
         result["storage_check"] = capture_and_save(auth, db, source_user, target_user, services, "after")
@@ -706,7 +715,8 @@ def migrate_user(auth: AuthManager, db: MigrationDB, settings: Settings,
         import verify_sample
         from resilience import retry_on_google_error
         done = [s for s in verify_sample.ALL_SERVICES
-                if s == "directory" or s in _services_that_succeeded(result["services"])]
+                if (s == "directory" or s in _services_that_succeeded(result["services"]))
+                and (s != "gmail" or full_mail_check(settings))]
         if done:
             VERIFY.submit(verify_sample.verify_user, auth, db, settings, source_user, tuple(done),
                           settings.verify_sample_per_service,
@@ -811,10 +821,8 @@ def _services_already_done(db, r, services) -> bool:
     return set(services) <= done
 
 
-def run_batch(auth: AuthManager, db: MigrationDB, settings: Settings,
-              services: set[str], delta: bool, delta_days: int,
-              only: list[str] | None = None) -> list[dict]:
-    """Fan out across users with a bounded thread pool."""
+def _pass_user_pairs(db, settings, services, delta, only):
+    """Eligible users for one pass, before process sharding or profile writes."""
     rows = [r for r in db.all_identities() if r["entity_type"] == "user"]
 
     def _already_done(r) -> bool:
@@ -846,6 +854,14 @@ def run_batch(auth: AuthManager, db: MigrationDB, settings: Settings,
         wanted = {u.lower() for u in only}
         pairs = [p for p in pairs if p[0] in wanted]
 
+    return pairs
+
+
+def run_batch(auth: AuthManager, db: MigrationDB, settings: Settings,
+              services: set[str], delta: bool, delta_days: int,
+              only: list[str] | None = None) -> list[dict]:
+    """Fan out across users with a bounded thread pool."""
+    pairs = _pass_user_pairs(db, settings, services, delta, only)
     # One process of a pass split across several (_run_pass_in_processes): a
     # disjoint, stable slice of the users, so no two processes ever hold one.
     shard = os.getenv("MIGRATE_SHARD")
@@ -1247,7 +1263,9 @@ def _run_with_memory_pause(auth, db, settings, services, delta, delta_days,
         name="metrics", daemon=True)
     flusher.start()
     try:
-        with _registered("delta" if delta else "migrate",
+        # BITPORT_JOB_NAME: a benchmark arm (ab_transfer) is not a migration of the account, and
+        # judged as one it opened "users_failed" incidents for its test users (#2, #6, #7).
+        with _registered(os.getenv("BITPORT_JOB_NAME") or ("delta" if delta else "migrate"),
                          getattr(settings, "account_id", None)):
             # `passes` is an --ordered run: the same services, as separate passes
             # across ALL users. They live inside this ONE registration, memory
@@ -1768,6 +1786,12 @@ def _run_pass(auth, db, settings, services, delta, delta_days, only) -> list[dic
     n = int(getattr(settings, "migrate_processes", 0) or 0)
     if n <= 0 and settings is not None and not settings.dry_run and not os.getenv("MIGRATE_SHARD"):
         n = _auto_processes()
+        eligible = len(_pass_user_pairs(db, settings, services, delta, only))
+        bounded = min(n, max(eligible, 1))
+        if bounded != n:
+            log.info("processes for this pass capped from %d to %d: %d eligible user(s)",
+                     n, bounded, eligible)
+        n = bounded
     if n <= 1 or getattr(settings, "dry_run", False) or os.getenv("MIGRATE_SHARD"):
         return run_batch(auth, db, settings, services, delta=delta,
                          delta_days=delta_days, only=only)
@@ -2299,7 +2323,7 @@ def resolve_services(raw: str) -> set[str]:
     services = {s.strip().lower() for s in raw.split(",") if s.strip()}
     if "all" in services:
         services.discard("all")
-        services |= set(PER_USER_SERVICES)
+        services |= {s for s in PER_USER_SERVICES if s != "chat" or config.chat_by_default()}
     unknown = services - set(PER_USER_SERVICES)
     if unknown:
         sys.exit(f"unknown service(s): {', '.join(sorted(unknown))}. "

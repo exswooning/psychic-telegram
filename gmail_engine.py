@@ -19,6 +19,9 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import json
+import sys
+import time
 import logging
 import os
 import concurrent.futures as futures
@@ -42,6 +45,18 @@ from resilience import (PermanentAPIError, RateLimiter, TransportExhausted,
 OPTIONAL_PASS_ERRORS = (PermanentAPIError, RuntimeError, RefreshError)
 
 log = logging.getLogger(__name__)
+
+# Split mail's candidate searches, run separately (ids only) and unioned, so a report
+# can say what each form found. Gmail search is not proof of coverage: a link Gmail did
+# not index is missed, which is why every full run also re-reads the messages this
+# ledger already proved link-bearing and reports any the searches did not name.
+LINK_SEARCHES = ("has:drive", "has:document", "has:spreadsheet", "has:presentation",
+                 '"drive.google.com"', '"docs.google.com"',
+                 # text attachments are read by the classifier, and a forwarded .eml blocks
+                 "filename:txt", "filename:htm", "filename:html", "filename:csv",
+                 "filename:ics", "filename:eml")
+NOT_A_CANDIDATE = ("not named by Gmail's link search, so its body was not read; "
+                   "awaiting verified DMS delivery")
 
 SYSTEM_LABELS = {
     "INBOX", "SENT", "DRAFT", "SPAM", "TRASH", "UNREAD", "STARRED",
@@ -114,9 +129,12 @@ class GmailMigrator:
         self._src_override = None
         self._tgt_override = None
         self._stats_lock = threading.Lock()
+        self._scan_lock = threading.Lock()
+        self._link_scan: dict = {}
         self._conv_locks: dict[str, threading.Lock] = {}
         self._conv_locks_guard = threading.Lock()
         self.limiter = RateLimiter(settings.per_user_qps)
+        self.scan_limiter = RateLimiter(getattr(settings, "mail_scan_qps", settings.per_user_qps))
         self.stats = {
             "inserted": 0, "failed": 0, "skipped": 0,
             "drafts_inserted": 0, "drafts_failed": 0, "drafts_skipped": 0,
@@ -465,24 +483,43 @@ class GmailMigrator:
     def _split_unknown_link(self, fid):
         # Positive external ownership evidence is required. A 403/404,
         # source-owned item or unknown Shared Drive cannot be handed off.
-        meta = self._retry(lambda: self.auth.source_drive(self.source_user).files().get(
-            fileId=fid, fields="id,owners(emailAddress),driveId", supportsAllDrives=True).execute(),
-            label="gmail.split.link_owner")
+        try:
+            meta = self._retry(lambda: self.auth.source_drive(self.source_user).files().get(
+                fileId=fid, fields="id,owners(emailAddress),driveId", supportsAllDrives=True).execute(),
+                label="gmail.split.link_owner")
+        except PermanentAPIError as exc:
+            # A definite 404 for an id the run never mapped: nobody can rewrite it, so the link
+            # reads the same by either route. Blocking on it held back every other message of
+            # the mailbox (4 of 758 on audit@s., 695 on info@s.). Counted, never silent.
+            if not str(exc).startswith("HTTP 404"):
+                raise
+            self._scan_count("unreachableLinks", 1)
+            return "external"
         owners = [o.get("emailAddress", "").rsplit("@", 1)[-1].lower() for o in meta.get("owners", [])]
         return "external" if owners and all(x and x != self.settings.source_domain.lower() for x in owners) else "unresolved"
 
     def _split_classify(self, mid):
         from split_mail import classify_payload
-        self.limiter.acquire()
+        self.scan_limiter.acquire()
         full = self._retry(lambda: self.src.users().messages().get(
             userId="me", id=mid, format="full").execute(), label="gmail.split.text")
+        self._scan_count("bodiesRead", 1)
+        self._scan_count("bytesRead", int(full.get("sizeEstimate") or 0))
         if set(full.get("labelIds") or []) & {"DRAFT", "CHAT"}:
             return full, None
         def text_attachment(aid):
-            self.limiter.acquire()
+            self.scan_limiter.acquire()
+            self._scan_count("attachmentReads", 1)
             return self._retry(lambda: self.src.users().messages().attachments().get(
                 userId="me", messageId=mid, id=aid).execute(), label="gmail.split.text_attachment")
-        return full, classify_payload(full, self._drive_link_target, text_attachment, self._split_unknown_link)
+        def raw():
+            self.scan_limiter.acquire()
+            self._scan_count("rawReads", 1)
+            got = self._retry(lambda: self.src.users().messages().get(
+                userId="me", id=mid, format="raw").execute(), label="gmail.split.raw")
+            data = got.get("raw", "")
+            return base64.urlsafe_b64decode(data + "=" * (-len(data) % 4))
+        return full, classify_payload(full, self._drive_link_target, text_attachment, self._split_unknown_link, raw)
 
     def _migrate_one_message(self, ref: dict) -> None:
         """One message, start to finish. Extracted so a pool can run
@@ -508,14 +545,15 @@ class GmailMigrator:
             return
         if self.settings.mail_only_with_links and not already:
             try:
-                classified, plan = self._split_classify(mid)
+                cached = getattr(self, "_split_scan", {}).pop(mid, None)
+                classified, plan = cached if cached is not None else self._split_classify(mid)
                 if plan and plan["route"] == "BLOCKED":
                     raise RuntimeError("Unresolved Drive link mapping: " + ", ".join(plan["unresolved"]))
                 if plan and plan["route"] == "DMS":
                     prior = self.db.get_audit(self.source_user, mid, "message")
+                    detail = plan.get("why") or "no changed Drive link; awaiting verified DMS delivery"
                     if not (prior and prior["status"] == DELIVERED_BY_DMS):
-                        self.db.log_audit(self.source_user, mid, "message", DEFERRED_TO_DMS,
-                                          "no changed Drive link; awaiting verified DMS delivery")
+                        self.db.log_audit(self.source_user, mid, "message", DEFERRED_TO_DMS, detail)
                     self._bump("skipped")
                     return
                 if plan and not self.settings.rewrite_drive_links:
@@ -718,7 +756,8 @@ class GmailMigrator:
         self.db.log_audit(self.source_user, mid, "message", "SUCCESS",
                           bytes_moved=approx_bytes)
         self._bump("inserted")
-        if (getattr(self.settings, "migration_checks_enabled", False) or self.settings.mail_only_with_links
+        from mail_completion import full_mail_check
+        if ((getattr(self.settings, "migration_checks_enabled", False) and full_mail_check(self.settings)) or self.settings.mail_only_with_links
                 or getattr(self, "recover_unmapped", False)):
             from migration_checks import verify_written_mail
             verified = verify_written_mail(self, mid, result["id"], raw, mapped_labels,
@@ -733,6 +772,169 @@ class GmailMigrator:
                                   "SUCCESS" if verified else "NEEDS_ATTENTION",
                                   "Old target copy retained in Trash; fresh copy " + result["id"] +
                                   (" content and labels verified" if verified else " requires verification"))
+
+    def _scan_count(self, key, n):
+        with self._scan_lock:
+            self._link_scan[key] = self._link_scan.get(key, 0) + n
+
+    def _list_ids(self, q):
+        ids, token = set(), None
+        while True:
+            self.limiter.acquire()
+            resp = self._retry(lambda t=token: self.src.users().messages().list(
+                userId="me", maxResults=500, pageToken=t, q=q, includeSpamTrash=True,
+            ).execute(), label="gmail.split.search")
+            self._scan_count("listCalls", 1)
+            ids.update(m["id"] for m in resp.get("messages", []))
+            token = resp.get("nextPageToken")
+            if not token:
+                return ids
+
+    def _known_link_ids(self):
+        """Messages an earlier full read proved carry a Drive link: rewritten, or blocked
+        on one. Independent of Gmail's search, so they measure its recall."""
+        rows = self.db.conn.execute(
+            "SELECT item_id FROM audit_log WHERE source_user=? AND ("
+            "(item_type='link_rewrite' AND status='SUCCESS') OR (item_type='message' "
+            "AND status='FAILED_SPLIT' AND error_message LIKE '%Unresolved Drive link%'))",
+            (self.source_user,)).fetchall()
+        return {r[0] for r in rows}
+
+    def _save_link_scan(self):
+        with self._scan_lock:
+            report = dict(self._link_scan)
+        rss = __import__("resource").getrusage(__import__("resource").RUSAGE_SELF).ru_maxrss
+        report["maxRssMb"] = round(rss / (1 << 20 if sys.platform == "darwin" else 1 << 10), 1)
+        with self.db.write() as conn:
+            conn.execute("CREATE TABLE IF NOT EXISTS mail_link_scans (source_user TEXT NOT NULL, "
+                         "started_at TEXT NOT NULL, report TEXT NOT NULL, "
+                         "PRIMARY KEY (source_user, started_at))")
+            conn.execute("INSERT OR REPLACE INTO mail_link_scans VALUES (?,?,?)",
+                         (self.source_user, report["startedAt"], json.dumps(report)))
+
+    def _scan_split_before_delivery(self, query):
+        """Classify source mail before the first content insert.
+
+        Exhaustive mode reads every message. Search mode reads only the candidates
+        Gmail's own search names (LINK_SEARCHES, plus every message this ledger already
+        proved link-bearing); the rest are routed to the DMS unread and say so.
+        Keep only route/label metadata, never raw mail/attachments. A blocked
+        reference or unread candidate prevents DMS handoff and any content copy.
+        Existing target mappings must not exempt source mail from this scan.
+        """
+        from db import utc_now
+        mode = (getattr(self.settings, "mail_link_scan", "exhaustive") or "exhaustive").lower()
+        if mode not in ("search", "exhaustive"):
+            raise ValueError("MAIL_LINK_SCAN must be search or exhaustive")
+        self._split_scan = {}
+        self._link_scan = {"mode": mode, "query": query, "startedAt": utc_now(), "state": "SEARCHING",
+                           "examined": 0, "blocked": 0, "notRead": 0, "bodiesRead": 0, "bytesRead": 0,
+                           "attachmentReads": 0, "listCalls": 0}
+        began = time.monotonic()
+        candidates = drafts = chats = None
+        if mode == "search":
+            searches, candidates = {}, set()
+            for term in LINK_SEARCHES:
+                hits = self._list_ids(f"{term} {query}".strip())
+                searches[term] = len(hits)
+                candidates |= hits
+            # A delta window cannot judge recall: the proven ids fall mostly outside it.
+            known = set() if query else self._known_link_ids()
+            missed = known - candidates
+            candidates |= missed
+            drafts = self._list_ids(f"in:drafts {query}".strip())
+            chats = self._list_ids(f"in:chats {query}".strip())
+            self._link_scan.update(searches=searches, candidates=len(candidates),
+                                   knownLinkMessages=None if query else len(known),
+                                   recallMissed=None if query else len(missed),
+                                   searchSeconds=round(time.monotonic() - began, 1))
+            log.info("[%s] mail link search: %d candidates (%s); %s known link messages missed by search",
+                     self.source_user, len(candidates), json.dumps(searches),
+                     "n/a" if query else len(missed))
+        self._link_scan["state"] = "READING"
+        self._save_link_scan()
+        refs = []
+        workers = max(int(getattr(self.settings, "mail_workers", 1) or 1),
+                      int(getattr(self.settings, "mail_scan_workers", 1) or 1))
+        self._link_scan.update(scanWorkers=workers, scanQps=getattr(self.scan_limiter, "rate", None))
+
+        def inspect(ref):
+            # Returning only classification metadata bounds retained memory even
+            # when a text part is large. No binary attachment is requested.
+            classified, plan = self._split_classify(ref["id"])
+            if plan and plan["route"] == "BLOCKED":
+                raise RuntimeError("Unresolved Drive link mapping: " + ", ".join(plan["unresolved"]))
+            return {"labelIds": classified.get("labelIds", [])}, plan
+
+        def collect(completed):
+            for future in completed:
+                mid = pending.pop(future)
+                try:
+                    self._split_scan[mid] = future.result()
+                except Exception as exc:
+                    self.db.log_audit(self.source_user, mid, "message", "FAILED_SPLIT",
+                                      "Pre-delivery link scan: " + str(exc)[:300])
+                    self._scan_count("blocked", 1)
+                self._scan_count("examined", 1)
+                if self._link_scan["examined"] % 500 == 0:
+                    self._save_link_scan()
+                if self._link_scan["examined"] % 100 == 0:
+                    log.info("[%s] mail pre-delivery scan: %d examined, %d blocked",
+                             self.source_user, self._link_scan["examined"], self._link_scan["blocked"])
+
+        pending = {}
+        try:
+            with futures.ThreadPoolExecutor(max_workers=workers, thread_name_prefix="mail-scan") as pool:
+                for ref in self._iter_messages(query):
+                    if shutdown_requested():
+                        raise RuntimeError("Mail link scan interrupted; DMS handoff not ready")
+                    refs.append(ref)
+                    mid = ref["id"]
+                    if candidates is not None and mid not in candidates:
+                        labels = ["DRAFT"] if mid in drafts else ["CHAT"] if mid in chats else None
+                        self._split_scan[mid] = (({"labelIds": labels}, None) if labels else
+                                                 ({"labelIds": []}, {"route": "DMS", "changed": {},
+                                                  "unresolved": [], "linkIds": [], "why": NOT_A_CANDIDATE}))
+                        self._scan_count("notRead", 1)
+                        continue
+                    pending[pool.submit(inspect, ref)] = mid
+                    if len(pending) >= workers * 2:
+                        completed, _ = futures.wait(pending, return_when=futures.FIRST_COMPLETED)
+                        collect(completed)
+                while pending:
+                    if shutdown_requested():
+                        raise RuntimeError("Mail link scan interrupted; DMS handoff not ready")
+                    completed, _ = futures.wait(pending, return_when=futures.FIRST_COMPLETED)
+                    collect(completed)
+        except RuntimeError:
+            self._link_scan["state"] = "INTERRUPTED"
+            self._save_link_scan()
+            raise
+        blocked = self._link_scan["blocked"]
+        self._link_scan.update(state="BLOCKED" if blocked else "DONE", messages=len(refs),
+                               scanSeconds=round(time.monotonic() - began, 1), finishedAt=utc_now())
+        self._save_link_scan()
+        log.info("[%s] mail pre-delivery scan complete (%s): %d messages, %d bodies read, %d not read, %d blocked",
+                 self.source_user, mode, len(refs), self._link_scan["bodiesRead"],
+                 self._link_scan["notRead"], blocked)
+        if blocked:
+            self._owe_clean_mail_to_dms()
+            self._split_scan.clear()
+            raise RuntimeError(f"Mail link scan blocked on {blocked} messages; DMS not ready")
+        return iter(refs)
+
+    def _owe_clean_mail_to_dms(self):
+        """A blocked scan never reaches delivery, so the mail it proved needs no rewrite would
+        carry no ledger row and read as lost: the repair's missing-mail recovery then copied a whole
+        mailbox through the engine (734 messages, live, 2026-10-30), ahead of the DMS. Record it as
+        owed to the DMS, as delivery would have."""
+        for mid, (_, plan) in self._split_scan.items():
+            if not plan or plan.get("route") != "DMS" or self.db.get_target_id(self.source_user, mid, "message"):
+                continue
+            prior = self.db.get_audit(self.source_user, mid, "message")
+            if not prior or prior["status"] not in (DELIVERED_BY_DMS, "SUCCESS"):
+                detail = plan.get("why") or "no changed Drive link; awaiting verified DMS delivery"
+                self.db.log_audit(self.source_user, mid, "message", DEFERRED_TO_DMS, detail)
 
     def run(self, delta: bool = False, since_epoch_days: int = 0,
             drive_in_scope: bool = True) -> dict:
@@ -799,9 +1001,11 @@ class GmailMigrator:
         # regardless of how long ago Stop was pressed. A message not yet
         # reached is simply not in the ledger, same as any other
         # not-yet-run one, and a delta/re-run picks it up.
+        refs = (self._scan_split_before_delivery(query) if self.settings.mail_only_with_links
+                else self._iter_messages(query))
         workers = max(1, int(getattr(self.settings, "mail_workers", 1) or 1))
         if workers == 1:
-            for ref in self._iter_messages(query):
+            for ref in refs:
                 if shutdown_requested():
                     log.warning("[%s] stopping mail migration early -- "
                                "signal received", self.source_user)
@@ -811,7 +1015,7 @@ class GmailMigrator:
             with futures.ThreadPoolExecutor(max_workers=workers,
                                             thread_name_prefix="gmail") as pool:
                 pending: set = set()
-                for ref in self._iter_messages(query):
+                for ref in refs:
                     if shutdown_requested():
                         log.warning("[%s] stopping mail migration early -- "
                                    "signal received", self.source_user)

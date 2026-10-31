@@ -38,6 +38,18 @@ const ServicesPanel: React.FC = () => {
             deployed commit <Box component="span" sx={mono}>{data.deployed_commit || 'unknown'}</Box>
           </Typography>
         </Stack>
+        {data.releaseCheck && <Box sx={{ mb: 2 }} data-testid="release-checks">
+          <Typography variant="subtitle2">Installed release verification</Typography>
+          {(['backend', 'workspace'] as const).map(name => {
+            const r = data.releaseCheck?.[name]
+            return <Alert key={name} severity={!r ? 'info' : r.error || r.mismatches.length ? 'error' : 'success'} sx={{ mt: 1 }}>
+              {name === 'backend' ? 'Backend' : 'New UI'}: {r ? `${r.checked}/${r.total} file hashes match · ${r.commit || 'version unknown'}` : 'No release manifest recorded; integrity not checked.'}
+              {!!r?.error && <Typography variant="body2">{r.error}</Typography>}
+              {!!r?.mismatches.length && <Typography variant="body2">Files differ: {r.mismatches.join(', ')}</Typography>}
+            </Alert>
+          })}
+          <Typography variant="caption" display="block" sx={{ mt: 1, overflowWrap: 'anywhere' }}>Original UI fingerprint: {data.releaseCheck.originalUiSha256 || 'not available'}</Typography>
+        </Box>}
         {msg && <Alert severity={msg.ok ? 'success' : 'warning'} sx={{ mb: 1.5 }}
                        onClose={() => setMsg(null)}>{msg.text}</Alert>}
         <Stack spacing={1.5}>

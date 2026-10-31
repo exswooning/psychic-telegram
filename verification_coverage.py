@@ -32,6 +32,17 @@ def pages(v, call, key):
         seen.add(token)
 
 
+FORM_MIME = "application/vnd.google-apps.form"
+
+
+def _is_form(svc, fid, execute=lambda fn: fn()) -> bool:
+    try:
+        return execute(lambda: svc.files().get(fileId=fid, fields="mimeType",
+                                               supportsAllDrives=True).execute()).get("mimeType") == FORM_MIME
+    except Exception:      # noqa: BLE001 - unknown type: let the original error stand
+        return False
+
+
 def add(v, result, key, label, fn):
     try:
         result.setdefault("checks", []).append(fn())
@@ -297,7 +308,14 @@ def drive(v, result):
             from migration_comments import list_threads,differences
             compared=matched=0
             for sid,tid,_ in v._pairs("file",sample=True):
-                a=list_threads(src,sid,v._x)
+                try:
+                    a=list_threads(src,sid,v._x)
+                except Exception as exc:
+                    # A Form has no Drive comments; the API answers 404 for its threads. That is no
+                    # comments, not an unreadable file -- confirmed by its type, never assumed.
+                    if "404" in str(exc) and _is_form(src, sid, v._x):
+                        continue
+                    raise
                 b=list_threads(v.auth.target_drive(v.tgt_user),tid,v._x)
                 diffs=differences(a,b,v.db.target_for_source_id)
                 compared+=len(a);matched+=len(a) if not diffs else 0

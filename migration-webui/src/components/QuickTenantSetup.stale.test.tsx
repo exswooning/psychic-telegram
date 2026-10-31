@@ -6,10 +6,14 @@ import { describe, it, expect, vi } from 'vitest'
 import QuickTenantSetup from './QuickTenantSetup'
 
 const none = vi.hoisted(() => () => Promise.resolve(null))
+const setupResult = vi.hoisted(() => ({ value: {
+  side: 'target', ok: true, phases: [] as { name: string; detail: string }[],
+  domain: 'target2.sarafgloabalexim.com', dryRun: false,
+} }))
 vi.mock('@/api/controlPlane', () => ({
   fetchFullSetupStatus: () => Promise.resolve({
     running: false,
-    result: { side: 'target', ok: true, phases: [], domain: 'target2.sarafgloabalexim.com' },
+    result: setupResult.value,
   }),
   fetchProvisionStatus: () => Promise.resolve({
     running: false, pid: null, created: 1, failed: 0, total: 1, tail: [],
@@ -36,5 +40,14 @@ describe("another tenant's setup", () => {
     await new Promise((r) => setTimeout(r, 50))
     expect(screen.queryByText(/Setup done/)).toBeNull()
     expect(screen.queryByText(/fiona@target2/)).toBeNull()
+  })
+  it('does not offer user provisioning after a successful dry-run preview', async () => {
+    setupResult.value = { side: 'target', ok: true, domain: 'new.example', dryRun: true,
+      phases: [{ name: 'domain-wide delegation (skipped: dry run)', detail: '' }] }
+    render(<MemoryRouter><QuickTenantSetup side="target" view="automated" showProvisionUsers
+                                           initialDomain="new.example" /></MemoryRouter>)
+    expect(await screen.findByText(/Preview complete. No tenant connection/)).toBeInTheDocument()
+    expect(screen.queryByText(/Setup done/)).toBeNull()
+    expect(screen.queryByTestId('build-identity-map')).toBeNull()
   })
 })

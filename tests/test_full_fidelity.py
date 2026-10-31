@@ -103,8 +103,10 @@ class TestEverythingOnByDefault:
         for var in fidelity.OPTIONAL.values():
             monkeypatch.delenv(var, raising=False)
         s = Settings()
-        assert all(getattr(s, flag) for flag in fidelity.OPTIONAL), [
-            f for f in fidelity.OPTIONAL if not getattr(s, f)]
+        # Chat is the one pass left off by default (operator, 2026-10-31).
+        assert not s.migrate_chat
+        assert all(getattr(s, flag) for flag in fidelity.OPTIONAL if flag != "migrate_chat"), [
+            f for f in fidelity.OPTIONAL if f != "migrate_chat" and not getattr(s, f)]
 
     def test_a_healthy_tenant_costs_one_token_per_side_and_drops_nothing(self, settings):
         asked = []

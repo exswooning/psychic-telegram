@@ -376,3 +376,76 @@ def test_generic_retry_cannot_bypass_a_blocked_split_route(
     gmail_migrator._migrate_one_message({"id": mid})
     assert auth.target_gmail(TGT_USER).call_count("messages.insert") == 0
     assert db.get_audit(SRC_USER, mid, "message")["status"] == "FAILED_SPLIT"
+
+
+def test_a_link_the_source_answers_404_for_does_not_block_the_scan(settings):
+    """The source answered 404 for the file, so no run can map it: the link reads the same by
+    either route, and one such message used to hold back the whole mailbox (4 of 758, 695 of 36k)."""
+    import threading
+    from gmail_engine import GmailMigrator
+    from resilience import PermanentAPIError
+    m = object.__new__(GmailMigrator)
+    m.settings, m.source_user = settings, SRC_USER
+    m._scan_lock, m._link_scan = threading.Lock(), {}
+
+    def gone(fn, **kw):
+        raise PermanentAPIError("HTTP 404 (notFound): File not found")
+    m._retry = gone
+    m.auth = type("A", (), {"source_drive": lambda self, u: None})()
+    assert m._split_unknown_link("x") == "external"
+    assert m._link_scan["unreachableLinks"] == 1
+    m._retry = lambda fn, **kw: (_ for _ in ()).throw(PermanentAPIError("HTTP 403 (forbidden)"))
+    import pytest
+    with pytest.raises(PermanentAPIError):
+        m._split_unknown_link("x")
+
+
+BOUNCE = b"""From: Mail Delivery Subsystem <mailer-daemon@googlemail.com>
+To: a@tenanta.com
+Subject: Delivery Status Notification (Failure)
+MIME-Version: 1.0
+Content-Type: multipart/report; report-type=delivery-status; boundary="r"
+
+--r
+Content-Type: text/plain
+
+Your message wasn't delivered.
+--r
+Content-Type: message/rfc822
+
+From: a@tenanta.com
+Subject: the plan
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="m"
+
+--m
+Content-Type: text/plain
+
+See https://drive.google.com/file/d/%s/view
+--m--
+--r--
+"""
+
+# What Gmail's `full` format gives for that bounce: the attached message's own parts unexpanded.
+BOUNCE_FULL = {"payload": {"mimeType": "multipart/report", "parts": [
+    {"mimeType": "text/plain", "body": {"size": 30, "data": base64.urlsafe_b64encode(b"Your message wasn't delivered.").decode()}},
+    {"mimeType": "message/rfc822", "body": {"size": 0}, "parts": [{"mimeType": "multipart/mixed", "body": {"size": 0}}]},
+]}}
+
+
+def test_a_bounce_report_is_scanned_through_its_raw_bytes_and_its_hidden_link_found():
+    """Live: bounce reports blocked two mailboxes' whole hand-off as "no readable parts"."""
+    link = b"1" + b"A" * 32
+    got = classify_payload(BOUNCE_FULL, lambda x: None, fetch_raw=lambda: BOUNCE % link)
+    assert got["linkIds"] == [link.decode()] and got["route"] == "BLOCKED"      # unmapped here: blocked, not lost
+
+
+def test_a_bounce_report_with_no_link_goes_to_the_dms_instead_of_blocking():
+    clean = BOUNCE.replace(b"See https://drive.google.com/file/d/%s/view", b"No links here.")
+    got = classify_payload(BOUNCE_FULL, lambda x: None, fetch_raw=lambda: clean)
+    assert got["route"] == "DMS" and got["linkIds"] == []
+
+
+def test_without_the_raw_bytes_an_unexpanded_part_still_blocks():
+    with pytest.raises(ClassificationIncomplete):
+        classify_payload(BOUNCE_FULL, lambda x: None)

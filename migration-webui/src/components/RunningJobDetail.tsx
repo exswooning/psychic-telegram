@@ -12,6 +12,7 @@
  * those, clearly labelled as the projection it is rather than a measurement.
  */
 import React, { useEffect, useState } from 'react'
+import { MailLinkScans } from './MailLinkScans'
 import {
   Alert, Box, Chip, CircularProgress, Dialog, DialogContent, DialogTitle, Divider,
   IconButton, LinearProgress, Stack, Table, TableBody, TableCell, TableContainer,
@@ -88,6 +89,14 @@ export const RunningJobDetail: React.FC<{
   const progressPct = verifyEstimate?.progressPct ?? jobProgressPct(job.label, job.pct, job.lines)
   const eta = verifyEstimate?.etaSec ?? facts?.etaSec ?? projectedEta(progressPct, job.elapsedSec)
   const t = m?.throughput
+  const movement = isMigrate ? m?.movement : undefined
+  const phase = movement?.stage
+  const phaseProgress = phase ? `Pass ${phase.pass} of ${phase.of}` : 'Counting work'
+  const phaseHint = phase?.services.includes('gmail')
+    ? `${movement?.mail.messagesCopied.toLocaleString()} messages copied; count completion is not 1:1 verification`
+    : phase?.services.includes('drive') && movement?.driveBaseline
+      ? `${movement.driveBaseline.done.toLocaleString()} of ${movement.driveBaseline.total.toLocaleString()} saved baseline IDs mapped; checks may still be running`
+      : 'Per-service progress; an overall percentage is not available'
   return (
     <Dialog open onClose={onClose} maxWidth="md" fullWidth>
       <DialogTitle sx={{ pr: 6 }}>
@@ -114,8 +123,8 @@ export const RunningJobDetail: React.FC<{
               nothing at all, every one of its 76 attempts a failure. A bar
               that reads as a success rate is the misreading to prevent. */}
           <Stat label="Progress"
-                value={typeof progressPct === 'number' ? formatPct(progressPct) : '--'}
-                hint={verifyEstimate ? 'estimated from completed service checks'
+                value={isMigrate ? phaseProgress : typeof progressPct === 'number' ? formatPct(progressPct) : '--'}
+                hint={isMigrate ? phaseHint : verifyEstimate ? 'estimated from completed service checks'
                   : typeof progressPct === 'number' ? 'of the work attempted'
                   : 'not reported'} />
           {verifyEstimate && (
@@ -169,9 +178,12 @@ export const RunningJobDetail: React.FC<{
                     hint="items examined per minute" />
             </>
           )}
-          <Stat label={facts?.etaSec != null && !verifyEstimate ? 'ETA (measured)' : 'ETA (projected)'}
-                value={eta != null ? describeElapsed(Math.round(eta)) : '--'}
-                hint={eta != null ? verifyEstimate
+          <Stat label={isMigrate ? 'Time remaining' : facts?.etaSec != null && !verifyEstimate ? 'ETA (measured)' : 'ETA (projected)'}
+                value={isMigrate ? 'Not yet available' : eta != null ? describeElapsed(Math.round(eta)) : '--'}
+                hint={isMigrate ? movement?.mail.method === 'split'
+                  ? 'DMS reports import progress after the link scan and handoff'
+                  : 'No comparable remaining-work total and phase rate recorded'
+                  : eta != null ? verifyEstimate
                   ? 'early estimate; service sizes vary and it recalculates as checks finish'
                   : 'at the current rate'
                   : 'needs a count or a percentage'} />
@@ -202,6 +214,17 @@ export const RunningJobDetail: React.FC<{
                   hint={`mail and Drive, incl. shared in; users' own Drives held ${bytes(t.expectedBytes)} when counted`} />
           )}
         </Stack>
+        {isMigrate && m?.metricsScope && <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1 }}>
+          API metrics: {m.metricsScope}
+        </Typography>}
+        {isMigrate && m?.mailCountCheck && <Alert severity={m.mailCountCheck.blocked ? 'warning' : 'info'} sx={{ mb: 2 }}>
+          Mail completion: {m.mailCountCheck.scope}. Checked {m.mailCountCheck.checkedAt}.
+          {m.mailCountCheck.users.map((u) => <Typography variant="body2" key={u.source}>
+            {u.source}: source {u.sourceMessages?.toLocaleString() ?? 'unknown'};
+            target {u.targetMessages?.toLocaleString() ?? 'unknown'} — {u.verdict}
+          </Typography>)}
+        </Alert>}
+        {isMigrate && <MailLinkScans scans={m?.mailLinkScans} />}
 
         {verifyMetrics && verifyMetrics.services.length > 0 && (
           <Box sx={{ mb: 2 }}>
@@ -365,6 +388,10 @@ const HowItMoves: React.FC<{ mv: Movement }> = ({ mv }) => {
             Drive · {of(mv.drive.filesCopied, mv.drive.filesOnSource)} files
           </Typography>
           <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>{mv.drive.how}</Typography>
+          {mv.driveBaseline && <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
+            Saved baseline coverage: {mv.driveBaseline.done.toLocaleString()} of {mv.driveBaseline.total.toLocaleString()} IDs
+            {' '}(files, folders and shortcuts); recorded {mv.driveBaseline.takenAt}. Copy mappings, not fidelity.
+          </Typography>}
           {mv.drive.formsRebuilt > 0 && (
             <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
               {mv.drive.formsRebuilt.toLocaleString()} Google file(s) rebuilt through their own API (Forms, and

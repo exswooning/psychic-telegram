@@ -23,8 +23,10 @@ const JobRunner: React.FC<{
   /** Which tenant to act on, and to watch. Omitted means the session's own
    *  -- the behaviour every caller had before this existed. */
   accountId?: number | string
+  extra?: Record<string, unknown>
+  disabled?: boolean
 }> = ({
-  name, spec, onDone, accountId,
+  name, spec, onDone, accountId, extra, disabled = false,
 }) => {
   const [running, setRunning] = useState(false)
   const [lines, setLines] = useState<string[]>([])
@@ -90,7 +92,8 @@ const JobRunner: React.FC<{
     setLines([])
     sinceRef.current = 0
     const res = await runAction(name, confirm, accountId,
-                                name === 'discover' && workers ? { workers: Number(workers) } : undefined)
+                                name === 'discover' && workers
+                                  ? { ...extra, workers: Number(workers) } : extra)
     if (!res.ok) {
       setError(res.error || 'could not start')
       return
@@ -105,7 +108,7 @@ const JobRunner: React.FC<{
     setRunning(true)
     pollRef.current = setInterval(poll, 1000)
     poll()
-  }, [name, poll, accountId, workers])
+  }, [name, poll, accountId, workers, extra])
 
   const handleClick = () => {
     if (spec.destructive) {
@@ -129,10 +132,11 @@ const JobRunner: React.FC<{
           color={spec.destructive ? 'error' : 'primary'}
           size="small"
           startIcon={running ? <StopIcon /> : <RunIcon />}
-          onClick={running ? () => stopJob() : handleClick}
+          onClick={running ? () => stopJob(accountId == null ? undefined : String(accountId)) : handleClick}
           // Keyed by action name so a harness can address any action without
           // matching on button TEXT, which is a label people reword.
           data-testid={`action-${name}`}
+          disabled={disabled && !running}
         >
           {running ? 'Stop' : spec.label}
         </Button>

@@ -25,6 +25,52 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import gcloud_browser_auth as ga  # noqa: E402
 
 
+class TestSigninScreenSummary:
+    def test_unrecognized_prompt_offers_ui_handoff_after_one_minute(self, monkeypatch):
+        monkeypatch.setattr(ga, "HANDOFF", lambda v: None)
+        assert not ga._device_handoff_due(None, False, 100)
+        assert not ga._device_handoff_due(0, False, 59)
+        assert ga._device_handoff_due(0, False, 60)
+        assert not ga._device_handoff_due(0, True, 100)
+        monkeypatch.setattr(ga, "HANDOFF", None)
+        assert not ga._device_handoff_due(0, False, 100)
+    def test_context_reaches_the_ui_log_without_tokens_or_codes(self):
+        page = type("Page", (), {"inner_text": lambda self, selector:
+            "Verify it's you\nEnter code 123456\nhttps://accounts.google.com/auth?code=secret\nabcdefghijklmnopqrstuvwxyz0123456789"})()
+        summary = ga._signin_screen_summary([page])
+        assert "Verify it's you" in summary
+        assert "123456" not in summary and "code=secret" not in summary
+        assert "abcdefghijklmnopqrstuvwxyz" not in summary
+
+    def test_terminal_auth_code_page_is_never_logged(self):
+        page = type("Page", (), {"inner_text": lambda self, selector:
+            "Sign in to the gcloud CLI\ncopy this verification code: SECRET-CODE"})()
+        assert "SECRET-CODE" not in ga._signin_screen_summary([page])
+
+    def test_navigation_failure_is_not_reported_as_success(self):
+        assert "could not be read" in ga._signin_screen_summary([])
+
+    def test_browser_timeout_does_not_fall_through_to_another_wait(self, monkeypatch):
+        import types
+        import dwd_helper
+        page = types.SimpleNamespace(goto=lambda *a, **k: None,
+                                     inner_text=lambda selector: "Choose how to verify",
+                                     screenshot=lambda **k: None)
+        browser = types.SimpleNamespace(new_page=lambda: page,
+            contexts=[types.SimpleNamespace(pages=[page])], close=lambda: None)
+        class Context:
+            def __enter__(self): return object()
+            def __exit__(self, *args): return False
+        monkeypatch.setitem(sys.modules, "playwright.sync_api",
+                            types.SimpleNamespace(sync_playwright=Context))
+        monkeypatch.setattr(dwd_helper, "_installed_browser_launch", lambda *a, **k: browser)
+        monkeypatch.setattr(ga.signin_challenge, "Watcher", lambda log:
+                            types.SimpleNamespace(check=lambda pages: ""))
+        result = ga._drive_browser(types.SimpleNamespace(poll=lambda: None),
+                                   "https://accounts.google.com/", "admin@example.test", "not-a-secret", 0)
+        assert result.startswith("Sign-in timed out.")
+
+
 class _FakeLocator:
     """Mirrors test_dwd_helper.py's _FakeLocator, extended with the
     is_visible/is_enabled/click/type surface _fill_visible actually uses."""
@@ -653,7 +699,65 @@ def test_a_handed_over_sign_in_takes_the_code_pasted_on_the_card(monkeypatch, tm
             pasted.append(code_file.write_text("4/0AbC-d_e\n"))
     monkeypatch.setattr(g.time, "sleep", _sleep)
     proc = _Proc()
-    g._await_device(proc, "https://accounts.google.com/o/oauth2/auth?x", 60)
+    assert g._await_device(proc, "https://accounts.google.com/o/oauth2/auth?x", 60)
     assert proc.stdin.getvalue() == "4/0AbC-d_e\n"
-    assert seen == [{"kind": "signin", "url": "https://accounts.google.com/o/oauth2/auth?x"}, None]
+    assert seen[0]["kind"] == "signin"
+    assert seen[0]["url"] == "https://accounts.google.com/o/oauth2/auth?x"
+    assert seen[0]["expiresAt"] > 0
+    assert seen[-1] is None
     assert not code_file.exists()
+
+
+def test_authentication_details_redact_complete_and_truncated_parameters():
+    detail = ga._safe_auth_detail('Google error https://accounts.google.com/auth?state=private state=leftover code_challenge=private ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890')
+    assert 'Google error' in detail
+    assert 'private' not in detail and 'leftover' not in detail
+    assert 'ABCDEFGHIJKLMNOPQRSTUVWXYZ' not in detail
+
+
+def test_legal_and_access_buttons_are_not_generic_navigation():
+    assert ga._CONSENT_LABELS == ('Continue',)
+
+class TestCloudTermsReview:
+    def test_new_review_is_requested_after_signin_without_legacy_auto_accept(self, monkeypatch):
+        from types import SimpleNamespace
+        events = []
+        page = SimpleNamespace(goto=lambda *a, **k: events.append('open'), wait_for_timeout=lambda n: None)
+        monkeypatch.setattr(ga, 'HANDOFF', lambda v: None)
+        monkeypatch.setattr(ga, 'NOTICE_FILE', '/private/test-response')
+        calls = [dict(category='cloud_console_terms'), None]
+        monkeypatch.setattr(ga.setup_notices, 'current_notice', lambda *a: calls.pop(0))
+        def review(*args):
+            assert args[2] is None
+            events.append('review')
+            return 'approved'
+        monkeypatch.setattr(ga.setup_notices, 'await_review', review)
+        monkeypatch.setattr(ga, '_accept_cloud_console_tos', lambda *a, **k: (_ for _ in ()).throw(AssertionError('legacy acceptance forbidden')))
+        assert ga._review_cloud_console_terms(page, 'nest@target.example', 60) == ''
+        assert events == ['open', 'review']
+
+    def test_declined_terms_stop_setup_and_no_prompt_does_nothing(self, monkeypatch):
+        from types import SimpleNamespace
+        page = SimpleNamespace(goto=lambda *a, **k: None, wait_for_timeout=lambda n: None,
+            inner_text=lambda _: 'Cloud project form', get_by_role=lambda *a, **k: SimpleNamespace(
+                count=lambda: 1 if a[0] == 'textbox' else 0, is_visible=lambda: True))
+        monkeypatch.setattr(ga, 'HANDOFF', lambda v: None)
+        monkeypatch.setattr(ga, 'NOTICE_FILE', '/private/test-response')
+        monkeypatch.setattr(ga.setup_notices, 'current_notice', lambda *a: dict(category='cloud_console_terms'))
+        monkeypatch.setattr(ga.setup_notices, 'await_review', lambda *a: 'declined')
+        assert 'declined' in ga._review_cloud_console_terms(page, 'nest@target.example', 60)
+        monkeypatch.setattr(ga.setup_notices, 'current_notice', lambda *a: None)
+        assert ga._review_cloud_console_terms(page, 'nest@target.example', 60) == ''
+
+    def test_console_loading_is_not_mistaken_for_absent_terms(self, monkeypatch):
+        from types import SimpleNamespace
+        waits = []
+        page = SimpleNamespace(goto=lambda *a, **k: None, wait_for_timeout=waits.append,
+            get_by_role=lambda *a, **k: SimpleNamespace(count=lambda: 0, is_visible=lambda: False))
+        notices = [None] * 4 + [dict(category='cloud_console_terms'), None]
+        monkeypatch.setattr(ga, 'HANDOFF', lambda v: None)
+        monkeypatch.setattr(ga, 'NOTICE_FILE', '/private/test-response')
+        monkeypatch.setattr(ga.setup_notices, 'current_notice', lambda *a: notices.pop(0))
+        monkeypatch.setattr(ga.setup_notices, 'await_review', lambda *a: 'approved')
+        assert ga._review_cloud_console_terms(page, 'nest@target.example', 60) == ''
+        assert waits.count(1000) == 5

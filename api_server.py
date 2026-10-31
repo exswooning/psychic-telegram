@@ -337,14 +337,16 @@ class StartMigration(WriteAction):
     account_id: int | None = None
     dry_run: bool = False
     # Who moves the mail.
-    #   engine  this tool moves all of it. What every caller got before this
-    #           field existed, so it stays the API's own default.
+    #   engine  this tool moves all of it (also used for bounded samples).
     #   dms     Google's Data Migration Service moves all of it; this run
     #           migrates everything else.
-    #   split   experimental: this tool copies changed-link mail, then DMS
-    #           imports the mailbox. Fresh reconciliation checks the overlap.
-    # Left out, it is `engine`; unqualified handoff is never the default.
+    #   split   default for full mail runs: scan all source messages, copy changed-link
+    #           mail, then DMS imports the mailbox. Counts do not prove 1:1 fidelity.
     mail_mode: Literal["engine", "dms", "split"] | None = None
+    # Split mail's link scan: "search" (Gmail's own search names the candidates; only
+    # their bodies are read) or "exhaustive" (every message read). None = this
+    # server's MAIL_LINK_SCAN, "search" unless set. Ignored by engine and dms.
+    mail_link_scan: Literal["search", "exhaustive"] | None = None
     # A SAMPLE run: consider at most this many items of each service per user
     # (the first N found), and leave the users UNFINISHED so the next full
     # migration still copies the rest. For a quick copy small enough to check one to
@@ -2033,6 +2035,13 @@ def _account_argv(account_id: int | None) -> list[str]:
 _ALL_SERVICES = ("drive", "gmail", "calendar", "chat", "contacts", "tasks")
 
 
+def _expand_all(services: list[str]) -> list[str]:
+    """`all` as the engine reads it: every service, Chat only when MIGRATE_CHAT turns it on."""
+    from config import chat_by_default
+    return [s for s in _ALL_SERVICES if s != "chat" or chat_by_default()] \
+        if "all" in services else list(services)
+
+
 def _mail_plan(services: list[str], mail_mode: str, rewrite: bool = True) -> tuple[list[str], dict | None, bool]:
     """(services, env, ordered) for who moves the mail.
 
@@ -2053,7 +2062,7 @@ def _mail_plan(services: list[str], mail_mode: str, rewrite: bool = True) -> tup
     unrewritten content; post-import reconciliation detects overlap, duplicate
     identities and label drift instead of trusting DMS completion counters.
     """
-    wanted = list(_ALL_SERVICES) if "all" in services else list(services)
+    wanted = _expand_all(services)
     env = None
     if mail_mode == "dms":
         # Excluding mail is the whole point: running both inserts every message
@@ -2068,12 +2077,17 @@ def _mail_plan(services: list[str], mail_mode: str, rewrite: bool = True) -> tup
 
 
 def _default_mail_mode(body: "StartMigration") -> str:
-    """DMS mailbox overlap is not a proven per-message handoff.
+    """Full mail runs scan/rewrite link mail first, then hand off to DMS.
 
-    Keep split available as an explicit choice while sandbox qualification is
-    incomplete. Callers omitting a mode get the tracked engine.
+    A bounded sample must remain a bounded engine job. Counts are accounting,
+    not a release of any outstanding full-verification findings.
     """
-    return "engine"
+    wanted = set(_expand_all(body.services))
+    # Without Drive in the run there is nothing to rewrite links against.
+    if body.sample is not None or not {"gmail", "drive"} <= wanted:
+        return "engine"
+    best = ab_default()       # the benchmark's verified winner, when there is one
+    return (best or {}).get("mailMode") or "split"
 
 
 def _export_identities_csv(account_id: int | None) -> tuple[str, int]:
@@ -2390,6 +2404,8 @@ def _dispatch_verification_repairs():
         t = _REPAIR_THREADS.get(aid)
         if not path or not os.path.isfile(path) or (t is not None and t.is_alive()):
             continue
+        if _ab_running_for(aid):
+            continue
         d = MigrationDB(path)
         try:
             if not verification_repairs.enabled(d):
@@ -2416,6 +2432,22 @@ def _dispatch_verification_repairs():
         except Exception:
             job_admission.release(aid, "verify")
             raise
+
+
+def _ab_running_for(account_id, progress_path: str | None = None) -> bool:
+    """Is a same-user A/B (ab_transfer.py) alive for this account? It is not an admitted job, so
+    between its own steps the account looks idle and the backlog verifier slipped in: it repaired
+    (copied mail into) the user under test and overwrote its verification rows mid-comparison.
+    A progress file with no account (written before it carried one) holds every account back."""
+    try:
+        with open(progress_path or os.path.join(HERE, "logs", "ab_progress.json")) as fh:
+            p = json.load(fh)
+        if not p.get("running") or not p.get("pid"):
+            return False
+        os.kill(int(p["pid"]), 0)
+    except (OSError, ValueError):
+        return False
+    return p.get("accountId") in (None, account_id)
 
 
 async def _verification_repair_loop():
@@ -2468,6 +2500,8 @@ async def migrate_start(body: StartMigration, op: Operator = Depends(operator)):
     # Resolved once and written back, so the audit row and the DMS follow-on below both see
     # what this run actually does rather than "not said".
     body.mail_mode = body.mail_mode or _default_mail_mode(body)
+    if not body.transfer_mode and (best := ab_default()) and best["mode"] in ("server_side", "download_upload"):
+        body.transfer_mode = best["mode"]
     if body.sample is not None and body.mail_mode != "engine":
         # Split leaves the rest of the mail to the DMS and dms takes all of it, so
         # either way the mail could not be compared one to one -- the reason to
@@ -2504,6 +2538,8 @@ async def migrate_start(body: StartMigration, op: Operator = Depends(operator)):
         env = {**(env or os.environ), "TRANSFER_MODE": body.transfer_mode}
     if body.redo_links:
         env = {**(env or os.environ), "REDO_UNREWRITTEN_LINKS": "true", "REWRITE_DRIVE_LINKS": "true"}
+    if body.mail_link_scan and body.mail_mode == "split":
+        env = {**(env or os.environ), "MAIL_LINK_SCAN": body.mail_link_scan}
     env = _tuning_env(body, env)
     left_off: list[str] = []
     if not body.dry_run:
@@ -2930,6 +2966,45 @@ async def copy_safety_latest(account_id: int | None = None, op: Operator = Depen
             return None
         with open(found[-1]) as fh:
             return {**_json.load(fh), "file": os.path.basename(found[-1])}
+    return await _off_loop(_read)
+
+
+# -- Move route probe (move_probe.py) ---------------------------------------------------
+class MoveProbeStart(WriteAction):
+    account_id: int | None = None
+
+
+@app.post("/api/v2/move-probe/run")
+async def move_probe_run(body: MoveProbeStart, op: Operator = Depends(operator)):
+    """Try moving a one-byte file between the two tenants through a shared drive, by each route a
+    move could use (move_probe.py). An admitted job named `move-probe`; it writes to the source
+    only when that is a declared sandbox, and says so when it is not."""
+    account_id = _resolve_account(body, op)
+    argv = [PY, "move_probe.py"] + _account_argv(account_id)
+    return await _gated(op, "move_probe.run", body, "move-probe",
+                        lambda: _run_admitted(argv, account_id, "move-probe"))
+
+
+@app.get("/api/v2/move-probe")
+async def move_probe_latest(account_id: int | None = None, op: Operator = Depends(operator)):
+    """What the last probe of THIS pair found, per route, and whether a move run may be offered:
+    only a direct pass, the one route the engine moves by."""
+    require_login(op)
+    aid = account_id if account_id is not None else op.account_id
+    _require_account_access(aid, op)
+
+    def _read():
+        import move_probe
+        from config import Settings
+        from db import MigrationDB
+        st = Settings(account_id=aid)
+        path = _ledger_path(aid)
+        results = move_probe.latest(MigrationDB(path), st) if os.path.isfile(path) else []
+        by = {r["route"]: r for r in results}
+        return {"accountId": aid, "pair": move_probe.pair_key(st), "results": results,
+                "moveAvailable": bool((by.get("direct") or {}).get("ok")),
+                "otherRouteOnly": bool((by.get("source-drive") or {}).get("ok")
+                                       and not (by.get("direct") or {}).get("ok"))}
     return await _off_loop(_read)
 
 
@@ -4012,6 +4087,108 @@ async def benchmark_running(op: Operator = Depends(operator)):
     return await _off_loop(_check)
 
 
+def ab_view(progress_path: str, results_path: str, now: float | None = None) -> dict:
+    """The controlled A/B (ab_transfer.py): live progress, a real ETA, and the ranked results.
+
+    The ETA exists because this run's total is known before it starts (arms = transfer modes x
+    mail modes), unlike benchmark_run.py's open-ended walk. It is mean(finished arms) for the
+    arms still to go, less what the current one has already used -- and absent until one arm
+    has finished, because one measurement is the least a mean can be made of.
+    """
+    now = time.time() if now is None else now
+    out: dict = {"running": False, "progress": None, "results": None, "ranking": []}
+    try:
+        with open(progress_path) as fh:
+            p = json.load(fh)
+    except (OSError, ValueError):
+        p = None
+    if p:
+        alive = False
+        if p.get("running") and p.get("pid"):
+            try:
+                os.kill(int(p["pid"]), 0)
+                alive = True
+            except (OSError, ValueError):
+                alive = False        # a hard kill leaves running=true behind
+        durations = [d for d in (p.get("durations") or []) if isinstance(d, (int, float))]
+        total, done = int(p.get("total") or 0), int(p.get("done") or 0)
+        eta = None
+        if alive and p.get("parallel") and p.get("phase") == "side by side":
+            pass        # arms overlap, so a mean of their durations says nothing about the finish
+        elif alive and durations and total > done:
+            mean = sum(durations) / len(durations)
+            used = max(0.0, now - float(p.get("armStartedAt") or now))
+            eta = round(max(mean - used, 0.0) + mean * (total - done - 1))
+        out["running"] = alive
+        out["progress"] = {**{k: p.get(k) for k in ("startedAt", "finishedAt", "updatedAt", "current",
+                                                      "users", "corpus", "total", "done", "error")},
+                           "alive": alive, "etaSeconds": eta, "armsFinished": len(durations),
+                           "meanArmSeconds": round(sum(durations) / len(durations)) if durations else None,
+                           "arms": p.get("arms") or [], "phase": p.get("phase"),
+                           "skipped": p.get("skipped") or [],
+                           "etaNote": None if eta is not None else (
+                               "arms run side by side; the slowest sets the finish, then the leader is re-timed alone"
+                               if alive and p.get("parallel") and p.get("phase") == "side by side" else
+                               "no estimate until one arm has finished" if alive else None)}
+    try:
+        with open(results_path) as fh:
+            res = json.load(fh)
+    except (OSError, ValueError):
+        res = None
+    if res:
+        runs = res.get("runs") or []
+        out["results"] = {"source": res.get("source"), "runs": runs}
+        # Fast only counts if it also finished clean. A Drive-only arm has no 1:1 verdict, so it
+        # is "clean" when nothing failed and the target kept every file it was compared on.
+        def clean(r):
+            if "clean" in r and r.get("mailMode"):
+                return bool(r["clean"])
+            f = r.get("fidelity") or {}
+            return r.get("exit") == 0 and not r.get("failed") and not f.get("missing_on_target")
+        out["ranking"] = sorted(
+            ({"arm": r["mode"] + (" + " + r["mailMode"] if r.get("mailMode") else ""),
+              "mode": r["mode"], "mailMode": r.get("mailMode"),
+              "seconds": r.get("seconds"), "failed": r.get("failed"), "clean": clean(r),
+              "timing": r.get("timing"), "contendedSeconds": r.get("contendedSeconds"),
+              "corpus": r.get("corpus"), "_key": _ab_rank_key(r),
+              **ab_errors(r),
+              "verdicts": r.get("verdicts") or {},
+              "differences": r.get("differences") or {}, "dms": r.get("dms")} for r in runs),
+            key=lambda a: a.pop("_key"))
+        best = next((a for a in out["ranking"] if a["judged"] and a["mailMode"]), None)
+        out["best"] = best and {k: best.get(k) for k in ("arm", "mode", "mailMode", "errors", "seconds",
+                                                         "errorsPer1k", "secondsPer100")}
+        out["finishedAt"] = (p or {}).get("finishedAt") if not out["running"] else None
+        out["skipped"] = res.get("skipped") or []
+    return out
+
+
+def ab_errors(r: dict) -> dict:
+    import ab_transfer
+    return ab_transfer.arm_errors(r)
+
+
+def _ab_rank_key(r: dict) -> tuple:
+    import ab_transfer
+    return ab_transfer.rank_key(r)
+
+
+AB_RESULTS = os.path.join(HERE, "logs", "ab_results.md.json")
+
+
+def ab_default(results_path: str = AB_RESULTS) -> dict | None:
+    """The benchmark's winner -- fewest errors, then fastest, among arms whose own check ran --
+    which new runs use when they name no transfer or mail mode (operator, 2026-10-31: "set the
+    default now"). None while no arm qualifies, and runs keep the configured defaults."""
+    return ab_view(os.devnull, results_path).get("best")
+
+
+@app.get("/api/v2/benchmark/ab")
+async def benchmark_ab(op: Operator = Depends(operator)):
+    require_reader(op)
+    return await _off_loop(ab_view, os.path.join(HERE, "logs", "ab_progress.json"), AB_RESULTS)
+
+
 # ======================================================================
 # AI diagnostics
 #
@@ -4731,6 +4908,34 @@ class FullSetupCode(WriteAction):
     # exclude=True: kept out of the audit log like a password -- it signs gcloud in.
     code: str = Field(min_length=4, max_length=512, pattern=r"^[A-Za-z0-9/_.~+=-]+$",
                       exclude=True)
+
+
+class FullSetupNotice(WriteAction):
+    account_id: int | None = None
+    side: Literal["source", "target"]
+    request_id: str = Field(pattern=r"^[a-f0-9]{48}$")
+    notice_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
+    decision: Literal["approve", "decline"]
+
+
+@app.post("/api/v2/full-setup/notice")
+async def full_setup_notice(body: FullSetupNotice, op: Operator = Depends(operator)):
+    """Audited, account/run-specific approval, never a saved blanket acceptance."""
+    require_admin(op)
+    aid = _resolve_account(body, op)
+
+    def _respond() -> tuple[bool, str]:
+        if _full_setup_pid(body.side, aid) is None:
+            return False, f"no {body.side} setup is running"
+        import setup_notices
+        try:
+            setup_notices.write_decision(
+                _full_setup_state_path(body.side, aid) + ".progress",
+                body.request_id, body.notice_hash, body.decision)
+        except (OSError, ValueError, KeyError) as exc:
+            return False, str(exc)
+        return True, "Notice response recorded for this setup only; Google must still confirm the next step."
+    return await _gated(op, "full_setup.notice", body, body.side, _respond)
 
 
 @app.post("/api/v2/full-setup/code")
@@ -6008,7 +6213,8 @@ def _movement(conn, account_id, run_users=(), qs="") -> dict:
                 stage = {"pass": int(m.group(1)), "of": int(m.group(2)), "services": m.group(3).strip()}
     except Exception:      # noqa: BLE001 - no log: no stage, never a guess
         stage = None
-    return {"stage": stage,
+    from migration_progress import drive_baseline_coverage
+    return {"stage": stage, "driveBaseline": drive_baseline_coverage(conn, run_users),
             "drive": {"method": mode, "how": drive_how, "filesCopied": files,
                       "filesOnSource": exp["f"] if exp else 0, "formsRebuilt": forms},
             "mail": {"method": "split" if split else "engine", "how": mail_how,
@@ -6958,7 +7164,9 @@ async def migration_metrics(account_id: int, history: int = 60, users: str = "",
             return out
         samples = _this_run(samples)
 
-        latest = samples[0]
+        from migration_progress import reporting_process
+        latest = reporting_process(samples)
+        out["metricsScope"] = "busiest fresh reporting process; item totals include all processes"
         out["latest"] = {
             "recordedAt": latest.get("recordedAt"),
             "elapsedSec": latest.get("elapsed_sec", 0),
@@ -7101,6 +7309,16 @@ async def migration_metrics(account_id: int, history: int = 60, users: str = "",
                                          "bytesMovedTotal": moved, "expectedBytes": exp["b"],
                                          "remainingBytes": max(0, exp["b"] - moved) if exp["b"] else 0}
                 out["movement"] = _movement(conn, account_id, run_users, qs)
+                if conn.execute("SELECT 1 FROM sqlite_master WHERE name='mail_count_checks'").fetchone():
+                    counts = conn.execute("SELECT report FROM mail_count_checks ORDER BY checked_at DESC LIMIT 1").fetchone()
+                    if counts:
+                        out["mailCountCheck"] = json.loads(counts[0])
+                if conn.execute("SELECT 1 FROM sqlite_master WHERE name='mail_link_scans'").fetchone():
+                    # The latest scan per user: search-first or exhaustive, what it read.
+                    out["mailLinkScans"] = [{"source": r[0], **json.loads(r[1])} for r in conn.execute(
+                        "SELECT source_user, report FROM mail_link_scans s WHERE started_at = "
+                        "(SELECT MAX(started_at) FROM mail_link_scans WHERE source_user=s.source_user) "
+                        "ORDER BY source_user").fetchall()]
                 # Same grouped-by-cause failures the Migrations detail page already shows
                 # as a table (see _migration_detail, same query) -- reused here for the
                 # Metrics page's pie chart, so both name the same causes the same way and

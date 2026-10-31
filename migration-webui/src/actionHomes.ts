@@ -47,6 +47,7 @@ export const CLAIMED_ELSEWHERE = [
   'shared_drives_inventory', 'shared_drives_migrate', 'staging_drives_cleanup',
   'sso_inventory', 'sso_migrate', 'reconcile', 'dms_import',
   'groups_inventory', 'groups_migrate_dry', 'groups_migrate',
+  'configuration_check', 'configuration_apply_groups',
   // Mission Control / Wizard / Scope / Identities
   //
   // NOT 'migrate'. Mission Control's button launches through api_server,

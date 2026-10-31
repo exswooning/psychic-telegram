@@ -1,3 +1,4 @@
+import BenchmarkPill from './BenchmarkPill'
 import { appLink, workspaceUI } from '@/workspace'
 import React, { useEffect, useRef, useState } from 'react'
 import { useNavigate, useLocation } from 'react-router-dom'
@@ -106,6 +107,7 @@ const NAV_ITEMS = [
   // first is a step between them and the answer. The endpoint resolves
   // the account -- a client's own, an operator's running one.
   { path: '/metrics', label: 'Metrics', icon: <MetricsIconNav /> , group: 'Check' },
+  { path: '/benchmarks', label: 'Benchmarks', icon: <MetricsIconNav /> , group: 'Check' },
   { path: '/jobs', label: 'Jobs', icon: <JobsIconNav /> , group: 'Migrate' },
   { path: '/mission-control', label: 'Mission Control', icon: <MissionIcon /> , group: 'Migrate' },
   { path: '/pipeline', label: 'Pipeline', icon: <PipelineIcon /> , group: 'Migrate' },
@@ -510,6 +512,8 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
               )}
             </Box>
           )}
+
+          <BenchmarkPill />
 
           <Box sx={{ flexGrow: 1 }} />
           <ViewingAccountSelect />

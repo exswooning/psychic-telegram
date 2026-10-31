@@ -522,6 +522,21 @@ ACTIONS: dict[str, dict] = {
                  "would get. Reads only.",
         "argv": [PY, "groups_engine.py", "--inventory"],
     },
+    "configuration_check": {
+        "label": "Inspect groups and storage",
+        "blurb": "Read both tenants' group metadata, aliases, member roles and settings; "
+                 "retain exact reported storage bytes for mapped users. No tenant writes.",
+        "argv": [PY, "workspace_configuration.py"],
+    },
+    "configuration_apply_groups": {
+        "label": "Apply reviewed group configuration",
+        "blurb": "Apply the fresh reviewed plan to TARGET groups, aliases, roles and settings, "
+                 "then re-read both tenants. Can change who can access or post to groups. "
+                 "No source writes, deletions, archive import or storage-policy changes.",
+        "argv": [PY, "workspace_configuration.py", "--apply-groups"],
+        "destructive": True,
+        "confirm": "APPLY GROUP CONFIGURATION",
+    },
     "groups_migrate_dry": {
         "label": "Migrate groups (dry run)",
         "blurb": "What would be created, without writing. Groups are the "
@@ -531,9 +546,8 @@ ACTIONS: dict[str, dict] = {
     },
     "groups_migrate": {
         "label": "Migrate groups",
-        "blurb": "Create the groups and their members on the target. Group "
-                 "settings (who can post) are not copied -- target defaults "
-                 "apply, which are more restrictive rather than less.",
+        "blurb": "Create groups and members on the target. This legacy pass does not "
+                 "copy group settings; use Inspect groups and storage to review configuration parity.",
         "argv": [PY, "groups_engine.py"],
         "confirm": "GROUPS",
     },
@@ -5578,6 +5592,20 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"error": scope_err}, 403)
                 return
             self._json(storage_summary_payload(aid))
+        elif path == "/api/configuration-report":
+            # Saved evidence only. A UI poll must never launch Google API scans.
+            from workspace_configuration import load_report
+            from config import Settings as _S
+            aid, scope_err = resolve_target_account(
+                self._account_id(), query.get("account", [""])[0] or self._on_screen())
+            if scope_err:
+                self._json({"error": scope_err}, 403)
+                return
+            try:
+                st = _S(account_id=aid) if aid else _S()
+                self._json({"report": load_report(st)})
+            except (OSError, ValueError) as exc:
+                self._json({"error": str(exc), "report": None}, 500)
         elif path == "/api/licence_preflight":
             self._json(licence_preflight(self._on_screen()))
         elif path == "/api/identities":
@@ -6537,6 +6565,13 @@ class Handler(BaseHTTPRequestHandler):
             if err:
                 self._json({"ok": False, "error": err}, 400)
                 return
+
+        if name == "configuration_apply_groups":
+            reviewed = str(body.get("review_hash") or "")
+            if len(reviewed) != 64 or any(c not in "0123456789abcdef" for c in reviewed):
+                self._json({"ok": False, "error": "Inspect and review the configuration plan first."}, 400)
+                return
+            env["CONFIGURATION_REVIEW_HASH"] = reviewed
 
         if spec.get("parallel"):
             # A dedicated Job instance so it does not collide with the

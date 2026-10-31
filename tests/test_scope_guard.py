@@ -1675,7 +1675,8 @@ class TestBlockedIsNotFailed:
 
         src = inspect.getsource(main._services_already_done)
         assert 'r["status"] != "DONE"' in src
-        assert "_services_already_done" in inspect.getsource(main.run_batch)
+        assert "_pass_user_pairs" in inspect.getsource(main.run_batch)
+        assert "_services_already_done" in inspect.getsource(main._pass_user_pairs)
 
 
 class TestDriveFallsBackBetweenCopyStrategies:

@@ -104,7 +104,7 @@ def _newly_supported(rows):
     for row in rows:
         service = row.get("service")
         if service == "drive" and any(c.get("key") in ("drive.permissions", "drive.externalSharing")
-                and c.get("status") == "NOT_VERIFIED" for c in row.get("checks", [])):
+                and c.get("status") == "NOT_VERIFIED" for c in (row.get("checks") or [])):
             return True
         if service in ("tasks", "drive", "calendar", "directory") and (row.get("differences") or row.get("duplicates")):
             return True

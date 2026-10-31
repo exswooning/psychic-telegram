@@ -347,10 +347,15 @@ def read_metrics(page) -> dict:
     j = body.find("Import data")
     seg = body[j:j + 900] if j >= 0 else body
     status = "unknown"
-    for s in ("In progress", "Stopped", "complete", "Not started"):
-        if s.lower() in seg.lower():
-            status = s
-            break
+    # Whole words only: the setup page's "ensure you have completed all the previous steps" read as
+    # "complete", so a console with no import at all reported one finished (live, 2026-10-31).
+    if "To start data import" in seg:
+        status = "Not started"
+    else:
+        for s in ("In progress", "Stopped", "complete", "Not started"):
+            if re.search(rf"\b{s}\b", seg, re.IGNORECASE):
+                status = s
+                break
     metrics = {}
     for label in _METRIC_FIELDS:
         m = re.search(re.escape(label) + r"\s+([\d,]+)", seg)
@@ -448,7 +453,8 @@ def rows_off_domain(identities: str, target_domain: str) -> int:
 
 
 def start(source_domain: str, source_admin: str, timeout: int,
-          headful: bool, dry_run: bool, identities: str | None = None) -> dict:
+          headful: bool, dry_run: bool, identities: str | None = None,
+          fresh: bool = False) -> dict:
     """Drive the Google Workspace email data import as far as it can go.
 
     Stops before Step 4 unless --apply. Step 1 is also a genuine wall: it
@@ -477,14 +483,17 @@ def start(source_domain: str, source_admin: str, timeout: int,
             return result
         result["did"].append("opened the Workspace email import page")
 
-        # A previously stopped import leaves Step 4 on a 'Stopped -- your
-        # import is complete' screen that offers 'Exit import' (back to the
-        # setup page) or 'Run delta import', but NOT 'Start import'. To run a
-        # fresh import, click 'Exit import' first to return to the setup
-        # steps. Without this a re-run reported "no Start import button".
-        exit_btn = _find_first(page, ['button:has-text("Exit import")'])
+        # A finished or stopped import leaves Step 4 on a 'Complete' screen that offers 'Exit
+        # import' or 'Run delta import', never 'Start import'. Exit asks "Exit and delete import?"
+        # -- the old map, settings and results are deleted -- and until 2026-10-31 nothing
+        # confirmed it, so every run landed back on the old import and a new user could never
+        # be added. Only a FRESH import (new, empty target accounts: the A/B's arms) exits;
+        # otherwise the delta below continues the existing import without duplicating mail.
+        exit_btn = _find_first(page, ['button:has-text("Exit import")']) if fresh and not dry_run else None
         if exit_btn is not None:
             exit_btn.click()
+            page.wait_for_timeout(3000)
+            page.get_by_role("button", name="Exit and delete import").first.click(timeout=15000)
             page.wait_for_timeout(5000)
             # Exit import returns to the Data Import landing, not the setup
             # steps, so re-navigate and let the console repaint before the
@@ -567,7 +576,9 @@ def start(source_domain: str, source_admin: str, timeout: int,
         # --- Step 2: the import map ------------------------------------
         result["step"] = "step2-map"
         if identities and os.path.isfile(identities):
-            n, path = import_map_csv(identities, "/tmp/dms-import-map.csv")
+            # Named after its identities file, so the console's own file name says whose map it holds.
+            n, path = import_map_csv(identities, os.path.join(
+                "/tmp", "dms-map-" + os.path.splitext(os.path.basename(identities))[0] + ".csv"))
             head = _find_first(page, [
                 '[aria-expanded]:has-text("Upload data import maps")',
                 f'text="{STEP2_HEADING}"'])
@@ -585,11 +596,16 @@ def start(source_domain: str, source_admin: str, timeout: int,
             # Any .csv already shown means a map is uploaded (processing or
             # done); re-uploading would restart the slow job, so skip it and
             # let the wait loop below ride out any remaining processing.
-            if ".csv" in s2seg:
+            ours = os.path.basename(path).lower() in s2seg
+            if ".csv" in s2seg and (ours or not fresh):
                 state = "processing" if "processing" in s2seg else "processed"
                 result["did"].append(f"import map already uploaded ({state})")
                 already = True
             else:
+                # A fresh import must carry ITS users: live, the second arm kept the first arm's
+                # map ("already uploaded") and would have imported the wrong mailbox.
+                if ".csv" in s2seg:
+                    result["did"].append("replaced another run's import map")
                 already = False
             # Set the hidden <input type=file> directly. This once looked like
             # it did nothing, but the real fault was a headerless CSV -- with
@@ -633,7 +649,9 @@ def start(source_domain: str, source_admin: str, timeout: int,
                     if "processing" not in seg.lower():
                         done = True
                         break
-                if done:
+                if done and already:
+                    result["did"].append("kept the import map already there")
+                elif done:
                     result["did"].append(
                         f"uploaded and processed an import map of {n} users")
                 else:
@@ -667,6 +685,17 @@ def start(source_domain: str, source_admin: str, timeout: int,
                     result["did"].append(f"enabled {label!r}")
             except Exception:          # noqa: BLE001
                 logging.getLogger(__name__).debug("ignored an error", exc_info=True)
+        # Ticked with no labels, "Exclude specific labels" keeps Save disabled ("Labels are
+        # required"), so Start import never enables (live, 2026-10-31). Read the box's own state:
+        # clicking its text blindly ticked it on a page where it had been off.
+        excl = page.get_by_role("checkbox", name="Exclude specific labels")
+        try:
+            if excl.count() and excl.first.is_checked():
+                excl.first.uncheck(timeout=4000)
+                page.wait_for_timeout(1500)
+                result["did"].append("unticked 'Exclude specific labels' (it had no labels)")
+        except Exception:          # noqa: BLE001
+            logging.getLogger(__name__).debug("ignored an error", exc_info=True)
         if _set_earliest_date(page):
             result["did"].append("set the start date to the earliest offered")
         else:
@@ -892,10 +921,10 @@ def approve_as_source(timeout: int, headful: bool) -> list[str]:
 
 # How often to read a running import. Each read is a fresh sign-in, and an
 # import runs for hours, so this is slow on purpose.
-DONE_POLL_SEC = 900
+DONE_POLL_SEC = int(os.getenv("DMS_POLL_SEC", "900"))
 
 
-def wait_then_tally(minutes: int, timeout: int, headful: bool) -> int:
+def wait_then_tally(minutes: int, timeout: int, headful: bool, tally: bool = True) -> int:
     """Read the import's status until Google says it has stopped running, then
     tally both tenants (tally.py, every user) so the result is counted without
     anyone asking. Each read also refreshes the cached metrics the UI shows.
@@ -909,6 +938,8 @@ def wait_then_tally(minutes: int, timeout: int, headful: bool) -> int:
         state = got.get("status", "unknown")
         log(f"import status: {state} {got.get('metrics') or ''}")
         if state in ("complete", "Stopped"):
+            if not tally:      # the caller judges the result itself (ab_transfer's own 1:1 check)
+                return 0 if state == "complete" else 1
             if state == "complete":
                 from config import Settings
                 from auth import AuthManager
@@ -917,6 +948,11 @@ def wait_then_tally(minutes: int, timeout: int, headful: bool) -> int:
                 st = Settings()
                 db = MigrationDB(st.db_path)
                 try:
+                    from mail_completion import compare_mail_counts, full_mail_check
+                    if not full_mail_check(st):
+                        checked = compare_mail_counts(AuthManager(st), db, st, progress=log)
+                        log("DMS count completion (not 1:1): " + json.dumps(checked))
+                        return 2 if checked["blocked"] else 0
                     checked = reconcile_dms(AuthManager(st), db, st, progress=log)
                     log("DMS delivery reconciliation: " + json.dumps(checked, default=str))
                     if checked["blocked"]:
@@ -931,6 +967,24 @@ def wait_then_tally(minutes: int, timeout: int, headful: bool) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """One console, one import at a time, across processes: a second run arriving mid-import saw
+    "In progress", called it started, and would report someone else's import as its own."""
+    if "--apply" not in (argv if argv is not None else sys.argv[1:]):
+        return _main(argv)
+    import fcntl
+    lock = open(os.getenv("DMS_LOCK_FILE", "/tmp/bitport-dms.lock"), "w")
+    try:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            log("another import is driving the console; waiting for it to finish")
+            fcntl.flock(lock, fcntl.LOCK_EX)
+        return _main(argv)
+    finally:
+        lock.close()
+
+
+def _main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--source-domain", default=os.getenv("SOURCE_DOMAIN", ""))
     ap.add_argument("--target-admin", default=os.getenv("TARGET_ADMIN", ""))
@@ -954,6 +1008,12 @@ def main(argv: list[str] | None = None) -> int:
                     help="actually drive the flow (default: stop at the "
                          "setup control without moving mail)")
     ap.add_argument("--json", action="store_true")
+    ap.add_argument("--fresh-import", action="store_true",
+                    help="exit and DELETE a finished import first, so this map starts a new one "
+                         "(only for new, empty target accounts -- otherwise a delta import continues)")
+    ap.add_argument("--no-tally", action="store_true",
+                    help="with --until-done: stop when Google reports the import complete; no "
+                         "reconcile or whole-tenant tally")
     ap.add_argument("--status", action="store_true",
                     help="read the import's live counters and cache them, "
                          "then exit (does not touch the import)")
@@ -984,7 +1044,7 @@ def main(argv: list[str] | None = None) -> int:
     def _run():
         return start(args.source_domain, args.source_admin or args.target_admin,
                      args.timeout, args.headful, dry_run=not args.apply,
-                     identities=identities)
+                     identities=identities, fresh=args.fresh_import)
 
     out = _run()
     if args.apply and out.get("step") == "step1-pending":
@@ -1020,7 +1080,12 @@ def main(argv: list[str] | None = None) -> int:
         if not out["ok"]:
             print(out["manual"])
     if args.until_done and out.get("started"):
-        return wait_then_tally(args.until_done, args.timeout, args.headful)
+        return wait_then_tally(args.until_done, args.timeout, args.headful, tally=not args.no_tally)
+    if args.apply and args.until_done:
+        # Asked to see it through and nothing started: not a success. Exiting 0 here made the A/B
+        # record an arm's mail import "done" when Start import had stayed disabled.
+        log(f"the import did not start ({out.get('step')}: {out.get('detail')})")
+        return 3
     return 0 if out["ok"] else 1
 
 
