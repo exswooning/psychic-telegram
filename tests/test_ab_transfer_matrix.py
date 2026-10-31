@@ -405,3 +405,15 @@ def test_an_arm_skips_the_duplicate_acceptance_check_and_keeps_receipts_unless_t
     st = types.SimpleNamespace(db_path="x", target_domain="t.x", scratch_dir="s", target_admin="a@t.x")
     AB.one_mode("server_side", st, None, ["a@s.x"], ["a@t.x"], {"sample": {}}, "engine", "a-ab1@t.x")
     assert (seen["FIRST_PASS_ACCEPTANCE"], seen["MAIL_COMPLETION_CHECK"]) == (acceptance, check)
+
+
+def test_an_arm_registers_as_its_own_job_so_it_is_never_judged_as_a_migration():
+    import inspect
+
+    import main
+    import run_watch
+    src = inspect.getsource(AB.one_mode)
+    assert 'env["BITPORT_JOB_NAME"] = "ab-migrate"' in src
+    assert 'os.getenv("BITPORT_JOB_NAME")' in inspect.getsource(main.cmd_migrate) or \
+           'os.getenv("BITPORT_JOB_NAME")' in inspect.getsource(main)
+    assert "ab-migrate" not in run_watch.MIGRATION_JOBS

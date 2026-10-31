@@ -2969,6 +2969,45 @@ async def copy_safety_latest(account_id: int | None = None, op: Operator = Depen
     return await _off_loop(_read)
 
 
+# -- Move route probe (move_probe.py) ---------------------------------------------------
+class MoveProbeStart(WriteAction):
+    account_id: int | None = None
+
+
+@app.post("/api/v2/move-probe/run")
+async def move_probe_run(body: MoveProbeStart, op: Operator = Depends(operator)):
+    """Try moving a one-byte file between the two tenants through a shared drive, by each route a
+    move could use (move_probe.py). An admitted job named `move-probe`; it writes to the source
+    only when that is a declared sandbox, and says so when it is not."""
+    account_id = _resolve_account(body, op)
+    argv = [PY, "move_probe.py"] + _account_argv(account_id)
+    return await _gated(op, "move_probe.run", body, "move-probe",
+                        lambda: _run_admitted(argv, account_id, "move-probe"))
+
+
+@app.get("/api/v2/move-probe")
+async def move_probe_latest(account_id: int | None = None, op: Operator = Depends(operator)):
+    """What the last probe of THIS pair found, per route, and whether a move run may be offered:
+    only a direct pass, the one route the engine moves by."""
+    require_login(op)
+    aid = account_id if account_id is not None else op.account_id
+    _require_account_access(aid, op)
+
+    def _read():
+        import move_probe
+        from config import Settings
+        from db import MigrationDB
+        st = Settings(account_id=aid)
+        path = _ledger_path(aid)
+        results = move_probe.latest(MigrationDB(path), st) if os.path.isfile(path) else []
+        by = {r["route"]: r for r in results}
+        return {"accountId": aid, "pair": move_probe.pair_key(st), "results": results,
+                "moveAvailable": bool((by.get("direct") or {}).get("ok")),
+                "otherRouteOnly": bool((by.get("source-drive") or {}).get("ok")
+                                       and not (by.get("direct") or {}).get("ok"))}
+    return await _off_loop(_read)
+
+
 # -- Mirror ---------------------------------------------------------------------------
 # A target kept as a continuously updated copy of its source (mirror.py). Settings
 # live in the control plane (mirror_scheduler.py); cycles, held deletions and

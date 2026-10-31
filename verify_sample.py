@@ -816,6 +816,18 @@ class Verifier:
                         res["notes"].append("Confirmed duplicate retained in target quarantine: " + f["id"])
                         continue
                     res["errors"].append("Quarantined duplicate changed or moved: " + f["id"])
+                # A copy repair made of a target file before rewriting it, kept on purpose so the
+                # repair can be undone (finding_repairs._backup) -- Bitport's own, not a stray.
+                try:
+                    kept = self.db.conn.execute(
+                        "SELECT 1 FROM finding_repair_actions WHERE source_user=? AND service='drive-backup' "
+                        "AND state='RETAINED' AND item_id LIKE ?", (self.src_user, "%:" + f["id"])).fetchone()
+                except Exception:      # noqa: BLE001 - no repair has run: nothing retained
+                    kept = None
+                if kept:
+                    res.setdefault("repairBackups", []).append({"target": f["id"], "name": f.get("name")})
+                    res["notes"].append("Repair backup kept on purpose so a repair can be undone: " + f["id"])
+                    continue
                 key = (self._drive_path(tgt, f["id"], tc), f.get("name"), f.get("md5Checksum"))
                 if key in target_keys:
                     res["duplicates"].append({"target": f["id"], "name": f.get("name"), "path": key[0],

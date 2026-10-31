@@ -21,15 +21,36 @@ def decode_part(value):
         raise ClassificationIncomplete("Gmail text body could not be decoded") from exc
 
 
-def classify_payload(message, lookup, fetch_text_attachment=None, unknown=None):
+def ids_in_raw(raw: bytes) -> set:
+    """Drive ids in every text part of a whole RFC 822 message, attached messages included --
+    for what Gmail's `full` format leaves unexpanded. Binary parts are never read."""
+    import email
+    from email import policy
+    msg = email.message_from_bytes(raw, policy=policy.default)
+    ids = set()
+    for part in msg.walk():
+        mime = part.get_content_type().lower()
+        if mime in ("multipart/encrypted", "application/pkcs7-mime", "application/x-pkcs7-mime"):
+            raise ClassificationIncomplete("Encrypted MIME content cannot be classified for link rewriting")
+        if part.is_multipart() or not mime.startswith("text/"):
+            continue
+        body = part.get_payload(decode=True) or b""
+        ids.update(m.group(1).decode("ascii") for m in DRIVE_ID.finditer(body))
+    return ids
+
+
+def classify_payload(message, lookup, fetch_text_attachment=None, unknown=None, fetch_raw=None):
     """Inspect decoded text parts only. Never fetch binary attachments.
 
     unknown(id) returns 'external' only with positive ownership evidence;
-    inaccessible and internal unmapped links block the handoff.
+    inaccessible and internal unmapped links block the handoff. fetch_raw() returns the
+    whole message's bytes, read when Gmail left a part unexpanded (an attached message
+    inside a bounce report): every text part is then scanned from those bytes instead.
     """
     if not isinstance(message.get("payload"), dict):
         raise ClassificationIncomplete("Gmail full response has no MIME payload")
     ids = set()
+    unexpanded = []
 
     def walk(part, depth=0):
         if depth > 60:
@@ -46,7 +67,13 @@ def classify_payload(message, lookup, fetch_text_attachment=None, unknown=None):
             )
         if mime.startswith("multipart/") or (mime.startswith("message/") and children):
             if not children:
-                raise ClassificationIncomplete("Multipart body has no readable parts")
+                # Gmail's `full` format does not expand an attached message's own parts (live:
+                # bounce reports blocked two mailboxes' whole hand-off). Unread is not empty:
+                # without the raw bytes this still blocks.
+                if fetch_raw is None:
+                    raise ClassificationIncomplete("Multipart body has no readable parts")
+                unexpanded.append(mime)
+                return
             for child in children:
                 walk(child, depth + 1)
             return
@@ -73,6 +100,8 @@ def classify_payload(message, lookup, fetch_text_attachment=None, unknown=None):
         )
 
     walk(message["payload"])
+    if unexpanded:
+        ids |= ids_in_raw(fetch_raw())
     changed = {}
     unresolved = []
     for source in sorted(ids):

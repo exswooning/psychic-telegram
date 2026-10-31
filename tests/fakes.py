@@ -549,6 +549,9 @@ class _DriveFiles:
             "owners": [{"emailAddress": self.s.owner}],
             "capabilities": {"canDownload": True},
         }
+        if parents and parents[0] in self.s.shared_drives:
+            meta["driveId"] = parents[0]          # in a shared drive: the drive owns it
+            meta["owners"] = []
         if body.get("shortcutDetails"):
             meta["shortcutDetails"] = body["shortcutDetails"]
 
@@ -665,9 +668,36 @@ class _DriveFiles:
         dst._mark(fileId)
         return {"id": fileId}
 
+    def _move_out_of_peer_drive(self, fileId: str, to: str) -> dict:
+        """The OTHER tenant's shared drive holds the file and THIS tenant's user is a member of it:
+        they take it out into their own Drive. Refused when that tenant blocks distribution, and a
+        non-member does not even see the file."""
+        peer = self.s.peer
+        meta = peer.store[fileId]
+        did = meta.get("driveId")
+        if not did or not any(p.get("emailAddress") == self.s.owner for p in peer.perms.get(did, [])):
+            raise http_error(404, "notFound", fileId)
+        if peer.distribution_blocked:
+            raise http_error(403, "insufficientFilePermissions",
+                             "The user does not have sufficient permissions for this file.")
+        peer.store.pop(fileId)
+        meta.update(parents=[to], driveId=None, owners=[{"emailAddress": self.s.owner}])
+        self.s.store[fileId] = meta
+        for attr in ("content", "exports", "perms", "comment_store", "_revisions"):
+            here = getattr(peer, attr)
+            if fileId in here:
+                getattr(self.s, attr)[fileId] = here.pop(fileId)
+        peer._seq += 1
+        peer._changed[fileId] = peer._seq
+        self.s._mark(fileId)
+        return {"id": fileId}
+
     def _update(self, fileId: str, body: Optional[dict] = None,
                 media_body=None, addParents: str = "",
                 removeParents: str = "", **_):
+        if (addParents and fileId not in self.s.store and self.s.peer is not None
+                and fileId in self.s.peer.store):
+            return self._move_out_of_peer_drive(fileId, addParents)
         if (addParents and fileId in self.s.store and self.s.peer is not None
                 and addParents in self.s.peer.shared_drives):
             return self._move_across(fileId, addParents)

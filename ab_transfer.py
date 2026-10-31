@@ -242,6 +242,7 @@ def one_mode(mode: str, settings: Settings, auth: AuthManager,
     # check's Drive pass). Receipts: the engine compares each message as it writes it, so the check
     # need not download it again (verify_sample.Verifier._receipts). An explicit value still wins.
     env.setdefault("FIRST_PASS_ACCEPTANCE", "false")
+    env["BITPORT_JOB_NAME"] = "ab-migrate"     # its own job: never judged or reported as a migration
     env.setdefault("MAIL_COMPLETION_CHECK", "full")
     env.setdefault("MIGRATION_CHECKS", "true")
     env["MIGRATE_CHAT"] = "true" if "chat" in ALL_SERVICES.split(",") else "false"

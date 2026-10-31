@@ -512,7 +512,14 @@ class GmailMigrator:
             self._scan_count("attachmentReads", 1)
             return self._retry(lambda: self.src.users().messages().attachments().get(
                 userId="me", messageId=mid, id=aid).execute(), label="gmail.split.text_attachment")
-        return full, classify_payload(full, self._drive_link_target, text_attachment, self._split_unknown_link)
+        def raw():
+            self.scan_limiter.acquire()
+            self._scan_count("rawReads", 1)
+            got = self._retry(lambda: self.src.users().messages().get(
+                userId="me", id=mid, format="raw").execute(), label="gmail.split.raw")
+            data = got.get("raw", "")
+            return base64.urlsafe_b64decode(data + "=" * (-len(data) % 4))
+        return full, classify_payload(full, self._drive_link_target, text_attachment, self._split_unknown_link, raw)
 
     def _migrate_one_message(self, ref: dict) -> None:
         """One message, start to finish. Extracted so a pool can run

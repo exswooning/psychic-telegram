@@ -18,6 +18,7 @@ import {
   fetchMigrationDetail, startDelta, startMigration, runRepair,
   MigrationDetail as Detail, RepairSurvey,
 } from '@/api/controlPlane'
+import MoveRouteProbe from '@/components/MoveRouteProbe'
 import type { MailLinkScan, MailMode, TransferMode } from '@/api/controlPlane'
 import SourceGuardPanel from '@/components/SourceGuardPanel'
 import UserProfilesPanel from '@/components/UserProfilesPanel'
@@ -85,6 +86,7 @@ export const MigrationDetail: React.FC = () => {
   // '' = the server's own default (config.TRANSFER_MODES via TRANSFER_MODE) --
   // most runs never need to touch this.
   const [transferMode, setTransferMode] = useState<TransferMode | ''>('')
+  const [moveAvailable, setMoveAvailable] = useState(false)
   const [confirmMove, setConfirmMove] = useState('')
   // Who to migrate: every user, or the ones chosen here. Chosen users move their mail
   // through this tool -- the DMS only starts after a whole-tenant run, so Split or DMS
@@ -1056,6 +1058,7 @@ export const MigrationDetail: React.FC = () => {
                   } />
                 <FormControlLabel
                   value="move" control={<Radio size="small" />}
+                  disabled={!moveAvailable}
                   data-testid="transfer-mode-move"
                   label={
                     <Typography variant="body2">
@@ -1064,9 +1067,11 @@ export const MigrationDetail: React.FC = () => {
                       each file keeps its id, version history and comments. The files{' '}
                       <strong>leave the source</strong>. Needs the source admin to let content
                       move to other organisations; the run checks first and stops if not.
+                      {!moveAvailable && ' Offered once the test below shows a file can move.'}
                     </Typography>
                   } />
               </RadioGroup>
+              <MoveRouteProbe accountId={Number(accountId) || undefined} onAvailable={setMoveAvailable} />
               {transferMode === 'move' && (
                 <Box sx={{ mt: 1 }} data-testid="move-confirm">
                   <Alert severity="warning" sx={{ mb: 1 }}>

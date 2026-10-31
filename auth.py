@@ -420,6 +420,11 @@ class AuthManager:
             domain_guard.require_not_source(self.settings.source_domain,
                                             self.settings.source_domain)
         svc = self._service("source", "drive", user)
+        if writable:
+            # Past the guard above: this source is a declared sandbox. Returning the wrapper here
+            # (as a98ead0 did) left every deliberate writer -- the move check, move back, link flip,
+            # the contract probe -- unable to write a byte, with "a migration only reads the source".
+            return svc
         return ReadOnlyDrive(svc, keys_db=getattr(self.settings, "db_path", None))
 
     def target_drive(self, user: str):

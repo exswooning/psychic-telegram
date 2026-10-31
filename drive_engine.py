@@ -3307,7 +3307,9 @@ class DriveMigrator:
         # Comments BEFORE sharing: Drive emails the people who can see a file about a new
         # comment on it, and once shared that includes a client's outside collaborators.
         # Written first, the only one who can see it is the target owner.
-        if comments and self.settings.migrate_comments:
+        # A Form has no Drive comment threads: the comments API answers it 404 "File not found",
+        # which was recorded as a FAILED comment on every Form copied (live, 2026-10-31).
+        if comments and self.settings.migrate_comments and item.get("mimeType") != FORM_MIME:
             try:
                 commented = self._sync_comments(item["id"], target_id)
                 touched += commented

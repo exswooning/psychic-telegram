@@ -1263,7 +1263,9 @@ def _run_with_memory_pause(auth, db, settings, services, delta, delta_days,
         name="metrics", daemon=True)
     flusher.start()
     try:
-        with _registered("delta" if delta else "migrate",
+        # BITPORT_JOB_NAME: a benchmark arm (ab_transfer) is not a migration of the account, and
+        # judged as one it opened "users_failed" incidents for its test users (#2, #6, #7).
+        with _registered(os.getenv("BITPORT_JOB_NAME") or ("delta" if delta else "migrate"),
                          getattr(settings, "account_id", None)):
             # `passes` is an --ordered run: the same services, as separate passes
             # across ALL users. They live inside this ONE registration, memory

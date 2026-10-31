@@ -3415,6 +3415,19 @@ class TestCopySafetyEndpoints:
         assert r["ok"] is False and "government" in r["detail"] and not started
 
 
+class TestMoveProbeEndpoints:
+    def test_run_is_an_admitted_job_named_move_probe(self, cp, monkeypatch):
+        import api_server
+        started = []
+        monkeypatch.setattr(api_server, "_run_admitted", lambda *a, **k: started.append(a) or (True, "x"))
+        r = cp.post("/api/v2/move-probe/run", headers=ADMIN, json={"reason": "try the move route"}).json()
+        assert r["ok"] is True and started[0][2] == "move-probe" and "move_probe.py" in started[0][0]
+
+    def test_a_viewer_cannot_start_it_and_an_unsigned_reader_cannot_read_it(self, cp):
+        assert cp.post("/api/v2/move-probe/run", json={"reason": "try the move route"}).status_code in (401, 403)
+        assert cp.get("/api/v2/move-probe").status_code in (401, 403)
+
+
 class TestChosenUsersMoveTheirOwnMail:
     """With no mode named, a few chosen users get the engine: the DMS is only started
     after a whole-tenant run, so mail split off for them would not arrive on its own.

@@ -809,3 +809,21 @@ class TestReceiptsSpareTheDownloads:
         before = len(_raw_reads(tgt))
         r = verify(receipted, ("gmail",))["users"][SRC_USER]["gmail"]
         assert r["identical"] == 4 and r["receipted"] == 0 and len(_raw_reads(tgt)) - before == 4
+
+
+def test_a_repair_backup_bitport_kept_is_not_a_stray(migrated):
+    """Live: '.Repair backup - <name> (Responses)' read as an extra on it.department -- repair
+    copies a target file before rewriting it and keeps the copy (finding_repairs._backup)."""
+    import finding_repairs
+    tgt = migrated.auth.target_drive(TGT_USER)
+    bid = tgt.add_binary(".Repair backup - notes.txt", data=b"plain notes", mime="text/plain")
+    finding_repairs.record(migrated.db, SRC_USER, "drive-backup", "src-notes:" + bid, "RETAINED", {"backup": bid})
+    r = verify(migrated, ("drive",))["users"][SRC_USER]["drive"]
+    assert r["extras"] == [] and [b["target"] for b in r["repairBackups"]] == [bid]
+
+
+def test_an_unrecorded_copy_with_the_same_name_is_still_a_stray(migrated):
+    tgt = migrated.auth.target_drive(TGT_USER)
+    tgt.add_binary(".Repair backup - notes.txt", data=b"plain notes", mime="text/plain")
+    r = verify(migrated, ("drive",))["users"][SRC_USER]["drive"]
+    assert [e["name"] for e in r["extras"]] == [".Repair backup - notes.txt"]

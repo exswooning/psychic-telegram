@@ -2345,6 +2345,25 @@ export interface CopySafetyReport {
   unattributed: { id: string; name: string; kind: string; modifiedTime: string }[]
   auditReadable: boolean; cleanup: { ok: boolean; error?: string }
 }
+// -- Move route probe --------------------------------------------------------
+export interface MoveProbeResult {
+  route: 'direct' | 'source-drive'; ok: boolean | null; step: string; detail: string
+  status: number | null; testedAt: string
+}
+export interface MoveProbe {
+  accountId: number | null; pair: string; results: MoveProbeResult[]
+  /** A direct pass: the one route a move run moves by. */
+  moveAvailable: boolean
+  /** The shared-drive route worked but the direct one did not: the engine cannot use it yet. */
+  otherRouteOnly: boolean
+}
+export const fetchMoveProbe = (accountId?: number) =>
+  cpFetch<MoveProbe>(`/api/v2/move-probe${accountId ? `?account_id=${accountId}` : ''}`)
+export const startMoveProbe = (reason: string, accountId?: number) =>
+  cpFetch<ActionResult>('/api/v2/move-probe/run', {
+    method: 'POST', body: JSON.stringify({ reason, account_id: accountId ?? null }),
+  })
+
 export const fetchCopySafety = (accountId?: number) =>
   cpFetch<CopySafetyReport | null>(`/api/v2/copy-safety/latest${accountId ? `?account_id=${accountId}` : ''}`)
 export const startCopySafety = (reason: string, user: string, perType: number, settleMin: number, accountId?: number) =>
