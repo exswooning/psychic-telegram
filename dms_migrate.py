@@ -967,6 +967,24 @@ def wait_then_tally(minutes: int, timeout: int, headful: bool, tally: bool = Tru
 
 
 def main(argv: list[str] | None = None) -> int:
+    """One console, one import at a time, across processes: a second run arriving mid-import saw
+    "In progress", called it started, and would report someone else's import as its own."""
+    if "--apply" not in (argv if argv is not None else sys.argv[1:]):
+        return _main(argv)
+    import fcntl
+    lock = open(os.getenv("DMS_LOCK_FILE", "/tmp/bitport-dms.lock"), "w")
+    try:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            log("another import is driving the console; waiting for it to finish")
+            fcntl.flock(lock, fcntl.LOCK_EX)
+        return _main(argv)
+    finally:
+        lock.close()
+
+
+def _main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--source-domain", default=os.getenv("SOURCE_DOMAIN", ""))
     ap.add_argument("--target-admin", default=os.getenv("TARGET_ADMIN", ""))

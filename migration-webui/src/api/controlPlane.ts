@@ -80,7 +80,10 @@ async function cpFetch<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 async function cpFetchRaw<T>(path: string, init?: RequestInit): Promise<T> {
+  const read = (init?.method ?? 'GET').toUpperCase() === 'GET'
   const res = await fetch(`${CP_BASE}${path}`, {
+    // Reads give up (see client.ts READ_TIMEOUT_MS); a write is never cut short.
+    ...(read && !init?.signal ? { signal: AbortSignal.timeout(20_000) } : {}),
     ...init,
     // Carries the bp_session cookie an account signed in with -- it lives
     // on this server's own origin (CP_BASE), a different one than the page
@@ -93,6 +96,9 @@ async function cpFetchRaw<T>(path: string, init?: RequestInit): Promise<T> {
       'X-Operator': OPERATOR,
       ...(init?.headers ?? {}),
     },
+  }).catch((e) => {
+    if (e instanceof Error && e.name === 'TimeoutError') throw new Error(`${path}: no answer after 20s`)
+    throw e
   })
   if (!res.ok) {
     // FastAPI puts the human-readable cause in `detail`; surfacing the raw

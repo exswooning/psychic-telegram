@@ -288,3 +288,26 @@ def test_asked_to_see_it_through_an_import_that_never_started_is_not_success(mon
     monkeypatch.setattr(dms_migrate, "wait_then_tally", lambda *a, **k: pytest.fail("nothing to wait for"))
     assert dms_migrate.main(["--apply", "--until-done", "5", "--identities", "none.csv"]) == 3
     assert dms_migrate.main(["--identities", "none.csv"]) == 0        # a dry run still reports ok
+
+
+def test_a_second_apply_run_waits_for_the_first_to_let_go_of_the_console(monkeypatch, tmp_path):
+    import fcntl
+    import dms_migrate
+    lock = tmp_path / "dms.lock"
+    monkeypatch.setenv("DMS_LOCK_FILE", str(lock))
+    monkeypatch.delenv("TARGET_DOMAIN", raising=False)
+    monkeypatch.setattr(dms_migrate, "start", lambda *a, **k: {
+        "ok": True, "step": "step4-start", "detail": "", "did": [], "manual": "", "started": False})
+    held = open(lock, "w")
+    fcntl.flock(held, fcntl.LOCK_EX)
+    waited = []
+    real = fcntl.flock
+
+    def flock(f, op):
+        if op & fcntl.LOCK_NB:
+            raise BlockingIOError
+        waited.append(op)
+        return real(f, op & ~fcntl.LOCK_NB) if False else None
+    monkeypatch.setattr(fcntl, "flock", flock)
+    dms_migrate.main(["--apply", "--identities", "none.csv"])
+    assert waited == [fcntl.LOCK_EX]

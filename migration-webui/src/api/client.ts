@@ -22,9 +22,20 @@ import {
 } from '@/types'
 import { coalesce } from './inflight'
 
+/** A read gives up after this long. Without it a request a tunnel or a loaded host never answers
+ *  (Cloudflare holds one for ~100 s) leaves its page on a loading bar, and everything that awaits
+ *  it with it. Reads only: a write can legitimately take longer, and aborting one is not safe. */
+export const READ_TIMEOUT_MS = 20_000
+
 async function getJSON<T>(path: string): Promise<T> {
   return coalesce(path, async () => {
-    const res = await fetch(path)
+    let res: Response
+    try {
+      res = await fetch(path, { signal: AbortSignal.timeout(READ_TIMEOUT_MS) })
+    } catch (e) {
+      if (e instanceof Error && e.name === 'TimeoutError') throw new Error(`${path}: no answer after ${READ_TIMEOUT_MS / 1000}s`)
+      throw e
+    }
     if (!res.ok) throw new Error(`${path}: HTTP ${res.status}`)
     return res.json() as Promise<T>
   })
