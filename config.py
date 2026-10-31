@@ -338,6 +338,11 @@ def target_scopes(settings: "Settings") -> list[str]:
     return scopes
 
 
+def chat_by_default() -> bool:
+    """Whether `all` means Chat too (MIGRATE_CHAT, default off)."""
+    return _env_bool("MIGRATE_CHAT", False)
+
+
 def _env_bool(name: str, default: bool) -> bool:
     val = os.getenv(name)
     if val is None:
@@ -866,8 +871,10 @@ class Settings:
     # Chat service switched on for each organisation and a Chat app configured
     # in the Cloud console. Original message timestamps cannot be preserved --
     # see chat_engine.py -- so this is a deliberate, documented trade.
+    # OFF by default since 2026-10-31 (operator): `all` no longer includes Chat. MIGRATE_CHAT=true
+    # brings it back, and naming `--services chat` still selects it for one run.
     migrate_chat: bool = field(
-        default_factory=lambda: _env_bool("MIGRATE_CHAT", True)
+        default_factory=lambda: _env_bool("MIGRATE_CHAT", False)
     )
     chat_space_mode: str = field(
         default_factory=lambda: os.getenv("CHAT_SPACE_MODE", "import").strip().lower()
@@ -974,6 +981,11 @@ class Settings:
     def __post_init__(self) -> None:
         if self.account_id is not None:
             self._load_account_tenant_config()
+        # One process's own copy of the ledger, for ab_transfer's side-by-side arms: a ledger is
+        # per account, so without this every arm of one account would share (and clear) one.
+        # Set only in an arm's child processes, never in a shared one.
+        if os.getenv("BITPORT_LEDGER"):
+            self.db_path = os.environ["BITPORT_LEDGER"]
         if self.transfer_mode == "adaptive" and self.adaptive_sandbox_only and (
                 self.source_domain.lower(), self.target_domain.lower()) != ("s.sarafgloabalexim.com", "t.sarafgloabalexim.com"):
             raise ValueError("Adaptive transfer is restricted to the explicit s. to t. sandbox pair")

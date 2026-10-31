@@ -578,15 +578,25 @@ export const fetchBenchmarkRunning = () =>
 /** The controlled A/B (ab_transfer.py): one pinned corpus, one arm per transfer mode x mail mode. */
 export interface AbArm {
   arm: string; seconds: number | null; failed: number | null; clean: boolean
+  /** Failed items + every counted difference. null when the arm is not ranked on it (judged false). */
+  errors?: number | null; judged?: boolean; why?: string | null
+  /** 'alone' = timed with the box to itself; 'side by side' = shared with other arms, so not a speed. */
+  timing?: 'alone' | 'side by side' | null; contendedSeconds?: number | null
   verdicts: Record<string, string>
   dms?: string | null
-  differences?: Record<string, { counts?: Record<string, number> | null; failedChecks?: string[] }>
+  differences?: Record<string, {
+    counts?: Record<string, number> | null; failedChecks?: string[]
+    /** The same findings grouped by known kind, with each kind's cause and whether Bitport fixes it on its own. */
+    kinds?: { kind: string; count: number; title: string; cause?: string | null; fix?: string | null; auto: boolean }[]
+  }>
 }
 export interface AbView {
   running: boolean
   progress: {
     startedAt?: string; finishedAt?: string; updatedAt?: string
     current?: { mode: string; mailMode: string | null; stage: string } | null
+    /** Every arm in flight: several at once while the arms run side by side. */
+    arms?: { arm: string; stage: string }[]; phase?: string | null; skipped?: string[]
     users?: string[]; corpus?: { files: number; bytes: number }
     total?: number; done?: number; alive: boolean; armsFinished: number
     /** Why the run stopped, when it did not finish: a refusal's own words, never a bare 0 of N. */
@@ -598,6 +608,8 @@ export interface AbView {
   results: { runs: unknown[] } | null
   /** Clean arms first, fastest first; a fast arm that did not finish clean is listed, never hidden. */
   ranking: AbArm[]
+  /** Fewest errors, then fastest, among arms whose own check ran: what new runs use by default. */
+  best?: { arm: string; mode: string; mailMode: string; errors: number; seconds: number | null } | null
 }
 export const fetchAbBenchmark = () => cpFetch<AbView>('/api/v2/benchmark/ab')
 

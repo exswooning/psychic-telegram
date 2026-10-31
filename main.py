@@ -2321,7 +2321,7 @@ def resolve_services(raw: str) -> set[str]:
     services = {s.strip().lower() for s in raw.split(",") if s.strip()}
     if "all" in services:
         services.discard("all")
-        services |= set(PER_USER_SERVICES)
+        services |= {s for s in PER_USER_SERVICES if s != "chat" or config.chat_by_default()}
     unknown = services - set(PER_USER_SERVICES)
     if unknown:
         sys.exit(f"unknown service(s): {', '.join(sorted(unknown))}. "

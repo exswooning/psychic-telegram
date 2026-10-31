@@ -35,11 +35,15 @@ from __future__ import annotations
 import logging
 
 import argparse
+import copy
 import json
 import os
+import sqlite3
 import subprocess
 import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -52,34 +56,54 @@ PY = sys.executable
 PROGRESS = os.path.join(HERE, "logs", "ab_progress.json")
 ACCOUNT_ENV: dict = {}      # the tenant pair of --account-id, for the child scripts that read env
 ACCOUNT_ARGS: list = []     # main.py takes the account as a flag
-ALL_SERVICES = "drive,gmail,calendar,contacts,tasks,chat"
+# Chat is left out for now (operator, 2026-10-31): its 4 findings are Chat API limits that add the same
+# count to every arm, and its import is slow. One switch: put "chat" back here and in VERIFY_SERVICES.
+ALL_SERVICES = "drive,gmail,calendar,contacts,tasks"
+VERIFY_SERVICES = "drive,gmail,calendar,contacts,tasks,directory"
 
 
 _STATE: dict = {}
+_ARMS: dict = {}            # arm label -> what it is doing now; several at once when arms run side by side
+_LOCK = threading.Lock()
+_DMS_LOCK = threading.Lock()    # the unattended approval drives one browser (Xvfb :99): one import at a time
+# Measured 2026-10-30 on the sandbox pair: 68 min against 27 for the same arm on server_side, and
+# its Drive differences were download_upload's own. Skipped by default; --include-slow runs it.
+SLOW_ARM = ("download_upload", "engine")
 
 
-def stage(name: str) -> None:
-    """Move the live page to the next stage of the current arm."""
-    if _STATE:
-        cur = dict(_STATE.get("current") or {}, stage=name)
-        write_progress(**{**_STATE, "current": cur})
+def arm_label(mode: str, mail_mode: str | None) -> str:
+    return mode + (f" + {mail_mode}" if mail_mode else "")
+
+
+def stage(name: str, label: str | None = None) -> None:
+    """Move the live page to the next stage of an arm (the only one, unless several run at once)."""
+    with _LOCK:
+        arm = _ARMS.get(label) if label else next(iter(_ARMS.values()), None)
+        if arm is None:
+            return
+        arm["stage"] = name
+    write_progress()
 
 
 def write_progress(**fields) -> None:
     """The live state the Benchmarks page reads. Written whole each time (tmp + rename) so a
     reader never sees half a file. Totals are known up front here, so an ETA is a real
-    division of measured trial times, never a guess."""
-    _STATE.clear()
-    _STATE.update(fields)
-    try:
-        os.makedirs(os.path.dirname(PROGRESS), exist_ok=True)
-        tmp = PROGRESS + ".tmp"
-        with open(tmp, "w") as fh:
-            json.dump({**fields, "updatedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                       "pid": os.getpid()}, fh)
-        os.replace(tmp, PROGRESS)
-    except OSError:
-        pass
+    division of measured trial times, never a guess. `arms` lists every arm in flight."""
+    with _LOCK:
+        _STATE.update(fields)
+        arms = [dict(a) for a in _ARMS.values()]
+        state = {**_STATE, "arms": arms}
+        if arms:
+            state["current"] = {k: arms[0][k] for k in ("mode", "mailMode", "stage")}
+        try:
+            os.makedirs(os.path.dirname(PROGRESS), exist_ok=True)
+            tmp = PROGRESS + ".tmp"
+            with open(tmp, "w") as fh:
+                json.dump({**state, "updatedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                           "pid": os.getpid()}, fh)
+            os.replace(tmp, PROGRESS)
+        except OSError:
+            pass
 
 
 def services_for(mail_mode: str | None) -> str:
@@ -100,13 +124,15 @@ NATIVE = "application/vnd.google-apps."
 
 
 def net_bytes() -> int:
-    """Bytes received on the primary interface, for the host-cost measure."""
-    for iface in ("eth0", "ens3", "enp1s0"):
+    """Bytes received on every interface but loopback, for the host-cost measure. A fixed list of
+    names (eth0, ens3, enp1s0) found none on the laptop box and read 0 MB for download_upload."""
+    total = 0
+    for iface in os.listdir("/sys/class/net") if os.path.isdir("/sys/class/net") else []:
         p = f"/sys/class/net/{iface}/statistics/rx_bytes"
-        if os.path.exists(p):
+        if iface != "lo" and os.path.exists(p):
             with open(p) as fh:
-                return int(fh.read().strip())
-    return 0
+                total += int(fh.read().strip())
+    return total
 
 
 def scratch_peak(settings: Settings) -> int:
@@ -122,7 +148,7 @@ def snapshot_drive(auth: AuthManager, users: list[str], side: str) -> dict:
     get = auth.source_drive if side == "source" else auth.target_drive
     out = {"files": 0, "folders": 0, "bytes": 0, "native": 0, "binary": 0,
            "mimes": {}, "sample": {}}
-    for u in users:
+    for i, u in enumerate(users):
         token = None
         while True:
             r = get(u).files().list(
@@ -143,8 +169,9 @@ def snapshot_drive(auth: AuthManager, users: list[str], side: str) -> dict:
                 else:
                     out["binary"] += 1
                 out["mimes"][mime] = out["mimes"].get(mime, 0) + 1
-                # Keyed by name so the two sides can be compared without ids.
-                key = f"{u.split('@')[0]}/{f.get('name','')}"
+                # Keyed by the user's place in the list and the file's name, so the two sides
+                # compare without ids. Not by address: audit@ vs a fresh audit-ab1-… never matched.
+                key = f"{i}/{f.get('name','')}"
                 if key not in out["sample"]:
                     out["sample"][key] = {
                         "mime": mime,
@@ -197,12 +224,20 @@ def run_tail(cmd: list[str], env: dict) -> tuple[int, str]:
 
 def one_mode(mode: str, settings: Settings, auth: AuthManager,
              users_src: list[str], users_tgt: list[str], src_snap: dict,
-             mail_mode: str | None = None, fresh_target: str | None = None) -> dict:
+             mail_mode: str | None = None, fresh_target: str | None = None,
+             ledger: str | None = None, side_by_side: bool = False) -> dict:
+    """One arm. `ledger` is this arm's own copy of the account's ledger (side-by-side arms), with
+    `settings.db_path` already pointing at it; its scratch space is its own too."""
+    label = arm_label(mode, mail_mode)
     env = dict(os.environ)
     env["TRANSFER_MODE"] = mode
     env.update(mail_env(mail_mode))
     env.update(ACCOUNT_ENV)
+    if ledger:
+        env["BITPORT_LEDGER"] = ledger
+        env["SCRATCH_DIR"] = settings.scratch_dir
     env["SANDBOX_MODE"] = "true"
+    env["MIGRATE_CHAT"] = "true" if "chat" in ALL_SERVICES.split(",") else "false"
     env["MIGRATE_COMMENTS"] = "true"
     env["MIGRATE_SECONDARY_CALENDARS"] = "true"
 
@@ -210,7 +245,7 @@ def one_mode(mode: str, settings: Settings, auth: AuthManager,
 
     print(f"\n=== {mode}: emptying the target ({len(users_src)} user(s)) ===",
           flush=True)
-    stage("reset target")
+    stage("reset target", label)
     if fresh_target:
         # reset_target.py only removes seeder data, never what a migration copied in, so a
         # second arm into the same account stacks on the first (audit@t.: 758 -> 1,486 messages).
@@ -231,7 +266,7 @@ def one_mode(mode: str, settings: Settings, auth: AuthManager,
     # precisely because it is the only evidence of what happened. An
     # experiment on three mailboxes has no business destroying that.
     print(f"=== {mode}: clearing the ledger for those users ===", flush=True)
-    stage("reset ledger")
+    stage("reset ledger", label)
     db = MigrationDB(settings.db_path)
     ph = ",".join("?" * len(users_src))
     with db.write() as c:
@@ -252,7 +287,7 @@ def one_mode(mode: str, settings: Settings, auth: AuthManager,
     db._mapping_cached_users.clear()
 
     print(f"=== {mode}: migrating ===", flush=True)
-    stage("migrate")
+    stage("migrate", label)
     net0 = net_bytes()
     services = services_for(mail_mode)
     rc, secs = run([PY, "main.py", *ACCOUNT_ARGS, "migrate", "--services", services, *scoped], env)
@@ -260,8 +295,9 @@ def one_mode(mode: str, settings: Settings, auth: AuthManager,
     dms = None
     if mail_mode in ("dms", "split") and len(users_src) == 1:
         print(f"=== {mode}+{mail_mode}: Google's mail import ===", flush=True)
-        stage("dms import")
-        dms, dms_secs = dms_tail(settings, users_src, users_tgt, env)
+        stage("dms import", label)
+        with _DMS_LOCK:
+            dms, dms_secs = dms_tail(settings, users_src, users_tgt, env)
         secs += dms_secs
         print(f"=== DMS: {dms} ===", flush=True)
 
@@ -274,14 +310,18 @@ def one_mode(mode: str, settings: Settings, auth: AuthManager,
         f"AND source_user IN ({ph})", users_src).fetchone()[0]
 
     print(f"=== {mode}: snapshotting the target ===", flush=True)
-    stage("snapshot target")
+    stage("snapshot target", label)
     tgt_snap = snapshot_drive(auth, users_tgt, "target")
 
     verdicts, details = {}, {}
     if mail_mode is not None:
         print(f"=== {mode}+{mail_mode}: verifying one to one ===", flush=True)
-        stage("verify 1:1")
-        run([PY, "verify_sample.py", *ACCOUNT_ARGS[:2], *scoped, "--services", "all"], env)
+        stage("verify 1:1", label)
+        # Cleared first, so an arm only ever reads rows its own check wrote: with `--services all`
+        # checking nothing, every arm reported a stray backfill's mid-migration rows as its own.
+        with db.write() as c:
+            c.execute(f"DELETE FROM user_verification WHERE source_user IN ({ph})", users_src)
+        vrc, vout = run_tail([PY, "verify_sample.py", *ACCOUNT_ARGS[:2], *scoped, "--services", VERIFY_SERVICES], env)
         db = MigrationDB(settings.db_path)
         for u in users_src:
             for svc, v, payload in db.conn.execute(
@@ -289,7 +329,10 @@ def one_mode(mode: str, settings: Settings, auth: AuthManager,
                 key = f"{u.split('@')[0]}/{svc}"
                 verdicts[key] = v
                 if v not in ("IDENTICAL", "COMPLETE"):
-                    details[key] = difference_summary(payload)
+                    details[key] = difference_summary(payload, service=svc)
+        if vrc != 0 or not verdicts:
+            verdicts["verify"] = "UNVERIFIED"
+            details["verify"] = {"exit": vrc, "output": vout}
 
     return {
         "mode": mode,
@@ -304,10 +347,43 @@ def one_mode(mode: str, settings: Settings, auth: AuthManager,
         "seconds": round(secs, 1),
         "migrated": counts,
         "failed": failed,
-        "host_bytes_in": net1 - net0,
+        "host_bytes_in": None if side_by_side else net1 - net0,   # the interface is shared by every arm
+        "timing": "side by side" if side_by_side else "alone",
         "target": {k: v for k, v in tgt_snap.items() if k != "sample"},
         "fidelity": fidelity(src_snap, tgt_snap),
     }
+
+
+def ledger_copy(settings: Settings, directory: str) -> str:
+    """A consistent copy of the account's ledger (sqlite's own backup, safe while it is written to)
+    for one side-by-side arm. The real ledger is never touched by an arm that has its own."""
+    os.makedirs(directory, exist_ok=True)
+    path = os.path.join(directory, "migration.db")
+    src, dst = sqlite3.connect(settings.db_path), sqlite3.connect(path)
+    try:
+        src.backup(dst)
+    finally:
+        src.close()
+        dst.close()
+    return path
+
+
+def arm_errors(r: dict) -> dict:
+    """One number to rank arms by: failed items plus every counted difference, missing, duplicate,
+    extra, not-copied item and verifier error. `judged` is False when the arm cannot be ranked on
+    it -- its own check never ran (UNVERIFIED, or no verdicts), or mail it owes Google's import was
+    never imported -- because a low count there means nothing was looked at, not that nothing differed."""
+    verdicts = r.get("verdicts") or {}
+    if r.get("mailMode") and (not verdicts or "UNVERIFIED" in verdicts.values()):
+        return {"errors": None, "judged": False, "why": "its 1:1 check did not run"}
+    if r.get("dms") not in (None, "done"):
+        return {"errors": None, "judged": False, "why": f"Google's mail import: {r['dms']}"}
+    if r.get("exit") not in (None, 0):
+        return {"errors": None, "judged": False, "why": f"the migration exited {r['exit']}"}
+    n = int(r.get("failed") or 0) + int((r.get("fidelity") or {}).get("missing_on_target") or 0) * (not r.get("mailMode"))
+    for d in (r.get("differences") or {}).values():
+        n += sum(v for v in (d.get("counts") or {}).values() if isinstance(v, int))
+    return {"errors": n, "judged": True, "why": None}
 
 
 def dms_tail(settings, users_src, users_tgt, env) -> tuple[str, float]:
@@ -333,14 +409,34 @@ def dms_tail(settings, users_src, users_tgt, env) -> tuple[str, float]:
     return ("done" if rc == 0 else f"failed (exit {rc})"), secs
 
 
-def difference_summary(payload, sample: int = 5) -> dict:
+def difference_kinds(payload: dict, service: str) -> list[dict]:
+    """Every difference, missing, extra, duplicate and not-copied item of one service counted by
+    kind (known_issues), most first, with each kind's cause and fix -- the whole list, not the
+    handful of examples kept, so "what went wrong" reads as a few causes rather than a count."""
+    import known_issues
+    counts: dict[str, int] = {}
+    for category in ("differences", "missing", "extras", "duplicates", "notCopied", "errors"):
+        for item in payload.get(category) or []:
+            kind = known_issues.classify(service, item if category != "notCopied" else {"notCopied": item})
+            key = kind if category in ("differences", "notCopied") or kind != "unclassified" else f"{service}.{category}"
+            counts[key] = counts.get(key, 0) + 1
+    out = []
+    for kind, n in sorted(counts.items(), key=lambda kv: -kv[1]):
+        row = known_issues.BY_ID.get(kind)
+        out.append({"kind": kind, "count": n, "title": row[3] if row else kind.replace(".", " "),
+                    "cause": row[4] if row else None, "fix": row[5] if row else None,
+                    "auto": bool(row and row[6])})
+    return out
+
+
+def difference_summary(payload, sample: int = 5, service: str = "") -> dict:
     """What a non-identical verdict was about: the counts and a few examples of each list, so
     the cause survives the next arm clearing the ledger (the first A/B lost it)."""
     try:
         p = json.loads(payload) if isinstance(payload, str) else (payload or {})
     except ValueError:
         return {"unreadable": str(payload)[:200]}
-    out = {"counts": p.get("counts"), "completion": p.get("completion")}
+    out = {"counts": p.get("counts"), "completion": p.get("completion"), "kinds": difference_kinds(p, service)}
     for k in ("differences", "missing", "extras", "notCopied", "errors"):
         if p.get(k):
             out[k] = p[k][:sample]
@@ -368,6 +464,14 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--mail-mode", action="append", choices=["engine", "split", "dms"],
                     help="also move mail, once per value, crossed with every --mode. "
                          "Without it this is the Drive-only A/B it always was.")
+    ap.add_argument("--sequential", action="store_true",
+                    help="one arm at a time on the account's own ledger (the original way). The "
+                         "default runs the arms side by side, each on its own copy of the ledger, "
+                         "then re-times the leading arm(s) alone: side-by-side times share one box, "
+                         "one Google quota and one network card, so they rank errors, not speed.")
+    ap.add_argument("--include-slow", action="store_true",
+                    help=f"also run {arm_label(*SLOW_ARM)}, skipped by default: it took ~2.5x "
+                         "the next slowest arm and its differences were download_upload's own.")
     args = ap.parse_args(argv)
 
     settings = Settings(account_id=args.account_id)
@@ -403,41 +507,100 @@ def main(argv: list[str] | None = None) -> int:
               "user's data, and each arm needs its own new account for it.")
         return 1
     original_target = users_tgt[0]
-    results = []
     arms = [(m, mm) for m in (args.mode or ["server_side", "download_upload"])
             for mm in (args.mail_mode or [None])]
+    skipped = []
+    if fresh and not args.include_slow and SLOW_ARM in arms and len(arms) > 1:
+        arms.remove(SLOW_ARM)
+        skipped.append(arm_label(*SLOW_ARM))
+        print(f"=== skipping {skipped[0]} (slow; --include-slow runs it) ===", flush=True)
+    side_by_side = fresh and not args.sequential and len(arms) > 1
     started = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    stamp = started[5:7] + started[8:10] + started[11:13] + started[14:16]
     durations: list[float] = []
-    try:
-        for i, (mode, mail_mode) in enumerate(arms):
-            write_progress(running=True, startedAt=started, total=len(arms), done=i,
-                           accountId=args.account_id, armStartedAt=time.time(),
-                           current={"mode": mode, "mailMode": mail_mode, "stage": "starting"},
-                           durations=durations, users=users_src,
-                           corpus={"files": src_snap["files"], "bytes": src_snap["bytes"]})
-            fresh_target = None
-            if fresh:
-                base, _, dom = original_target.partition("@")
-                stamp = started[5:7] + started[8:10] + started[11:13] + started[14:16]
-                fresh_target = f"{base}-ab{i + 1}-{stamp}@{dom}"
-            results.append(one_mode(mode, settings, auth, users_src, users_tgt,
-                                    src_snap, mail_mode, fresh_target))
-            durations.append(results[-1]["seconds"])
+    results: list = [None] * len(arms)
+    corpus = {"files": src_snap["files"], "bytes": src_snap["bytes"]}
+
+    def save() -> None:
+        with _LOCK:
             with open(args.report + ".json", "w") as fh:
-                json.dump({"source": {k: v for k, v in src_snap.items()
-                                      if k != "sample"},
-                           "runs": results}, fh, indent=2)
+                json.dump({"source": {k: v for k, v in src_snap.items() if k != "sample"},
+                           "skipped": skipped, "sideBySide": side_by_side,
+                           "runs": [r for r in results if r]}, fh, indent=2)
+
+    def arm(i: int, mode: str, mail_mode: str | None, together: bool, tag: str) -> dict:
+        label = arm_label(mode, mail_mode)
+        with _LOCK:
+            _ARMS[label] = {"arm": label, "mode": mode, "mailMode": mail_mode, "stage": "starting",
+                            "startedAt": time.time()}
+        write_progress()
+        try:
+            fresh_target = f"{original_target.partition('@')[0]}-ab{tag}-{stamp}@" \
+                           f"{original_target.partition('@')[2]}" if fresh else None
+            st, au, ledger = settings, auth, None
+            if together:        # its own ledger copy and scratch, its own Google clients
+                ledger = ledger_copy(settings, os.path.join(HERE, "data", "ab", stamp, f"arm{tag}"))
+                st = copy.copy(settings)
+                st.db_path = ledger
+                st.scratch_dir = os.path.join(os.path.dirname(ledger), "scratch")
+                au = AuthManager(st)
+            r = one_mode(mode, st, au, users_src, users_tgt, src_snap, mail_mode, fresh_target,
+                         ledger=ledger, side_by_side=side_by_side and together)
+        finally:
+            with _LOCK:
+                _ARMS.pop(label, None)
+        return r
+
+    def finished(r: dict) -> None:
+        with _LOCK:
+            durations.append(r["seconds"])
+        save()
+        write_progress(done=len(durations), durations=durations)
+
+    try:
+        write_progress(running=True, startedAt=started, total=len(arms), done=0,
+                       accountId=args.account_id, armStartedAt=time.time(), durations=durations,
+                       users=users_src, corpus=corpus, parallel=side_by_side, skipped=skipped,
+                       phase="side by side" if side_by_side else "one at a time")
+        if side_by_side:
+            def go(i):
+                results[i] = arm(i, *arms[i], True, str(i + 1))
+                finished(results[i])
+            with ThreadPoolExecutor(len(arms)) as ex:
+                for f in [ex.submit(go, i) for i in range(len(arms))]:
+                    f.result()
+            # Errors are comparable across arms that shared the box; speed is not. Re-time alone
+            # whichever arms hold the lowest error count (at most three, fastest first).
+            judged = [(arm_errors(r)["errors"], r["seconds"], i) for i, r in enumerate(results)
+                      if arm_errors(r)["judged"] and r.get("mailMode")]
+            lowest = min((e for e, _, _ in judged), default=None)
+            lead = sorted((sec, i) for e, sec, i in judged if e == lowest)[:3]
+            write_progress(total=len(arms) + len(lead), phase="re-timing the leading arm alone")
+            for k, (_, i) in enumerate(lead):
+                again = arm(i, *arms[i], False, f"{i + 1}t")
+                again["contendedSeconds"] = results[i]["seconds"]
+                results[i] = again
+                durations.append(again["seconds"])
+                save()
+                write_progress(done=len(arms) + k + 1, durations=durations)
+        else:
+            for i, (mode, mail_mode) in enumerate(arms):
+                write_progress(done=i, armStartedAt=time.time())
+                results[i] = arm(i, mode, mail_mode, False, str(i + 1))
+                finished(results[i])
     except BaseException as exc:      # the page must say it failed, and why, not sit at "0 of N"
-        write_progress(**{**_STATE, "running": False, "current": None,
-                          "error": f"{type(exc).__name__}: {str(exc)[:600]}",
-                          "finishedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())})
+        with _LOCK:
+            _ARMS.clear()
+        write_progress(running=False, current=None,
+                       error=f"{type(exc).__name__}: {str(exc)[:600]}",
+                       finishedAt=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
         raise
     finally:
-        if fresh:      # the pinned user goes back to its own target account
+        if fresh and not side_by_side:      # the pinned user goes back to its own target account
             from db import bulk_seed_identities
             bulk_seed_identities(MigrationDB(settings.db_path), [(users_src[0], original_target)])
-    write_progress(running=False, startedAt=started, total=len(arms), done=len(arms),
-                   current=None, durations=durations, users=users_src,
+    results = [r for r in results if r]
+    write_progress(running=False, total=len(durations), done=len(durations), current=None,
                    finishedAt=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
 
     lines = ["# Transfer mode A/B", "",
@@ -456,7 +619,8 @@ def main(argv: list[str] | None = None) -> int:
     row("files migrated", lambda r: f"{r['migrated'].get('file', 0):,}")
     row("folders", lambda r: f"{r['migrated'].get('folder', 0):,}")
     row("failures", lambda r: r["failed"])
-    row("bytes through host", lambda r: f"{r['host_bytes_in']/1e6:.0f} MB")
+    row("bytes through host", lambda r: "n/a" if r["host_bytes_in"] is None else f"{r['host_bytes_in']/1e6:.0f} MB")
+    row("timed", lambda r: r.get("timing", "alone"))
     row("target files", lambda r: f"{r['target']['files']:,}")
     row("target native", lambda r: f"{r['target']['native']:,}")
     row("files compared", lambda r: r["fidelity"]["compared"])

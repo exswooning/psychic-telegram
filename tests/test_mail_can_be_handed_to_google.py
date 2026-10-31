@@ -66,7 +66,7 @@ class TestChoosingDmsExcludesMailFromTheRun:
     def test_it_still_migrates_everything_else(self):
         import api_server
         services = api_server._mail_plan(["all"], "dms")[0]
-        for svc in ("drive", "calendar", "contacts", "tasks", "chat"):
+        for svc in ("drive", "calendar", "contacts", "tasks"):        # Chat is opt-in since 2026-10-31
             assert svc in services, f"{svc} would be silently skipped"
 
     def test_the_engine_path_keeps_its_services_and_environment(self):

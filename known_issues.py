@@ -48,6 +48,21 @@ ISSUES = [
      "The sender is a bot (e.g. Drive notifications) or has no account on the target; Chat lets "
      "nobody post as them, so the user posts the same text prefixed \"[originally from ...]\".",
      "None possible through the Chat API. Text and order are intact; listed in the final report.", False),
+    ("chat.space_type", "chat", lambda t: "Chat conversation type differs" in t,
+     "A direct message became a group chat",
+     "Chat's import mode can only create spaces and group chats; a DIRECT_MESSAGE cannot be "
+     "imported, so the conversation lands as a two-person group chat (measured 2026-10-31).",
+     "None possible through the Chat API: messages, order and times are intact. Listed in the final report.", False),
+    ("chat.members", "chat", lambda t: "Chat participants differ" in t,
+     "A Chat participant did not come across",
+     "A bot or app (e.g. Drive notifications) cannot be added to an imported space; any other "
+     "difference is a member's role or state.",
+     "None possible for a bot. A missing person is added by the missing-member repair when one exists; listed otherwise.", False),
+    ("chat.sender", "chat", lambda t: "Original Chat sender identity was not reproduced" in t,
+     "A Chat message's sender is the migrating user",
+     "Same cause as an attributed message: Chat lets nobody post as a bot or an account that is "
+     "not on the target, so the thread check sees the user as sender.",
+     "None possible through the Chat API; the text carries \"[originally from ...]\".", False),
     ("chat.text", "chat", lambda t: "Chat text differs" in t,
      "Chat message text differs",
      "A real text difference (link rewrite or edit).",

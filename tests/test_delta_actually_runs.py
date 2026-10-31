@@ -28,7 +28,7 @@ class TestDeltaExpandsAll:
         monkeypatch.setattr(main, "_print_batch_summary", lambda r, s=None: None)
         st = MagicMock()
         main.cmd_delta(self._args(), st, MagicMock(), MagicMock())
-        assert seen["services"] == set(main.PER_USER_SERVICES)
+        assert seen["services"] == set(main.PER_USER_SERVICES) - {"chat"}    # Chat is opt-in since 2026-10-31
         assert "all" not in seen["services"], \
             "the literal string 'all' matches no service and runs nothing"
         assert seen["delta"] is True

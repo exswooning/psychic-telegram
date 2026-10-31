@@ -35,16 +35,42 @@ describe('A/B benchmark page', () => {
     expect(screen.getByTestId('ab-eta')).toHaveTextContent('from 2 finished')
   })
 
-  it('crowns the fastest CLEAN arm and still lists a faster arm that was not clean', async () => {
-    fetchAb.mockResolvedValue({ running: false, results: { runs: [] }, progress: progress({ alive: false, done: 6 }),
+  it('names the default: fewest errors, then fastest; an unranked arm says why and never wins', async () => {
+    fetchAb.mockResolvedValue({ running: false, results: { runs: [] }, progress: progress({ alive: false, done: 4 }),
+      best: { arm: 'server_side + engine', mode: 'server_side', mailMode: 'engine', errors: 4, seconds: 1600 },
       ranking: [
-        { arm: 'server_side + split', seconds: 60, failed: 0, clean: true, verdicts: {} },
-        { arm: 'server_side + engine', seconds: 40, failed: 3, clean: false, verdicts: { 'audit/gmail': 'DIFFERENCES' } },
+        { arm: 'server_side + engine', seconds: 1600, failed: 0, clean: false, errors: 4, judged: true,
+          verdicts: { 'a/chat': 'DIFFERENCES' } },
+        { arm: 'server_side + split', seconds: 300, failed: 0, clean: false, errors: null, judged: false,
+          why: "Google's mail import: skipped", verdicts: {} },
       ] })
     render(<AbBenchmarkPanel />)
-    await waitFor(() => expect(screen.getByTestId('ab-best')).toHaveTextContent('server_side + split'))
-    expect(screen.getByTestId('ab-best')).not.toHaveTextContent('server_side + engine')
-    expect(screen.getByText('not clean')).toBeTruthy()
+    await waitFor(() => expect(screen.getByTestId('ab-best')).toHaveTextContent('Default for new runs: server_side + engine'))
+    expect(screen.getByTestId('ab-best')).toHaveTextContent('fewest errors (4)')
+    expect(screen.getAllByTestId('ab-errors')[0]).toHaveTextContent('4')
+    expect(screen.getAllByTestId('ab-errors')[1]).toHaveTextContent("not ranked: Google's mail import: skipped")
+    expect(screen.getByText('default')).toBeTruthy()
+  })
+
+  it('lists every arm running side by side, the skipped slow arm, and how each time was taken', async () => {
+    fetchAb.mockResolvedValue({ running: true, results: null, best: null,
+      progress: progress({ phase: 'side by side', skipped: ['download_upload + engine'],
+        arms: [{ arm: 'server_side + engine', stage: 'migrate' }, { arm: 'server_side + split', stage: 'verify 1:1' }] }),
+      ranking: [{ arm: 'server_side + split', seconds: 300, failed: 0, clean: false, errors: 2, judged: true,
+        timing: 'side by side', verdicts: {} }] })
+    render(<AbBenchmarkPanel />)
+    await waitFor(() => expect(screen.getByTestId('ab-arms')).toHaveTextContent('server_side + engine · migrate; server_side + split · verify 1:1'))
+    expect(screen.getByTestId('ab-skipped')).toHaveTextContent('download_upload + engine')
+    expect(screen.getByText('shared the box')).toBeTruthy()
+  })
+
+  it('says new runs keep the configured defaults while no arm qualifies', async () => {
+    fetchAb.mockResolvedValue({ running: false, results: { runs: [] }, progress: progress({ alive: false, done: 1 }),
+      best: null, ranking: [{ arm: 'server_side + split', seconds: 300, failed: 0, clean: false,
+        errors: null, judged: false, why: 'its 1:1 check did not run', verdicts: {} }] })
+    render(<AbBenchmarkPanel />)
+    await waitFor(() => expect(screen.getByTestId('ab-no-best')).toHaveTextContent('keep the configured defaults'))
+    expect(screen.queryByTestId('ab-best')).toBeNull()
   })
 
   it('shows what differed and the mail-import status in the row, not behind a hover', async () => {
@@ -63,6 +89,19 @@ describe('A/B benchmark page', () => {
     expect(screen.getAllByTestId('ab-differences')[1]).toHaveTextContent('5 item(s) failed')
     expect(screen.getAllByTestId('ab-dms')[1]).toHaveTextContent('skipped: no Admin console login')
     expect(screen.getAllByTestId('ab-dms')[0]).toHaveTextContent('not run')
+  })
+
+  it('groups what differed by kind, saying which kinds fix themselves', async () => {
+    fetchAb.mockResolvedValue({ running: false, results: null, best: null, progress: progress({ alive: false, done: 1 }),
+      ranking: [{ arm: 'server_side + engine', seconds: 1600, failed: 0, clean: false, errors: 4, judged: true,
+        verdicts: { 'a/chat': 'DIFFERENCES' },
+        differences: { 'a/chat': { counts: { differences: 4 }, kinds: [
+          { kind: 'chat.attributed', count: 1, title: 'Chat message re-posted with an attribution', auto: false },
+          { kind: 'chat.labels', count: 2, title: 'A label did not come across', auto: true }] } } }] })
+    render(<AbBenchmarkPanel />)
+    await waitFor(() => expect(screen.getAllByTestId('ab-kind')).toHaveLength(2))
+    expect(screen.getAllByTestId('ab-kind')[0]).toHaveTextContent('1 × Chat message re-posted with an attribution (needs a person or cannot be fixed)')
+    expect(screen.getAllByTestId('ab-kind')[1]).toHaveTextContent('(fixed automatically)')
   })
 
   it('the header pill appears only while a run is going', async () => {

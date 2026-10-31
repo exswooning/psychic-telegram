@@ -33,7 +33,7 @@ const differing = (a: {
       const counts = Object.entries(a.differences?.[k]?.counts ?? {}).filter(
         ([, n]) => n,
       );
-      return { key: k, verdict: v, counts };
+      return { key: k, verdict: v, counts, kinds: a.differences?.[k]?.kinds ?? [] };
     });
 
 /**
@@ -46,7 +46,7 @@ const AbBenchmarkPanel: React.FC = () => {
   const p = view?.progress ?? null;
   const total = p?.total ?? 0,
     done = p?.done ?? 0;
-  const best = view?.ranking.find((a) => a.clean);
+  const best = view?.best ?? null;
 
   return (
     <Paper
@@ -63,8 +63,9 @@ const AbBenchmarkPanel: React.FC = () => {
       </Stack>
       <Typography variant="caption" color="text.secondary">
         The same user&#39;s data, once per transfer mode and mail mode, the
-        target emptied between arms. Speed only counts if the arm also finished
-        clean (no failures, mail verified one to one).
+        target emptied between arms. Ranked by errors (failed items plus every
+        difference the arm&#39;s own one-to-one check found), then by time. An arm
+        whose check did not run is listed but never wins.
       </Typography>
 
       {!view && (
@@ -91,10 +92,18 @@ const AbBenchmarkPanel: React.FC = () => {
                 ? `Arm ${Math.min(done + 1, total)} of ${total}`
                 : `${done} of ${total} arms done`}
             </Typography>
-            {p.alive && p.current && (
-              <Typography variant="body2">
-                {armLabel(p.current)} · {p.current.stage}
+            {p.alive && p.arms && p.arms.length > 0 ? (
+              <Typography variant="body2" data-testid="ab-arms">
+                {p.phase ? `${p.phase}: ` : ""}
+                {p.arms.map((a) => `${a.arm} · ${a.stage}`).join("; ")}
               </Typography>
+            ) : (
+              p.alive &&
+              p.current && (
+                <Typography variant="body2">
+                  {armLabel(p.current)} · {p.current.stage}
+                </Typography>
+              )
             )}
             {p.alive && p.etaSeconds != null && (
               <Typography
@@ -151,9 +160,28 @@ const AbBenchmarkPanel: React.FC = () => {
 
       {best && (
         <Alert severity="success" sx={{ mt: 2 }} data-testid="ab-best">
-          Fastest that finished clean: <strong>{best.arm}</strong>
-          {best.seconds != null ? ` in ${fmtDuration(best.seconds)}` : ""}.
+          Default for new runs: <strong>{best.arm}</strong>: fewest errors (
+          {best.errors}), then fastest
+          {best.seconds != null ? ` (${fmtDuration(best.seconds)})` : ""}. A
+          run that names no transfer or mail mode uses it.
         </Alert>
+      )}
+      {!best && !view?.running && !!view?.ranking.length && (
+        <Alert severity="info" sx={{ mt: 2 }} data-testid="ab-no-best">
+          No arm has a completed one-to-one check yet, so new runs keep the
+          configured defaults.
+        </Alert>
+      )}
+
+      {!!p?.skipped?.length && (
+        <Typography
+          variant="caption"
+          color="text.secondary"
+          sx={{ display: "block", mt: 1 }}
+          data-testid="ab-skipped"
+        >
+          Skipped (slow): {p.skipped.join(", ")}. Run it with --include-slow.
+        </Typography>
       )}
 
       {!!view?.ranking.length && (
@@ -163,6 +191,7 @@ const AbBenchmarkPanel: React.FC = () => {
               <TableRow>
                 <TableCell>Arm</TableCell>
                 <TableCell align="right">time</TableCell>
+                <TableCell align="right">errors</TableCell>
                 <TableCell align="right">failed</TableCell>
                 <TableCell>Finished clean</TableCell>
                 <TableCell>What differed</TableCell>
@@ -174,12 +203,46 @@ const AbBenchmarkPanel: React.FC = () => {
                 const diffs = differing(a);
                 return (
                   <TableRow key={a.arm}>
-                    <TableCell>{a.arm}</TableCell>
+                    <TableCell>
+                      {a.arm}
+                      {best?.arm === a.arm && (
+                        <Chip
+                          size="small"
+                          color="success"
+                          label="default"
+                          sx={{ ml: 1 }}
+                        />
+                      )}
+                    </TableCell>
                     <TableCell
                       align="right"
                       sx={{ fontVariantNumeric: "tabular-nums" }}
                     >
                       {a.seconds != null ? fmtDuration(a.seconds) : "—"}
+                      {a.timing && (
+                        <Typography
+                          variant="caption"
+                          color="text.secondary"
+                          sx={{ display: "block" }}
+                        >
+                          {a.timing === "alone"
+                            ? "timed alone"
+                            : "shared the box"}
+                        </Typography>
+                      )}
+                    </TableCell>
+                    <TableCell
+                      align="right"
+                      data-testid="ab-errors"
+                      sx={{ fontVariantNumeric: "tabular-nums" }}
+                    >
+                      {a.judged ? (
+                        a.errors
+                      ) : (
+                        <Typography variant="body2" color="text.secondary">
+                          not ranked{a.why ? `: ${a.why}` : ""}
+                        </Typography>
+                      )}
                     </TableCell>
                     <TableCell align="right">{a.failed ?? "—"}</TableCell>
                     <TableCell>
@@ -204,6 +267,19 @@ const AbBenchmarkPanel: React.FC = () => {
                             {d.counts.length
                               ? ` — ${d.counts.map(([n, x]) => `${x} ${n}`).join(", ")}`
                               : ""}
+                            {d.kinds.map((x) => (
+                              <Typography
+                                key={x.kind}
+                                variant="caption"
+                                color="text.secondary"
+                                sx={{ display: "block", pl: 1.5 }}
+                                title={[x.cause, x.fix].filter(Boolean).join(" Fix: ")}
+                                data-testid="ab-kind"
+                              >
+                                {x.count} × {x.title}
+                                {x.auto ? " (fixed automatically)" : " (needs a person or cannot be fixed)"}
+                              </Typography>
+                            ))}
                           </Typography>
                         ))
                       )}

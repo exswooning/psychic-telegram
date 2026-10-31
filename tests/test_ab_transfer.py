@@ -110,5 +110,5 @@ class TestTheComparisonIsFair:
         """The run takes hours; a crash in the second mode must not discard
         the first mode's measurements."""
         src = inspect.getsource(ab_transfer.main)
-        loop = src[src.index("for i, (mode, mail_mode) in"):]
-        assert "json.dump" in loop
+        assert "json.dump" in src[src.index("def save()"):src.index("def arm(")]
+        assert "save()" in src[src.index("def finished("):src.index("try:\n        write_progress(running=True")]

@@ -206,6 +206,17 @@ ignored. Throughput is items written *during the run*, never the ledger total, a
 it divides by the user workers the run could keep busy (`busyWorkers`: the pool, or
 the users it wrote, whichever is smaller) -- never the whole pool.
 
+**The A/B benchmark (`ab_transfer.py`, Benchmarks page) ranks arms by errors, then speed.** Arms run
+side by side by default, each on its own copy of the ledger (`BITPORT_LEDGER`, `ledger_copy`) and
+scratch, then the arm(s) with the fewest errors are re-timed alone -- side-by-side times share one
+box and one Google quota, so they rank errors, not speed. `--sequential` is the old way;
+download_upload + engine is skipped (`--include-slow`); Chat is left out (`ALL_SERVICES`,
+`VERIFY_SERVICES`). `arm_errors` scores failed items + every counted difference, and an arm whose own
+1:1 check did not run (UNVERIFIED) or whose mail import was skipped is never ranked. The winner is
+the default for a new run that names no transfer/mail mode (`api_server.ab_default`). Each arm
+clears its user's `user_verification` first: `verify_sample --services all` was once dropped as an
+unknown name, so every arm read stray rows from other verify jobs.
+
 **Handling an incident.** Read the brief; reproduce from its evidence; fix on
 a **test sandbox tenant**, never a real one; add a test. **Do not deploy
 unattended**: `sync_vps.sh` restarts services and a webui-launched seed or a
@@ -696,9 +707,13 @@ A DMS job survives a webui restart; `_EXT_SCRIPTS` lists it so the Jobs page can
 Before building anything browser-driven here, look for the one-off script that already
 did it (`dms_*.py`, `*_probe.py`) -- the approval was rebuilt once from guesses.
 
-**Full scope, always** (`fidelity.py`): every optional pass -- external-owned shares,
-secondary calendars, groups, Gmail settings, calendar ACLs, rooms, comments, chat,
-contacts, tasks, SSO profiles, form links -- defaults ON in config.py. A run mints ONE token for every
+**Full scope, except Chat** (`fidelity.py`): every optional pass -- external-owned shares,
+secondary calendars, groups, Gmail settings, calendar ACLs, rooms, comments,
+contacts, tasks, SSO profiles, form links -- defaults ON in config.py. **Chat is OFF by default
+(operator, 2026-10-31):** `MIGRATE_CHAT` defaults false, `--services all` expands without it
+(`main.resolve_services`, `api_server._expand_all`, both via `config.chat_by_default`), and
+naming `chat` or setting `MIGRATE_CHAT=true` still turns it on. Its findings are Chat API limits
+(DM becomes a group chat, a bot cannot post or join -- `known_issues` chat.*). A run mints ONE token for every
 scope and one ungranted scope fails every call, so: the launch probes each pass's extra
 scopes and writes it on or off (`plan`, named in the launch detail); the run's own gate
 (`main._gate_on_delegation`) tries scope_guard's unattended re-grant first and otherwise

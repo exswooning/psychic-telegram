@@ -2035,6 +2035,13 @@ def _account_argv(account_id: int | None) -> list[str]:
 _ALL_SERVICES = ("drive", "gmail", "calendar", "chat", "contacts", "tasks")
 
 
+def _expand_all(services: list[str]) -> list[str]:
+    """`all` as the engine reads it: every service, Chat only when MIGRATE_CHAT turns it on."""
+    from config import chat_by_default
+    return [s for s in _ALL_SERVICES if s != "chat" or chat_by_default()] \
+        if "all" in services else list(services)
+
+
 def _mail_plan(services: list[str], mail_mode: str, rewrite: bool = True) -> tuple[list[str], dict | None, bool]:
     """(services, env, ordered) for who moves the mail.
 
@@ -2055,7 +2062,7 @@ def _mail_plan(services: list[str], mail_mode: str, rewrite: bool = True) -> tup
     unrewritten content; post-import reconciliation detects overlap, duplicate
     identities and label drift instead of trusting DMS completion counters.
     """
-    wanted = list(_ALL_SERVICES) if "all" in services else list(services)
+    wanted = _expand_all(services)
     env = None
     if mail_mode == "dms":
         # Excluding mail is the whole point: running both inserts every message
@@ -2075,9 +2082,12 @@ def _default_mail_mode(body: "StartMigration") -> str:
     A bounded sample must remain a bounded engine job. Counts are accounting,
     not a release of any outstanding full-verification findings.
     """
-    wanted = set(_ALL_SERVICES) if "all" in body.services else set(body.services)
+    wanted = set(_expand_all(body.services))
     # Without Drive in the run there is nothing to rewrite links against.
-    return "split" if body.sample is None and {"gmail", "drive"} <= wanted else "engine"
+    if body.sample is not None or not {"gmail", "drive"} <= wanted:
+        return "engine"
+    best = ab_default()       # the benchmark's verified winner, when there is one
+    return (best or {}).get("mailMode") or "split"
 
 
 def _export_identities_csv(account_id: int | None) -> tuple[str, int]:
@@ -2490,6 +2500,8 @@ async def migrate_start(body: StartMigration, op: Operator = Depends(operator)):
     # Resolved once and written back, so the audit row and the DMS follow-on below both see
     # what this run actually does rather than "not said".
     body.mail_mode = body.mail_mode or _default_mail_mode(body)
+    if not body.transfer_mode and (best := ab_default()) and best["mode"] in ("server_side", "download_upload"):
+        body.transfer_mode = best["mode"]
     if body.sample is not None and body.mail_mode != "engine":
         # Split leaves the rest of the mail to the DMS and dms takes all of it, so
         # either way the mail could not be compared one to one -- the reason to
@@ -4062,7 +4074,9 @@ def ab_view(progress_path: str, results_path: str, now: float | None = None) -> 
         durations = [d for d in (p.get("durations") or []) if isinstance(d, (int, float))]
         total, done = int(p.get("total") or 0), int(p.get("done") or 0)
         eta = None
-        if alive and durations and total > done:
+        if alive and p.get("parallel") and p.get("phase") == "side by side":
+            pass        # arms overlap, so a mean of their durations says nothing about the finish
+        elif alive and durations and total > done:
             mean = sum(durations) / len(durations)
             used = max(0.0, now - float(p.get("armStartedAt") or now))
             eta = round(max(mean - used, 0.0) + mean * (total - done - 1))
@@ -4071,7 +4085,11 @@ def ab_view(progress_path: str, results_path: str, now: float | None = None) -> 
                                                       "users", "corpus", "total", "done", "error")},
                            "alive": alive, "etaSeconds": eta, "armsFinished": len(durations),
                            "meanArmSeconds": round(sum(durations) / len(durations)) if durations else None,
+                           "arms": p.get("arms") or [], "phase": p.get("phase"),
+                           "skipped": p.get("skipped") or [],
                            "etaNote": None if eta is not None else (
+                               "arms run side by side; the slowest sets the finish, then the leader is re-timed alone"
+                               if alive and p.get("parallel") and p.get("phase") == "side by side" else
                                "no estimate until one arm has finished" if alive else None)}
     try:
         with open(results_path) as fh:
@@ -4090,18 +4108,40 @@ def ab_view(progress_path: str, results_path: str, now: float | None = None) -> 
             return r.get("exit") == 0 and not r.get("failed") and not f.get("missing_on_target")
         out["ranking"] = sorted(
             ({"arm": r["mode"] + (" + " + r["mailMode"] if r.get("mailMode") else ""),
+              "mode": r["mode"], "mailMode": r.get("mailMode"),
               "seconds": r.get("seconds"), "failed": r.get("failed"), "clean": clean(r),
+              "timing": r.get("timing"), "contendedSeconds": r.get("contendedSeconds"),
+              **ab_errors(r),
               "verdicts": r.get("verdicts") or {},
               "differences": r.get("differences") or {}, "dms": r.get("dms")} for r in runs),
-            key=lambda a: (not a["clean"], a["seconds"] if a["seconds"] is not None else 1e12))
+            key=lambda a: (not a["judged"], a["errors"] if a["errors"] is not None else 1e12,
+                           a["seconds"] if a["seconds"] is not None else 1e12))
+        best = next((a for a in out["ranking"] if a["judged"] and a["mailMode"]), None)
+        out["best"] = best and {k: best[k] for k in ("arm", "mode", "mailMode", "errors", "seconds")}
+        out["finishedAt"] = (p or {}).get("finishedAt") if not out["running"] else None
+        out["skipped"] = res.get("skipped") or []
     return out
+
+
+def ab_errors(r: dict) -> dict:
+    import ab_transfer
+    return ab_transfer.arm_errors(r)
+
+
+AB_RESULTS = os.path.join(HERE, "logs", "ab_results.md.json")
+
+
+def ab_default(results_path: str = AB_RESULTS) -> dict | None:
+    """The benchmark's winner -- fewest errors, then fastest, among arms whose own check ran --
+    which new runs use when they name no transfer or mail mode (operator, 2026-10-31: "set the
+    default now"). None while no arm qualifies, and runs keep the configured defaults."""
+    return ab_view(os.devnull, results_path).get("best")
 
 
 @app.get("/api/v2/benchmark/ab")
 async def benchmark_ab(op: Operator = Depends(operator)):
     require_reader(op)
-    return await _off_loop(ab_view, os.path.join(HERE, "logs", "ab_progress.json"),
-                           os.path.join(HERE, "logs", "ab_results.md.json"))
+    return await _off_loop(ab_view, os.path.join(HERE, "logs", "ab_progress.json"), AB_RESULTS)
 
 
 # ======================================================================

@@ -2241,7 +2241,12 @@ def main(argv=None) -> int:
     ap.add_argument("--repair-after-user", action="store_true",
                     help="repair supported findings and recheck each user immediately after verification")
     a = ap.parse_args(argv)
-    services = tuple(s.strip() for s in a.services.split(","))
+    services = ALL_SERVICES if a.services.strip() == "all" else tuple(s.strip() for s in a.services.split(","))
+    # An unknown name used to be dropped silently: the A/B's `--services all` checked nothing in any
+    # arm, and each arm read whatever rows some other verify had left.
+    unknown = sorted(set(services) - set(ALL_SERVICES))
+    if unknown:
+        ap.error(f"unknown service(s) {', '.join(unknown)}; choose from {', '.join(ALL_SERVICES)}, or all")
     settings = Settings(account_id=a.account_id)
     # The scopes a credential carries follow these flags (config.source_scopes), and main.py switches
     # them on for the services a run names. Without this, reading contacts or tasks is a 403.

@@ -35,14 +35,14 @@ class TestThePlan:
         assert A._mail_plan(["all"], "engine", rewrite=False) == (["all"], None, False)
 
     def test_dms_takes_mail_off_the_engine_however_the_services_were_named(self):
-        every = [s for s in A._ALL_SERVICES if s != "gmail"]
+        every = [s for s in A._ALL_SERVICES if s not in ("gmail", "chat")]    # Chat is opt-in since 2026-10-31
         # Calendar is still moved, so its links still need Drive first.
         assert A._mail_plan(["all"], "dms") == (every, None, True)
         assert A._mail_plan(["drive", "gmail", "chat"], "dms") == (["drive", "chat"], None, False)
 
     def test_split_keeps_mail_on_the_engine_orders_the_passes_and_forces_rewriting(self):
         services, env, ordered = A._mail_plan(["all"], "split")
-        assert services == list(A._ALL_SERVICES) and "gmail" in services
+        assert services == [s for s in A._ALL_SERVICES if s != "chat"] and "gmail" in services
         assert ordered is True
         assert env["MAIL_ONLY_WITH_LINKS"] == "true" and env["REWRITE_DRIVE_LINKS"] == "true"
 
@@ -398,3 +398,11 @@ class TestMailLinkScan:
     def test_an_unknown_scan_is_refused(self, cp, monkeypatch):
         r, seen = _start(cp, monkeypatch, services=["all"], mail_mode="split", mail_link_scan="fast")
         assert r.status_code == 422 and not seen
+
+
+def test_a_run_naming_no_mode_takes_the_benchmarks_winner(cp, monkeypatch):
+    monkeypatch.setattr(A, "ab_default", lambda: {"arm": "download_upload + engine", "mode": "download_upload",
+                                                 "mailMode": "engine", "errors": 4, "seconds": 900})
+    r, seen = _start(cp, monkeypatch, services=["all"])
+    assert r.status_code == 200, r.text
+    assert seen["env"]["TRANSFER_MODE"] == "download_upload" and "MAIL_ONLY_WITH_LINKS" not in seen["env"]

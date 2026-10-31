@@ -50,10 +50,12 @@ def test_a_progress_file_left_by_a_killed_run_does_not_read_as_running(tmp_path)
 
 def test_the_ranking_puts_clean_arms_first_fastest_first_and_never_hides_a_fast_dirty_one(tmp_path):
     runs = [
-        {"mode": "download_upload", "mailMode": "engine", "seconds": 90, "clean": True, "failed": 0},
+        {"mode": "download_upload", "mailMode": "engine", "seconds": 90, "clean": True, "failed": 0,
+         "verdicts": {"audit/gmail": "IDENTICAL"}},
         {"mode": "server_side", "mailMode": "engine", "seconds": 40, "clean": False, "failed": 3,
          "verdicts": {"audit/gmail": "DIFFERENCES"}},
-        {"mode": "server_side", "mailMode": "split", "seconds": 60, "clean": True, "failed": 0},
+        {"mode": "server_side", "mailMode": "split", "seconds": 60, "clean": True, "failed": 0,
+         "verdicts": {"audit/gmail": "IDENTICAL"}, "dms": "done"},
     ]
     pp, rp = _write(tmp_path, None, {"source": {}, "runs": runs})
     r = api_server.ab_view(pp, rp)["ranking"]
@@ -94,7 +96,7 @@ def test_a_fresh_target_arm_deletes_nothing_and_points_the_user_at_a_new_account
     assert "run_tail(" not in fresh_branch and "bulk_seed_identities" in fresh_branch
     main_src = inspect.getsource(AB.main)
     assert "fresh = args.fresh_targets or bool(args.mail_mode)" in main_src
-    assert "finally:" in main_src and "original_target" in main_src.split("finally:")[1]
+    assert "finally:" in main_src and "original_target" in main_src.split("finally:")[-1]
 
 
 def test_differences_survive_as_counts_and_a_few_examples():
@@ -142,3 +144,172 @@ def test_the_ranking_carries_each_arms_differences_and_mail_import_status(tmp_pa
     r = {a["arm"]: a for a in api_server.ab_view(pp, rp)["ranking"]}
     assert r["server_side + engine"]["differences"] == {"audit/gmail": {"counts": {"missing": 756}}}
     assert r["server_side + split"]["dms"] == "skipped: no Admin console login"
+
+
+def test_verify_takes_all_and_refuses_a_service_it_does_not_know(monkeypatch):
+    """`--services all` was dropped as an unknown name: the A/B's audit checked nothing in any arm."""
+    import types
+
+    import pytest
+
+    import config
+    import db as dbmod
+    import verify_sample
+    seen = {}
+    monkeypatch.setattr(config, "Settings", lambda account_id=None: types.SimpleNamespace(
+        db_path=":memory:", migrate_contacts=False, migrate_tasks=False, max_retries=1))
+    monkeypatch.setattr(dbmod, "MigrationDB", lambda path: types.SimpleNamespace(close=lambda: None))
+    monkeypatch.setattr(verify_sample, "run_and_save", lambda auth, db, st, users, services, **k: seen.update(s=services))
+    import auth
+    monkeypatch.setattr(auth, "AuthManager", lambda st: None)
+    assert verify_sample.main(["--services", "all"]) == 0 and seen["s"] == verify_sample.ALL_SERVICES
+    with pytest.raises(SystemExit) as exc:
+        verify_sample.main(["--services", "everything"])
+    assert exc.value.code == 2
+
+
+def test_the_drive_comparison_matches_a_fresh_target_account(monkeypatch):
+    """Keyed by address, audit/… never met audit-ab1-…/…: 0 compared, 102 'missing', every arm."""
+    import types
+    files = [{"id": "1", "name": "Plan", "mimeType": "x", "md5Checksum": "a", "modifiedTime": "2024"}]
+    svc = types.SimpleNamespace(files=lambda: types.SimpleNamespace(
+        list=lambda **k: types.SimpleNamespace(execute=lambda: {"files": files})))
+    auth = types.SimpleNamespace(source_drive=lambda u: svc, target_drive=lambda u: svc)
+    src = AB.snapshot_drive(auth, ["audit@s.example"], "source")
+    tgt = AB.snapshot_drive(auth, ["audit-ab1-10301748@t.example"], "target")
+    assert AB.fidelity(src, tgt)["compared"] == 1
+
+
+def _arms(tmp_path, runs):
+    rp = tmp_path / "r.json"
+    rp.write_text(json.dumps({"runs": runs}))
+    return str(rp)
+
+
+ARMS = [
+    {"mode": "server_side", "mailMode": "engine", "seconds": 1600, "exit": 0, "failed": 0, "dms": None,
+     "verdicts": {"a/drive": "IDENTICAL", "a/chat": "DIFFERENCES"},
+     "differences": {"a/chat": {"counts": {"differences": 4, "missing": 0}}}},
+    {"mode": "download_upload", "mailMode": "engine", "seconds": 900, "exit": 0, "failed": 0, "dms": None,
+     "verdicts": {"a/drive": "DIFFERENCES", "a/chat": "DIFFERENCES"},
+     "differences": {"a/drive": {"counts": {"differences": 16, "duplicates": 5}},
+                     "a/chat": {"counts": {"differences": 4}}}},
+    {"mode": "server_side", "mailMode": "split", "seconds": 300, "exit": 0, "failed": 0,
+     "dms": "skipped: no Admin console login", "verdicts": {"a/drive": "IDENTICAL"}},
+    {"mode": "download_upload", "mailMode": "split", "seconds": 200, "exit": 0, "failed": 0, "dms": None,
+     "verdicts": {"verify": "UNVERIFIED"}},
+]
+
+
+def test_arms_rank_by_errors_then_speed_and_an_unchecked_arm_never_wins(tmp_path):
+    """A fast arm wins only on what its own check saw: one whose check never ran, or whose mail
+    never reached Google's import, ranks after every arm that was looked at."""
+    v = api_server.ab_view(str(tmp_path / "none"), _arms(tmp_path, ARMS))
+    r = v["ranking"]
+    assert [(a["arm"], a["errors"]) for a in r[:2]] == [("server_side + engine", 4),
+                                                         ("download_upload + engine", 25)]
+    assert not r[2]["judged"] and not r[3]["judged"] and r[2]["why"] and r[3]["why"]
+    assert v["best"] == {"arm": "server_side + engine", "mode": "server_side", "mailMode": "engine",
+                         "errors": 4, "seconds": 1600}
+
+
+def test_new_runs_take_the_winner_and_keep_the_old_defaults_while_none_qualifies(tmp_path, monkeypatch):
+    import types
+    body = types.SimpleNamespace(services=["all"], sample=None)
+    monkeypatch.setattr(api_server, "AB_RESULTS", _arms(tmp_path, ARMS))
+    monkeypatch.setattr(api_server.ab_default, "__defaults__", (api_server.AB_RESULTS,))
+    assert api_server._default_mail_mode(body) == "engine"
+    monkeypatch.setattr(api_server.ab_default, "__defaults__", (_arms(tmp_path, ARMS[2:]),))
+    assert api_server.ab_default() is None and api_server._default_mail_mode(body) == "split"
+    assert api_server._default_mail_mode(types.SimpleNamespace(services=["all"], sample=25)) == "engine"
+
+
+def test_a_process_can_be_pointed_at_its_own_copy_of_the_ledger(monkeypatch, tmp_path):
+    import sqlite3
+
+    import config
+    src = tmp_path / "real.db"
+    c = sqlite3.connect(src)
+    c.execute("create table t (x)")
+    c.execute("insert into t values (1)")
+    c.commit()
+    c.close()
+    path = AB.ledger_copy(config.Settings(db_path=str(src)), str(tmp_path / "arm1"))
+    assert sqlite3.connect(path).execute("select x from t").fetchall() == [(1,)] and path != str(src)
+    monkeypatch.setenv("BITPORT_LEDGER", path)
+    assert config.Settings().db_path == path
+
+
+def _main_with(monkeypatch, tmp_path, argv, results):
+    """AB.main with the Google-facing pieces faked; `results` maps arm label -> list of run dicts."""
+    import types
+    ledgers, calls = [], []
+    st = types.SimpleNamespace(db_path=str(tmp_path / "real.db"), scratch_dir="s", target_domain="t.x",
+                               target_admin="a@t.x", target_sa_key="k", account_id=3)
+    import sqlite3
+    sqlite3.connect(st.db_path).close()
+    monkeypatch.setattr(AB, "Settings", lambda account_id=None: st)
+    monkeypatch.setattr(AB, "AuthManager", lambda s: object())
+    monkeypatch.setattr(AB, "snapshot_drive", lambda *a: {"files": 1, "folders": 0, "bytes": 1, "native": 0, "binary": 1,
+                                                          "mimes": {}, "sample": {}})
+    db = types.SimpleNamespace(all_identities=lambda: [{"entity_type": "user", "source_email": "a@s.x", "target_email": "a@t.x"}])
+    monkeypatch.setattr(AB, "MigrationDB", lambda p: db)
+    monkeypatch.setattr(AB, "ledger_copy", lambda s, d: ledgers.append(d) or d + "/migration.db")
+    monkeypatch.setattr(AB, "PROGRESS", str(tmp_path / "p.json"))
+    monkeypatch.setattr("db.bulk_seed_identities", lambda *a: calls.append("restore"))
+
+    def one_mode(mode, settings, auth, us, ut, snap, mail_mode, fresh_target, ledger=None, side_by_side=False):
+        r = dict(results[AB.arm_label(mode, mail_mode)].pop(0))
+        calls.append((AB.arm_label(mode, mail_mode), ledger, side_by_side))
+        return {"mode": mode, "mailMode": mail_mode, "exit": 0, "failed": 0, "dms": None, "timing": "side by side" if side_by_side else "alone",
+                "verdicts": {"a/drive": "IDENTICAL"}, "differences": {}, "migrated": {}, "host_bytes_in": None,
+                "target": {"files": 1, "native": 0}, "fidelity": {"compared": 1, "missing_on_target": 0, "mime_changed": 0,
+                                                                  "md5_changed": 0, "mtime_changed": 0, "examples": []}, **r}
+    monkeypatch.setattr(AB, "one_mode", one_mode)
+    assert AB.main([*argv, "--report", str(tmp_path / "r.md"), "--user", "a@s.x", "--account-id", "3"]) == 0
+    return json.load(open(tmp_path / "r.md.json")), calls, ledgers
+
+
+def test_arms_run_side_by_side_on_their_own_ledgers_then_the_leader_is_re_timed_alone(monkeypatch, tmp_path):
+    runs = {"server_side + engine": [{"seconds": 90}, {"seconds": 40}],
+            "server_side + split": [{"seconds": 60, "failed": 3}],
+            "download_upload + split": [{"seconds": 70, "failed": 3}]}
+    out, calls, ledgers = _main_with(monkeypatch, tmp_path, ["--mode", "server_side", "--mode", "download_upload",
+                                                             "--mail-mode", "engine", "--mail-mode", "split"], runs)
+    first = [c for c in calls if c != "restore"]
+    assert {c[0] for c in first[:3]} == {"server_side + engine", "server_side + split", "download_upload + split"}
+    assert all(c[1] and c[2] for c in first[:3]) and len(set(c[1] for c in first[:3])) == 3
+    assert first[3][0] == "server_side + engine" and first[3][2] is False       # the 0-error leader, alone
+    assert "restore" not in calls                                               # the real ledger was never touched
+    lead = next(r for r in out["runs"] if r["mailMode"] == "engine")
+    assert lead["seconds"] == 40 and lead["contendedSeconds"] == 90 and lead["timing"] == "alone"
+    assert out["skipped"] == ["download_upload + engine"] and out["sideBySide"] is True
+
+
+def test_sequential_is_the_old_way_and_include_slow_brings_the_slow_arm_back(monkeypatch, tmp_path):
+    runs = {k: [{"seconds": 5}] for k in ("server_side + engine", "download_upload + engine")}
+    out, calls, ledgers = _main_with(monkeypatch, tmp_path, ["--mode", "server_side", "--mode", "download_upload",
+                                                             "--mail-mode", "engine", "--sequential", "--include-slow"], runs)
+    assert ledgers == [] and [c[2] for c in calls if c != "restore"] == [False, False]
+    assert out["skipped"] == [] and calls[-1] == "restore" and len(out["runs"]) == 2
+
+
+def test_differences_are_grouped_by_known_kind_with_cause_and_fix():
+    """Four Chat findings read as two platform limits and one bot attribution, not as '4 differences'."""
+    payload = json.dumps({"counts": {"differences": 4}, "differences": [
+        {"diffs": ["posted by the user with an attribution: the sender cannot post there"]},
+        {"diffs": ["Original Chat sender identity was not reproduced"], "scope": "chat-thread"},
+        {"diffs": ["Chat conversation type differs: DIRECT_MESSAGE -> GROUP_CHAT; x"], "scope": "chat-space-type"},
+        {"diffs": ["Chat participants differ: 1 missing (1 app/bot), 0 extra; 0 existing"], "scope": "chat-members"}],
+        "missing": [{"why": "not on the target"}] * 3, "checks": []})
+    kinds = {k["kind"]: k for k in AB.difference_summary(payload, service="chat")["kinds"]}
+    assert set(kinds) == {"chat.attributed", "chat.sender", "chat.space_type", "chat.members", "chat.missing"}
+    assert kinds["chat.missing"]["count"] == 3 and kinds["chat.space_type"]["auto"] is False
+    assert kinds["chat.space_type"]["cause"] and kinds["chat.space_type"]["fix"]
+
+
+def test_chat_is_left_out_of_the_arms_and_their_check_until_it_is_put_back():
+    assert "chat" not in AB.ALL_SERVICES.split(",") and "chat" not in AB.VERIFY_SERVICES.split(",")
+    assert "chat" not in AB.services_for("engine").split(",") and "chat" not in AB.services_for("dms").split(",")
+    import verify_sample
+    assert set(AB.VERIFY_SERVICES.split(",")) <= set(verify_sample.ALL_SERVICES)

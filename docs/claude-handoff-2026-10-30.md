@@ -93,3 +93,9 @@ Primary goal of these tests is the fastest way to migrate; errors are second. On
 - **Operator decision, 13:41Z:** `t.sarafgloabalexim.com` declared a sandbox (`domain_guard.py --revoke`, reason on the record) so the A/B can empty `audit@t.`. It is scoped by `--user`; never run an unscoped reset on t. (`nest@t.` holds 13,752 messages).
 - **Running now:** pid 3321423, user audit@s. only, arms server_side/download_upload x engine/split. Mail copy still runs at the 3/s `per_user_qps`, so engine arms take ~12 min each; speeding that up is the next benchmark.
 - Full Python suite not rerun after the last small change (error display); targeted ab tests pass; the five known failures are unchanged.
+
+## 31 October 2026 — benchmark audit fixed, Chat off by default
+
+- The A/B's own 1:1 check never ran before (`verify_sample --services all` was dropped as an unknown name): every earlier arm verdict was stray rows. Fixed; arm 1 (server_side + engine) re-audited properly: everything identical except 4 Chat limits.
+- Benchmarks now rank by errors then speed, run arms side by side on ledger copies, re-time the leader alone, skip download_upload + engine, and name the winner as the default for runs that name no mode.
+- Chat is OFF by default (operator): `MIGRATE_CHAT=false`, `all` excludes it. Still left: the Google mail import needs the console login in `/etc/bitport/dwd.env` before any split arm can be ranked.
