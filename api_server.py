@@ -4111,13 +4111,14 @@ def ab_view(progress_path: str, results_path: str, now: float | None = None) -> 
               "mode": r["mode"], "mailMode": r.get("mailMode"),
               "seconds": r.get("seconds"), "failed": r.get("failed"), "clean": clean(r),
               "timing": r.get("timing"), "contendedSeconds": r.get("contendedSeconds"),
+              "corpus": r.get("corpus"), "_key": _ab_rank_key(r),
               **ab_errors(r),
               "verdicts": r.get("verdicts") or {},
               "differences": r.get("differences") or {}, "dms": r.get("dms")} for r in runs),
-            key=lambda a: (not a["judged"], a["errors"] if a["errors"] is not None else 1e12,
-                           a["seconds"] if a["seconds"] is not None else 1e12))
+            key=lambda a: a.pop("_key"))
         best = next((a for a in out["ranking"] if a["judged"] and a["mailMode"]), None)
-        out["best"] = best and {k: best[k] for k in ("arm", "mode", "mailMode", "errors", "seconds")}
+        out["best"] = best and {k: best.get(k) for k in ("arm", "mode", "mailMode", "errors", "seconds",
+                                                         "errorsPer1k", "secondsPer100")}
         out["finishedAt"] = (p or {}).get("finishedAt") if not out["running"] else None
         out["skipped"] = res.get("skipped") or []
     return out
@@ -4126,6 +4127,11 @@ def ab_view(progress_path: str, results_path: str, now: float | None = None) -> 
 def ab_errors(r: dict) -> dict:
     import ab_transfer
     return ab_transfer.arm_errors(r)
+
+
+def _ab_rank_key(r: dict) -> tuple:
+    import ab_transfer
+    return ab_transfer.rank_key(r)
 
 
 AB_RESULTS = os.path.join(HERE, "logs", "ab_results.md.json")

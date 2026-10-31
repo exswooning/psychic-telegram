@@ -448,7 +448,8 @@ def rows_off_domain(identities: str, target_domain: str) -> int:
 
 
 def start(source_domain: str, source_admin: str, timeout: int,
-          headful: bool, dry_run: bool, identities: str | None = None) -> dict:
+          headful: bool, dry_run: bool, identities: str | None = None,
+          fresh: bool = False) -> dict:
     """Drive the Google Workspace email data import as far as it can go.
 
     Stops before Step 4 unless --apply. Step 1 is also a genuine wall: it
@@ -477,14 +478,17 @@ def start(source_domain: str, source_admin: str, timeout: int,
             return result
         result["did"].append("opened the Workspace email import page")
 
-        # A previously stopped import leaves Step 4 on a 'Stopped -- your
-        # import is complete' screen that offers 'Exit import' (back to the
-        # setup page) or 'Run delta import', but NOT 'Start import'. To run a
-        # fresh import, click 'Exit import' first to return to the setup
-        # steps. Without this a re-run reported "no Start import button".
-        exit_btn = _find_first(page, ['button:has-text("Exit import")'])
+        # A finished or stopped import leaves Step 4 on a 'Complete' screen that offers 'Exit
+        # import' or 'Run delta import', never 'Start import'. Exit asks "Exit and delete import?"
+        # -- the old map, settings and results are deleted -- and until 2026-10-31 nothing
+        # confirmed it, so every run landed back on the old import and a new user could never
+        # be added. Only a FRESH import (new, empty target accounts: the A/B's arms) exits;
+        # otherwise the delta below continues the existing import without duplicating mail.
+        exit_btn = _find_first(page, ['button:has-text("Exit import")']) if fresh and not dry_run else None
         if exit_btn is not None:
             exit_btn.click()
+            page.wait_for_timeout(3000)
+            page.get_by_role("button", name="Exit and delete import").first.click(timeout=15000)
             page.wait_for_timeout(5000)
             # Exit import returns to the Data Import landing, not the setup
             # steps, so re-navigate and let the console repaint before the
@@ -633,7 +637,9 @@ def start(source_domain: str, source_admin: str, timeout: int,
                     if "processing" not in seg.lower():
                         done = True
                         break
-                if done:
+                if done and already:
+                    result["did"].append("kept the import map already there")
+                elif done:
                     result["did"].append(
                         f"uploaded and processed an import map of {n} users")
                 else:
@@ -665,6 +671,15 @@ def start(source_domain: str, source_admin: str, timeout: int,
                 if box.count() and not box.first.is_checked():
                     box.first.check(timeout=4000)
                     result["did"].append(f"enabled {label!r}")
+            except Exception:          # noqa: BLE001
+                logging.getLogger(__name__).debug("ignored an error", exc_info=True)
+        # Ticked with no labels, "Exclude specific labels" makes Save refuse ("Labels are
+        # required") and Start import never enables (live, 2026-10-31).
+        if "Labels are required" in page.inner_text("body"):
+            try:
+                page.get_by_text("Exclude specific labels from data import").first.click(timeout=4000)
+                page.wait_for_timeout(1500)
+                result["did"].append("unticked 'Exclude specific labels' (it had no labels)")
             except Exception:          # noqa: BLE001
                 logging.getLogger(__name__).debug("ignored an error", exc_info=True)
         if _set_earliest_date(page):
@@ -892,10 +907,10 @@ def approve_as_source(timeout: int, headful: bool) -> list[str]:
 
 # How often to read a running import. Each read is a fresh sign-in, and an
 # import runs for hours, so this is slow on purpose.
-DONE_POLL_SEC = 900
+DONE_POLL_SEC = int(os.getenv("DMS_POLL_SEC", "900"))
 
 
-def wait_then_tally(minutes: int, timeout: int, headful: bool) -> int:
+def wait_then_tally(minutes: int, timeout: int, headful: bool, tally: bool = True) -> int:
     """Read the import's status until Google says it has stopped running, then
     tally both tenants (tally.py, every user) so the result is counted without
     anyone asking. Each read also refreshes the cached metrics the UI shows.
@@ -909,6 +924,8 @@ def wait_then_tally(minutes: int, timeout: int, headful: bool) -> int:
         state = got.get("status", "unknown")
         log(f"import status: {state} {got.get('metrics') or ''}")
         if state in ("complete", "Stopped"):
+            if not tally:      # the caller judges the result itself (ab_transfer's own 1:1 check)
+                return 0 if state == "complete" else 1
             if state == "complete":
                 from config import Settings
                 from auth import AuthManager
@@ -959,6 +976,12 @@ def main(argv: list[str] | None = None) -> int:
                     help="actually drive the flow (default: stop at the "
                          "setup control without moving mail)")
     ap.add_argument("--json", action="store_true")
+    ap.add_argument("--fresh-import", action="store_true",
+                    help="exit and DELETE a finished import first, so this map starts a new one "
+                         "(only for new, empty target accounts -- otherwise a delta import continues)")
+    ap.add_argument("--no-tally", action="store_true",
+                    help="with --until-done: stop when Google reports the import complete; no "
+                         "reconcile or whole-tenant tally")
     ap.add_argument("--status", action="store_true",
                     help="read the import's live counters and cache them, "
                          "then exit (does not touch the import)")
@@ -989,7 +1012,7 @@ def main(argv: list[str] | None = None) -> int:
     def _run():
         return start(args.source_domain, args.source_admin or args.target_admin,
                      args.timeout, args.headful, dry_run=not args.apply,
-                     identities=identities)
+                     identities=identities, fresh=args.fresh_import)
 
     out = _run()
     if args.apply and out.get("step") == "step1-pending":
@@ -1025,7 +1048,7 @@ def main(argv: list[str] | None = None) -> int:
         if not out["ok"]:
             print(out["manual"])
     if args.until_done and out.get("started"):
-        return wait_then_tally(args.until_done, args.timeout, args.headful)
+        return wait_then_tally(args.until_done, args.timeout, args.headful, tally=not args.no_tally)
     return 0 if out["ok"] else 1
 
 

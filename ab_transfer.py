@@ -354,6 +354,17 @@ def one_mode(mode: str, settings: Settings, auth: AuthManager,
     }
 
 
+def mailbox_size(auth: AuthManager, user: str) -> int | None:
+    """The source mailbox's message count (Gmail's own messagesTotal), for weighting an arm's
+    results by how much mail it had to move. None if it could not be read."""
+    try:
+        return int(auth.source_gmail(user).users().getProfile(userId="me").execute()
+                   .get("messagesTotal") or 0)
+    except Exception:  # noqa: BLE001 - a weight we cannot read is reported as missing, not zero
+        logging.getLogger(__name__).warning("could not read %s's mailbox size", user, exc_info=True)
+        return None
+
+
 def ledger_copy(settings: Settings, directory: str) -> str:
     """A consistent copy of the account's ledger (sqlite's own backup, safe while it is written to)
     for one side-by-side arm. The real ledger is never touched by an arm that has its own."""
@@ -383,7 +394,22 @@ def arm_errors(r: dict) -> dict:
     n = int(r.get("failed") or 0) + int((r.get("fidelity") or {}).get("missing_on_target") or 0) * (not r.get("mailMode"))
     for d in (r.get("differences") or {}).values():
         n += sum(v for v in (d.get("counts") or {}).values() if isinstance(v, int))
-    return {"errors": n, "judged": True, "why": None}
+    # Arms on different users carry different amounts of data: per 1,000 source items and per 100
+    # items is what makes them comparable. An arm with no corpus (one shared user) ranks on raw counts.
+    items = (r.get("corpus") or {}).get("items")
+    return {"errors": n, "judged": True, "why": None,
+            "errorsPer1k": round(n * 1000 / items, 2) if items else None,
+            "secondsPer100": round(r["seconds"] * 100 / items, 1) if items and r.get("seconds") else None}
+
+
+def rank_key(r: dict) -> tuple:
+    """Fewest errors, then fastest -- weighted per item when the arm knows its corpus."""
+    e = arm_errors(r)
+    if not e["judged"]:
+        return (1, 1e12, 1e12)
+    err = e["errorsPer1k"] if e["errorsPer1k"] is not None else e["errors"]
+    sec = e["secondsPer100"] if e["secondsPer100"] is not None else (r.get("seconds") or 1e12)
+    return (0, err, sec)
 
 
 def dms_tail(settings, users_src, users_tgt, env) -> tuple[str, float]:
@@ -403,9 +429,12 @@ def dms_tail(settings, users_src, users_tgt, env) -> tuple[str, float]:
         w.writerow(("source_email", "target_email"))
         w.writerow((users_src[0], users_tgt[0]))
     argv = [PY, "dms_migrate.py", "--apply", "--watch", "60", "--until-done", "1440", "--timeout", "200",
+            "--fresh-import", "--no-tally", "--watch-interval", "120",
             "--identities", path, "--source-domain", settings.source_domain,
             "--target-admin", settings.target_admin]
-    rc, secs = run(argv, {**env, **denv})
+    # Each status read is a fresh sign-in; every 2 minutes keeps the arm's measured time within
+    # two minutes of Google's own finish without tripping sign-in challenges.
+    rc, secs = run(argv, {**env, **denv, "DMS_POLL_SEC": "120"})
     return ("done" if rc == 0 else f"failed (exit {rc})"), secs
 
 
@@ -481,32 +510,24 @@ def main(argv: list[str] | None = None) -> int:
                            TARGET_SA_KEY=settings.target_sa_key, MIGRATION_DB=settings.db_path)
     auth = AuthManager(settings)
     db = MigrationDB(settings.db_path)
-    rows = [r for r in db.all_identities() if r["entity_type"] == "user"]
+    fresh = args.fresh_targets or bool(args.mail_mode)
+    mapped = {r["source_email"].lower(): r["target_email"] for r in db.all_identities()
+              if r["entity_type"] == "user"}
     if args.user:
-        wanted = {u.lower() for u in args.user}
-        rows = [r for r in rows if r["source_email"].lower() in wanted]
-        missing = wanted - {r["source_email"].lower() for r in rows}
-        if missing:
-            print(f"not in identity_map: {sorted(missing)}")
+        missing = sorted({u.lower() for u in args.user} - set(mapped))
+        if missing and not fresh:
+            print(f"not in identity_map: {missing}")
             return 1
-    users_src = [r["source_email"] for r in rows]
-    users_tgt = [r["target_email"] for r in rows]
+        # A fresh arm maps its user to a brand-new target account, so an unmapped user is fine.
+        users_src = list(dict.fromkeys(args.user))
+    else:
+        users_src = list(mapped)
+    users_tgt = [mapped.get(u.lower()) or f"{u.partition('@')[0]}@{settings.target_domain}"
+                 for u in users_src]
     if not users_src:
         print("identity_map is empty.")
         return 1
 
-    print("=== snapshotting the source (the fixed corpus) ===", flush=True)
-    src_snap = snapshot_drive(auth, users_src, "source")
-    print(f"    {src_snap['files']} files ({src_snap['native']} native, "
-          f"{src_snap['binary']} binary), {src_snap['folders']} folders, "
-          f"{src_snap['bytes']/1e9:.2f} GB", flush=True)
-
-    fresh = args.fresh_targets or bool(args.mail_mode)
-    if fresh and len(users_src) != 1:
-        print("--fresh-targets/--mail-mode need exactly one --user: a fair comparison pins one "
-              "user's data, and each arm needs its own new account for it.")
-        return 1
-    original_target = users_tgt[0]
     arms = [(m, mm) for m in (args.mode or ["server_side", "download_upload"])
             for mm in (args.mail_mode or [None])]
     skipped = []
@@ -514,17 +535,38 @@ def main(argv: list[str] | None = None) -> int:
         arms.remove(SLOW_ARM)
         skipped.append(arm_label(*SLOW_ARM))
         print(f"=== skipping {skipped[0]} (slow; --include-slow runs it) ===", flush=True)
+    # One user per arm (as many --user as arms): every arm reads its own mailbox, so Gmail's
+    # per-user limit never pits one arm against another (2026-10-31: four arms on one user ran it
+    # dry -- 729 messages unverifiable). Users differ in size, so results are weighted per item.
+    per_arm = fresh and len(users_src) == len(arms) > 1
+    if fresh and not per_arm and len(users_src) != 1:
+        print(f"--fresh-targets/--mail-mode need one --user, or one per arm ({len(arms)}): "
+              "a fair comparison pins each arm's data, and each arm needs its own new account.")
+        return 1
+    arm_users = ([(users_src[i], users_tgt[i]) for i in range(len(arms))] if per_arm
+                 else [(users_src[0], users_tgt[0])] * len(arms))
+    snaps = {}
+    for u in dict.fromkeys(u for u, _ in arm_users):
+        print(f"=== snapshotting the source: {u} ===", flush=True)
+        snaps[u] = snapshot_drive(auth, [u], "source")
+        snaps[u]["messages"] = mailbox_size(auth, u)
+        print(f"    {snaps[u]['files']} files, {snaps[u]['bytes']/1e9:.2f} GB, "
+              f"{snaps[u]['messages']} messages", flush=True)
+    src_snap = snaps[arm_users[0][0]]
+    original_target = users_tgt[0]
     side_by_side = fresh and not args.sequential and len(arms) > 1
     started = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     stamp = started[5:7] + started[8:10] + started[11:13] + started[14:16]
     durations: list[float] = []
     results: list = [None] * len(arms)
-    corpus = {"files": src_snap["files"], "bytes": src_snap["bytes"]}
+    corpus = {"files": sum(x["files"] for x in snaps.values()), "bytes": sum(x["bytes"] for x in snaps.values()),
+              "messages": sum(x["messages"] or 0 for x in snaps.values())}
 
     def save() -> None:
         with _LOCK:
             with open(args.report + ".json", "w") as fh:
                 json.dump({"source": {k: v for k, v in src_snap.items() if k != "sample"},
+                           "perArmUsers": per_arm,
                            "skipped": skipped, "sideBySide": side_by_side,
                            "runs": [r for r in results if r]}, fh, indent=2)
 
@@ -532,11 +574,13 @@ def main(argv: list[str] | None = None) -> int:
         label = arm_label(mode, mail_mode)
         with _LOCK:
             _ARMS[label] = {"arm": label, "mode": mode, "mailMode": mail_mode, "stage": "starting",
-                            "startedAt": time.time()}
+                            "startedAt": time.time(), "user": arm_users[i][0]}
         write_progress()
+        user, target = arm_users[i]
+        snap = snaps[user]
         try:
-            fresh_target = f"{original_target.partition('@')[0]}-ab{tag}-{stamp}@" \
-                           f"{original_target.partition('@')[2]}" if fresh else None
+            fresh_target = f"{target.partition('@')[0]}-ab{tag}-{stamp}@" \
+                           f"{target.partition('@')[2]}" if fresh else None
             st, au, ledger = settings, auth, None
             if together:        # its own ledger copy and scratch, its own Google clients
                 ledger = ledger_copy(settings, os.path.join(HERE, "data", "ab", stamp, f"arm{tag}"))
@@ -544,8 +588,11 @@ def main(argv: list[str] | None = None) -> int:
                 st.db_path = ledger
                 st.scratch_dir = os.path.join(os.path.dirname(ledger), "scratch")
                 au = AuthManager(st)
-            r = one_mode(mode, st, au, users_src, users_tgt, src_snap, mail_mode, fresh_target,
+            r = one_mode(mode, st, au, [user], [target], snap, mail_mode, fresh_target,
                          ledger=ledger, side_by_side=side_by_side and together)
+            items = snap["files"] + (snap["messages"] or 0 if mail_mode else 0)
+            r["corpus"] = {"user": user, "files": snap["files"], "bytes": snap["bytes"],
+                           "messages": snap["messages"], "items": items}
         finally:
             with _LOCK:
                 _ARMS.pop(label, None)
@@ -571,7 +618,7 @@ def main(argv: list[str] | None = None) -> int:
                     f.result()
             # Errors are comparable across arms that shared the box; speed is not. Re-time alone
             # whichever arms hold the lowest error count (at most three, fastest first).
-            judged = [(arm_errors(r)["errors"], r["seconds"], i) for i, r in enumerate(results)
+            judged = [(rank_key(r)[1], rank_key(r)[2], i) for i, r in enumerate(results)
                       if arm_errors(r)["judged"] and r.get("mailMode")]
             lowest = min((e for e, _, _ in judged), default=None)
             lead = sorted((sec, i) for e, sec, i in judged if e == lowest)[:3]
@@ -596,7 +643,8 @@ def main(argv: list[str] | None = None) -> int:
                        finishedAt=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
         raise
     finally:
-        if fresh and not side_by_side:      # the pinned user goes back to its own target account
+        if fresh and not side_by_side and not per_arm and users_src[0].lower() in mapped:
+            # the pinned user goes back to its own target account
             from db import bulk_seed_identities
             bulk_seed_identities(MigrationDB(settings.db_path), [(users_src[0], original_target)])
     results = [r for r in results if r]

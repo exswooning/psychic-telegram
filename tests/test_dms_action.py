@@ -169,7 +169,7 @@ def test_it_waits_only_for_an_import_that_started(monkeypatch, started, waited):
         "ok": True, "step": "step4-start", "detail": "", "did": [], "manual": "",
         "started": started})
     seen = []
-    monkeypatch.setattr(dms_migrate, "wait_then_tally", lambda *a: seen.append(a) or 0)
+    monkeypatch.setattr(dms_migrate, "wait_then_tally", lambda *a, **k: seen.append(a) or 0)
     dms_migrate.main(["--apply", "--until-done", "5", "--identities", "none.csv"])
     assert bool(seen) is waited
 
@@ -233,3 +233,29 @@ def test_a_pending_request_is_approved_then_looked_at_again(monkeypatch):
                         lambda *a: approved.append(1) or ["pressed 'Authorize'"])
     dms_migrate.main(["--apply", "--identities", "none.csv"])
     assert approved == [1] and len(runs) == 2
+
+
+def test_an_ab_arm_stops_at_googles_complete_without_a_whole_tenant_tally(monkeypatch):
+    import subprocess
+    import dms_migrate
+    reads = iter(["In progress", "complete"])
+    monkeypatch.setattr(dms_migrate, "status", lambda *a: {"status": next(reads)})
+    monkeypatch.setattr(dms_migrate.time, "sleep", lambda s: None)
+    monkeypatch.setattr(subprocess, "call", lambda *a, **k: pytest.fail("tallied the whole tenant"))
+    assert dms_migrate.wait_then_tally(60, 10, False, tally=False) == 0
+
+
+@pytest.mark.parametrize("flag, fresh", [([], False), (["--fresh-import"], True)])
+def test_only_a_fresh_import_exits_and_deletes_the_finished_one(monkeypatch, flag, fresh):
+    """'Exit import' asks "Exit and delete import?"; nothing confirmed it, so a new user was never
+    added. Only a fresh import (new, empty target accounts) may delete; otherwise a delta continues."""
+    import dms_migrate
+    monkeypatch.delenv("TARGET_DOMAIN", raising=False)
+    seen = {}
+    monkeypatch.setattr(dms_migrate, "start", lambda *a, **k: seen.update(k) or {
+        "ok": True, "step": "step4-start", "detail": "", "did": [], "manual": "", "started": False})
+    dms_migrate.main(["--apply", "--identities", "none.csv", *flag])
+    assert seen["fresh"] is fresh
+    import inspect
+    src = inspect.getsource(dms_migrate)      # start itself is replaced above
+    assert "Exit and delete import" in src and "if fresh and not dry_run" in src

@@ -210,7 +210,7 @@ def test_arms_rank_by_errors_then_speed_and_an_unchecked_arm_never_wins(tmp_path
                                                          ("download_upload + engine", 25)]
     assert not r[2]["judged"] and not r[3]["judged"] and r[2]["why"] and r[3]["why"]
     assert v["best"] == {"arm": "server_side + engine", "mode": "server_side", "mailMode": "engine",
-                         "errors": 4, "seconds": 1600}
+                         "errors": 4, "seconds": 1600, "errorsPer1k": None, "secondsPer100": None}
 
 
 def test_new_runs_take_the_winner_and_keep_the_old_defaults_while_none_qualifies(tmp_path, monkeypatch):
@@ -240,18 +240,21 @@ def test_a_process_can_be_pointed_at_its_own_copy_of_the_ledger(monkeypatch, tmp
     assert config.Settings().db_path == path
 
 
-def _main_with(monkeypatch, tmp_path, argv, results):
+def _main_with(monkeypatch, tmp_path, argv, results, users=("a@s.x",), files=None):
     """AB.main with the Google-facing pieces faked; `results` maps arm label -> list of run dicts."""
     import types
-    ledgers, calls = [], []
+    ledgers, calls, users_seen = [], [], []
+    _main_with.users_seen = users_seen
     st = types.SimpleNamespace(db_path=str(tmp_path / "real.db"), scratch_dir="s", target_domain="t.x",
                                target_admin="a@t.x", target_sa_key="k", account_id=3)
     import sqlite3
     sqlite3.connect(st.db_path).close()
     monkeypatch.setattr(AB, "Settings", lambda account_id=None: st)
     monkeypatch.setattr(AB, "AuthManager", lambda s: object())
-    monkeypatch.setattr(AB, "snapshot_drive", lambda *a: {"files": 1, "folders": 0, "bytes": 1, "native": 0, "binary": 1,
-                                                          "mimes": {}, "sample": {}})
+    monkeypatch.setattr(AB, "snapshot_drive", lambda auth, us, side: {
+        "files": (files or {}).get(us[0], 1), "folders": 0, "bytes": 1, "native": 0, "binary": 1,
+        "mimes": {}, "sample": {}})
+    monkeypatch.setattr(AB, "mailbox_size", lambda auth, u: 9)
     db = types.SimpleNamespace(all_identities=lambda: [{"entity_type": "user", "source_email": "a@s.x", "target_email": "a@t.x"}])
     monkeypatch.setattr(AB, "MigrationDB", lambda p: db)
     monkeypatch.setattr(AB, "ledger_copy", lambda s, d: ledgers.append(d) or d + "/migration.db")
@@ -261,12 +264,14 @@ def _main_with(monkeypatch, tmp_path, argv, results):
     def one_mode(mode, settings, auth, us, ut, snap, mail_mode, fresh_target, ledger=None, side_by_side=False):
         r = dict(results[AB.arm_label(mode, mail_mode)].pop(0))
         calls.append((AB.arm_label(mode, mail_mode), ledger, side_by_side))
+        users_seen.append((us[0], fresh_target))
         return {"mode": mode, "mailMode": mail_mode, "exit": 0, "failed": 0, "dms": None, "timing": "side by side" if side_by_side else "alone",
                 "verdicts": {"a/drive": "IDENTICAL"}, "differences": {}, "migrated": {}, "host_bytes_in": None,
                 "target": {"files": 1, "native": 0}, "fidelity": {"compared": 1, "missing_on_target": 0, "mime_changed": 0,
                                                                   "md5_changed": 0, "mtime_changed": 0, "examples": []}, **r}
     monkeypatch.setattr(AB, "one_mode", one_mode)
-    assert AB.main([*argv, "--report", str(tmp_path / "r.md"), "--user", "a@s.x", "--account-id", "3"]) == 0
+    assert AB.main([*argv, "--report", str(tmp_path / "r.md"), *[a for u in users for a in ("--user", u)],
+                    "--account-id", "3"]) == 0
     return json.load(open(tmp_path / "r.md.json")), calls, ledgers
 
 
@@ -313,3 +318,24 @@ def test_chat_is_left_out_of_the_arms_and_their_check_until_it_is_put_back():
     assert "chat" not in AB.services_for("engine").split(",") and "chat" not in AB.services_for("dms").split(",")
     import verify_sample
     assert set(AB.VERIFY_SERVICES.split(",")) <= set(verify_sample.ALL_SERVICES)
+
+
+def test_one_user_per_arm_weighted_per_item_so_a_bigger_mailbox_is_not_punished(monkeypatch, tmp_path):
+    """Four arms on one mailbox ran Gmail's per-user limit dry (729 unverifiable). One user per arm
+    avoids that; users differ in size, so errors and time are weighed per 1,000 / 100 items."""
+    files = {"a@s.x": 10, "b@s.x": 1000, "c@s.x": 10}
+    runs = {"server_side + engine": [{"seconds": 100, "failed": 2}],
+            "server_side + split": [{"seconds": 100, "failed": 2}, {"seconds": 90, "failed": 2}],
+            "download_upload + split": [{"seconds": 10, "failed": 3}]}
+
+    out, calls, _ = _main_with(monkeypatch, tmp_path, [
+        "--mode", "server_side", "--mode", "download_upload", "--mail-mode", "engine", "--mail-mode", "split"],
+        runs, users=("a@s.x", "b@s.x", "c@s.x"), files=files)
+    seen = _main_with.users_seen
+    # each arm on its own user, each with a fresh target named after that user
+    assert {(u, t.split("-ab")[0]) for u, t in seen[:3]} == {("a@s.x", "a"), ("b@s.x", "b"), ("c@s.x", "c")}
+    by = {f"{r['mode']} + {r['mailMode']}": r for r in out["runs"]}
+    assert by["server_side + split"]["corpus"] == {"user": "b@s.x", "files": 1000, "bytes": 1, "messages": 9, "items": 1009}
+    # 2 errors in 1,009 items beats 2 in 19: the big mailbox wins on errors, so it is re-timed alone
+    assert AB.arm_errors(by["server_side + split"])["errorsPer1k"] == 1.98
+    assert seen[3][0] == "b@s.x" and seen[3][1].split("-ab")[1].startswith("2t")

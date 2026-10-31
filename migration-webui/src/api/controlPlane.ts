@@ -582,6 +582,9 @@ export interface AbArm {
   errors?: number | null; judged?: boolean; why?: string | null
   /** 'alone' = timed with the box to itself; 'side by side' = shared with other arms, so not a speed. */
   timing?: 'alone' | 'side by side' | null; contendedSeconds?: number | null
+  /** Whose data this arm moved, and how much: arms on different users are compared per item. */
+  corpus?: { user: string; files: number; bytes: number; messages: number | null; items: number } | null
+  errorsPer1k?: number | null; secondsPer100?: number | null
   verdicts: Record<string, string>
   dms?: string | null
   differences?: Record<string, {
@@ -596,7 +599,7 @@ export interface AbView {
     startedAt?: string; finishedAt?: string; updatedAt?: string
     current?: { mode: string; mailMode: string | null; stage: string } | null
     /** Every arm in flight: several at once while the arms run side by side. */
-    arms?: { arm: string; stage: string }[]; phase?: string | null; skipped?: string[]
+    arms?: { arm: string; stage: string; user?: string }[]; phase?: string | null; skipped?: string[]
     users?: string[]; corpus?: { files: number; bytes: number }
     total?: number; done?: number; alive: boolean; armsFinished: number
     /** Why the run stopped, when it did not finish: a refusal's own words, never a bare 0 of N. */
@@ -609,7 +612,8 @@ export interface AbView {
   /** Clean arms first, fastest first; a fast arm that did not finish clean is listed, never hidden. */
   ranking: AbArm[]
   /** Fewest errors, then fastest, among arms whose own check ran: what new runs use by default. */
-  best?: { arm: string; mode: string; mailMode: string; errors: number; seconds: number | null } | null
+  best?: { arm: string; mode: string; mailMode: string; errors: number; seconds: number | null
+    errorsPer1k?: number | null; secondsPer100?: number | null } | null
 }
 export const fetchAbBenchmark = () => cpFetch<AbView>('/api/v2/benchmark/ab')
 

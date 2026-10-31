@@ -104,6 +104,20 @@ describe('A/B benchmark page', () => {
     expect(screen.getAllByTestId('ab-kind')[1]).toHaveTextContent('(fixed automatically)')
   })
 
+  it('weighs each arm by its own user\'s data, so arms on different users compare fairly', async () => {
+    fetchAb.mockResolvedValue({ running: false, results: null, progress: progress({ alive: false, done: 2 }),
+      best: { arm: 'server_side + split', mode: 'server_side', mailMode: 'split', errors: 2, seconds: 90,
+        errorsPer1k: 1.98, secondsPer100: 8.9 },
+      ranking: [{ arm: 'server_side + split', seconds: 90, failed: 2, clean: false, errors: 2, judged: true,
+        errorsPer1k: 1.98, secondsPer100: 8.9, timing: 'alone', verdicts: {},
+        corpus: { user: 'b@s.example', files: 1000, bytes: 1, messages: 9, items: 1009 } }] })
+    render(<AbBenchmarkPanel />)
+    await waitFor(() => expect(screen.getByTestId('ab-best')).toHaveTextContent('1.98 per 1,000 items'))
+    expect(screen.getByTestId('ab-best')).toHaveTextContent('8.9s per 100 items')
+    expect(screen.getByTestId('ab-corpus')).toHaveTextContent('b@s.example · 1,009 items (1,000 files, 9 messages)')
+    expect(screen.getByText(/timed alone · 8.9s per 100 items/)).toBeTruthy()
+  })
+
   it('the header pill appears only while a run is going', async () => {
     fetchAb.mockResolvedValue({ running: false, progress: progress({ alive: false }), results: null, ranking: [] })
     const { rerender } = render(<MemoryRouter><BenchmarkPill /></MemoryRouter>)

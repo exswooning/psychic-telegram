@@ -95,7 +95,9 @@ const AbBenchmarkPanel: React.FC = () => {
             {p.alive && p.arms && p.arms.length > 0 ? (
               <Typography variant="body2" data-testid="ab-arms">
                 {p.phase ? `${p.phase}: ` : ""}
-                {p.arms.map((a) => `${a.arm} · ${a.stage}`).join("; ")}
+                {p.arms
+                  .map((a) => `${a.arm}${a.user ? ` (${a.user})` : ""} · ${a.stage}`)
+                  .join("; ")}
               </Typography>
             ) : (
               p.alive &&
@@ -161,9 +163,16 @@ const AbBenchmarkPanel: React.FC = () => {
       {best && (
         <Alert severity="success" sx={{ mt: 2 }} data-testid="ab-best">
           Default for new runs: <strong>{best.arm}</strong>: fewest errors (
-          {best.errors}), then fastest
-          {best.seconds != null ? ` (${fmtDuration(best.seconds)})` : ""}. A
-          run that names no transfer or mail mode uses it.
+          {best.errorsPer1k != null
+            ? `${best.errorsPer1k} per 1,000 items`
+            : best.errors}
+          ), then fastest
+          {best.secondsPer100 != null
+            ? ` (${best.secondsPer100}s per 100 items)`
+            : best.seconds != null
+              ? ` (${fmtDuration(best.seconds)})`
+              : ""}
+          . A run that names no transfer or mail mode uses it.
         </Alert>
       )}
       {!best && !view?.running && !!view?.ranking.length && (
@@ -205,6 +214,21 @@ const AbBenchmarkPanel: React.FC = () => {
                   <TableRow key={a.arm}>
                     <TableCell>
                       {a.arm}
+                      {a.corpus && (
+                        <Typography
+                          variant="caption"
+                          color="text.secondary"
+                          sx={{ display: "block" }}
+                          data-testid="ab-corpus"
+                        >
+                          {a.corpus.user} · {a.corpus.items.toLocaleString()} items
+                          ({a.corpus.files.toLocaleString()} files
+                          {a.corpus.messages != null
+                            ? `, ${a.corpus.messages.toLocaleString()} messages`
+                            : ""}
+                          )
+                        </Typography>
+                      )}
                       {best?.arm === a.arm && (
                         <Chip
                           size="small"
@@ -228,6 +252,9 @@ const AbBenchmarkPanel: React.FC = () => {
                           {a.timing === "alone"
                             ? "timed alone"
                             : "shared the box"}
+                          {a.secondsPer100 != null
+                            ? ` · ${a.secondsPer100}s per 100 items`
+                            : ""}
                         </Typography>
                       )}
                     </TableCell>
@@ -237,7 +264,18 @@ const AbBenchmarkPanel: React.FC = () => {
                       sx={{ fontVariantNumeric: "tabular-nums" }}
                     >
                       {a.judged ? (
-                        a.errors
+                        <>
+                          {a.errors}
+                          {a.errorsPer1k != null && (
+                            <Typography
+                              variant="caption"
+                              color="text.secondary"
+                              sx={{ display: "block" }}
+                            >
+                              {a.errorsPer1k} per 1,000 items
+                            </Typography>
+                          )}
+                        </>
                       ) : (
                         <Typography variant="body2" color="text.secondary">
                           not ranked{a.why ? `: ${a.why}` : ""}
