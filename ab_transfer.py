@@ -618,7 +618,10 @@ def main(argv: list[str] | None = None) -> int:
         user, target = arm_users[i]
         snap = snaps[user]
         try:
-            fresh_target = f"{target.partition('@')[0]}-ab{tag}-{stamp}@" \
+            # Named after the source user, not its current target: an earlier run's test account
+            # left in the map read as the user's own, and the next was named after it
+            # (esc.mrc-ab1-10311709-ab1-10311833, live 2026-10-31).
+            fresh_target = f"{user.partition('@')[0]}-ab{tag}-{stamp}@" \
                            f"{target.partition('@')[2]}" if fresh else None
             st, au, ledger = settings, auth, None
             if together:        # its own ledger copy and scratch, its own Google clients
@@ -682,10 +685,17 @@ def main(argv: list[str] | None = None) -> int:
                        finishedAt=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
         raise
     finally:
-        if fresh and not side_by_side and not per_arm and users_src[0].lower() in mapped:
-            # the pinned user goes back to its own target account
-            from db import bulk_seed_identities
-            bulk_seed_identities(MigrationDB(settings.db_path), [(users_src[0], original_target)])
+        if fresh and not side_by_side and not per_arm:
+            # The pinned user goes back to how it was: its own target account, or -- never mapped
+            # before this run -- no mapping at all, not a pointer at the test account just made.
+            if users_src[0].lower() in mapped:
+                from db import bulk_seed_identities
+                bulk_seed_identities(MigrationDB(settings.db_path), [(users_src[0], original_target)])
+            else:
+                forget = MigrationDB(settings.db_path)
+                with forget.write() as c:
+                    c.execute("DELETE FROM identity_map WHERE source_email=?", (users_src[0].lower(),))
+                forget._identity_cache = None
     results = [r for r in results if r]
     write_progress(running=False, total=len(durations), done=len(durations), current=None,
                    finishedAt=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))

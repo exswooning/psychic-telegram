@@ -417,3 +417,36 @@ def test_an_arm_registers_as_its_own_job_so_it_is_never_judged_as_a_migration():
     assert 'os.getenv("BITPORT_JOB_NAME")' in inspect.getsource(main.cmd_migrate) or \
            'os.getenv("BITPORT_JOB_NAME")' in inspect.getsource(main)
     assert "ab-migrate" not in run_watch.MIGRATION_JOBS
+
+
+def test_a_user_never_mapped_is_left_unmapped_and_its_test_accounts_are_named_after_it(monkeypatch, tmp_path):
+    """Live: esc.mrc stayed mapped to R1's test account; R2 restored that and named its own
+    account after it (esc.mrc-ab1-10311709-ab1-10311833)."""
+    import contextlib
+    import sqlite3
+    import types
+    st = types.SimpleNamespace(db_path=str(tmp_path / "real.db"), scratch_dir="s", target_domain="t.x",
+                               target_admin="a@t.x", target_sa_key="k", account_id=3)
+    sqlite3.connect(st.db_path).close()
+    executed, seen = [], []
+    db = types.SimpleNamespace(all_identities=lambda: [], _identity_cache=None)
+    db.write = contextlib.contextmanager(lambda: (yield types.SimpleNamespace(execute=lambda *a: executed.append(a))))
+    monkeypatch.setattr(AB, "Settings", lambda account_id=None: st)
+    monkeypatch.setattr(AB, "AuthManager", lambda s: object())
+    monkeypatch.setattr(AB, "MigrationDB", lambda p: db)
+    monkeypatch.setattr(AB, "mailbox_size", lambda auth, u: 1)
+    monkeypatch.setattr(AB, "PROGRESS", str(tmp_path / "p.json"))
+    monkeypatch.setattr(AB, "snapshot_drive", lambda *a: {"files": 1, "folders": 0, "bytes": 1, "native": 0,
+                                                          "binary": 1, "mimes": {}, "sample": {}})
+
+    def one_mode(mode, settings, auth, us, ut, snap, mail_mode, fresh_target, ledger=None, side_by_side=False):
+        seen.append(fresh_target)
+        return {"mode": mode, "mailMode": mail_mode, "exit": 0, "failed": 0, "seconds": 1, "verdicts": {},
+                "differences": {}, "migrated": {}, "host_bytes_in": 0, "target": {"files": 1, "native": 0},
+                "fidelity": {"compared": 1, "missing_on_target": 0, "mime_changed": 0, "md5_changed": 0,
+                             "mtime_changed": 0, "examples": []}}
+    monkeypatch.setattr(AB, "one_mode", one_mode)
+    assert AB.main(["--report", str(tmp_path / "r.md"), "--user", "esc.mrc@s.x", "--account-id", "3",
+                    "--sequential", "--mode", "server_side", "--mail-mode", "engine"]) == 0
+    assert seen[0].startswith("esc.mrc-ab1-") and seen[0].endswith("@t.x")
+    assert any("DELETE FROM identity_map" in a[0] and a[1] == ("esc.mrc@s.x",) for a in executed)
