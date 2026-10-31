@@ -24,8 +24,10 @@ from __future__ import annotations
 import functools
 import json
 import logging
+import os
 import random
 import re
+import sys
 import threading
 import time
 from collections import deque
@@ -302,17 +304,40 @@ def _is_permanent(status: int, reason: str, exc: HttpError | None = None) -> boo
     return True
 
 
+# Gmail's per-user limit says WHEN in the error body ("User-rate limit exceeded.  Retry after
+# 2026-10-31T04:53:11.049Z"), 15-30 minutes ahead, and sends no Retry-After header. The ladder
+# (~4 minutes) gave up long before it: live, 729 messages unverifiable and one user's whole mail
+# pass FAILED (sandbox A/B, 2026-10-31). Waits longer than RETRY_AFTER_CAP_SEC still fail the item.
+_RETRY_AFTER_AT = re.compile(r"Retry after (\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?Z)")
+RETRY_AFTER_CAP = float(os.getenv("RETRY_AFTER_CAP_SEC", "1800"))
+
+
 def _retry_after_seconds(exc: HttpError) -> float | None:
+    """Seconds Google asked us to wait: a Retry-After header, or a "Retry after <time>" in the body."""
     resp = getattr(exc, "resp", None)
-    if resp is None:
+    val = resp.get("retry-after") or resp.get("Retry-After") if resp is not None else None
+    if val:
+        try:
+            return float(val)
+        except (TypeError, ValueError):
+            pass
+    m = _RETRY_AFTER_AT.search(str(exc) + " " + str(getattr(exc, "content", b"")[:2000]))
+    if not m:
         return None
-    val = resp.get("retry-after") or resp.get("Retry-After")
-    if not val:
-        return None
-    try:
-        return float(val)
-    except (TypeError, ValueError):
-        return None
+    from datetime import datetime, timezone
+    at = datetime.fromisoformat(m.group(1).replace("Z", "+00:00"))
+    return max((at - datetime.now(timezone.utc)).total_seconds(), 1.0)
+
+
+def _wait(delay: float) -> None:
+    """time.sleep, but a long wait still hears Stop: a Retry-After can be half an hour."""
+    end = time.monotonic() + delay
+    while (left := end - time.monotonic()) > 0:
+        main = sys.modules.get("main")
+        if left > 5 and main is not None and getattr(main, "SHUTDOWN", None) is not None \
+                and main.SHUTDOWN.is_set():
+            raise RuntimeError("stopped while waiting out a Google rate limit")
+        time.sleep(min(left, 5.0))
 
 
 def _ask_hook(before_retry):
@@ -503,8 +528,14 @@ def retry_on_google_error(
                         ) from exc
 
                     retry_after = _retry_after_seconds(exc)
+                    if retry_after is not None and retry_after > RETRY_AFTER_CAP:
+                        raise RuntimeError(
+                            f"HTTP {status} ({reason or 'unknown reason'}): Google asked for "
+                            f"{retry_after:.0f}s, over RETRY_AFTER_CAP_SEC: {exc}") from exc
                     if retry_after is not None:
-                        delay = min(retry_after, max_delay)
+                        # Google's own time, not the ladder's cap: retrying sooner is only refused
+                        # again. A little jitter so every waiting thread does not return at once.
+                        delay = retry_after + random.uniform(0, 1)
                     else:
                         delay = random.uniform(
                             0, min(max_delay, base_delay * (2 ** (attempt - 1)))
@@ -513,7 +544,7 @@ def retry_on_google_error(
                         "retrying after HTTP %s (%s): attempt %d/%d in %.2fs",
                         status, reason, attempt, budget, delay,
                     )
-                    time.sleep(delay)
+                    _wait(delay)
                     # A 5xx may have been processed before the error was
                     # generated; a 429 was rejected before it was.
                     if status is not None and status >= 500:
