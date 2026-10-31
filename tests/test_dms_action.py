@@ -259,3 +259,32 @@ def test_only_a_fresh_import_exits_and_deletes_the_finished_one(monkeypatch, fla
     import inspect
     src = inspect.getsource(dms_migrate)      # start itself is replaced above
     assert "Exit and delete import" in src and "if fresh and not dry_run" in src
+
+
+@pytest.mark.parametrize("text, want", [
+    ("Step 4: Import data After you start importing data, Data Import appears Start import "
+     "To start data import, ensure you have completed all the previous steps.", "Not started"),
+    ("Step 4: Import data Complete Complete Your import is complete. Run delta import Exit import "
+     "Emails imported 485", "complete"),
+])
+def test_a_console_with_no_import_never_reads_as_complete(text, want):
+    """Live: "ensure you have completed all the previous steps" read as "complete", so the A/B called
+    a mail import done that had never started."""
+    import dms_migrate
+
+    class _Page:
+        def inner_text(self, _):
+            return text
+
+    assert dms_migrate.read_metrics(_Page())["status"] == want
+
+
+def test_asked_to_see_it_through_an_import_that_never_started_is_not_success(monkeypatch):
+    import dms_migrate
+    monkeypatch.delenv("TARGET_DOMAIN", raising=False)
+    monkeypatch.setattr(dms_migrate, "start", lambda *a, **k: {
+        "ok": True, "step": "step4-start", "detail": "'Start import' still disabled", "did": [],
+        "manual": "", "started": False})
+    monkeypatch.setattr(dms_migrate, "wait_then_tally", lambda *a, **k: pytest.fail("nothing to wait for"))
+    assert dms_migrate.main(["--apply", "--until-done", "5", "--identities", "none.csv"]) == 3
+    assert dms_migrate.main(["--identities", "none.csv"]) == 0        # a dry run still reports ok

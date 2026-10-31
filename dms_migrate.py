@@ -347,10 +347,15 @@ def read_metrics(page) -> dict:
     j = body.find("Import data")
     seg = body[j:j + 900] if j >= 0 else body
     status = "unknown"
-    for s in ("In progress", "Stopped", "complete", "Not started"):
-        if s.lower() in seg.lower():
-            status = s
-            break
+    # Whole words only: the setup page's "ensure you have completed all the previous steps" read as
+    # "complete", so a console with no import at all reported one finished (live, 2026-10-31).
+    if "To start data import" in seg:
+        status = "Not started"
+    else:
+        for s in ("In progress", "Stopped", "complete", "Not started"):
+            if re.search(rf"\b{s}\b", seg, re.IGNORECASE):
+                status = s
+                break
     metrics = {}
     for label in _METRIC_FIELDS:
         m = re.search(re.escape(label) + r"\s+([\d,]+)", seg)
@@ -571,7 +576,9 @@ def start(source_domain: str, source_admin: str, timeout: int,
         # --- Step 2: the import map ------------------------------------
         result["step"] = "step2-map"
         if identities and os.path.isfile(identities):
-            n, path = import_map_csv(identities, "/tmp/dms-import-map.csv")
+            # Named after its identities file, so the console's own file name says whose map it holds.
+            n, path = import_map_csv(identities, os.path.join(
+                "/tmp", "dms-map-" + os.path.splitext(os.path.basename(identities))[0] + ".csv"))
             head = _find_first(page, [
                 '[aria-expanded]:has-text("Upload data import maps")',
                 f'text="{STEP2_HEADING}"'])
@@ -589,11 +596,16 @@ def start(source_domain: str, source_admin: str, timeout: int,
             # Any .csv already shown means a map is uploaded (processing or
             # done); re-uploading would restart the slow job, so skip it and
             # let the wait loop below ride out any remaining processing.
-            if ".csv" in s2seg:
+            ours = os.path.basename(path).lower() in s2seg
+            if ".csv" in s2seg and (ours or not fresh):
                 state = "processing" if "processing" in s2seg else "processed"
                 result["did"].append(f"import map already uploaded ({state})")
                 already = True
             else:
+                # A fresh import must carry ITS users: live, the second arm kept the first arm's
+                # map ("already uploaded") and would have imported the wrong mailbox.
+                if ".csv" in s2seg:
+                    result["did"].append("replaced another run's import map")
                 already = False
             # Set the hidden <input type=file> directly. This once looked like
             # it did nothing, but the real fault was a headerless CSV -- with
@@ -673,15 +685,17 @@ def start(source_domain: str, source_admin: str, timeout: int,
                     result["did"].append(f"enabled {label!r}")
             except Exception:          # noqa: BLE001
                 logging.getLogger(__name__).debug("ignored an error", exc_info=True)
-        # Ticked with no labels, "Exclude specific labels" makes Save refuse ("Labels are
-        # required") and Start import never enables (live, 2026-10-31).
-        if "Labels are required" in page.inner_text("body"):
-            try:
-                page.get_by_text("Exclude specific labels from data import").first.click(timeout=4000)
+        # Ticked with no labels, "Exclude specific labels" keeps Save disabled ("Labels are
+        # required"), so Start import never enables (live, 2026-10-31). Read the box's own state:
+        # clicking its text blindly ticked it on a page where it had been off.
+        excl = page.get_by_role("checkbox", name="Exclude specific labels")
+        try:
+            if excl.count() and excl.first.is_checked():
+                excl.first.uncheck(timeout=4000)
                 page.wait_for_timeout(1500)
                 result["did"].append("unticked 'Exclude specific labels' (it had no labels)")
-            except Exception:          # noqa: BLE001
-                logging.getLogger(__name__).debug("ignored an error", exc_info=True)
+        except Exception:          # noqa: BLE001
+            logging.getLogger(__name__).debug("ignored an error", exc_info=True)
         if _set_earliest_date(page):
             result["did"].append("set the start date to the earliest offered")
         else:
@@ -1049,6 +1063,11 @@ def main(argv: list[str] | None = None) -> int:
             print(out["manual"])
     if args.until_done and out.get("started"):
         return wait_then_tally(args.until_done, args.timeout, args.headful, tally=not args.no_tally)
+    if args.apply and args.until_done:
+        # Asked to see it through and nothing started: not a success. Exiting 0 here made the A/B
+        # record an arm's mail import "done" when Start import had stayed disabled.
+        log(f"the import did not start ({out.get('step')}: {out.get('detail')})")
+        return 3
     return 0 if out["ok"] else 1
 
 

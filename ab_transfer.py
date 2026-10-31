@@ -290,10 +290,16 @@ def one_mode(mode: str, settings: Settings, auth: AuthManager,
     stage("migrate", label)
     net0 = net_bytes()
     services = services_for(mail_mode)
-    rc, secs = run([PY, "main.py", *ACCOUNT_ARGS, "migrate", "--services", services, *scoped], env)
+    started_at = time.time()
+    rc, migrate_tail = run_tail([PY, "main.py", *ACCOUNT_ARGS, "migrate", "--services", services, *scoped], env)
+    secs = time.time() - started_at
     net1 = net_bytes()
+    if rc != 0:
+        # Its output was thrown away before, so an arm whose migrate died at startup read as "done in a
+        # minute" and went on to Google's import and a check of an empty target.
+        print(f"=== {label}: the migration exited {rc}: {migrate_tail[-300:]} ===", flush=True)
     dms = None
-    if mail_mode in ("dms", "split") and len(users_src) == 1:
+    if mail_mode in ("dms", "split") and len(users_src) == 1 and rc == 0:
         print(f"=== {mode}+{mail_mode}: Google's mail import ===", flush=True)
         stage("dms import", label)
         with _DMS_LOCK:
@@ -314,7 +320,9 @@ def one_mode(mode: str, settings: Settings, auth: AuthManager,
     tgt_snap = snapshot_drive(auth, users_tgt, "target")
 
     verdicts, details = {}, {}
-    if mail_mode is not None:
+    if mail_mode is not None and rc != 0:
+        verdicts["verify"], details["verify"] = "UNVERIFIED", {"exit": rc, "output": migrate_tail[-500:]}
+    elif mail_mode is not None:
         print(f"=== {mode}+{mail_mode}: verifying one to one ===", flush=True)
         stage("verify 1:1", label)
         # Cleared first, so an arm only ever reads rows its own check wrote: with `--services all`
@@ -344,6 +352,7 @@ def one_mode(mode: str, settings: Settings, auth: AuthManager,
         "clean": rc == 0 and not failed and (dms is None or dms == "done") and all(
             v in ("IDENTICAL", "COMPLETE") for v in verdicts.values()),
         "exit": rc,
+        "migrateOutput": None if rc == 0 else migrate_tail[-500:],
         "seconds": round(secs, 1),
         "migrated": counts,
         "failed": failed,
@@ -385,12 +394,12 @@ def arm_errors(r: dict) -> dict:
     it -- its own check never ran (UNVERIFIED, or no verdicts), or mail it owes Google's import was
     never imported -- because a low count there means nothing was looked at, not that nothing differed."""
     verdicts = r.get("verdicts") or {}
+    if r.get("exit") not in (None, 0):
+        return {"errors": None, "judged": False, "why": f"the migration exited {r['exit']}"}
     if r.get("mailMode") and (not verdicts or "UNVERIFIED" in verdicts.values()):
         return {"errors": None, "judged": False, "why": "its 1:1 check did not run"}
     if r.get("dms") not in (None, "done"):
         return {"errors": None, "judged": False, "why": f"Google's mail import: {r['dms']}"}
-    if r.get("exit") not in (None, 0):
-        return {"errors": None, "judged": False, "why": f"the migration exited {r['exit']}"}
     n = int(r.get("failed") or 0) + int((r.get("fidelity") or {}).get("missing_on_target") or 0) * (not r.get("mailMode"))
     for d in (r.get("differences") or {}).values():
         n += sum(v for v in (d.get("counts") or {}).values() if isinstance(v, int))
@@ -422,7 +431,9 @@ def dms_tail(settings, users_src, users_tgt, env) -> tuple[str, float]:
     denv = webui._dms_env(settings.account_id)
     if not denv.get("DWD_PASSWORD"):
         return f"skipped: no Admin console login for {settings.target_admin} in {webui.DWD_ENV_FILE}", 0.0
-    path = os.path.join("logs", "dms", f"ab-{os.getpid()}.csv")
+    # One file per arm: two split arms in one process shared ab-<pid>.csv, and the console's map
+    # name could not tell their imports apart.
+    path = os.path.join("logs", "dms", f"ab-{os.getpid()}-{users_tgt[0].split('@')[0]}.csv")
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", newline="", encoding="utf-8") as fh:
         w = csv.writer(fh)

@@ -339,3 +339,38 @@ def test_one_user_per_arm_weighted_per_item_so_a_bigger_mailbox_is_not_punished(
     # 2 errors in 1,009 items beats 2 in 19: the big mailbox wins on errors, so it is re-timed alone
     assert AB.arm_errors(by["server_side + split"])["errorsPer1k"] == 1.98
     assert seen[3][0] == "b@s.x" and seen[3][1].split("-ab")[1].startswith("2t")
+
+
+def test_an_arms_ledger_copy_is_never_taken_for_the_control_plane(monkeypatch, tmp_path):
+    """Live: BITPORT_LEDGER pointed the control-plane lookup at a copy with no tenant_configs, so
+    every arm's migrate died at startup and the A/B ran Google's import against empty targets."""
+    import os
+
+    import control_plane_db
+    monkeypatch.delenv("CONTROL_PLANE_DB", raising=False)
+    monkeypatch.setenv("BITPORT_LEDGER", str(tmp_path / "data" / "ab" / "x" / "arm1" / "migration.db"))
+    assert control_plane_db._db_path() == os.path.join(os.path.dirname(os.path.abspath(control_plane_db.__file__)), "migration.db")
+
+
+def test_an_arm_whose_migration_died_says_why_and_skips_googles_import(monkeypatch):
+    import types
+    ran = []
+    monkeypatch.setattr(AB, "dms_tail", lambda *a: ran.append("dms") or ("done", 1.0))
+    monkeypatch.setattr(AB, "snapshot_drive", lambda *a: {"files": 0, "folders": 0, "bytes": 0, "native": 0, "binary": 0,
+                                                          "mimes": {}, "sample": {}})
+    monkeypatch.setattr(AB, "run_tail", lambda cmd, env: (2, "sqlite3.OperationalError: no such table: tenant_configs")
+                        if "migrate" in cmd else ran.append("verify") or (0, ""))
+    class Rows(list):
+        def fetchone(self):
+            return (0,)
+    db = types.SimpleNamespace(conn=types.SimpleNamespace(execute=lambda *a, **k: Rows()),
+                               _mapping_cache={}, _mapping_cached_users=set())
+    monkeypatch.setattr(AB, "MigrationDB", lambda p: db)
+    st = types.SimpleNamespace(db_path="x", target_domain="t.x", scratch_dir="s", target_admin="a@t.x")
+    import contextlib
+    db.write = contextlib.contextmanager(lambda: (yield types.SimpleNamespace(execute=lambda *a, **k: None)))
+    monkeypatch.setattr("db.bulk_seed_identities", lambda *a: None)
+    r = AB.one_mode("server_side", st, None, ["a@s.x"], ["a@t.x"], {"sample": {}}, "split", "a-ab1@t.x")
+    assert r["exit"] == 2 and "tenant_configs" in r["migrateOutput"] and "dms" not in ran and "verify" not in ran
+    assert r["verdicts"] == {"verify": "UNVERIFIED"}
+    assert AB.arm_errors(r)["judged"] is False and "exited 2" in AB.arm_errors(r)["why"]
