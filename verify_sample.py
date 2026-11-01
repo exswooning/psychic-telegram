@@ -37,6 +37,7 @@ import logging
 import os
 import re
 import sys
+import threading
 import time
 import unicodedata
 from collections.abc import Iterator
@@ -492,6 +493,8 @@ class Verifier:
     def __init__(self, auth, db, settings, source_user: str, target_user: str, retry=lambda f: f,
                  limit: int | None = None, on_api_attempt=None, on_progress=None):
         self.auth, self.db, self.settings = auth, db, settings
+        self._native_mine: dict = {}      # this user's own per-minute Docs/Sheets/Slides buckets
+        self._native_lock = threading.Lock()
         self.src_user, self.tgt_user = source_user, target_user
         self._retry = retry
         self.evidence: list[dict] = []
@@ -1048,15 +1051,27 @@ class Verifier:
         """A Doc, Sheet or Slide's links live inside it, where no export comparison sees
         them: ask the same builder the rewrite uses what it would still change on the
         TARGET copy -- a link still naming a migrated source file. Reads only."""
-        from drive_engine import _NATIVE_KIND, _native_project_limiter
+        from drive_engine import _NATIVE_KIND
         import link_rewrite
         k = _NATIVE_KIND.get(sm.get("mimeType") or "")
         if not k:
             return []
         n = self._x(lambda: link_rewrite.rewrite_native(
             k, self.auth.api("target", k, self.tgt_user), tid, self.db.target_for_source_id,
-            pace=lambda op: _native_project_limiter(k, op).acquire(), apply=False))
+            pace=lambda op: self._native_pace(k, op), apply=False))
         return [f"links inside still point at the source ({n} rewrite(s) due)"] if n else []
+
+    def _native_pace(self, kind: str, op: str) -> None:
+        """This user's own per-minute quota AND the project's, as the engine paces its link
+        rewrite (drive_engine: `pace`). The project bucket alone let one user's Sheets reads
+        burst past Google's 60 a minute per user (live, finance@s.: 429 RESOURCE_EXHAUSTED,
+        six retries spent, the Drive verdict left INCOMPLETE)."""
+        from drive_engine import _native_project_limiter, _native_rate
+        from resilience import RateLimiter
+        with self._native_lock:
+            lim = self._native_mine.setdefault((kind, op), RateLimiter(_native_rate(kind, op, 0)))
+        lim.acquire()
+        _native_project_limiter(kind, op).acquire()
 
     # -- Gmail ------------------------------------------------------------
     def _label_names(self, svc) -> dict:
