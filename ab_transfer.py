@@ -85,6 +85,12 @@ def stage(name: str, label: str | None = None) -> None:
     write_progress()
 
 
+def _is_test_account(email: str | None) -> bool:
+    """An account this tool made for one arm: <user>-ab<n>[t]-<MMDDHHMM>@<target>."""
+    import re
+    return bool(re.search(r"-ab\d+t?-\d{8}@", email or ""))
+
+
 def write_progress(**fields) -> None:
     """The live state the Benchmarks page reads. Written whole each time (tmp + rename) so a
     reader never sees half a file. Totals are known up front here, so an ETA is a real
@@ -688,7 +694,9 @@ def main(argv: list[str] | None = None) -> int:
         if fresh and not side_by_side and not per_arm:
             # The pinned user goes back to how it was: its own target account, or -- never mapped
             # before this run -- no mapping at all, not a pointer at the test account just made.
-            if users_src[0].lower() in mapped:
+            # A map already pointing at an EARLIER run's test account counts as never mapped
+            # (live: finance@s. kept finance-ab1t-11010140, and the next run restored it).
+            if users_src[0].lower() in mapped and not _is_test_account(original_target):
                 from db import bulk_seed_identities
                 bulk_seed_identities(MigrationDB(settings.db_path), [(users_src[0], original_target)])
             else:
