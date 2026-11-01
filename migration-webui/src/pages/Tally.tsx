@@ -73,7 +73,7 @@ const UserRow: React.FC<{ u: TallyUser; selected: boolean; onSelect: (on: boolea
         <TableCell><Typography variant="caption">{when(u.recordedAt)}</Typography></TableCell>
         <TableCell padding="checkbox">
           {hasDetail && (
-            <IconButton size="small" sx={{ p: 0.75 }} onClick={() => setOpen((o) => !o)} aria-label={open ? `hide ${u.user}` : `show ${u.user}`}>
+            <IconButton size="small" sx={{ width: 32, height: 32 }} onClick={() => setOpen((o) => !o)} aria-label={open ? `hide ${u.user}` : `show ${u.user}`}>
               {open ? <CloseIcon fontSize="small" /> : <OpenIcon fontSize="small" />}
             </IconButton>
           )}

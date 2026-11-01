@@ -40,4 +40,33 @@ describe('every icon button has a name', () => {
     }
     expect(bad).toEqual([])
   })
+
+  it('gives every switch and checkbox a name: an aria-label, or a FormControlLabel around it', () => {
+    const bad: string[] = []
+    for (const [file, s] of Object.entries(sources)) {
+      for (const tagName of ['<Switch', '<Checkbox']) {
+        for (let i = s.indexOf(tagName); i >= 0; i = s.indexOf(tagName, i + 1)) {
+          if (!/[\s/>]/.test(s[i + tagName.length] ?? ' ')) continue          // <SwitchFoo, not <Switch
+          const tag = s.slice(i, tagEnd(s, i + tagName.length))
+          if (/aria-label(ledby)?=|aria-label'/.test(tag)) continue
+          if (/control=\{\s*$/.test(s.slice(Math.max(0, i - 80), i))) continue
+          bad.push(`${file}:${s.slice(0, i).split('\n').length}`)
+        }
+      }
+    }
+    expect(bad).toEqual([])
+  })
+
+  it('never uses a placeholder as the only name of a text field', () => {
+    const bad: string[] = []
+    for (const [file, s] of Object.entries(sources)) {
+      for (let i = s.indexOf('<TextField'); i >= 0; i = s.indexOf('<TextField', i + 1)) {
+        const tag = s.slice(i, tagEnd(s, i + 10))
+        if (!/\splaceholder=/.test(tag)) continue
+        if (/\slabel=|aria-label/.test(tag)) continue
+        bad.push(`${file}:${s.slice(0, i).split('\n').length}`)
+      }
+    }
+    expect(bad).toEqual([])
+  })
 })

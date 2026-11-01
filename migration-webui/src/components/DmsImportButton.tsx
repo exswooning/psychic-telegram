@@ -110,6 +110,7 @@ const DmsImportButton: React.FC<{ spec: ActionSpec }> = ({ spec }) => {
             fullWidth size="small" autoFocus value={typed}
             onChange={(e) => setTyped(e.target.value)}
             placeholder={spec.confirm}
+            inputProps={{ 'aria-label': `Type ${spec.confirm} to confirm` }}
           />
         </DialogContent>
         <DialogActions>

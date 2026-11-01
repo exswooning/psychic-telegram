@@ -5656,7 +5656,14 @@ class Handler(BaseHTTPRequestHandler):
                 job_queue.dispatch_one(_queue_starter, job_queue.RUNNER_WEBUI)
             except Exception as exc:  # noqa: BLE001
                 print(f"queue dispatch on poll failed: {exc}", flush=True)
-            self._json(queue_payload(self._account_id()))
+            # "Mine" is relative to the account being looked at, as /api/job's is: a superadmin
+            # viewing account 3 saw that account's own verify labelled "another account".
+            viewing, scope_err = resolve_target_account(
+                self._account_id(), query.get("account", [""])[0] or None)
+            if scope_err:
+                self._json({"error": scope_err}, 403)
+                return
+            self._json(queue_payload(viewing))
         elif path == "/api/job":
             since = 0
             if "since=" in self.path:

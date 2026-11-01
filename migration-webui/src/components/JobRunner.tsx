@@ -219,7 +219,7 @@ const JobRunner: React.FC<{
             fullWidth size="small" autoFocus value={typed}
             onChange={(e) => setTyped(e.target.value)}
             placeholder={spec.confirm}
-            inputProps={{ 'data-testid': `action-confirm-input-${name}` }}
+            inputProps={{ 'data-testid': `action-confirm-input-${name}`, 'aria-label': `Type ${spec.confirm} to confirm` }}
           />
         </DialogContent>
         <DialogActions>

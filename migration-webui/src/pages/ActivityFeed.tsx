@@ -82,6 +82,7 @@ const ActivityFeed: React.FC = () => {
       <Paper elevation={0} sx={{ borderRadius: 2, border: '1px solid', borderColor: 'divider', p: 2, mb: 2, display: 'flex', gap: 2, flexWrap: 'wrap', alignItems: 'center' }}>
         <TextField
           placeholder="Search activities..."
+          inputProps={{ 'aria-label': 'Search activities' }}
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           InputProps={{

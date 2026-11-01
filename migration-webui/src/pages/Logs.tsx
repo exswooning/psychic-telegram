@@ -52,8 +52,11 @@ const Logs: React.FC = () => {
 
   useEffect(() => {
     refresh()
-    const id = setInterval(refresh, 3000)
-    return () => clearInterval(id)
+    // Not redrawn while the tab is hidden; it catches up the moment it is shown again.
+    const id = setInterval(() => { if (!document.hidden) refresh() }, 3000)
+    const shown = () => { if (!document.hidden) refresh() }
+    document.addEventListener('visibilitychange', shown)
+    return () => { clearInterval(id); document.removeEventListener('visibilitychange', shown) }
   }, [refresh])
 
   useEffect(() => {

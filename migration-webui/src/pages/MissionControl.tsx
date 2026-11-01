@@ -348,7 +348,7 @@ const MissionControl: React.FC = () => {
       <Paper variant="outlined" sx={{ borderRadius: 2, p: 2 }}>
         <Stack direction="row" alignItems="center" spacing={2} sx={{ mb: 1.5, flexWrap: 'wrap', gap: 1.5 }}>
           <Typography variant="h6" sx={{ flexGrow: 1 }}>Users ({filteredUsers.length})</Typography>
-          <TextField size="small" placeholder="Filter by email…" value={userFilter}
+          <TextField size="small" placeholder="Filter by email…" inputProps={{ 'aria-label': 'Filter users by email' }} value={userFilter}
                      onChange={(e) => setUserFilter(e.target.value)}
                      sx={{ width: { xs: '100%', sm: 240 } }} />
         </Stack>

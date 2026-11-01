@@ -761,8 +761,8 @@ export interface QueueSnapshot {
  *  freed by the OTHER server process (api_server.py's migrate) has no
  *  in-process hook to fire, so without a poll the queue would look stuck
  *  until somebody happened to run a webui job. */
-export function fetchQueue(): Promise<QueueSnapshot> {
-  return getJSON<QueueSnapshot>('/api/queue')
+export function fetchQueue(accountId?: number): Promise<QueueSnapshot> {
+  return getJSON<QueueSnapshot>(`/api/queue${accountId ? `?account=${accountId}` : ''}`)
 }
 
 export async function cancelQueued(id: number): Promise<SeedResult> {
