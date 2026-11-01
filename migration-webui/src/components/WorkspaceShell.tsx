@@ -6,6 +6,7 @@ import { useMigrationStore } from '@/store'
 import BitportMark from './BitportMark'
 import WorkspaceSearch from './WorkspaceSearch'
 import MigrationSwitcher from './MigrationSwitcher'
+import ScopeMismatch from './ScopeMismatch'
 import ViewingAccountSelect from './ViewingAccountSelect'
 import { WorkspaceContext, WorkspaceState } from './WorkspaceContext'
 import { workspaceFeatures } from '@/workspaceFeatures'
@@ -67,6 +68,7 @@ export default function WorkspaceShell({ children, navItems, onSignOut, onInterr
       </Box>
       <Box component="main" id="workspace-content" tabIndex={-1} sx={{ flex: 1, minWidth: 0, bgcolor: 'background.paper', mt: { xs: 8, md: 9 }, mr: { xs: 1, md: 2 }, ml: { xs: 1, md: 1.5 }, mb: 2, borderRadius: { xs: '20px', md: '24px' }, p: { xs: 2, md: 3.5 }, overflowX: 'hidden' }}>
         <Box sx={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 1.5, mb: 2.5 }}><Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flex: 1, minWidth: 150 }}><Typography component={RouterLink} to="/migrations" sx={{ textDecoration: 'none', color: 'text.secondary', fontSize: 12 }}>Migrations</Typography><ChevronRight sx={{ fontSize: 15, color: 'text.secondary' }} /><Typography variant="caption">{title}</Typography></Box><MigrationSwitcher /><ViewingAccountSelect /></Box>
+        <ScopeMismatch />
         <Box key={location.pathname} data-workspace-page sx={{ maxWidth: 1560, mx: 'auto', minWidth: 0 }}>{children}</Box>
       </Box>
     </Box>
