@@ -95,6 +95,9 @@ const JobRunner: React.FC<{
                                 name === 'discover' && workers
                                   ? { ...extra, workers: Number(workers) } : extra)
     if (!res.ok) {
+      // "already queued for this account" is the server saying the earlier press worked, not a
+      // failure: say it as information, beside the queue that shows where it stands.
+      if (/already queued/i.test(res.error || '')) { setQueued(res.error as string); return }
       setError(res.error || 'could not start')
       return
     }
@@ -172,13 +175,14 @@ const JobRunner: React.FC<{
         </Box>
       )}
       {error && (
-        <Typography variant="caption" color="error" sx={{ display: 'block', mt: 0.5 }}>
+        <Typography variant="caption" color="error" sx={{ display: 'block', mt: 0.5 }}
+                    data-testid={`action-error-${name}`}>
           {error}
         </Typography>
       )}
       {queued && (
         <Typography variant="caption" color="info.main"
-                    sx={{ display: 'block', mt: 0.5 }}>
+                    sx={{ display: 'block', mt: 0.5 }} data-testid={`action-queued-${name}`}>
           {queued}
         </Typography>
       )}

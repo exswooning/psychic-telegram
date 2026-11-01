@@ -13,6 +13,7 @@ vi.mock('@/components/JobRunner', () => ({
   default: (p: Record<string, unknown>) => { seen.push(p); return <div data-testid="job-runner" /> },
 }))
 vi.mock('@/components/AbBenchmarkPanel', () => ({ default: () => null }))
+vi.mock('@/components/QueuePanel', () => ({ default: () => <div data-testid="queue-panel" /> }))
 vi.mock('@/components/BenchmarkRunner', () => ({ default: () => null }))
 
 import Benchmarks from './Benchmarks'
@@ -22,6 +23,11 @@ describe('the regression set on the Benchmarks page', () => {
     render(<MemoryRouter initialEntries={['/benchmarks']}><Benchmarks /></MemoryRouter>)
     expect(await screen.findByText(/Pick the account/)).toBeTruthy()
     expect(screen.queryByTestId('job-runner')).toBeNull()
+  })
+
+  it('shows what a launch waits behind', async () => {
+    render(<MemoryRouter initialEntries={['/benchmarks?account=3']}><Benchmarks /></MemoryRouter>)
+    expect(await screen.findByTestId('queue-panel')).toBeTruthy()
   })
 
   it('runs for the viewed account', async () => {

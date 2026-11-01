@@ -3,6 +3,7 @@ import { Alert, Box, Card, CardContent, Stack, Typography } from '@mui/material'
 import { useSearchParams } from 'react-router-dom'
 import AbBenchmarkPanel from '@/components/AbBenchmarkPanel'
 import BenchmarkRunner from '@/components/BenchmarkRunner'
+import QueuePanel from '@/components/QueuePanel'
 import JobRunner from '@/components/JobRunner'
 import { fetchActions, type ActionSpec } from '@/api/client'
 
@@ -36,6 +37,8 @@ const Benchmarks: React.FC = () => (
     <Stack spacing={3}>
       <AbBenchmarkPanel />
       <RegressionRunner />
+      {/* What a launch here waits behind: an account runs one job at a time. */}
+      <QueuePanel />
       <BenchmarkRunner />
     </Stack>
   </Box>
