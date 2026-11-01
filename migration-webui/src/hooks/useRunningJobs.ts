@@ -84,11 +84,12 @@ export const describeElapsed = (sec: number): string => {
 /** A verify's heartbeat is one pipe-separated line of counters; an operator wants the sentence:
  *  "info@s.… · Drive: Drive compare files · 326 of 1,403".  Anything else is left as printed. */
 export const plainLine = (t: string): string => {
-  const m = /^verify: (?:heartbeat|progress) (\S+) \| service=(\w+) \| operation=([^|]*?) *\| *(?:.*?\| *)?items=([\d,]+)\/([\d,]+)/.exec(t)
+  const m = /^verify: (?:heartbeat|progress) (\S+) \| service=(\w+) \| operation=([^|]*?) *\| *(?:.*?\| *)?items=([\d,]+)(?:\/([\d,]+))?/.exec(t)
   if (!m) return t
   const [, who, service, op, done, total] = m
   const name = service.charAt(0).toUpperCase() + service.slice(1)
-  return `${who} · ${name}: ${op.trim().replace(/^drive /i, '').replace(/^./, (c) => c.toLowerCase())} · ${done} of ${total}`
+  const what = op.trim().replace(/^(drive|gmail) /i, '').replace(/^./, (c) => c.toLowerCase())
+  return `${who} · ${name}: ${what} · ${total ? `${done} of ${total}` : `${done} so far`}`
 }
 
 const latestLine = (lines?: string[]): string | null => {

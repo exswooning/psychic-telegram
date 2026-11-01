@@ -65,6 +65,10 @@ describe('a verify heartbeat reads as a sentence', () => {
     expect(plainLine('verify: progress a@b.c | service=gmail | operation=reading receipts | items=1/9'))
       .toBe('a@b.c · Gmail: reading receipts · 1 of 9')
   })
+  it('says "so far" when the count has no total', () => {
+    expect(plainLine('verify: heartbeat finance@s.example | service=gmail | operation=Gmail target inventory | serviceElapsed=811s | items=2,200 | apiAttempts=2240'))
+      .toBe('finance@s.example · Gmail: target inventory · 2,200 so far')
+  })
   it('leaves any other line as printed', () => {
     expect(plainLine('=== run started ===')).toBe('=== run started ===')
   })
