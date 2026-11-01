@@ -453,7 +453,7 @@ class TestTheLimiterHearsTheFirstRejectionThroughDriveEngine:
         monkeypatch.setattr(resilience.time, "sleep", lambda *_: None)
         mig = drive_engine.DriveMigrator(auth, db, settings, SRC_USER, TGT_USER, quota)
         seen = []
-        monkeypatch.setattr(mig._project_limiter, "penalise", lambda: seen.append(1))
+        monkeypatch.setattr(mig._project_limiter, "penalise", lambda reason=None: seen.append(1))
 
         def always_rate_limited():
             raise resilience.HttpError(
@@ -777,3 +777,16 @@ class TestAFreshRunStartsFromWhatALastOneProved:
         lim = drive_engine._project_limiter(300, "target", db=Broken())
         lim.penalise()          # must not raise
         assert lim.rate < 300.0
+
+
+def test_rejections_are_counted_by_googles_reason():
+    """'quota pushback' alone could be a per-project, per-user or sharing limit; only a
+    per-project one is helped by a quota request, so each rejection keeps its reason."""
+    from resilience import AdaptiveRateLimiter
+    lim = AdaptiveRateLimiter(100, floor=1, ceiling=200, debounce_window=0)
+    lim.penalise("rateLimitExceeded")
+    lim.penalise("rateLimitExceeded")
+    lim.penalise("quotaExceeded")
+    lim.penalise()
+    assert lim.stats()["rejectionsByReason"] == {"rateLimitExceeded": 2, "quotaExceeded": 1, "unknown": 1}
+    assert lim.last_reason == "unknown"

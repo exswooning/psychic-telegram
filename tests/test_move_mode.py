@@ -10,6 +10,7 @@ which is what every guard here is about: once it has moved, the target holds the
 from __future__ import annotations
 
 import threading
+import types
 
 import pytest
 
@@ -144,6 +145,7 @@ class TestNothingDeletesTheOnlyCopy:
         assert _tgt(auth).call_count("files.update") == 0
         c = object.__new__(mirror.Cycle)
         c._lock, c.proposed = threading.Lock(), []
+        c.settings = types.SimpleNamespace()      # propose() reads _background_delta off it
         c.propose(**moved)
         c.propose(**{**moved, "item_id": "S1", "target_id": "T1"})
         assert [d["item_id"] for d in c.proposed] == ["S1"]

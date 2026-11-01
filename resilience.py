@@ -393,7 +393,7 @@ def retry_on_google_error(
     max_retries: int = 6, base_delay: float = 1.0, max_delay: float = 60.0,
     before_retry: Callable[[], T | None] | None = None,
     label: str | None = None,
-    on_quota_rejection: Callable[[], None] | None = None,
+    on_quota_rejection: Callable[[str], None] | None = None,
     quota_reasons: frozenset | None = None,
 ) -> Callable[[Callable[..., T]], Callable[..., T]]:
     """
@@ -427,7 +427,8 @@ def retry_on_google_error(
     on_quota_rejection
     -------------------
     Called once per attempt Google rejected for pacing (rateLimitExceeded,
-    userRateLimitExceeded, quotaExceeded) -- immediately, before the sleep.
+    userRateLimitExceeded, quotaExceeded) -- immediately, before the sleep -- with
+    Google's reason, so whoever listens can say WHICH limit pushed back.
     `quota_reasons` narrows which of those it hears: a limiter modelling a
     whole PROJECT must not learn from userRateLimitExceeded, one account's own
     budget (see drive_engine.PROJECT_QUOTA_REASONS).
@@ -520,7 +521,7 @@ def retry_on_google_error(
                         # burst of siblings nothing.
                         if on_quota_rejection is not None and (
                                 quota_reasons is None or reason in quota_reasons):
-                            on_quota_rejection()
+                            on_quota_rejection(reason or "unknown")
                     if attempt > budget:
                         raise RuntimeError(
                             f"exhausted {budget} retries on HTTP {status} "
@@ -723,6 +724,10 @@ class AdaptiveRateLimiter(RateLimiter):
         self.rate = min(max(self.rate, self.floor), self.ceiling)
         self._last_change = time.monotonic()
         self._rejections = 0
+        # Which limit said no, by Google's reason: "quota pushback" alone could be a
+        # per-project, per-user or sharing limit, and only one of those a quota request fixes.
+        self._by_reason: dict[str, int] = {}
+        self.last_reason: str | None = None
         self._backoffs = 0
         # Calls already in flight when the first rejection in a burst lands keep
         # arriving for a moment after -- every one of them blaming the SAME crossing,
@@ -755,7 +760,7 @@ class AdaptiveRateLimiter(RateLimiter):
             self._events.clear()
         return out
 
-    def penalise(self) -> float:
+    def penalise(self, reason: str | None = None) -> float:
         """Called when the service rejected a call for quota.
 
         Backs off by `decrease`, not by half.
@@ -801,6 +806,8 @@ class AdaptiveRateLimiter(RateLimiter):
         """
         with self._lock:
             self._rejections += 1
+            self.last_reason = reason or "unknown"
+            self._by_reason[self.last_reason] = self._by_reason.get(self.last_reason, 0) + 1
             now = time.monotonic()
             if (self._last_penalty is not None
                     and now - self._last_penalty < self.debounce_window):
@@ -869,6 +876,7 @@ class AdaptiveRateLimiter(RateLimiter):
         with self._lock:
             return {"rate": round(self.rate, 2), "floor": self.floor,
                     "ceiling": self.ceiling, "rejections": self._rejections,
+                    "rejectionsByReason": dict(self._by_reason),
                     "backoffs": self._backoffs, "decrease": self.decrease,
                     "ceilingHint": (round(self._ceiling_hint, 2)
                                     if self._ceiling_hint is not None else None)}

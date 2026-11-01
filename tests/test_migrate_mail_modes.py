@@ -100,13 +100,13 @@ class TestTheEndpoint:
     def test_dms_leaves_mail_out_of_the_run(self, cp, monkeypatch):
         r, seen = _start(cp, monkeypatch, services=["all"], mail_mode="dms")
         assert "gmail" not in seen["argv"][seen["argv"].index("--services") + 1].split(",")
-        assert seen["env"] is None
+        assert seen["env"] == {**seen["env"], "TRANSFER_MODE": "server_side"}      # the default, nothing else added
         assert "--ordered" in seen["argv"]      # calendar is still moved, and its links need Drive first
 
     def test_the_engine_still_orders_the_passes_because_links_are_being_rewritten(self, cp, monkeypatch):
         r, seen = _start(cp, monkeypatch, services=["all"], mail_mode="engine")
         assert seen["argv"][seen["argv"].index("--services") + 1] == "all"
-        assert "--ordered" in seen["argv"] and seen["env"] is None
+        assert "--ordered" in seen["argv"] and seen["env"]["TRANSFER_MODE"] == "server_side"
 
     def test_but_not_when_the_box_has_rewriting_off(self, cp, monkeypatch):
         monkeypatch.setenv("REWRITE_DRIVE_LINKS", "false")
@@ -202,9 +202,10 @@ class TestTransferMode:
     account's -- unlike the TRANSFER_MODE the box's own environment sets, this
     is per-launch, passed only to the child this request starts."""
 
-    def test_left_out_the_child_gets_no_override_at_all(self, cp, monkeypatch):
+    def test_left_out_the_child_gets_server_side(self, cp, monkeypatch):
+        """server_side is the default (operator, 2026-11-01): no bytes cross this host."""
         r, seen = _start(cp, monkeypatch, services=["drive"])
-        assert "TRANSFER_MODE" not in (seen["env"] or {})
+        assert seen["env"]["TRANSFER_MODE"] == "server_side"
 
     def test_server_side_is_passed_through_as_an_env_override(self, cp, monkeypatch):
         r, seen = _start(cp, monkeypatch, services=["drive"], transfer_mode="server_side")
@@ -311,6 +312,9 @@ class TestTuningForMeasuredRuns:
     """The perf plan's knobs, per launch, as env vars -- like transfer_mode."""
 
     def test_nothing_named_nothing_added(self, cp, monkeypatch):
+        # main.main() mirrors --workers into os.environ, which an earlier test can leave behind
+        for k in ("USER_WORKERS", "DRIVE_FILE_WORKERS", "MAPPING_CACHE_USER_CAP"):
+            monkeypatch.delenv(k, raising=False)
         r, seen = _start(cp, monkeypatch, services=["drive"])
         env = seen["env"] or {}
         for k in ("USER_WORKERS", "DRIVE_FILE_WORKERS", "MAPPING_CACHE_USER_CAP"):
@@ -400,9 +404,10 @@ class TestMailLinkScan:
         assert r.status_code == 422 and not seen
 
 
-def test_a_run_naming_no_mode_takes_the_benchmarks_winner(cp, monkeypatch):
+def test_a_run_naming_no_mode_takes_the_benchmarks_mail_mode_but_server_side(cp, monkeypatch):
     monkeypatch.setattr(A, "ab_default", lambda: {"arm": "download_upload + engine", "mode": "download_upload",
                                                  "mailMode": "engine", "errors": 4, "seconds": 900})
     r, seen = _start(cp, monkeypatch, services=["all"])
     assert r.status_code == 200, r.text
-    assert seen["env"]["TRANSFER_MODE"] == "download_upload" and "MAIL_ONLY_WITH_LINKS" not in seen["env"]
+    # the winner sets the MAIL mode; how Drive moves stays server_side unless the operator names one
+    assert seen["env"]["TRANSFER_MODE"] == "server_side" and "MAIL_ONLY_WITH_LINKS" not in seen["env"]

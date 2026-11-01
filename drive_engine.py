@@ -234,7 +234,7 @@ def _project_limiter(qps: float, tenant: str = "target", db=None):
 
             def _on_change(kind: str, before: float, after: float,
                           t: str = tenant, d=db, n: int = share) -> None:
-                _log_rate_change(kind, before, after, t)
+                _log_rate_change(kind, before, after, t, _PROJECT_LIMITERS[t].last_reason)
                 if kind == "backoff" and d is not None:
                     try:
                         d.save_rate_ceiling(t, _PROJECT_LIMITERS[t].ceiling * n)
@@ -386,12 +386,12 @@ def limiter_events() -> dict:
 
 
 def _log_rate_change(kind: str, before: float, after: float,
-                     tenant: str = "target") -> None:
+                     tenant: str = "target", reason: str | None = None) -> None:
     """Say it out loud. A limiter that silently retunes itself is a limiter
     nobody can debug when a run is mysteriously slow."""
     if kind == "backoff":
-        log.warning("drive %s project rate: %.1f -> %.1f/s (quota pushback)",
-                    tenant, before, after)
+        log.warning("drive %s project rate: %.1f -> %.1f/s (quota pushback: %s)",
+                    tenant, before, after, reason or "unknown")
     else:
         log.info("drive %s project rate: %.1f -> %.1f/s (probing up)",
                  tenant, before, after)
