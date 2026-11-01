@@ -46,3 +46,24 @@ def test_it_is_a_runnable_action():
     import webui
     assert webui.ACTIONS["regression"]["argv"][1] == "regression.py"
     assert not webui.ACTIONS["regression"].get("destructive")
+
+
+def test_progress_is_counted_in_real_steps_from_each_users_own_run():
+    """The card showed nothing and no bar for a whole run: regression.py printed nothing until the
+    end. Each user is three steps (migrate, Google's import, 1:1 check) read from its own file."""
+    states = {
+        "a@s.example": {"running": True, "current": {"stage": "migrate"}},
+        "b@s.example": {"running": True, "current": {"stage": "dms import"}},
+        "c@s.example": {"running": True, "current": {"stage": "verify 1:1"}},
+        "d@s.example": {"running": False, "finishedAt": "2026-11-01T18:00:00Z"},
+    }
+    line = R.progress_line(states)
+    assert line.startswith("[6/12] steps")          # 0 + 1 + 2 + 3
+    assert "a: migrate" in line and "d: finished" in line
+    assert R.user_steps(None) == (0, "waiting to start")
+
+
+def test_the_counter_is_the_shape_webui_reads():
+    import webui
+    m = webui._COUNTER_RE.search(R.progress_line({"a@s.example": None, "b@s.example": None}))
+    assert m and (m.group(1), m.group(2)) == ("0", "6")

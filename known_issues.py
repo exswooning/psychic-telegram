@@ -137,10 +137,15 @@ ISSUES = [
      "them to the Docs/Slides API.",
      "Checker compares Office files by their bytes (verify_sample, 2026-10-24); rechecked.", True),
     ("drive.read_refused", "drive", lambda t: "RESOURCE_EXHAUSTED" in t or "HTTP 429" in t
-                                             or "HTTP 500" in t or "(INTERNAL)" in t,
+                                             or "HTTP 500" in t or "(INTERNAL)" in t
+                                             or "HTTP 503" in t or "(UNAVAILABLE)" in t,
      "Google refused or failed a read during the check",
-     "Sheets allows 60 reads a minute per user; the Docs API sometimes answers 500.",
-     "Nothing on either tenant is wrong: the next check reads it again.", True),
+     "Sheets allows 60 reads a minute per user; the Docs API sometimes answers 500 or 503. The "
+     "check's own Sheets/Docs/Slides reads used to be paced per project only, so a big sheet "
+     "burst past the per-user limit (info@s., 2026-11-01).",
+     "Every content read is now paced per user as well (verify_sample._native_pace, "
+     "native_repair.read_sheet's pace); nothing on either tenant is wrong, and the repair "
+     "policy's next check reads it again.", True),
     ("drive.source_changed", "drive", lambda t: "Source changed during migration" in t,
      "The source changed while the user was copied",
      "Someone at the source edited the file during the run (the tripwire saw it).",
@@ -155,6 +160,69 @@ ISSUES = [
      "Drive cannot write a comment as its author, mark one resolved on create, or anchor it "
      "to the same text in a rebuilt Office file.",
      "None automatic beyond what the copy carried. Listed in the final report.", False),
+    # Taken from s.sarafgloabalexim.com -> t. (2026-11-01): findings the check reported as
+    # "unclassified" until each was traced to its cause.
+    ("gmail.link_scan_fixed", "gmail", lambda t: "Pre-delivery link scan: HTTP 404" in t
+                                                or "Multipart body has no readable parts" in t,
+     "Link mail held back by a link check that has since been fixed",
+     "Split mail scans each message for Drive links before delivery. Until 2026-10-31 a link to "
+     "a file nobody can read (404) blocked the message, and until 2026-11-01 so did a bounce "
+     "report with no text part. Both now deliver (an unreadable link is left as found; the "
+     "bounce is read raw), but the messages already held stayed FAILED_SPLIT.",
+     "The missing-mail repair delivers them through the engine with links rewritten "
+     "(repair.repair_verified_missing_mail now takes these two errors).", True),
+    ("gmail.link_owner_not_migrated", "gmail", lambda t: "Unresolved Drive link mapping" in t,
+     "Link mail waiting for the linked file's owner",
+     "The message links to a file owned by someone on the source who is not migrated yet, so "
+     "there is no target copy to point the link at. Delivering it now would leave a link into "
+     "the source tenant, which breaks when the source is shut down.",
+     "Delivered by the next run once that owner's Drive is migrated (ordered passes: Drive for "
+     "every user before mail). In a run of chosen users it waits for the owner's run.", False),
+    ("gmail.link_scan_encrypted", "gmail", lambda t: "Encrypted MIME content cannot be cla" in t,
+     "Encrypted mail cannot be scanned for links",
+     "An S/MIME or PGP body cannot be read, so whether it carries a Drive link is unknown.",
+     "None automatic: a person decides whether to send it through Google's import as it is.", False),
+    ("gmail.duplicate", "gmail", lambda t: '"messageId"' in t and '"target"' in t and '"source"' not in t,
+     "A message is on the target twice",
+     "In split mode the engine writes the link mail with its links rewritten, and Google's "
+     "import, run after, can bring the same message again with the original links (19 on "
+     "finance@s., 2026-11-01). The import's copy still points at the source.",
+     "None automatic yet: removing a message is the operator's call. Keep the engine's copy "
+     "(links rewritten); the import's copy is listed with both ids.", False),
+    ("gmail.rate_limited", "gmail", lambda t: "HTTP 429" in t or "rateLimitExceeded" in t,
+     "Gmail refused a read during the check",
+     "Gmail's per-user limit: a check reading the same mailbox as a running migration or "
+     "another check runs it dry.",
+     "Nothing on either tenant is wrong: the repair policy's next check reads it again.", True),
+    ("drive.comments_unreadable", "drive", lambda t: "Comment threads: HTTP 404" in t or "Comment threads: HTTP 403" in t,
+     "Comments on a file could not be read",
+     "A Form or Site has no Drive comments and answers 404; a file the reader cannot open "
+     "answers 403 or 404.",
+     "Forms are compared by their body instead (since 2026-11-01). Anything else is listed "
+     "for a person.", False),
+    ("drive.missing_on_target", "drive", lambda t: "not on the target" in t,
+     "A copied file is gone from the target",
+     "The ledger maps it, but the target copy was deleted after the run (a reset or a "
+     "person), or the target account itself was replaced.",
+     "None automatic: the mapping must be forgotten before Drive will copy it again.", False),
+    ("contacts.unmapped_source", "contacts", lambda t: "have no ledger mapping" in t,
+     "A source contact has no copy",
+     "Added at the source after the run, or the run stopped before it.",
+     "The delta (Mirror) copies it.", False),
+    ("contacts.missing_on_target", "contacts", lambda t: "not on the target" in t,
+     "A copied contact is gone from the target",
+     "Deleted on the target after the run.",
+     "None automatic: listed for a person.", False),
+    ("chat.not_migrated", "chat", lambda t: "Source Chat space has no migration mapping" in t
+                                           or "chat could not be verified" in t,
+     "Chat was not migrated",
+     "Chat is off by default since 2026-10-31 (MIGRATE_CHAT); a check of an earlier run still "
+     "lists its spaces as owed.",
+     "Turn Chat on for a run that should carry it; otherwise nothing is owed.", False),
+    ("tasks.list_missing", "tasks", lambda t: "Task list not found" in t,
+     "A task list is gone from the target",
+     "Deleted on the target after the run (a reset, or the account was replaced).",
+     "None automatic: listed for a person.", False),
 ]
 BY_ID = {i[0]: i for i in ISSUES}
 

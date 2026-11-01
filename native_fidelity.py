@@ -112,16 +112,16 @@ def _hash_images(value, fetch=None):
     return value
 
 
-def compare_native(auth, source_user, target_user, sid, tid, mime, lookup, fetch=None):
+def compare_native(auth, source_user, target_user, sid, tid, mime, lookup, fetch=None, pace=lambda: None):
     if mime.endswith(".document"):
         source = (
-            auth.api("source", "docs", source_user)
+            pace() or auth.api("source", "docs", source_user)
             .documents()
             .get(documentId=sid, includeTabsContent=True)
             .execute()
         )
         target = (
-            auth.api("target", "docs", target_user)
+            pace() or auth.api("target", "docs", target_user)
             .documents()
             .get(documentId=tid, includeTabsContent=True)
             .execute()
@@ -131,13 +131,13 @@ def compare_native(auth, source_user, target_user, sid, tid, mime, lookup, fetch
         )
     elif mime.endswith(".presentation"):
         source = (
-            auth.api("source", "slides", source_user)
+            pace() or auth.api("source", "slides", source_user)
             .presentations()
             .get(presentationId=sid)
             .execute()
         )
         target = (
-            auth.api("target", "slides", target_user)
+            pace() or auth.api("target", "slides", target_user)
             .presentations()
             .get(presentationId=tid)
             .execute()

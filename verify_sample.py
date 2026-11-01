@@ -203,7 +203,7 @@ def _is_not_found(exc) -> bool:
 
 
 def compare_grants(src_perms: list[dict], tgt_perms: list[dict], translate, src_domain: str, tgt_domain: str,
-                   skipped_ids: set[str], source_id: str) -> dict:
+                   skipped_ids: set[str], source_id: str, owed_ids: set[str] = frozenset()) -> dict:
     """Who can see one file, source against target.
 
     Each grant is reduced to (who, role) -- the thing a person would notice
@@ -225,7 +225,10 @@ def compare_grants(src_perms: list[dict], tgt_perms: list[dict], translate, src_
             f"{source_id}:domain:{who}" if kind == "domain" else f"{source_id}:anyone")
     missing = sorted(want - got)
     explained = [k for k in missing if audit_id(k) in skipped_ids]
+    # Owed (the colleague has no target account YET) is still due; any other skip is a decision
+    # that stands (an outsider with no Google account) and leaves nothing to check.
     return {"matched": len(want & got), "notReproduced": [list(k) for k in explained],
+            "owed": sum(1 for k in explained if audit_id(k) in owed_ids),
             "missing": [list(k) for k in missing if k not in explained], "extra": [list(k) for k in sorted(got - want)]}
 
 
@@ -943,12 +946,16 @@ class Verifier:
                 "SELECT item_id FROM audit_log WHERE source_user=? AND item_type='acl' "
                 "AND (status LIKE 'SKIPPED%' OR status LIKE 'OWED%')",
                 (self.src_user,))}
+            self._owed_ids = {r["item_id"] for r in self.db.conn.execute(
+                "SELECT item_id FROM audit_log WHERE source_user=? AND item_type='acl' AND status LIKE 'OWED%'",
+                (self.src_user,))}
         g = compare_grants(sp, tp, self._translate, self.settings.source_domain, self.settings.target_domain,
-                           self._skipped_ids, sid)
-        sh = res.setdefault("sharing", {"filesCompared": 0, "matched": 0, "notReproduced": 0})
+                           self._skipped_ids, sid, getattr(self, "_owed_ids", set()))
+        sh = res.setdefault("sharing", {"filesCompared": 0, "matched": 0, "notReproduced": 0, "owed": 0})
         sh["filesCompared"] += 1
         sh["matched"] += g["matched"]
         sh["notReproduced"] += len(g["notReproduced"])
+        sh["owed"] = sh.get("owed", 0) + g["owed"]
         out = [f"grant missing on the target: {m}" for m in g["missing"]]
         out += [f"extra grant on the target (nobody granted it): {e}" for e in g["extra"]]
         return out
@@ -979,8 +986,10 @@ class Verifier:
         try:
             if mime == "application/vnd.google-apps.spreadsheet":
                 from native_repair import read_sheet, compare_sheets
-                source_sheet = self._x(lambda: read_sheet(self.auth.api("source", "sheets", self.src_user), sid))
-                target_sheet = self._x(lambda: read_sheet(self.auth.api("target", "sheets", self.tgt_user), tid))
+                source_sheet = self._x(lambda: read_sheet(self.auth.api("source", "sheets", self.src_user), sid,
+                                                           pace=lambda: self._native_pace("sheets", "read")))
+                target_sheet = self._x(lambda: read_sheet(self.auth.api("target", "sheets", self.tgt_user), tid,
+                                                           pace=lambda: self._native_pace("sheets", "read")))
                 differences = compare_sheets(source_sheet, target_sheet, self.db.target_for_source_id)
                 if differences and self.db.conn.execute(
                         "SELECT 1 FROM audit_log WHERE item_type='form_link' AND status='RELINKED' "
@@ -1003,7 +1012,9 @@ class Verifier:
                 return differences
             if mime in ("application/vnd.google-apps.document", "application/vnd.google-apps.presentation"):
                 from native_fidelity import compare_native
-                differences,scope=self._x(lambda: compare_native(self.auth,self.src_user,self.tgt_user,sid,tid,mime,self.db.target_for_source_id))
+                kind = "docs" if mime.endswith(".document") else "slides"
+                differences,scope=self._x(lambda: compare_native(self.auth,self.src_user,self.tgt_user,sid,tid,mime,self.db.target_for_source_id,
+                                                                 pace=lambda: self._native_pace(kind, "read")))
                 ev.update(opened=True,how=scope,nativeFeaturesChecked=True,nativeFeaturesMatched=not differences)
                 return differences
             if mime in NATIVE_EXPORT:

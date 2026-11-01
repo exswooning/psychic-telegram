@@ -43,6 +43,35 @@ def _account_from_ledger() -> int | None:
     return int(m.group(1)) if m else None
 
 
+# Three real steps per user, read from its own ab_transfer progress file -- never a guess from
+# time. Stages before the migration finishes count 0; Google's import running means the
+# migration is done (1); the snapshot and the 1:1 check mean the import is done (2); a finished
+# run is 3.
+STEPS_DONE = {"dms import": 1, "snapshot target": 2, "verify 1:1": 2}
+STEPS_PER_USER = 3
+
+
+def user_steps(progress: dict | None) -> tuple[int, str]:
+    """(steps finished, what it is doing) for one user's run."""
+    if not progress:
+        return 0, "waiting to start"
+    if not progress.get("running") and progress.get("finishedAt"):
+        return STEPS_PER_USER, "finished"
+    stage = ((progress.get("current") or {}).get("stage")) or progress.get("phase") or "starting"
+    return STEPS_DONE.get(stage, 0), stage
+
+
+def progress_line(states: dict[str, dict | None]) -> str:
+    """'[5/12] steps · esc.mrc: verify 1:1 · audit: dms import · ...' -- webui turns the counter
+    into the card's progress bar."""
+    parts, done = [], 0
+    for user, st in states.items():
+        n, doing = user_steps(st)
+        done += n
+        parts.append(f"{user.partition('@')[0]}: {doing}")
+    return f"[{done}/{STEPS_PER_USER * len(states)}] steps · " + " · ".join(parts)
+
+
 def summarise(report: dict) -> dict:
     """One user's ab_transfer report -> verdict per service, failures, seconds, kinds counted."""
     runs = report.get("runs") or []
@@ -115,8 +144,41 @@ def main(argv=None) -> int:
     folder = os.path.join(OUT, stamp)
     os.makedirs(folder, exist_ok=True)
     started = time.time()
+    print(f"Regression set: {len(users)} users, server_side + split, into new target accounts", flush=True)
+    import threading
+    finished = threading.Event()
+
+    def report_progress():
+        last = None
+        while True:
+            states = {}
+            for u in users:
+                try:
+                    with open(os.path.join(folder, f"{u.partition('@')[0]}.progress.json")) as fh:
+                        states[u] = json.load(fh)
+                except (OSError, ValueError):
+                    states[u] = None
+            line = progress_line(states)
+            if line != last:
+                print(line, flush=True)
+                last = line
+            if finished.wait(20):
+                return
+
+    watcher = threading.Thread(target=report_progress, daemon=True)
+    watcher.start()
+
+    def one(u):
+        got = run_one(args.account_id, u, folder)
+        print(f"{u}: finished, {'ran' if got.get('ran') else 'did not run'}"
+              f"{'' if got.get('seconds') is None else f' in {got['seconds'] / 60:.0f} min'}"
+              f", failed={got.get('failed')}, verdicts={got.get('verdicts')}", flush=True)
+        return got
+
     with ThreadPoolExecutor(len(users)) as ex:
-        results = dict(zip(users, ex.map(lambda u: run_one(args.account_id, u, folder), users)))
+        results = dict(zip(users, ex.map(one, users)))
+    finished.set()
+    watcher.join(5)
     latest = os.path.join(OUT, "latest.json")
     try:
         with open(latest) as fh:

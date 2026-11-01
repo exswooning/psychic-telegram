@@ -56,6 +56,35 @@ def add(v, result, key, label, fn):
         result["errors"].append(f"{label}: {detail}")
 
 
+def permissions_status(result: dict) -> str:
+    """The verdict of drive.permissions from one user's Drive result."""
+    sharing = result.get("sharing") or {}
+    return (
+        "EMPTY"
+        if result.get("emptySource")
+        else "INCOMPLETE"
+        if any("sharing" in e for e in result["errors"])
+        else "DIFFERENCES"
+        if any(
+            any("grant" in d for d in item.get("diffs", []))
+            for item in result["differences"]
+        )
+        else "NOT_VERIFIED"
+        # Only an OWED grant is still due; a deliberate skip (no Google account at all) is
+        # a decision, not something left to check (live: finance@s. read INCOMPLETE on 2
+        # such grants while its own note said "0 remain unverified"). A result saved before
+        # owed was counted keeps the old reading.
+        if sharing.get("owed", sharing.get("notReproduced")) or result.get("not_owner") or (
+            result.get("carriedIn") and (
+                not result.get("externalSharing")
+                or result["externalSharing"].get("unverified")
+                or result["externalSharing"].get("notChecked")))
+        else "MATCHED"
+        if sharing.get("filesCompared", 0)
+        else "NOT_VERIFIED"
+    )
+
+
 def drive(v, result):
     src = v.auth.source_drive(v.src_user)
     external_items = []
@@ -271,27 +300,11 @@ def drive(v, result):
         check(
             "drive.permissions",
             "File and folder share access",
-            "EMPTY"
-            if result.get("emptySource")
-            else "INCOMPLETE"
-            if any("sharing" in e for e in result["errors"])
-            else "DIFFERENCES"
-            if any(
-                any("grant" in d for d in item.get("diffs", []))
-                for item in result["differences"]
-            )
-            else "NOT_VERIFIED"
-            if sharing.get("notReproduced") or result.get("not_owner") or (
-                result.get("carriedIn") and (
-                    not result.get("externalSharing")
-                    or result["externalSharing"].get("unverified")
-                    or result["externalSharing"].get("notChecked")))
-            else "MATCHED"
-            if sharing.get("filesCompared", 0)
-            else "NOT_VERIFIED",
+            permissions_status(result),
             sharing.get("filesCompared", 0),
             sharing.get("matched", 0),
             f"{sharing.get('matched', 0)} grants matched; {sharing.get('notReproduced', 0)} deliberately skipped grants "
+            f"({sharing.get('owed', 0)} of them owed until the colleague has an account) "
             f"and permissions on {result.get('not_owner', 0)} unreadable source items and "
             f"{(result.get('externalSharing') or {}).get('matched', 0)} external originals have equivalent access and verified shortcuts; "
             f"{(result.get('externalSharing') or {}).get('unverified', result.get('carriedIn', 0))} remain unverified. "

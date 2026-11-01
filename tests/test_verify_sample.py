@@ -519,6 +519,22 @@ class TestCompareGrants:
         g = self._g([{"type": "user", "role": "reader", "emailAddress": "x@outside.com"}], [])
         assert g["missing"] == [["user", "x@outside.com", "reader"]] and g["notReproduced"] == []
 
+    def test_an_owed_grant_is_counted_apart_from_a_decision(self):
+        g = V.compare_grants([{"type": "user", "role": "reader", "emailAddress": "x@outside.com"},
+                              {"type": "user", "role": "reader", "emailAddress": "col@tenanta.com"}], [],
+                             self.T, "tenanta.com", "tenantb.com",
+                             {"f1:x@outside.com", "f1:col@tenantb.com"}, "f1", owed_ids={"f1:col@tenantb.com"})
+        assert len(g["notReproduced"]) == 2 and g["owed"] == 1 and g["missing"] == []
+
+    def test_only_an_owed_grant_leaves_sharing_unverified(self):
+        """Live: finance@s. read INCOMPLETE on two grants to people with no Google account at
+        all, while the note said '0 remain unverified'."""
+        from verification_coverage import permissions_status
+        base = {"errors": [], "differences": []}
+        assert permissions_status({**base, "sharing": {"filesCompared": 5, "notReproduced": 2, "owed": 0}}) == "MATCHED"
+        assert permissions_status({**base, "sharing": {"filesCompared": 5, "notReproduced": 2, "owed": 1}}) == "NOT_VERIFIED"
+        assert permissions_status({**base, "sharing": {"filesCompared": 5, "notReproduced": 2}}) == "NOT_VERIFIED"   # saved before owed existed
+
     def test_a_deleted_grant_does_not_count(self):
         assert self._g([{"type": "user", "role": "reader", "emailAddress": "x@y.com", "deleted": True}], [])["missing"] == []
 

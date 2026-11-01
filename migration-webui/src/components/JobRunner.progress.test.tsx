@@ -16,6 +16,9 @@ const job = (over: Partial<client.JobStatus>) => ({
 }) as client.JobStatus
 
 const start = async () => {
+  // Nothing of this panel's is running when it opens; the press starts it (the card now
+  // attaches on mount to a job already running, so the first look must see none).
+  vi.mocked(client.fetchJob).mockResolvedValueOnce({ running: false, name: '', rc: null, elapsed: 0, lines: [], total: 0, progressPct: null, etaSeconds: null, external: false } as never)
   render(<JobRunner name="shared_drives_migrate" spec={SPEC} />)
   ;(await screen.findByRole('button', { name: /shared drives migrate/i })).click()
   await waitFor(() => expect(client.runAction).toHaveBeenCalled())

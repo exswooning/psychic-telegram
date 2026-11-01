@@ -29,10 +29,11 @@ def _rewrite(value, lookup):
     return value
 
 
-def read_sheet(svc, fid, cell_budget=2000000):
-    """Read native structures and bounded grid windows, including every tab."""
+def read_sheet(svc, fid, cell_budget=2000000, pace=lambda: None):
+    """Read native structures and bounded grid windows, including every tab. `pace` is called
+    before each request: a big sheet is many requests, and Google allows 60 reads a minute per user."""
     fields=SHEET_FIELDS.split(",data(",1)[0]+")"
-    doc=svc.spreadsheets().get(spreadsheetId=fid,fields=fields).execute()
+    pace();doc=svc.spreadsheets().get(spreadsheetId=fid,fields=fields).execute()
     cells=sum(int(s["properties"].get("gridProperties",{}).get("rowCount",0))*int(s["properties"].get("gridProperties",{}).get("columnCount",0)) for s in doc.get("sheets",[]))
     if cells>cell_budget:
         raise RuntimeError("Native sheet allocated cells exceed the explicit per-read budget; increase only for a qualified workload")
@@ -51,7 +52,7 @@ def read_sheet(svc, fid, cell_budget=2000000):
                 # method only with the full Sheets scope, so on a read-only grant every
                 # native Sheet read 403 ACCESS_TOKEN_SCOPE_INSUFFICIENT (dharan, 2026-10-23).
                 rng="'"+props["title"].replace("'","''")+"'!"+_a1(col,row)+":"+_a1(end_col-1,min(height,row+row_step)-1)
-                result=svc.spreadsheets().get(spreadsheetId=fid,ranges=[rng],includeGridData=True,
+                pace();result=svc.spreadsheets().get(spreadsheetId=fid,ranges=[rng],includeGridData=True,
                     fields="sheets(properties.sheetId,data(startRow,startColumn,rowData(values("+CELL_FIELDS+"))))").execute()
                 for chunk in result.get("sheets",[]):
                     if chunk.get("properties",{}).get("sheetId")==props["sheetId"]:

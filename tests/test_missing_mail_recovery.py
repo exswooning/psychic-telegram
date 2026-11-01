@@ -166,3 +166,15 @@ def test_orphaned_verification_is_interrupted_only_when_disabled_and_owner_dead(
     assert R.reconcile_stopped_verification(db) == 1
     assert db.conn.execute("SELECT state FROM verification_repairs").fetchone()[0] == "INTERRUPTED"
     assert db.conn.execute("SELECT finished_at FROM repair_runs WHERE id=?", (run,)).fetchone()[0]
+
+
+def test_link_mail_held_by_a_fixed_check_is_recovered_but_owner_waiting_mail_is_not(auth, db, settings, identity):
+    """info@s. held 819 messages behind the old 404 link check (fixed in e1a935f) and the
+    repair never took them. Mail whose link's OWNER is not migrated yet must keep waiting:
+    delivering it would leave the link pointing at the source."""
+    held = [{"id": "m404", "type": "message", "error": "Pre-delivery link scan: HTTP 404 (notFound): ..."},
+            {"id": "mbounce", "type": "message", "error": "Pre-delivery link scan: Multipart body has no readable parts"},
+            {"id": "mowner", "type": "message", "error": "Pre-delivery link scan: Unresolved Drive link mapping: 1abc"}]
+    r = {"users": {SRC_USER: {"gmail": {"notCopied": held}}}}
+    got = repair.repair_verified_missing_mail(auth, db, settings, r, apply=False)
+    assert got["candidates"] == 2

@@ -86,6 +86,31 @@ const JobRunner: React.FC<{
 
   useEffect(() => () => { if (pollRef.current) clearInterval(pollRef.current) }, [])
 
+  // Attach to this action's job when it is already running: one the queue started after the
+  // press said "queued", or one running when the page was opened. Only a press that started
+  // at once was ever watched, so the Regression set card sat blank, no log and no bar,
+  // through a run that had started on its own (2026-11-01). While queued it looks every 5 s.
+  const acct = accountId === undefined || accountId === null ? undefined : String(accountId)
+  useEffect(() => {
+    let alive = true
+    const look = async () => {
+      if (pollRef.current) return true
+      try {
+        const job = await fetchJob(0, acct, spec.label)
+        if (!alive || !job.running) return false
+        setQueued(null)
+        setLines(job.lines)
+        sinceRef.current = job.total
+        setRunning(true)
+        pollRef.current = setInterval(poll, 1000)
+        return true
+      } catch { return false }
+    }
+    look()
+    const t = queued ? setInterval(() => { look().then((on) => { if (on) clearInterval(t) }) }, 5000) : undefined
+    return () => { alive = false; if (t) clearInterval(t) }
+  }, [acct, spec.label, poll, queued])
+
   const start = useCallback(async (confirm?: string) => {
     setError(null)
     setQueued(null)

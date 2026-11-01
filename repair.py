@@ -219,7 +219,13 @@ def repair_verified_missing_mail(auth, db, settings, report: dict, apply: bool =
         ids = sorted({i["id"] for i in (services.get("gmail") or {}).get("notCopied", [])
                       if (i.get("status") == "UNMAPPED_SOURCE" or "Missing Message-ID" in i.get("error", "")
                           or "Existing destination Message-ID" in i.get("error", "")
-                          or "Split classification incomplete" in i.get("error", ""))
+                          or "Split classification incomplete" in i.get("error", "")
+                          # Held by a link check since fixed: a 404 link (e1a935f) or a bounce with
+                          # no text part (d047c9a). The engine delivers them with links rewritten.
+                          # NOT "Unresolved Drive link mapping": that link's owner is not migrated
+                          # yet, and delivering now would leave it pointing at the source.
+                          or "Pre-delivery link scan: HTTP 404" in i.get("error", "")
+                          or "Multipart body has no readable parts" in i.get("error", ""))
                       and i.get("type") == "message" and i.get("id")})
         # Split deliberately owes these to DMS. Recovery must not silently
         # replace the chosen transport by copying the entire deferred mailbox.
