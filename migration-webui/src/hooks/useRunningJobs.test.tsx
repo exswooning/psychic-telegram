@@ -87,6 +87,26 @@ describe('Running Now', () => {
     client.fetchJob.mockResolvedValue({ running: false, name: '', lines: [] })
   })
 
+  it('stops polling while the tab is hidden and catches up when shown', async () => {
+    vi.useFakeTimers()
+    try {
+      client.fetchJob.mockResolvedValue({ running: false, name: '', lines: [] })
+      render(<RunningNow />)
+      await vi.advanceTimersByTimeAsync(0)
+      const before = client.fetchJob.mock.calls.length
+      Object.defineProperty(document, 'hidden', { configurable: true, get: () => true })
+      await vi.advanceTimersByTimeAsync(20000)
+      expect(client.fetchJob.mock.calls.length).toBe(before)
+      Object.defineProperty(document, 'hidden', { configurable: true, get: () => false })
+      document.dispatchEvent(new Event('visibilitychange'))
+      await vi.advanceTimersByTimeAsync(0)
+      expect(client.fetchJob.mock.calls.length).toBeGreaterThan(before)
+    } finally {
+      Object.defineProperty(document, 'hidden', { configurable: true, get: () => false })
+      vi.useRealTimers()
+    }
+  })
+
   it('lists a running job that has no admission row', async () => {
     // The row is gone whenever the process outlived the restart that
     // forgot it. The server can still see and name the job.

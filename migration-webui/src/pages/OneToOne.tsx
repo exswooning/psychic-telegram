@@ -112,7 +112,7 @@ const UserRow: React.FC<{ u: OneToOneUser; selected: boolean; onSelect: (on: boo
         <TableCell><Typography variant="caption">{when(u.verifiedAt)}</Typography></TableCell>
         <TableCell padding="checkbox">
           {u.services.length > 0 && (
-            <IconButton size="small" onClick={() => setOpen((o) => !o)} aria-label={open ? `hide ${u.user}` : `show ${u.user}`}>
+            <IconButton size="small" sx={{ p: 0.75 }} onClick={() => setOpen((o) => !o)} aria-label={open ? `hide ${u.user}` : `show ${u.user}`}>
               {open ? <CloseIcon fontSize="small" /> : <OpenIcon fontSize="small" />}
             </IconButton>
           )}

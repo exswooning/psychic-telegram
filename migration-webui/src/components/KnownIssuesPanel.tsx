@@ -18,7 +18,7 @@ const Row: React.FC<{ k: KnownIssueKind }> = ({ k }) => {
     <>
       <TableRow hover data-testid={`issue-${k.id}`}>
         <TableCell padding="checkbox">
-          <IconButton size="small" aria-label={open ? `hide how ${k.title} is fixed` : `show how ${k.title} is fixed`}
+          <IconButton size="small" sx={{ p: 0.75 }} aria-label={open ? `hide how ${k.title} is fixed` : `show how ${k.title} is fixed`}
                       onClick={() => setOpen(!open)}>
             {open ? <ExpandLessIcon fontSize="small" /> : <ExpandMoreIcon fontSize="small" />}
           </IconButton>

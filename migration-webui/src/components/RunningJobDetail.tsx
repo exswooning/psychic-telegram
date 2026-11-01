@@ -106,7 +106,7 @@ export const RunningJobDetail: React.FC<{
             {job.domain || job.label}
           </Typography>
         </Stack>
-        <IconButton onClick={onClose} size="small"
+        <IconButton onClick={onClose} size="small" aria-label="Close"
                     sx={{ position: 'absolute', right: 8, top: 12 }}>
           <CloseIcon fontSize="small" />
         </IconButton>

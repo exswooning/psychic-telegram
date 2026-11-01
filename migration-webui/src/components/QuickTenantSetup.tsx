@@ -147,7 +147,7 @@ const GoogleStyleAuth: React.FC<{
       } }}
     >
       <IconButton
-        onClick={onClose} size="small"
+        onClick={onClose} size="small" aria-label="Close"
         sx={{ position: 'absolute', top: 12, right: 12, color: G_TEXT_DIM }}
       >
         <CloseIcon fontSize="small" />

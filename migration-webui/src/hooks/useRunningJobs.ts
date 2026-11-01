@@ -377,8 +377,12 @@ export function useRunningJobs() {
 
   useEffect(() => {
     refresh()
-    const id = setInterval(refresh, 5000)
-    return () => clearInterval(id)
+    // A tab nobody is looking at has no use for a 40 KB job transcript every five seconds;
+    // it catches up the moment it is shown again.
+    const id = setInterval(() => { if (!document.hidden) refresh() }, 5000)
+    const shown = () => { if (!document.hidden) refresh() }
+    document.addEventListener('visibilitychange', shown)
+    return () => { clearInterval(id); document.removeEventListener('visibilitychange', shown) }
   }, [refresh])
 
   return { jobs, loading, refresh }

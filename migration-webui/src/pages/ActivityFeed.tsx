@@ -105,9 +105,7 @@ const ActivityFeed: React.FC = () => {
           <option value="retrying">Retrying</option>
           <option value="needs_attention">Needs Attention</option>
         </TextField>
-        <Tooltip title="Refresh">
-          <IconButton><RefreshIcon /></IconButton>
-        </Tooltip>
+        <Typography variant="caption" color="text.secondary">Updates by itself</Typography>
       </Paper>
 
       <Paper elevation={0} sx={{ borderRadius: 2, border: '1px solid', borderColor: 'divider' }}>

@@ -446,7 +446,7 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
         }}
       >
         <Toolbar sx={{ gap: 1.5, flexWrap: 'wrap', py: 0.5 }}>
-          <IconButton edge="start" color="inherit" onClick={handleDrawerToggle}>
+          <IconButton edge="start" color="inherit" onClick={handleDrawerToggle} aria-label="Open navigation">
             <MenuIcon />
           </IconButton>
           <Typography variant="h6" noWrap component="div" sx={{ fontWeight: 700, mr: 1 }}>
@@ -604,7 +604,7 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
             return (
               <>
                 <Badge badgeContent={items.length} color="error" invisible={items.length === 0}>
-                  <IconButton color="inherit" onClick={(e) => setNotifAnchor(e.currentTarget)}>
+                  <IconButton color="inherit" onClick={(e) => setNotifAnchor(e.currentTarget)} aria-label="Notifications">
                     <NotificationsIcon />
                   </IconButton>
                 </Badge>

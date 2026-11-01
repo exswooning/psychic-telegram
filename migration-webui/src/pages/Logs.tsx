@@ -81,7 +81,7 @@ const Logs: React.FC = () => {
         <Typography variant="h4" sx={{ fontWeight: 700, flexGrow: 1 }}>Logs</Typography>
         <Tooltip title="Re-check">
           <span>
-            <IconButton size="small" onClick={refresh}>
+            <IconButton size="small" onClick={refresh} aria-label="Re-check">
               <RefreshIcon fontSize="small" />
             </IconButton>
           </span>
