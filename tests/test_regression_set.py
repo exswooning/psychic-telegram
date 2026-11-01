@@ -67,3 +67,8 @@ def test_the_counter_is_the_shape_webui_reads():
     import webui
     m = webui._COUNTER_RE.search(R.progress_line({"a@s.example": None, "b@s.example": None}))
     assert m and (m.group(1), m.group(2)) == ("0", "6")
+
+
+def test_the_heartbeat_is_inside_the_stall_window():
+    import job_supervisor
+    assert R.HEARTBEAT_SEC < job_supervisor.STALL_SECONDS / 2

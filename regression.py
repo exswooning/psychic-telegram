@@ -49,6 +49,7 @@ def _account_from_ledger() -> int | None:
 # run is 3.
 STEPS_DONE = {"dms import": 1, "snapshot target": 2, "verify 1:1": 2}
 STEPS_PER_USER = 3
+HEARTBEAT_SEC = 300      # well inside job_supervisor.STALL_SECONDS (900)
 
 
 def user_steps(progress: dict | None) -> tuple[int, str]:
@@ -149,7 +150,10 @@ def main(argv=None) -> int:
     finished = threading.Event()
 
     def report_progress():
-        last = None
+        # Printed when anything moves, and at least every HEARTBEAT_SEC regardless: Google's
+        # import can hold one stage for an hour, and a job that says nothing for 15 minutes while
+        # using no CPU of its own is ended as wedged (job_supervisor; incident #8, 2026-11-01).
+        last, said = None, 0.0
         while True:
             states = {}
             for u in users:
@@ -159,9 +163,9 @@ def main(argv=None) -> int:
                 except (OSError, ValueError):
                     states[u] = None
             line = progress_line(states)
-            if line != last:
+            if line != last or time.time() - said >= HEARTBEAT_SEC:
                 print(line, flush=True)
-                last = line
+                last, said = line, time.time()
             if finished.wait(20):
                 return
 

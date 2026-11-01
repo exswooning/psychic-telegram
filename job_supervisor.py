@@ -47,6 +47,55 @@ def cpu_ticks(pid: int) -> int | None:
         return None
 
 
+def tree_cpu_ticks(pid: int, proc: str = "/proc") -> int | None:
+    """CPU ticks of a process AND every live descendant -- None if the process itself is gone.
+
+    A parent that only waits on its children burns nothing of its own while they work: live,
+    the regression set's regression.py sat on four ab_transfer runs through an hour of Google's
+    mail import, read as wedged and was killed (2026-11-01, incident #8). Its children were
+    alive and polling the import the whole time."""
+    own = cpu_ticks(pid) if proc == "/proc" else _ticks_at(proc, pid)
+    if own is None:
+        return None
+    children: dict[int, list[int]] = {}
+    try:
+        names = os.listdir(proc)
+    except OSError:
+        return own
+    for name in names:
+        if not name.isdigit():
+            continue
+        try:
+            with open(os.path.join(proc, name, "stat"), "rb") as fh:
+                raw = fh.read()
+            # The command name is in parentheses and may hold spaces: split after the last ')'.
+            ppid = int(raw[raw.rindex(b")") + 2:].split()[1])
+        except (OSError, ValueError, IndexError):
+            continue
+        children.setdefault(ppid, []).append(int(name))
+    total, todo, seen = own, list(children.get(pid, [])), {pid}
+    while todo:
+        child = todo.pop()
+        if child in seen:
+            continue
+        seen.add(child)
+        ticks = _ticks_at(proc, child)
+        if ticks is not None:
+            total += ticks
+        todo.extend(children.get(child, []))
+    return total
+
+
+def _ticks_at(proc: str, pid: int) -> int | None:
+    try:
+        with open(os.path.join(proc, str(pid), "stat"), "rb") as fh:
+            raw = fh.read()
+        fields = raw[raw.rindex(b")") + 2:].split()
+        return int(fields[11]) + int(fields[12])      # utime, stime (14th/15th of the whole line)
+    except (OSError, ValueError, IndexError):
+        return None
+
+
 def last_ledger_write(db_path: str) -> str | None:
     try:
         conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5)
@@ -133,7 +182,7 @@ class Supervisor:
     """Holds the previous CPU reading, so 'burned no CPU' has a baseline."""
 
     def __init__(self, db_path_for, stall_seconds: int = STALL_SECONDS,
-                 cpu_fn=cpu_ticks, kill_fn=None, now_fn=None,
+                 cpu_fn=tree_cpu_ticks, kill_fn=None, now_fn=None,
                  spawn_fn=None,
                  output_fn=None, signal_fn=None):
         self.db_path_for = db_path_for
