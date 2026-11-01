@@ -33,3 +33,16 @@ def test_an_earlier_test_account_is_not_restored_as_the_users_own():
     assert ab_transfer._is_test_account("it.department-ab1-10311353@t.example")
     assert not ab_transfer._is_test_account("finance@t.example")
     assert not ab_transfer._is_test_account(None)
+
+
+def test_a_web_ui_launch_names_the_account_through_its_ledger(monkeypatch):
+    monkeypatch.setenv("MIGRATION_DB", "/opt/bitport/data/accounts/3/migration.db")
+    assert R._account_from_ledger() == 3
+    monkeypatch.setenv("MIGRATION_DB", "/opt/bitport/migration.db")
+    assert R._account_from_ledger() is None
+
+
+def test_it_is_a_runnable_action():
+    import webui
+    assert webui.ACTIONS["regression"]["argv"][1] == "regression.py"
+    assert not webui.ACTIONS["regression"].get("destructive")

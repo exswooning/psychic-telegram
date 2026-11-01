@@ -618,6 +618,14 @@ ACTIONS: dict[str, dict] = {
                  "return with what the engine and its tests assume.",
         "argv": [PY, "contract_probe.py"],
     },
+    "regression": {
+        "label": "Regression set: four users, server-side + split",
+        "blurb": "Migrates four sandbox users who between them carry every problem kind seen "
+                 "live (Forms, bounce mail, twin comments, Sheets links, a plain control) into "
+                 "NEW target accounts, the way a full run does, checks each one to one and lists "
+                 "what got worse since the last run. Deletes nothing; uses four licences.",
+        "argv": [PY, "regression.py"],
+    },
     "ab_transfer": {
         "label": "A/B: server-side vs download/upload",
         "blurb": "Migrates the same corpus twice, once per transfer mode, "

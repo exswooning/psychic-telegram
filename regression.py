@@ -36,6 +36,13 @@ OUT = os.path.join(HERE, "logs", "regression")
 DEFAULT_USERS = ("esc.mrc", "audit", "finance", "livestock")
 
 
+def _account_from_ledger() -> int | None:
+    """A web UI launch points MIGRATION_DB at data/accounts/<id>/migration.db (webui._account_env)."""
+    import re
+    m = re.search(r"accounts/(\d+)/migration\.db$", os.getenv("MIGRATION_DB", ""))
+    return int(m.group(1)) if m else None
+
+
 def summarise(report: dict) -> dict:
     """One user's ab_transfer report -> verdict per service, failures, seconds, kinds counted."""
     runs = report.get("runs") or []
@@ -95,9 +102,12 @@ def run_one(account_id: int, user: str, folder: str) -> dict:
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[1])
-    ap.add_argument("--account-id", type=int, required=True)
+    ap.add_argument("--account-id", type=int, default=_account_from_ledger(),
+                    help="default: the account whose ledger MIGRATION_DB names (a web UI launch)")
     ap.add_argument("--user", action="append", help="default: " + ", ".join(DEFAULT_USERS))
     args = ap.parse_args(argv)
+    if args.account_id is None:
+        ap.error("which account? pass --account-id (a web UI launch names it through MIGRATION_DB)")
     from config import Settings
     domain = Settings(account_id=args.account_id).source_domain
     users = [u if "@" in u else f"{u}@{domain}" for u in (args.user or DEFAULT_USERS)]
