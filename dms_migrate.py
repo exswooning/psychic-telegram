@@ -938,8 +938,8 @@ def wait_then_tally(minutes: int, timeout: int, headful: bool, tally: bool = Tru
         state = got.get("status", "unknown")
         log(f"import status: {state} {got.get('metrics') or ''}")
         if state in ("complete", "Stopped"):
-            if not tally:      # the caller judges the result itself (ab_transfer's own 1:1 check)
-                return 0 if state == "complete" else 1
+            if not tally and state != "complete":
+                return 1
             if state == "complete":
                 from config import Settings
                 from auth import AuthManager
@@ -959,6 +959,8 @@ def wait_then_tally(minutes: int, timeout: int, headful: bool, tally: bool = Tru
                         return 2
                 finally:
                     db.close()
+            if not tally:      # the caller judges the result itself (ab_transfer's own 1:1 check), on a reconciled ledger
+                return 0
             log("the import has finished -- tallying both tenants")
             return subprocess.call([sys.executable, "tally.py"],
                                    cwd=os.path.dirname(os.path.abspath(__file__)))
@@ -1012,8 +1014,9 @@ def _main(argv: list[str] | None = None) -> int:
                     help="exit and DELETE a finished import first, so this map starts a new one "
                          "(only for new, empty target accounts -- otherwise a delta import continues)")
     ap.add_argument("--no-tally", action="store_true",
-                    help="with --until-done: stop when Google reports the import complete; no "
-                         "reconcile or whole-tenant tally")
+                    help="with --until-done: stop when Google reports the import complete, after the "
+                         "delivery reconcile (the ledger must know which messages the import "
+                         "moved) but without the whole-tenant tally")
     ap.add_argument("--status", action="store_true",
                     help="read the import's live counters and cache them, "
                          "then exit (does not touch the import)")

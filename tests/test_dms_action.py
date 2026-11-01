@@ -146,6 +146,9 @@ def test_a_finished_import_is_tallied(monkeypatch):
     monkeypatch.setattr(dms_migrate.time, "sleep", lambda s: None)
     calls = []
     monkeypatch.setattr(subprocess, "call", lambda argv, **kw: calls.append(argv) or 0)
+    import split_mail, mail_completion
+    monkeypatch.setattr(mail_completion, "full_mail_check", lambda st: True)
+    monkeypatch.setattr(split_mail, "reconcile_dms", lambda *a, **k: {"blocked": []})
     assert dms_migrate.wait_then_tally(60, 10, False) == 0
     assert calls and calls[0][1] == "tally.py"
 
@@ -242,7 +245,13 @@ def test_an_ab_arm_stops_at_googles_complete_without_a_whole_tenant_tally(monkey
     monkeypatch.setattr(dms_migrate, "status", lambda *a: {"status": next(reads)})
     monkeypatch.setattr(dms_migrate.time, "sleep", lambda s: None)
     monkeypatch.setattr(subprocess, "call", lambda *a, **k: pytest.fail("tallied the whole tenant"))
+    reconciled = []
+    import split_mail, mail_completion
+    monkeypatch.setattr(mail_completion, "full_mail_check", lambda st: True)
+    monkeypatch.setattr(split_mail, "reconcile_dms",
+                        lambda *a, **k: reconciled.append(1) or {"blocked": []})
     assert dms_migrate.wait_then_tally(60, 10, False, tally=False) == 0
+    assert reconciled == [1]      # the ledger must learn which messages the import moved
 
 
 @pytest.mark.parametrize("flag, fresh", [([], False), (["--fresh-import"], True)])

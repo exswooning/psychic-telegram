@@ -2500,8 +2500,11 @@ async def migrate_start(body: StartMigration, op: Operator = Depends(operator)):
     # Resolved once and written back, so the audit row and the DMS follow-on below both see
     # what this run actually does rather than "not said".
     body.mail_mode = body.mail_mode or _default_mail_mode(body)
-    if not body.transfer_mode and (best := ab_default()) and best["mode"] in ("server_side", "download_upload"):
-        body.transfer_mode = best["mode"]
+    # server_side is the default (operator, 2026-11-01): no bytes cross this host, so a slow or
+    # unreliable line can't bound a run. The benchmark's winner still sets the MAIL mode above;
+    # an operator who names a transfer mode keeps it.
+    if not body.transfer_mode:
+        body.transfer_mode = "server_side"
     if body.sample is not None and body.mail_mode != "engine":
         # Split leaves the rest of the mail to the DMS and dms takes all of it, so
         # either way the mail could not be compared one to one -- the reason to

@@ -56,6 +56,11 @@ def differences(source, target, lookup):
             if c.get("content", "")
             in (wanted, rewrite_text(comment.get("content", ""), lookup)[0])
         ]
+        if len(candidates) > 1:
+            # Two threads with the same words on different spots (live, finance@s.: one PDF,
+            # "[FINANCE, 2023-01-13]" twice): the anchor tells them apart, as delivery does.
+            candidates = [c for c in candidates
+                          if all(c.get(f) == comment.get(f) for f in ("anchor", "quotedFileContent"))]
         if len(candidates) != 1:
             diffs.append("comment thread missing or ambiguous")
             continue

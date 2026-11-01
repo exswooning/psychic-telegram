@@ -1031,7 +1031,7 @@ export const MigrationDetail: React.FC = () => {
                   value="" control={<Radio size="small" />}
                   data-testid="transfer-mode-default"
                   label={<Typography variant="body2">
-                    <strong>Default (recommended)</strong> — whatever this server is configured for.
+                    <strong>Default (recommended)</strong> — Drive copies it directly; no bytes pass through this server.
                   </Typography>} />
                 <FormControlLabel
                   value="download_upload" control={<Radio size="small" />}
