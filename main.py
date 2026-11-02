@@ -487,8 +487,26 @@ def migrate_user(auth: AuthManager, db: MigrationDB, settings: Settings,
             dm.consolidate_under = source_user
         stats = dm.run(delta=delta)
         if checkpoints and not SHUTDOWN.is_set() and not delta:
-            from migration_checks import drive_completion
+            from migration_checks import drive_completion, reopen_missing_mappings
             check = drive_completion(auth, db, settings, source_user, target_user)
+            # Mapped copies that are no longer on the target (an account emptied after the ledger
+            # was written): Bitport forgets the confirmed-gone mappings and walks the user's Drive
+            # once more, so they are copied again instead of being skipped as migrated.
+            if check.get("missingItems"):
+                reopened = reopen_missing_mappings(db, auth.target_drive(target_user), source_user,
+                                                   check["missingItems"])
+                if reopened:
+                    log.error("[%s] %d mapped Drive item(s) were gone from the target; mappings "
+                              "forgotten, copying them again", source_user, reopened)
+                    again = DriveMigrator(auth, db, settings, source_user, target_user, quota)
+                    if dm.consolidate_under:
+                        again.consolidate_under = dm.consolidate_under
+                    redo = again.run(delta=delta)
+                    stats["recopied_missing"] = reopened
+                    stats["files"] = stats.get("files", 0) + redo.get("files", 0)
+                    stats["failed"] = stats.get("failed", 0) + redo.get("failed", 0)
+                    check = drive_completion(auth, db, settings, source_user, target_user)
+            check.pop("missingItems", None)      # ids are for the repair above, not the run log
             stats["coverage_check"] = check
             stats["completion_incomplete"] = not check["complete"]
         return stats

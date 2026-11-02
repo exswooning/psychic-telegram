@@ -187,7 +187,8 @@ def drive_completion(auth, db, settings, source_user, target_user, retry=lambda 
                 result["notCopied"].append({"type": kind, "id": sid, "status": "UNMAPPED_SOURCE",
                     "error": "Live source item in the configured Drive scope has no migration mapping"})
             elif tid not in target:
-                result["missing"].append({"source": sid, "target": tid, "why": "Mapped Drive item absent from destination inventory"})
+                result["missing"].append({"source": sid, "target": tid, "type": kind,
+                                          "why": "Mapped Drive item absent from destination inventory"})
             elif item.get("md5Checksum") and item["md5Checksum"] != target[tid].get("md5Checksum"):
                 result["differences"].append({"source": sid, "target": tid, "diffs": ["MD5 differs at migration completion"]})
     except Exception as exc:
@@ -202,8 +203,34 @@ def drive_completion(auth, db, settings, source_user, target_user, retry=lambda 
         result["notes"].append("Not copied by a recorded decision (listed, not counted as matching): "
                                + ", ".join(f"{n} {k}" for k, n in sorted(by.items())))
     return {"complete": not gap, "accounted": len(accounted), "notCopied": len(result["notCopied"]), "missing": len(result["missing"]),
+            "missingItems": [{k: m[k] for k in ("source", "target", "type") if k in m} for m in result["missing"]],
             "differences": len(result["differences"]), "errors": result["errors"],
             "scope": "configured My Drive source IDs and destination presence/binary checksums; native fidelity and ACLs require separate checks"}
+
+
+def reopen_missing_mappings(db, target_drive, source_user, missing_items, retry=lambda f: f) -> int:
+    """Forget the mappings whose target copy is confirmed gone, so the next Drive walk copies them again.
+
+    A mapped item absent from the target listing is not proof by itself (it may be owned by someone
+    else on the target), so each one is asked for by id: only a 404, or an item in the trash, is
+    gone. Live (account 3, 2026-11-02): an earlier benchmark emptied audit@t, the ledger still mapped
+    all 106 of audit's files, and the run skipped every one as already migrated."""
+    from googleapiclient.errors import HttpError
+    reopened = 0
+    for item in missing_items:
+        tid = item.get("target")
+        try:
+            meta = retry(lambda: target_drive.files().get(fileId=tid, fields="id,trashed",
+                                                          supportsAllDrives=True).execute())()
+            gone = bool(meta.get("trashed"))
+        except HttpError as exc:
+            gone = getattr(getattr(exc, "resp", None), "status", None) == 404
+        except Exception:      # noqa: BLE001 - unsure is not gone: never forget on a guess
+            gone = False
+        if gone:
+            db.forget_mapping(source_user, item["source"], item.get("type") or "file")
+            reopened += 1
+    return reopened
 
 
 def verify_written_mail(migrator, source_id, target_id, expected_raw, labels, allow_label_fix=False):
