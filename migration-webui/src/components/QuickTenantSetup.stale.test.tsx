@@ -6,6 +6,8 @@ import { describe, it, expect, vi } from 'vitest'
 import QuickTenantSetup from './QuickTenantSetup'
 
 const none = vi.hoisted(() => () => Promise.resolve(null))
+const ready = vi.hoisted(() => ({ value: false }))
+const cfg = vi.hoisted(() => ({ value: null as unknown }))
 const setupResult = vi.hoisted(() => ({ value: {
   side: 'target', ok: true, phases: [] as { name: string; detail: string }[],
   domain: 'target2.sarafgloabalexim.com', dryRun: false,
@@ -20,8 +22,8 @@ vi.mock('@/api/controlPlane', () => ({
     users: [{ email: 'fiona@target2.sarafgloabalexim.com', state: 'created' }],
   }),
   startFullSetup: none, startProvision: none,
-  fetchReadiness: () => Promise.resolve({ side: 'target', purpose: 'migrate', domain: '', admin: '', ready: false, checks: [] }),
-  fetchTenantConfigStatus: none, uploadCredentials: none, fetchTenantInventory: none,
+  fetchReadiness: () => Promise.resolve({ side: 'target', purpose: 'migrate', domain: ready.value ? 't.example' : '', admin: '', ready: ready.value, checks: [] }),
+  fetchTenantConfigStatus: () => Promise.resolve(cfg.value), uploadCredentials: none, fetchTenantInventory: none,
   startTenantScan: none, fetchTenantScan: none, buildIdentityMap: none,
   fetchIdentityMapStatus: none,
 }))
@@ -49,5 +51,14 @@ describe("another tenant's setup", () => {
     expect(await screen.findByText(/Preview complete. No tenant connection/)).toBeInTheDocument()
     expect(screen.queryByText(/Setup done/)).toBeNull()
     expect(screen.queryByTestId('build-identity-map')).toBeNull()
+  })
+  it('offers mapping on a target already set up and Ready, with no setup run in this session', async () => {
+    setupResult.value = null as unknown as typeof setupResult.value
+    ready.value = true
+    cfg.value = { hasKey: true, domain: 't.example', adminEmail: 'a@t.example', clientId: 'c1' }
+    render(<MemoryRouter><QuickTenantSetup side="target" view="automated" showProvisionUsers
+                                           initialDomain="t.example" /></MemoryRouter>)
+    expect(await screen.findByTestId('map-users-only')).toBeInTheDocument()
+    expect(screen.getByText(/Ready — map and provision accounts/)).toBeInTheDocument()
   })
 })

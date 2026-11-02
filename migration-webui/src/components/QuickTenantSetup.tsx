@@ -1487,10 +1487,14 @@ const QuickTenantSetup: React.FC<{
       {previewOnly && <Alert severity="info" sx={{ mt: 2 }}>
         Preview complete. No tenant connection or users were created. Run setup and pass the readiness checks before provisioning accounts.
       </Alert>}
-      {setUpOk && alreadyHere && readyHere && showProvisionUsers && side === 'target' && (
+      {/* A target whose key is on file and that Google says is Ready can map and provision users
+          whether or not a setup ran in this browser session: requiring a fresh "Setup done" hid these
+          buttons on an already-set-up target, so a 45-user run could not be mapped from the UI
+          (t.sarafgloabalexim.com, 2026-11-02). */}
+      {alreadyHere && readyHere && !previewOnly && !status?.running && showProvisionUsers && side === 'target' && (
         <Box sx={{ mt: 2, pt: 2, borderTop: '1px solid', borderColor: 'divider' }}>
           <Typography variant="subtitle2" sx={{ fontWeight: 700, mb: 1 }}>
-            Setup done — provision accounts
+            {setUpOk ? 'Setup done — provision accounts' : 'Ready — map and provision accounts'}
           </Typography>
 
           {/* Step one, and the one that was missing entirely.
