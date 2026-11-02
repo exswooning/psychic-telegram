@@ -2,6 +2,10 @@
 
 - [ ] High priority: [Gmail search-first link rewriting → DMS](docs/tasks/claude-gmail-search-first-dms.md). Use server-side search to fetch only candidate email bodies by default; keep exhaustive scans/full 1:1 optional. This task is queued, not implemented. Respect active-job deployment gates.
 
+## Job monitor (unattended error feed)
+
+`monitor/watch.py` reads the box's incident feed (`logs/incidents/feed.log`) and spends model tokens only on news: repeats and kinds `known_issues` fixes on its own cost nothing; the rest goes to a cheap model (`MONITOR_TRIAGE_MODEL`, haiku), and only an "escalate" reaches the strong one (`MONITOR_FIX_MODEL`, opus), which works in its own worktree on `monitor/incident-<id>` and never deploys. One lane per running job (`account:job`). Its memory is `monitor/state.json`; its standing orders are `monitor/CHARTER.md`; its results land in `monitor/INBOX.md` for the operator. A SessionStart hook prints `watch.py --brief`, so a context reset keeps the duty. Caps: `MONITOR_MAX_USD_DAY` ($5), `MONITOR_MAX_ESCALATIONS_DAY` (6), `MONITOR_MAX_ATTEMPTS` (2 per fingerprint). Check it first with `python3 monitor/watch.py --dry-run`; run it with `nohup python3 monitor/watch.py &`.
+
 ## Latest operator handoff — 30 October 2026
 
 Read [docs/claude-handoff-2026-10-30.md](docs/claude-handoff-2026-10-30.md) before migration work. It supersedes older defaults below: full mail runs now prefer complete link scan + DMS, routine mail completion uses counts (not 1:1), and full verification remains optional. The operator explicitly resumed the sandbox run on 30 October 2026; see the current-state note in the handoff.
