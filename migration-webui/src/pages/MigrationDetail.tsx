@@ -392,9 +392,16 @@ export const MigrationDetail: React.FC = () => {
                       value={p.itemsSkipped ?? 0} />
                 {/* Its own figure, never folded into "skipped": a skip is a
                     decision, this is mail the target does not have yet. */}
+                {p.mailWithLinks !== undefined && (
+                  <Stat id="mailwithlinks" label="mail with Drive links (rewritten)"
+                        value={p.mailWithLinks} />
+                )}
                 {(p.itemsDeferred ?? 0) > 0 && (
                   <Stat id="itemsdeferred" label="mail awaiting DMS"
                         value={p.itemsDeferred ?? 0} tone="error" />
+                )}
+                {p.mailDelivered !== undefined && (
+                  <Stat id="maildelivered" label="mail delivered by DMS" value={p.mailDelivered} />
                 )}
                 <Stat id="itemsfailed" label="items failed" value={p.itemsFailed}
                       tone="error" />

@@ -850,6 +850,9 @@ export interface MigrationProgress {
   /** Mail left for Google's Data Migration Service (split mode). NOT a skip:
    *  it is owed, and the target does not have it until the DMS delivers it. */
   itemsDeferred?: number
+  /** Split mail: written by the engine because it carries a Drive link / delivered by the DMS since. */
+  mailWithLinks?: number
+  mailDelivered?: number
 }
 
 export interface MigrationRow {

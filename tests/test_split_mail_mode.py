@@ -180,3 +180,24 @@ class TestWhatThePageIsTold:
         src = open(main.__file__, encoding="utf-8").read()
         assert 'print(f"PASS {i}/{len(plan)} pid={os.getpid()}: ' in src
         assert api_server._PASS_LINE.match("PASS 2/3 pid=4242: calendar,contacts,tasks,chat")
+
+    def test_the_page_counts_the_link_mail_the_engine_wrote_and_what_the_dms_delivered(
+            self, db, settings, identity, monkeypatch):
+        import api_server
+        import config
+        from config import DELIVERED_BY_DMS
+        for i in range(5):
+            db.log_audit(SRC_USER, f"l{i}", "message", "SUCCESS")
+        for i in range(7):
+            db.log_audit(SRC_USER, f"d{i}", "message", DEFERRED_TO_DMS, "left for the DMS pass")
+        db.log_audit(SRC_USER, "x", "message", DELIVERED_BY_DMS)
+        monkeypatch.setattr(config, "Settings", lambda account_id=None: settings)
+        out = api_server._migration_progress(1)
+        assert out["mailWithLinks"] == 5 and out["mailDelivered"] == 1 and out["itemsDeferred"] == 7
+
+    def test_a_run_that_is_not_split_reports_no_link_mail_figure(self, db, settings, identity, monkeypatch):
+        import api_server
+        import config
+        db.log_audit(SRC_USER, "m1", "message", "SUCCESS")
+        monkeypatch.setattr(config, "Settings", lambda account_id=None: settings)
+        assert "mailWithLinks" not in api_server._migration_progress(1)

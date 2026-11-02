@@ -5797,7 +5797,7 @@ def _migration_progress(account_id: int | None) -> dict:
              # "investigate this".
              "blocked": 0, "items": 0, "itemsFailed": 0}
     try:
-        from config import DEFERRED_TO_DMS, Settings
+        from config import DEFERRED_TO_DMS, DELIVERED_BY_DMS, Settings
         path = Settings(account_id=account_id).db_path
     except Exception:      # noqa: BLE001
         return empty
@@ -5858,6 +5858,15 @@ def _migration_progress(account_id: int | None) -> dict:
                 "AND EXISTS (SELECT 1 FROM identity_map m "
                 "            WHERE m.source_email = a.source_user)", (DEFERRED_TO_DMS,)
             ).fetchone()["n"]
+            # Split mail, both halves: what the engine wrote because it carries a Drive link,
+            # and what the DMS has delivered since. Only meaningful beside itemsDeferred.
+            if out["itemsDeferred"] or conn.execute(
+                    "SELECT 1 FROM audit_log WHERE status=? LIMIT 1", (DELIVERED_BY_DMS,)).fetchone():
+                for key, status in (("mailWithLinks", "SUCCESS"), ("mailDelivered", DELIVERED_BY_DMS)):
+                    out[key] = conn.execute(
+                        "SELECT COUNT(*) n FROM audit_log a WHERE a.status = ? AND a.item_type='message' "
+                        "AND EXISTS (SELECT 1 FROM identity_map m WHERE m.source_email = a.source_user)",
+                        (status,)).fetchone()["n"]
             return out
     except Exception:      # noqa: BLE001 - a ledger mid-migration, or absent
         return empty

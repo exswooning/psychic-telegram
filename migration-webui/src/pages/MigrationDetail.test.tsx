@@ -632,6 +632,15 @@ describe('MigrationDetail: what a split run says about itself', () => {
     expect(screen.getByTestId('stat-itemsskipped')).not.toHaveTextContent('349,560')
   })
 
+  it('shows the link mail the engine wrote beside what the DMS owes and has delivered', async () => {
+    show(detail({ progress: { users: 4, done: 4, running: 0, failed: 0, pending: 0, items: 100,
+                              itemsFailed: 0, itemsSkipped: 0, itemsDeferred: 900,
+                              mailWithLinks: 120, mailDelivered: 30 } }))
+    expect(await screen.findByTestId('stat-mailwithlinks')).toHaveTextContent('120')
+    expect(screen.getByTestId('stat-itemsdeferred')).toHaveTextContent('900')
+    expect(screen.getByTestId('stat-maildelivered')).toHaveTextContent('30')
+  })
+
   it('says nothing about the DMS when nothing is waiting for it', async () => {
     show(detail())
     await screen.findByTestId('stat-users')
