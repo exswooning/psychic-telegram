@@ -3949,6 +3949,86 @@ async def identities_auto_map(body: BuildIdentityMap,
     return await _gated(op, "identities.auto_map", body, "identity_map", _launch)
 
 
+class ExperimentAction(WriteAction):
+    account_id: int | None = None
+
+
+_EXPERIMENT_NAME = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")
+
+
+def _experiment_dir(name: str) -> str:
+    if not _EXPERIMENT_NAME.match(name or ""):
+        raise HTTPException(400, "an experiment name is 1-40 lowercase letters, digits or dashes")
+    return os.path.join(HERE, "logs", "experiments", name)
+
+
+@app.post("/api/v2/experiments/{name}/start")
+async def experiment_start(name: str, body: ExperimentAction, op: Operator = Depends(operator)):
+    """Bookmark every log and the ledger now (run_digest.py start), so the digest built later reads
+    only what this experiment wrote. Read-only on everything but its own folder."""
+    _experiment_dir(name)
+    aid = _resolve_account(body, op)
+
+    def _launch() -> tuple[bool, str]:
+        out = subprocess.run([PY, "run_digest.py", "start", "--account", str(aid), "--name", name],
+                             cwd=HERE, capture_output=True, text=True, timeout=120)
+        return out.returncode == 0, (out.stdout or out.stderr).strip()[-300:]
+    return await _gated(op, "experiment.start", body, name, _launch)
+
+
+@app.post("/api/v2/experiments/{name}/digest")
+async def experiment_digest(name: str, body: ExperimentAction, op: Operator = Depends(operator)):
+    """Fold what the experiment appended into digest.md/json, detached: reading a long run's logs
+    takes longer than a request should hold, and it must not take the account's job slot."""
+    d = _experiment_dir(name)
+    aid = _resolve_account(body, op)
+    if not os.path.isfile(os.path.join(d, "bookmark.json")):
+        raise HTTPException(409, "bookmark this experiment first")
+
+    def _launch() -> tuple[bool, str]:
+        with open(os.path.join(d, "digest.log"), "wb") as fh:
+            proc = subprocess.Popen([PY, "run_digest.py", "digest", "--account", str(aid), "--name", name],
+                                    cwd=HERE, stdout=fh, stderr=subprocess.STDOUT,
+                                    stdin=subprocess.DEVNULL, start_new_session=True)
+        return True, f"building the digest, pid {proc.pid}"
+    return await _gated(op, "experiment.digest", body, name, _launch)
+
+
+@app.get("/api/v2/experiments")
+async def experiments(account_id: int | None = None, name: str | None = None,
+                      op: Operator = Depends(operator)):
+    """This account's experiments, and with `name` that one's digest page."""
+    require_login(op)
+    aid = account_id if account_id is not None else op.account_id
+    _require_account_access(aid, op)
+
+    def _read() -> dict:
+        root = os.path.join(HERE, "logs", "experiments")
+        rows = []
+        for n in sorted(os.listdir(root)) if os.path.isdir(root) else []:
+            try:
+                with open(os.path.join(root, n, "bookmark.json"), encoding="utf-8") as fh:
+                    mark = json.load(fh)
+            except (OSError, ValueError):
+                continue
+            if mark.get("account") != aid:
+                continue
+            dj = os.path.join(root, n, "digest.json")
+            building = any(f"run_digest.py digest --account {aid} --name {n}" in ln for ln in
+                           subprocess.run(["ps", "-eo", "args="], capture_output=True, text=True).stdout.splitlines())
+            rows.append({"name": n, "startedAt": mark.get("startedAt"), "building": building,
+                         "digestAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(os.path.getmtime(dj)))
+                         if os.path.isfile(dj) else None})
+        out: dict = {"experiments": rows}
+        if name:
+            md = os.path.join(_experiment_dir(name), "digest.md")
+            if os.path.isfile(md) and any(r["name"] == name for r in rows):
+                with open(md, encoding="utf-8") as fh:
+                    out["digest"] = fh.read()
+        return out
+    return await _off_loop(_read)
+
+
 @app.get("/api/v2/identities/status")
 async def identities_status(account_id: int | None = None, op: Operator = Depends(operator)):
     """How many users are mapped, and how the last build went."""

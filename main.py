@@ -1399,8 +1399,17 @@ def cmd_init_db(args, settings: Settings, db: MigrationDB, auth: AuthManager):
         tgt_users = set(list_domain_users(auth, "target", settings.target_domain))
         pairs = []
         missing = []
+        kept = []
+        existing = ({r["source_email"].lower(): r["target_email"] for r in db.all_identities()
+                     if r["entity_type"] == "user"} if db is not None else {})
         for s in src_users:
             candidate = s.split("@")[0] + "@" + settings.target_domain
+            # An operator's own mapping stays (info@s -> nest@t, 2026-11-02): auto-map only
+            # fills gaps and replaces a pointer at a benchmark's throwaway test account.
+            prior = existing.get(s.lower())
+            if prior and prior.lower() != candidate and not _is_test_target(prior):
+                kept.append((s, prior))
+                continue
             if candidate in tgt_users:
                 pairs.append((s, candidate))
             elif getattr(args, "include_missing", False):
@@ -1421,6 +1430,8 @@ def cmd_init_db(args, settings: Settings, db: MigrationDB, auth: AuthManager):
         from db import bulk_seed_identities
         bulk_seed_identities(db, pairs)
         print(f"Auto-mapped {len(pairs)} of {len(src_users)} source users.")
+        for src, tgt in kept:
+            print(f"  kept {src} -> {tgt} (an existing mapping, not a test account)")
         if missing:
             print(f"  {len(missing)} of them have no target account yet. "
                   f"They are mapped so `provision-users` can create them; "
@@ -1429,6 +1440,12 @@ def cmd_init_db(args, settings: Settings, db: MigrationDB, auth: AuthManager):
                   "`provision-users --tenant target --dry-run` first to see "
                   "the exact list.")
     print(f"Schema initialised at {settings.db_path}")
+
+
+def _is_test_target(email: str) -> bool:
+    """A benchmark arm's throwaway account (ab_transfer: <user>-ab<n>[t]-<MMDDHHMM>@<target>)."""
+    import re
+    return bool(re.search(r"-ab\d+t?-\d{8}@", email or ""))
 
 
 METRICS_FLUSH_SEC = 15.0

@@ -24,6 +24,7 @@ import SourceGuardPanel from '@/components/SourceGuardPanel'
 import UserProfilesPanel from '@/components/UserProfilesPanel'
 import ReasonCodeDialog from '@/components/ReasonCodeDialog'
 import ScheduledRuns from '@/components/ScheduledRuns'
+import ExperimentPanel from '@/components/ExperimentPanel'
 import RunReports from '@/components/RunReports'
 import QuickVerification from '@/components/QuickVerification'
 import OneToOneSummary from '@/components/OneToOneSummary'
@@ -381,6 +382,7 @@ export const MigrationDetail: React.FC = () => {
           <CopySafetyCard accountId={Number(accountId)} users={(d?.users ?? []).map((u) => u.sourceUser)} />
 
           <ScheduledRuns accountId={Number(accountId)} />
+          <ExperimentPanel accountId={Number(accountId)} />
           {p && (
             <Paper variant="outlined" sx={{ p: 2, mb: 3 }}>
               <Stack direction="row" spacing={4} sx={{ flexWrap: 'wrap', gap: 2 }}>

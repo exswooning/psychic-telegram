@@ -440,6 +440,15 @@ export interface MailLinkScanReport {
 /** What the server answers when a start was set for an hour instead of now. */
 export interface ScheduledStart { id: number; runAt: string }
 export interface ScheduledRun { id: number; accountId: number; runAt: string; status: string; detail: string; requestedBy: string }
+/** run_digest.py from the UI: bookmark an experiment's logs, fold what it wrote into a digest. */
+export interface ExperimentRow { name: string; startedAt: string | null; building: boolean; digestAt: string | null }
+export const fetchExperiments = (accountId: number, name?: string) =>
+  cpFetch<{ experiments: ExperimentRow[]; digest?: string }>(
+    `/api/v2/experiments?account_id=${accountId}${name ? `&name=${encodeURIComponent(name)}` : ''}`)
+export const experimentAction = (name: string, action: 'start' | 'digest', accountId: number, reason: string) =>
+  cpFetch<ActionResult>(`/api/v2/experiments/${encodeURIComponent(name)}/${action}`,
+    { method: 'POST', body: JSON.stringify({ reason, account_id: accountId }) })
+
 export const fetchScheduledRuns = (accountId?: number) =>
   cpFetch<{ runs: ScheduledRun[] }>(`/api/v2/migrate/schedule${accountId ? `?account_id=${accountId}` : ''}`)
 export const cancelScheduledRun = (id: number, accountId?: number) =>
