@@ -1,4 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react'
+import { Accordion, AccordionDetails, AccordionSummary } from '@mui/material'
+import ExpandMoreIcon from '@mui/icons-material/ExpandMore'
 import { useNavigate } from 'react-router-dom'
 import {
   Alert, Box, Button, Chip, LinearProgress, Paper, Stack, TextField, Tooltip,
@@ -330,19 +332,32 @@ const MissionControl: React.FC = () => {
           panels below render one facet of each. */}
       <AiDiagnostics />
 
-      {/* Counting is read-only, so it is aimable from here rather than
-          only from inside whichever tenant panel you had opened. */}
-      <InventoryPicker />
+      {/* Run tools: closed and unmounted until asked for -- six panels that each load their own
+          data made this page 6,300px tall and slow to settle. */}
+      <Accordion variant="outlined" disableGutters TransitionProps={{ unmountOnExit: true }}
+                 sx={{ borderRadius: 2, '&:before': { display: 'none' } }}>
+        <AccordionSummary expandIcon={<ExpandMoreIcon />} aria-controls="run-tools-body" id="run-tools-head">
+          <Typography variant="h6">Run tools</Typography>
+          <Typography variant="body2" color="text.secondary" sx={{ ml: 2, alignSelf: 'center' }}>
+            inventory, coverage, provisioning, licences, options, job control, benchmarks
+          </Typography>
+        </AccordionSummary>
+        <AccordionDetails id="run-tools-body" sx={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+          {/* Counting is read-only, so it is aimable from here rather than
+              only from inside whichever tenant panel you had opened. */}
+          <InventoryPicker />
 
-      <CoverageAudit />
+          <CoverageAudit />
 
-      <ProvisionUsers />
+          <ProvisionUsers />
 
-      <LicenceReadiness />
-      <RunOptions />
-      <JobController users={cpUsers} nodes={nodes} onChanged={refreshLists} />
+          <LicenceReadiness />
+          <RunOptions />
+          <JobController users={cpUsers} nodes={nodes} onChanged={refreshLists} />
 
-      <BenchmarkRunner />
+          <BenchmarkRunner />
+        </AccordionDetails>
+      </Accordion>
 
       {/* Roster with search — Users.tsx, folded in */}
       <Paper variant="outlined" sx={{ borderRadius: 2, p: 2 }}>
