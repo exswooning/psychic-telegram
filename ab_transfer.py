@@ -753,5 +753,13 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
+def _exit_on_term(signum, frame):
+    """SIGTERM unwinds like Ctrl-C, so main's finally puts each user's mapping back. Killed
+    plainly, four arms left their users mapped to their throwaway test accounts (2026-11-02)."""
+    raise SystemExit(128 + signum)
+
+
 if __name__ == "__main__":
+    import signal
+    signal.signal(signal.SIGTERM, _exit_on_term)
     raise SystemExit(main())

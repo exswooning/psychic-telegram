@@ -460,3 +460,22 @@ def test_run_keeps_the_output_when_asked(tmp_path):
     rc, _ = AB.run([sys.executable, "-c", "print('import status: complete')"], dict(__import__('os').environ),
                    log_path=str(log))
     assert rc == 0 and "import status: complete" in log.read_text()
+
+
+def test_sigterm_unwinds_so_the_mapping_is_put_back(tmp_path):
+    """A plain SIGTERM skipped main's finally and left users mapped to test accounts."""
+    import os
+    import signal
+    import subprocess
+    import sys
+    import time
+    marker = tmp_path / "unwound"
+    code = ("import ab_transfer, signal, time, sys\n"
+            "signal.signal(signal.SIGTERM, ab_transfer._exit_on_term)\n"
+            "try:\n    print('ready', flush=True); time.sleep(30)\n"
+            f"finally:\n    open({str(marker)!r}, 'w').write('x')\n")
+    p = subprocess.Popen([sys.executable, "-c", code], cwd=os.path.dirname(AB.__file__),
+                         stdout=subprocess.PIPE, text=True)
+    assert p.stdout.readline().strip() == "ready"
+    p.send_signal(signal.SIGTERM)
+    assert p.wait(20) == 128 + signal.SIGTERM and marker.exists()
