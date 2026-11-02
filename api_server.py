@@ -1809,6 +1809,8 @@ def _run_admitted(argv: list[str], account_id: int | None, job_name: str,
     does rather than something the client is asked to do.
     """
     admitted, msg = job_admission.try_admit(account_id, job_name)
+    if not admitted and msg.startswith(job_admission.ALREADY_RUNNING):
+        return False, "Not started: " + msg[len(job_admission.ALREADY_RUNNING):]
     if not admitted:
         # Queued, not refused. A client whose migration came back "capacity
         # is full -- try again shortly" was being asked to poll a page that

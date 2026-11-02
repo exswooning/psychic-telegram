@@ -42,12 +42,13 @@ def signature(line: str) -> str:
     s = re.sub(r"\[[^\]]{0,40}\]\s*", "", s, count=1) if s.startswith("[") else s
     s = re.sub(r"[\w.+-]+@[\w-]+(\.[\w-]+)+", "<email>", s)
     s = re.sub(r"https?://\S+", "<url>", s)
-    s = re.sub(r"(['\"]).{1,120}?\1", "<q>", s)
+    # Quoted text is kept: it is the error's own words ("Entity Already Exists" vs "User creation is
+    # not complete" both read <q> once, 2026-11-02). Ids, emails and numbers inside it are blanked.
     s = re.sub(r"\b[A-Za-z0-9_-]{20,}\b", "<id>", s)
     s = re.sub(r"\b[0-9a-f]{12,}\b", "<id>", s)
     s = re.sub(r"\b\d+(\.\d+)?\b", "<n>", s)
     s = re.sub(r"\s+", " ", s)
-    return s[:220]
+    return s[:260]
 
 
 def _files(account: int) -> list[str]:

@@ -76,3 +76,11 @@ def test_it_writes_nothing_to_the_ledger(box):
     R.digest(3, "r")
     assert db.conn.execute("SELECT COUNT(*) FROM audit_log").fetchone()[0] == before
     assert json.load(open(tmp / "logs" / "experiments" / "r" / "digest.json"))["account"] == 3
+
+
+def test_the_errors_own_words_survive_and_still_group():
+    a = R.signature('WARNING provision: could not create ward4@t.example: <HttpError 409 when requesting https://x returned "Entity Already Exists">')
+    b = R.signature('WARNING provision: could not create ward9@t.example: <HttpError 409 when requesting https://x returned "Entity Already Exists">')
+    c = R.signature('INFO user profile: a@s.example: <HttpError 412 when requesting https://x returned "User creation is not complete.">')
+    assert a == b and "Entity Already Exists" in a and "User creation is not complete" in c
+
