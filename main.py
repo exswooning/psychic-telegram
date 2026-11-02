@@ -1717,18 +1717,22 @@ def _warn_if_ledger_is_stale(db, auth, pairs) -> None:
         return
     if not report.stale:
         return
+    # Bitport handles this itself (operator, 2 Nov 2026): the mappings name items in accounts that
+    # were deleted and recreated, so they are forgotten and their users reopened, and the run
+    # copies them again into the new accounts. Before this, a warning was logged and the run went on
+    # to skip them as already migrated -- a refusal raised in a worker process stops nothing.
+    # The audit history is kept: it records that this was done and when.
     log.error(
-        "%d of %d user(s) have %s mapping(s) that no longer exist on the "
-        "target -- their accounts were recreated after the ledger was "
-        "written. Those items will be SKIPPED as already-migrated and this "
-        "run will report success without copying them. Run "
-        "`main.py --account-id N verify-ledger --reopen` first.",
+        "%d of %d user(s) have %s mapping(s) naming items in accounts that were recreated after "
+        "the ledger was written; reopening them so they are copied again into the new accounts.",
         len(report.stale), report.checked, f"{report.stale_mappings:,}")
-    for verdict in report.stale[:3]:
-        log.error("  %s: %s", verdict.source_user, verdict.reason)
-    raise SystemExit(
-        "refusing to start against a ledger that does not match the target; "
-        "see verify-ledger")
+    for verdict in report.stale:
+        log.error("  reopened %s (%s mapping(s)): %s", verdict.source_user, verdict.mappings, verdict.reason)
+    try:
+        forgotten = ledger_verify.reopen(db, report, dry_run=False)
+    except Exception as exc:      # noqa: BLE001 - only a failure to repair stops the run
+        raise SystemExit(f"could not reopen the stale mappings ({exc}); nothing was copied") from exc
+    log.error("forgot %s stale mapping(s); the run copies them again", f"{forgotten:,}")
 
 
 def _auto_repair(db, auth, settings) -> None:

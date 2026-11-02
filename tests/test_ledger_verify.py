@@ -186,16 +186,25 @@ class TestAMigrationRefusesToRunAgainstAStaleLedger:
                 return FakeDirectory(accounts)
         return FakeAuth()
 
-    def test_it_stops_the_run_when_mappings_predate_the_account(self):
+    def test_a_stale_ledger_is_repaired_by_reopening_its_users(self):
+        """Bitport handles it: the stale mappings are forgotten and the user reopened, so the run
+        copies them again. It does not log and skip them as already migrated."""
+        import main
+        db = FakeDB({"u@src": bounds(35_490, "2026-08-20T08:53:39Z")})
+        main._warn_if_ledger_is_stale(
+            db, self._auth({"u@tgt": "2026-08-21T17:43:46.000Z"}), self._pairs())
+        assert db.forgotten == ["u@src"] and db.reopened == ["u@src"]
+
+    def test_a_repair_that_fails_stops_the_run_rather_than_skipping(self):
         import pytest
 
         import main
         db = FakeDB({"u@src": bounds(35_490, "2026-08-20T08:53:39Z")})
+        db.forget_mappings = lambda user: (_ for _ in ()).throw(RuntimeError("disk full"))
         with pytest.raises(SystemExit) as e:
             main._warn_if_ledger_is_stale(
-                db, self._auth({"u@tgt": "2026-08-21T17:43:46.000Z"}),
-                self._pairs())
-        assert "verify-ledger" in str(e.value)
+                db, self._auth({"u@tgt": "2026-08-21T17:43:46.000Z"}), self._pairs())
+        assert "nothing was copied" in str(e.value)
 
     def test_it_does_not_stop_a_healthy_run(self):
         import main
@@ -216,26 +225,14 @@ class TestAMigrationRefusesToRunAgainstAStaleLedger:
         db = FakeDB({"u@src": bounds(10, "2026-08-21T19:00:00Z")})
         main._warn_if_ledger_is_stale(db, Broken(), self._pairs())
 
-    def test_it_does_not_reopen_anything_by_itself(self):
-        """Forgetting 462,048 mappings means re-copying them -- hours of
-        someone's quota, and not a decision to take on their behalf."""
-        import pytest
-
+    def test_it_reopens_the_stale_users_itself_and_the_run_continues(self):
+        """Operator decision (2 Nov 2026): Bitport repairs a stale ledger on its own. The mappings
+        are forgotten and the user reopened, and the run copies them into the recreated accounts."""
         import main
         db = FakeDB({"u@src": bounds(500, "2026-08-20T08:00:00Z")})
-        with pytest.raises(SystemExit):
-            main._warn_if_ledger_is_stale(
-                db, self._auth({"u@tgt": "2026-08-21T17:43:46.000Z"}),
-                self._pairs())
-        assert db.forgotten == []
-
-
-class TestReopeningAUserNotJustTheirMappings:
-    """Forgetting the mappings was half the job. identity_map.status stayed
-    DONE and main._already_done() drops DONE users before dispatch, so the
-    next run said "dispatching 177 users" instead of 200 and silently
-    skipped 24 -- the largest holding 35,490 items. Two records claimed the
-    work was finished; correcting one of them fixed nothing visible."""
+        main._warn_if_ledger_is_stale(
+            db, self._auth({"u@tgt": "2026-08-21T17:43:46.000Z"}), self._pairs())
+        assert db.forgotten == ["u@src"] and db.reopened == ["u@src"]
 
     def _stale(self):
         db = FakeDB({"u@src": bounds(35_490, "2026-08-20T08:53:39Z")})
