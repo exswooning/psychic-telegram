@@ -68,7 +68,7 @@ function socket(nodes: GNode[], ref: string, side: 'ins' | 'outs') {
   }
 }
 
-const MIN_K = 0.1, MAX_K = 2.5
+const MIN_K = 0.1, MAX_K = 2.5, READABLE_K = 0.4
 const clamp = (k: number) => Math.min(MAX_K, Math.max(MIN_K, k))
 
 const NodeGraph = forwardRef<NodeGraphHandle, {
@@ -149,6 +149,14 @@ const NodeGraph = forwardRef<NodeGraphHandle, {
   const fit = useCallback(
     () => fitRect(0, 0, size.w, size.h, 20), [fitRect, size.w, size.h])
 
+  // The opening view: everything if it is readable, else the first section -- a whole
+  // graph scaled to a speck says nothing (Pipeline at 1920px opened at k~0.2, 20x9px boxes).
+  const fitStart = useCallback(() => {
+    const b = box(), f = frames[0]
+    if (b && f && Math.min((b.w - 40) / size.w, (b.h - 40) / size.h) < READABLE_K) fitRect(f.x, f.y, f.w, f.h, 50)
+    else fit()
+  }, [frames, fit, fitRect, size.w, size.h])
+
   const frameTo = useCallback((id: string) => {
     const f = frames.find((m) => m.id === id)
     if (!f) return
@@ -180,14 +188,14 @@ const NodeGraph = forwardRef<NodeGraphHandle, {
   }), [nodes, fit, frameTo, fitRect])
 
   // Start fitted, and stay fitted on resize until the user has taken over.
-  useLayoutEffect(() => { fit() }, [fit])
+  useLayoutEffect(() => { fitStart() }, [fitStart])
   useEffect(() => {
     const el = wrap.current
     if (!el || typeof ResizeObserver === 'undefined') return
-    const ro = new ResizeObserver(() => { if (!touched.current) fit() })
+    const ro = new ResizeObserver(() => { if (!touched.current) fitStart() })
     ro.observe(el)
     return () => ro.disconnect()
-  }, [fit])
+  }, [fitStart])
 
   const zoomAt = useCallback((px: number, py: number, factor: number) => {
     touched.current = true
