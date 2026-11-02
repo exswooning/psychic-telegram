@@ -103,6 +103,14 @@ class _VerifyQueue:
                 fn(*args)
             except Exception:      # noqa: BLE001 - verify_user already swallows; this is the last net
                 log.exception("verification worker")
+            except BaseException as exc:      # noqa: BLE001
+                # A cooperative Stop reaches a check as VerificationCancelled (a BaseException on
+                # purpose, so per-item collectors cannot swallow it). Left uncaught here it killed
+                # the worker and printed "Exception in thread verify-0" with a full traceback every
+                # time anyone pressed Stop (account 3, 2026-11-02): a normal stop reads as a crash.
+                if type(exc).__name__ != "VerificationCancelled":
+                    raise
+                log.info("verification stopped by operator")
             finally:
                 with self._lock:
                     self._pending -= 1
