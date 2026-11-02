@@ -496,7 +496,9 @@ def migrate_user(auth: AuthManager, db: MigrationDB, settings: Settings,
                 reopened = reopen_missing_mappings(db, auth.target_drive(target_user), source_user,
                                                    check["missingItems"])
                 if reopened:
-                    log.error("[%s] %d mapped Drive item(s) were gone from the target; mappings "
+                    # A repair Bitport made, not a failure: WARNING, so the operator's stop-on-error
+                    # rule and the error watcher do not stop a run for Bitport doing its job.
+                    log.warning("[%s] %d mapped Drive item(s) were gone from the target; mappings "
                               "forgotten, copying them again", source_user, reopened)
                     again = DriveMigrator(auth, db, settings, source_user, target_user, quota)
                     if dm.consolidate_under:
@@ -1748,17 +1750,17 @@ def _warn_if_ledger_is_stale(db, auth, pairs) -> None:
     # copies them again into the new accounts. Before this, a warning was logged and the run went on
     # to skip them as already migrated -- a refusal raised in a worker process stops nothing.
     # The audit history is kept: it records that this was done and when.
-    log.error(
+    log.warning(
         "%d of %d user(s) have %s mapping(s) naming items in accounts that were recreated after "
         "the ledger was written; reopening them so they are copied again into the new accounts.",
         len(report.stale), report.checked, f"{report.stale_mappings:,}")
     for verdict in report.stale:
-        log.error("  reopened %s (%s mapping(s)): %s", verdict.source_user, verdict.mappings, verdict.reason)
+        log.warning("  reopened %s (%s mapping(s)): %s", verdict.source_user, verdict.mappings, verdict.reason)
     try:
         forgotten = ledger_verify.reopen(db, report, dry_run=False)
     except Exception as exc:      # noqa: BLE001 - only a failure to repair stops the run
         raise SystemExit(f"could not reopen the stale mappings ({exc}); nothing was copied") from exc
-    log.error("forgot %s stale mapping(s); the run copies them again", f"{forgotten:,}")
+    log.warning("forgot %s stale mapping(s); the run copies them again", f"{forgotten:,}")
 
 
 def _auto_repair(db, auth, settings) -> None:

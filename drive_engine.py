@@ -2754,12 +2754,14 @@ class DriveMigrator:
             # This user's own copy first; else whoever's copy exists. A shortcut usually
             # points at a colleague's file -- live, dharan: ward7 and info@ each had one
             # left SKIPPED_UNRESOLVED_TARGET although planning@'s copy was on the target.
-            mapped = (
-                self.db.get_target_id(self.source_user, target_id, "file")
-                or self.db.get_target_id(self.source_user, target_id, "folder")
-                or self.db.target_for_source_id(target_id, ("file", "folder"))
-            )
-            if not mapped:
+            # Every copy is a candidate, in that order: a colleague's copy this user cannot see
+            # answers 404 (account 3, ward1@, 2026-11-02, which FAILED the user on one shortcut),
+            # and another copy may well be reachable.
+            candidates = list(dict.fromkeys(c for c in (
+                self.db.get_target_id(self.source_user, target_id, "file"),
+                self.db.get_target_id(self.source_user, target_id, "folder"),
+                *self.db.targets_for_source_id(target_id, ("file", "folder"))) if c))
+            if not candidates:
                 self.db.log_audit(self.source_user, item["id"], "shortcut",
                                   "SKIPPED_UNRESOLVED_TARGET",
                                   "shortcut target has not migrated")
@@ -2771,25 +2773,43 @@ class DriveMigrator:
                 self._bump("files")
                 continue
 
-            body = {"name": item["name"], "mimeType": SHORTCUT_MIME,
-                   "parents": [tgt_parent], "shortcutDetails": {"targetId": mapped}}
             # Its own times too: live, seeduser200's shortcut was the one Drive item
             # whose created/modified time was the copy's. Dropped if Drive refuses them.
             times = {k: item[k] for k in ("createdTime", "modifiedTime") if item.get(k)}
-            try:
+            result, last_exc, unreachable = None, None, 0
+            for mapped in candidates:
+                body = {"name": item["name"], "mimeType": SHORTCUT_MIME,
+                        "parents": [tgt_parent], "shortcutDetails": {"targetId": mapped}}
                 try:
-                    result = self._retry(lambda: self.tgt.files().create(
-                        body={**body, **times}, fields="id", supportsAllDrives=True,
-                    ).execute())
-                except (PermanentAPIError, RuntimeError):
-                    if not times:
-                        raise
-                    result = self._retry(lambda: self.tgt.files().create(
-                        body=body, fields="id", supportsAllDrives=True,
-                    ).execute())
-            except (PermanentAPIError, RuntimeError) as exc:
-                self.db.log_audit(self.source_user, item["id"], "shortcut", "FAILED", str(exc))
-                self._bump("failed")
+                    try:
+                        result = self._retry(lambda: self.tgt.files().create(
+                            body={**body, **times}, fields="id", supportsAllDrives=True,
+                        ).execute())
+                    except (PermanentAPIError, RuntimeError):
+                        if not times:
+                            raise
+                        result = self._retry(lambda: self.tgt.files().create(
+                            body=body, fields="id", supportsAllDrives=True,
+                        ).execute())
+                    break
+                except (PermanentAPIError, RuntimeError) as exc:
+                    last_exc = exc
+                    if "404" in str(exc) or "not found" in str(exc).lower():
+                        unreachable += 1
+                        continue        # this copy is not visible to this user; try the next
+                    break               # any other refusal is a real failure
+            if result is None:
+                if last_exc is not None and unreachable == len(candidates):
+                    # Every copy is out of this user's reach for now (not shared with them yet).
+                    # A reasoned skip, re-walked by repair once another copy lands, not a failure.
+                    self.db.log_audit(self.source_user, item["id"], "shortcut",
+                                      "SKIPPED_UNRESOLVED_TARGET",
+                                      f"no copy of the shortcut's target is reachable by this user "
+                                      f"({len(candidates)} tried): {str(last_exc)[:160]}")
+                    self._bump("skipped")
+                else:
+                    self.db.log_audit(self.source_user, item["id"], "shortcut", "FAILED", str(last_exc))
+                    self._bump("failed")
                 continue
 
             self.db.record_mapping(self.source_user, item["id"], result["id"], "shortcut",
