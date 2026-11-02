@@ -449,3 +449,35 @@ def test_a_bounce_report_with_no_link_goes_to_the_dms_instead_of_blocking():
 def test_without_the_raw_bytes_an_unexpanded_part_still_blocks():
     with pytest.raises(ClassificationIncomplete):
         classify_payload(BOUNCE_FULL, lambda x: None)
+
+
+def test_reconciliation_reads_only_the_imports_own_users(db, auth, settings, identity):
+    """A one-user arm's import was reconciled against every user in the ledger (46,108 bodies
+    behind a 758-message import, 15 h). Named users: only theirs are read."""
+    db.log_audit(SRC_USER, "m-other", "message", DEFERRED_TO_DMS)
+    out = reconcile_dms(auth, db, settings, progress=lambda m: None, users=["someone@else.example"])
+    assert out["checked"] == 0
+    assert auth.source_gmail(SRC_USER).call_count("messages.get") == 0
+
+
+def test_identity_sources_reads_the_arms_file(tmp_path):
+    import dms_migrate
+    f = tmp_path / "ids.csv"
+    f.write_text("source_email,target_email\naudit@s.example,audit@t.example\n")
+    assert dms_migrate.identity_sources(str(f)) == ["audit@s.example"]
+    assert dms_migrate.identity_sources(None) is None
+
+
+def test_an_arms_reconcile_is_scoped_to_its_identity_file(monkeypatch, tmp_path):
+    import dms_migrate
+    import mail_completion
+    import split_mail
+    reads = iter(["complete"])
+    monkeypatch.setattr(dms_migrate, "status", lambda *a: {"status": next(reads)})
+    monkeypatch.setattr(dms_migrate.time, "sleep", lambda s: None)
+    monkeypatch.setattr(mail_completion, "full_mail_check", lambda st: True)
+    seen = {}
+    monkeypatch.setattr(split_mail, "reconcile_dms",
+                        lambda *a, **k: seen.update(k) or {"blocked": []})
+    assert dms_migrate.wait_then_tally(60, 10, False, tally=False, users=["audit@s.example"]) == 0
+    assert seen["users"] == ["audit@s.example"]

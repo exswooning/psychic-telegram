@@ -118,7 +118,7 @@ def classify_payload(message, lookup, fetch_text_attachment=None, unknown=None, 
     }
 
 
-def reconcile_dms(auth, db, settings, progress=print):
+def reconcile_dms(auth, db, settings, progress=print, users=None):
     """Inspect exact deferred IDs; Google completion counters alone prove nothing.
 
     Also recheck engine link copies after DMS to detect overwritten content,
@@ -131,7 +131,9 @@ def reconcile_dms(auth, db, settings, progress=print):
     from verify_sample import _stop_check
 
     verified_items = []
-    users = [dict(r) for r in db.all_identities() if r["entity_type"] == "user"]
+    wanted = {u.lower() for u in users} if users else None
+    users = [dict(r) for r in db.all_identities() if r["entity_type"] == "user"
+             and (wanted is None or r["source_email"].lower() in wanted)]
     out = {
         "checked": 0,
         "verified": 0,

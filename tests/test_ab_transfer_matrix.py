@@ -128,10 +128,12 @@ def test_the_dms_tail_maps_the_one_user_and_runs_until_done(monkeypatch, tmp_pat
     monkeypatch.setattr(webui, "_dms_env", lambda account_id: {"DWD_PASSWORD": "x"})
     monkeypatch.chdir(tmp_path)
     seen = {}
-    monkeypatch.setattr(AB, "run", lambda cmd, env: (seen.update(cmd=cmd) or (0, 12.5)))
+    monkeypatch.setattr(AB, "run", lambda cmd, env, log_path=None: (seen.update(cmd=cmd, log=log_path) or (0, 12.5)))
     st = types.SimpleNamespace(account_id=3, target_admin="admin@t.example", source_domain="s.example")
     out, secs = AB.dms_tail(st, ["a@s.example"], ["a-ab1@t.example"], {})
     assert (out, secs) == ("done", 12.5) and "--until-done" in seen["cmd"] and "--apply" in seen["cmd"]
+    # its output is kept, never sent to /dev/null: that hid a finished import behind a 15 h reconcile
+    assert seen["log"] and seen["log"].endswith(".log")
     rows = list(csv.reader(open(seen["cmd"][seen["cmd"].index("--identities") + 1])))
     assert rows[1] == ["a@s.example", "a-ab1@t.example"]
 
@@ -450,3 +452,11 @@ def test_a_user_never_mapped_is_left_unmapped_and_its_test_accounts_are_named_af
                     "--sequential", "--mode", "server_side", "--mail-mode", "engine"]) == 0
     assert seen[0].startswith("esc.mrc-ab1-") and seen[0].endswith("@t.x")
     assert any("DELETE FROM identity_map" in a[0] and a[1] == ("esc.mrc@s.x",) for a in executed)
+
+
+def test_run_keeps_the_output_when_asked(tmp_path):
+    import sys
+    log = tmp_path / "out.log"
+    rc, _ = AB.run([sys.executable, "-c", "print('import status: complete')"], dict(__import__('os').environ),
+                   log_path=str(log))
+    assert rc == 0 and "import status: complete" in log.read_text()

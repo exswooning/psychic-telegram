@@ -924,11 +924,29 @@ def approve_as_source(timeout: int, headful: bool) -> list[str]:
 DONE_POLL_SEC = int(os.getenv("DMS_POLL_SEC", "900"))
 
 
-def wait_then_tally(minutes: int, timeout: int, headful: bool, tally: bool = True) -> int:
+def identity_sources(identities: str | None) -> list[str] | None:
+    """The source users an identity file names, or None for "every user in the ledger" (no file).
+    A one-user arm's import is reconciled for that user only: reconciling the whole ledger read
+    46,108 message bodies (info@s. alone 39,428) behind a 758-message import -- 15 h and counting,
+    with three other arms queued on the console lock (live, 2026-11-02)."""
+    if not identities:
+        return None
+    import csv
+    try:
+        with open(identities, newline="", encoding="utf-8") as fh:
+            return [r[0].strip() for r in csv.reader(fh)
+                    if len(r) >= 2 and "@" in r[0] and not r[0].startswith("source_")]
+    except OSError:
+        return None       # unreadable now: the whole ledger, as before this existed
+
+
+def wait_then_tally(minutes: int, timeout: int, headful: bool, tally: bool = True,
+                    users: list[str] | None = None) -> int:
     """Read the import's status until Google says it has stopped running, then
     tally both tenants (tally.py, every user) so the result is counted without
     anyone asking. Each read also refreshes the cached metrics the UI shows.
-    Gives up, without tallying, at the deadline."""
+    Gives up, without tallying, at the deadline. `users` limits the reconcile to the
+    import's own users (None: every user in the ledger)."""
     import subprocess
 
     deadline = time.time() + minutes * 60
@@ -950,10 +968,11 @@ def wait_then_tally(minutes: int, timeout: int, headful: bool, tally: bool = Tru
                 try:
                     from mail_completion import compare_mail_counts, full_mail_check
                     if not full_mail_check(st):
-                        checked = compare_mail_counts(AuthManager(st), db, st, progress=log)
+                        checked = compare_mail_counts(AuthManager(st), db, st, progress=log,
+                                                      source_users=users or ())
                         log("DMS count completion (not 1:1): " + json.dumps(checked))
                         return 2 if checked["blocked"] else 0
-                    checked = reconcile_dms(AuthManager(st), db, st, progress=log)
+                    checked = reconcile_dms(AuthManager(st), db, st, progress=log, users=users)
                     log("DMS delivery reconciliation: " + json.dumps(checked, default=str))
                     if checked["blocked"]:
                         return 2
@@ -1083,7 +1102,8 @@ def _main(argv: list[str] | None = None) -> int:
         if not out["ok"]:
             print(out["manual"])
     if args.until_done and out.get("started"):
-        return wait_then_tally(args.until_done, args.timeout, args.headful, tally=not args.no_tally)
+        return wait_then_tally(args.until_done, args.timeout, args.headful, tally=not args.no_tally,
+                               users=identity_sources(args.identities))
     if args.apply and args.until_done:
         # Asked to see it through and nothing started: not a success. Exiting 0 here made the A/B
         # record an arm's mail import "done" when Start import had stayed disabled.

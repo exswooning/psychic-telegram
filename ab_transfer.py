@@ -215,10 +215,14 @@ def fidelity(src: dict, tgt: dict) -> dict:
     }
 
 
-def run(cmd: list[str], env: dict) -> tuple[int, float]:
+def run(cmd: list[str], env: dict, log_path: str | None = None) -> tuple[int, float]:
     started = time.time()
-    p = subprocess.run(cmd, cwd=HERE, env=env,
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if log_path:
+        with open(log_path, "a", encoding="utf-8") as out:
+            p = subprocess.run(cmd, cwd=HERE, env=env, stdout=out, stderr=subprocess.STDOUT)
+    else:
+        p = subprocess.run(cmd, cwd=HERE, env=env,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     return p.returncode, time.time() - started
 
 
@@ -478,8 +482,10 @@ def dms_tail(settings, users_src, users_tgt, env) -> tuple[str, float]:
             "--identities", path, "--source-domain", settings.source_domain,
             "--target-admin", settings.target_admin]
     # Each status read is a fresh sign-in; every 2 minutes keeps the arm's measured time within
-    # two minutes of Google's own finish without tripping sign-in challenges.
-    rc, secs = run(argv, {**env, **denv, "DMS_POLL_SEC": "120"})
+    # two minutes of Google's own finish without tripping sign-in challenges. Its output goes to a
+    # log beside the identity file: sent to /dev/null, an arm sat 15 h on "Google's mail import"
+    # with nothing anywhere saying the import had finished and the reconcile was what ran.
+    rc, secs = run(argv, {**env, **denv, "DMS_POLL_SEC": "120"}, log_path=path[:-4] + ".log")
     return ("done" if rc == 0 else f"failed (exit {rc})"), secs
 
 
