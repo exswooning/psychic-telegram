@@ -23,6 +23,7 @@ import type { MailLinkScan, MailMode, TransferMode } from '@/api/controlPlane'
 import SourceGuardPanel from '@/components/SourceGuardPanel'
 import UserProfilesPanel from '@/components/UserProfilesPanel'
 import ReasonCodeDialog from '@/components/ReasonCodeDialog'
+import ScheduledRuns from '@/components/ScheduledRuns'
 import RunReports from '@/components/RunReports'
 import QuickVerification from '@/components/QuickVerification'
 import OneToOneSummary from '@/components/OneToOneSummary'
@@ -105,6 +106,7 @@ export const MigrationDetail: React.FC = () => {
   const [tuneFileWorkers, setTuneFileWorkers] = useState('')
   const [tuneCacheCap, setTuneCacheCap] = useState('')
   const [tuneProcesses, setTuneProcesses] = useState('')
+  const [startAt, setStartAt] = useState('')
   const [fullBusy, setFullBusy] = useState(false)
   // Quick migrate: a small slice of each user's data, small enough to check one to
   // one. See the dialog.
@@ -378,6 +380,7 @@ export const MigrationDetail: React.FC = () => {
 
           <CopySafetyCard accountId={Number(accountId)} users={(d?.users ?? []).map((u) => u.sourceUser)} />
 
+          <ScheduledRuns accountId={Number(accountId)} />
           {p && (
             <Paper variant="outlined" sx={{ p: 2, mb: 3 }}>
               <Stack direction="row" spacing={4} sx={{ flexWrap: 'wrap', gap: 2 }}>
@@ -1092,6 +1095,12 @@ export const MigrationDetail: React.FC = () => {
                 </Box>
               )}
             </Box>
+            <Box sx={{ mt: 2 }}>
+              <TextField size="small" type="datetime-local" label="Start at (optional)" value={startAt}
+                         onChange={(e) => setStartAt(e.target.value)} InputLabelProps={{ shrink: true }}
+                         helperText="Blank starts now. A time starts the run on its own, in your time zone; it is skipped if this server is down then."
+                         inputProps={{ 'data-testid': 'run-full-start-at' }} />
+            </Box>
             <Box sx={{ mt: 2 }} data-testid="run-full-tuning">
               <Typography variant="subtitle2" sx={{ fontWeight: 600, mb: 0.5 }}>
                 For measured runs (leave blank normally)
@@ -1145,8 +1154,10 @@ export const MigrationDetail: React.FC = () => {
                                              processes: num(tuneProcesses) },
                                            who === 'some' && redoLinks,
                                            transferMode === 'move' ? confirmMove : undefined,
-                                           mailBy === 'split' ? linkScan : undefined)
+                                           mailBy === 'split' ? linkScan : undefined,
+                                           startAt ? new Date(startAt).toISOString() : undefined)
             if (!r.ok) throw new Error(r.detail || 'could not start')
+            setStartAt('')
             setAskFull(false)
             setStarted(r.detail || 'migration started')
             refresh()

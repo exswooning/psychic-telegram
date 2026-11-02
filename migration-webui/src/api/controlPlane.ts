@@ -437,12 +437,20 @@ export interface MailLinkScanReport {
   unreachableLinks?: number
 }
 
+/** What the server answers when a start was set for an hour instead of now. */
+export interface ScheduledStart { id: number; runAt: string }
+export interface ScheduledRun { id: number; accountId: number; runAt: string; status: string; detail: string; requestedBy: string }
+export const fetchScheduledRuns = (accountId?: number) =>
+  cpFetch<{ runs: ScheduledRun[] }>(`/api/v2/migrate/schedule${accountId ? `?account_id=${accountId}` : ''}`)
+export const cancelScheduledRun = (id: number, accountId?: number) =>
+  cpFetch<{ cancelled: number }>(`/api/v2/migrate/schedule/${id}${accountId ? `?account_id=${accountId}` : ''}`, { method: 'DELETE' })
+
 export const startMigration = (
   reason: string, services: string[], users: string[], dryRun = false,
   accountId?: number, mailMode?: MailMode, sample?: number, dmsAfter?: boolean,
   transferMode?: TransferMode, tuning?: MigrationTuning, redoLinks = false,
-  confirmMove?: string, mailLinkScan?: MailLinkScan) =>
-  cpFetch<ActionResult>('/api/v2/migrate/start', {
+  confirmMove?: string, mailLinkScan?: MailLinkScan, runAt?: string) =>
+  cpFetch<ActionResult & Partial<ScheduledStart>>(runAt ? '/api/v2/migrate/schedule' : '/api/v2/migrate/start', {
     method: 'POST',
     // accountId is the migration on screen. Without it the server falls back
     // to the caller's own account -- the same trap the delta button hit.
@@ -451,6 +459,7 @@ export const startMigration = (
     // user and leaves the users unfinished (see sample_budget.py).
     body: JSON.stringify({ reason, services, users, dry_run: dryRun,
                            account_id: accountId ?? null,
+                           ...(runAt ? { run_at: runAt } : {}),
                            ...(mailMode ? { mail_mode: mailMode } : {}),
                            ...(mailLinkScan ? { mail_link_scan: mailLinkScan } : {}),
                            ...(sample ? { sample } : {}),
@@ -466,6 +475,9 @@ export const startMigration = (
                            ...(tuning?.fullFidelity === false ? { full_fidelity: false } : {}),
                            ...(tuning?.processes !== undefined ? { processes: tuning.processes } : {}) }),
   })
+    .then((r) => (runAt
+      ? { ok: true, actionId: r.id ?? 0, detail: `scheduled for ${new Date(r.runAt ?? runAt).toLocaleString()}` }
+      : r))
 
 export interface OwedGrants {
   migrations: { accountId: number; accountName: string; targetDomain: string; shares: number;

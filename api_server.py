@@ -83,6 +83,7 @@ import accounts_auth
 import account_context
 import job_admission
 import job_queue
+import scheduled_runs
 import job_supervisor
 import ai_diagnostics
 import control_plane_db as cpdb
@@ -886,6 +887,7 @@ async def lifespan(_: FastAPI):
     mirrors = asyncio.create_task(_mirror_loop())
     ends = asyncio.create_task(_lifecycle_loop())
     owed = asyncio.create_task(_owed_grants_loop())
+    scheduled = asyncio.create_task(_scheduled_runs_loop())
     housekeep = asyncio.create_task(_housekeeping_loop())
     guard = asyncio.create_task(_source_guard_loop())
     guard_fast = asyncio.create_task(_source_guard_fast_loop())
@@ -903,6 +905,7 @@ async def lifespan(_: FastAPI):
         mirrors.cancel()
         ends.cancel()
         owed.cancel()
+        scheduled.cancel()
 
 
 app = FastAPI(title="Migration Command Center", version="1.0", lifespan=lifespan)
@@ -3342,6 +3345,81 @@ async def quick_latest_markdown(account_id: int | None = None, op: Operator = De
         raise HTTPException(404, "no quick migration has been verified yet")
     return FileResponse(path, media_type="text/markdown", filename=f"quick-verification-{aid}.md",
                         content_disposition_type="attachment")
+
+
+class ScheduleMigration(StartMigration):
+    # ISO time with an offset or Z ("2026-11-03T02:00:00+05:45"); never a bare local time.
+    run_at: str
+
+
+@app.post("/api/v2/migrate/schedule")
+async def schedule_add(body: ScheduleMigration, op: Operator = Depends(operator)):
+    """Start a migration at a chosen hour. Stores the body the Start dialog would have sent;
+    the loop below sends it through migrate_start when the time comes, so every gate, audit
+    row and queue rule applies then, not now."""
+    require_admin(op)
+    account_id = _resolve_account(body, op)
+    try:
+        when = scheduled_runs.to_utc_iso(body.run_at)
+    except ValueError as exc:
+        raise HTTPException(400, f"run_at: {exc}") from exc
+    if when <= scheduled_runs.now_iso(60):
+        raise HTTPException(400, "run_at must be at least a minute from now")
+    payload = body.model_dump(exclude={"run_at"})
+    payload["account_id"] = account_id
+    run_id = await _off_loop(scheduled_runs.add, account_id, when, payload, op.name)
+    return {"id": run_id, "runAt": when}
+
+
+@app.get("/api/v2/migrate/schedule")
+async def schedule_list(account_id: int | None = None, op: Operator = Depends(operator)):
+    require_login(op)
+    aid = account_id if account_id is not None else op.account_id
+    _require_account_access(aid, op)
+    return {"runs": await _off_loop(scheduled_runs.listing, aid)}
+
+
+@app.delete("/api/v2/migrate/schedule/{run_id}")
+async def schedule_cancel(run_id: int, account_id: int | None = None, op: Operator = Depends(operator)):
+    require_admin(op)
+    aid = account_id if account_id is not None else op.account_id
+    _require_account_access(aid, op)
+    if not await _off_loop(scheduled_runs.cancel, run_id, aid):
+        raise HTTPException(404, "no pending scheduled run with that id")
+    return {"cancelled": run_id}
+
+
+SCHEDULE_POLL_SEC = 30
+
+
+async def _start_due_runs() -> None:
+    due, missed = await _off_loop(scheduled_runs.claim_due)
+    if missed:
+        log.warning("scheduled runs: %d missed their hour", missed)
+    for run in due:
+        # The operator who scheduled it, as far as the audit trail goes; the account is the one
+        # it was scheduled for, so migrate_start's own account check passes.
+        op = Operator(name=f"scheduled by {run['requestedBy']}", role="admin",
+                      account_id=run["accountId"], login_id=run["accountId"], is_superadmin=True)
+        try:
+            body = StartMigration(**run["payload"])
+            res = await migrate_start(body, op)
+            await _off_loop(scheduled_runs.finish, run["id"], True, str(res)[:300])
+        except HTTPException as exc:
+            await _off_loop(scheduled_runs.finish, run["id"], False, f"{exc.status_code}: {exc.detail}")
+        except Exception as exc:      # noqa: BLE001 - one bad run must not stop the next
+            await _off_loop(scheduled_runs.finish, run["id"], False, repr(exc))
+
+
+async def _scheduled_runs_loop() -> None:
+    while True:
+        try:
+            await asyncio.sleep(SCHEDULE_POLL_SEC)
+            await _start_due_runs()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:      # noqa: BLE001 - the loop must outlive a bad pass
+            log.warning("scheduled-run sweep failed: %r", exc)
 
 
 @app.post("/api/v2/migrate/delta")
