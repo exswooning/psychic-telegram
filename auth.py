@@ -100,6 +100,9 @@ def _http(timeout: int = 300) -> httplib2.Http:
     which httplib2 (0.19 on) raised as RedirectMissingLocation -- so any upload needing a
     second chunk failed: in download_upload, every file over the client's 100 MB chunk
     (found live, 2026-10-10). googleapiclient's own build_http() drops 308 the same way."""
+    # A process may set a shorter bound for every request it makes (the verifier does: a request that
+    # hangs must free its worker long before 300 s); the engines never set it.
+    timeout = int(os.getenv("GOOGLE_HTTP_TIMEOUT_SEC", "") or timeout)
     http = httplib2.Http(timeout=timeout)
     http.redirect_codes = http.redirect_codes - {308}
     return http

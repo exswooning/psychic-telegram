@@ -78,6 +78,16 @@ class PermanentAPIError(Exception):
     """Raised for errors retrying will never fix. Callers should give up."""
 
 
+class RetryBudgetExceeded(RuntimeError):
+    """Retries (or the elapsed budget) spent on a transient Google failure. A RuntimeError, so every
+    existing `except RuntimeError` still catches it; the fields say which status it was, how many
+    attempts it took and how long, so a caller can tell "Google was down" from "this is wrong"."""
+
+    def __init__(self, message: str, status: int | None = None, attempts: int = 0, elapsed: float = 0.0):
+        super().__init__(message)
+        self.status, self.attempts, self.elapsed = status, attempts, elapsed
+
+
 class TransportExhausted(RuntimeError):
     """
     The connection failed repeatedly and we stopped trying.
@@ -395,6 +405,7 @@ def retry_on_google_error(
     label: str | None = None,
     on_quota_rejection: Callable[[str], None] | None = None,
     quota_reasons: frozenset | None = None,
+    max_elapsed: float | None = None,
 ) -> Callable[[Callable[..., T]], Callable[..., T]]:
     """
     Decorator: retry transient Google API failures with full-jitter exponential
@@ -433,6 +444,14 @@ def retry_on_google_error(
     whole PROJECT must not learn from userRateLimitExceeded, one account's own
     budget (see drive_engine.PROJECT_QUOTA_REASONS).
 
+    max_elapsed
+    -----------
+    A wall-clock budget for one call, all attempts and waits together. None (every engine) keeps
+    the ladders above exactly as they were. The verifier sets one: its ladder honours a Retry-After
+    up to RETRY_AFTER_CAP (30 min) per attempt, so one Docs 503 could hold the single-threaded
+    Drive loop for the better part of an hour. A wait that would end after the budget is not
+    started: RetryBudgetExceeded is raised at once, so the caller can queue the item and go on.
+
     Without it, an AdaptiveRateLimiter only learns a project is overshot when a
     call's own retry ladder finally gives up (drive_engine.py penalises it then,
     around the whole call) -- as late as ~4 minutes after the FIRST rejection,
@@ -450,6 +469,7 @@ def retry_on_google_error(
         @functools.wraps(fn)
         def wrapper(*args, **kwargs) -> T:
             attempt = 0
+            call_started = time.monotonic()
             while True:
                 # Timed here because every Google call in the engine passes
                 # through this decorator, so instrumenting it needs no change
@@ -523,9 +543,11 @@ def retry_on_google_error(
                                 quota_reasons is None or reason in quota_reasons):
                             on_quota_rejection(reason or "unknown")
                     if attempt > budget:
-                        raise RuntimeError(
+                        raise RetryBudgetExceeded(
                             f"exhausted {budget} retries on HTTP {status} "
-                            f"({reason or 'unknown reason'}): {exc}"
+                            f"({reason or 'unknown reason'}): {exc}",
+                            status=status, attempts=attempt,
+                            elapsed=time.monotonic() - call_started,
                         ) from exc
 
                     retry_after = _retry_after_seconds(exc)
@@ -541,6 +563,13 @@ def retry_on_google_error(
                         delay = random.uniform(
                             0, min(max_delay, base_delay * (2 ** (attempt - 1)))
                         )
+                    if max_elapsed is not None and (
+                            time.monotonic() - call_started + delay > max_elapsed):
+                        raise RetryBudgetExceeded(
+                            f"HTTP {status} ({reason or 'unknown reason'}): the next wait ({delay:.0f}s) would "
+                            f"pass the {max_elapsed:.0f}s retry budget after {attempt} attempt(s): {exc}",
+                            status=status, attempts=attempt,
+                            elapsed=time.monotonic() - call_started) from exc
                     log.debug(
                         "retrying after HTTP %s (%s): attempt %d/%d in %.2fs",
                         status, reason, attempt, budget, delay,
@@ -587,6 +616,11 @@ def retry_on_google_error(
                     delay = random.uniform(
                         0, min(max_delay, base_delay * (2 ** (attempt - 1)))
                     )
+                    if max_elapsed is not None and time.monotonic() - call_started + delay > max_elapsed:
+                        raise RetryBudgetExceeded(
+                            f"{type(exc).__name__} after {attempt} attempt(s), over the "
+                            f"{max_elapsed:.0f}s retry budget: {exc}",
+                            attempts=attempt, elapsed=time.monotonic() - call_started) from exc
                     log.debug("retrying after %s: attempt %d/%d in %.2fs",
                               type(exc).__name__, attempt, max_retries, delay)
                     time.sleep(delay)

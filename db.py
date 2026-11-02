@@ -247,6 +247,25 @@ CREATE TABLE IF NOT EXISTS run_fidelity (
 -- verify_sample.py: what the one-to-one verifier last found for a user, one row
 -- per (user, service), newest wins. `payload` holds the counts and the first few
 -- of each kind of finding; the full report is the verifier's own file.
+-- Objects the verifier could not compare (verify_resilience): kept apart from user_verification
+-- so an item that is merely unread is never confused with one that was read and differs. A row
+-- is deleted when a later pass compares the object; one still here means "not verified".
+CREATE TABLE IF NOT EXISTS verification_unverified (
+  source_user TEXT NOT NULL,
+  service TEXT NOT NULL,
+  source_id TEXT NOT NULL,
+  target_id TEXT NOT NULL DEFAULT '',
+  mime TEXT,
+  state TEXT NOT NULL,
+  http_status INTEGER,
+  endpoint TEXT,
+  error TEXT,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  first_seen TEXT NOT NULL,
+  last_attempt TEXT NOT NULL,
+  next_retry_at TEXT,
+  PRIMARY KEY (source_user, service, source_id)
+);
 CREATE TABLE IF NOT EXISTS user_verification (
     source_user TEXT NOT NULL,
     service     TEXT NOT NULL,

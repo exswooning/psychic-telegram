@@ -146,6 +146,15 @@ ISSUES = [
      "Every content read is now paced per user as well (verify_sample._native_pace, "
      "native_repair.read_sheet's pace); nothing on either tenant is wrong, and the repair "
      "policy's next check reads it again.", True),
+    ("drive.unverified_transient", "drive", lambda t: "UNVERIFIED_TRANSIENT_ERROR" in t or "retry budget" in t
+                                                     or "circuit open" in t,
+     "A document could not be read in time and is still unverified",
+     "Google answered 5xx/429 (info@s., 2026-11-02: Docs 503 held item 326 of 1,403 for 27 minutes) or "
+     "kept it waiting past the per-document retry budget, or the endpoint's breaker was cooling down. "
+     "The document is neither identical nor different: it was not compared.",
+     "Each one is queued (verification_unverified), retried after a cooldown in the same run and on "
+     "every later run, and only a comparison that really happened clears it. The service stays "
+     "INCOMPLETE until then; nothing is written to either tenant.", True),
     ("drive.source_changed", "drive", lambda t: "Source changed during migration" in t,
      "The source changed while the user was copied",
      "Someone at the source edited the file during the run (the tripwire saw it).",

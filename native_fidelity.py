@@ -112,36 +112,36 @@ def _hash_images(value, fetch=None):
     return value
 
 
+def _side(side: str, endpoint: str, read):
+    """Run one read and, if it fails, say which tenant and endpoint it was: a 404 on the source is
+    MISSING_SOURCE and one on the target MISSING_TARGET, a 503 is Google's (verify_resilience.classify)."""
+    try:
+        return read()
+    except Exception as exc:
+        exc.bitport_side, exc.bitport_endpoint = side, endpoint
+        raise
+
+
 def compare_native(auth, source_user, target_user, sid, tid, mime, lookup, fetch=None, pace=lambda: None):
     if mime.endswith(".document"):
-        source = (
+        endpoint = "docs.googleapis.com/v1/documents.get"
+        source = _side("source", endpoint, lambda: (
             pace() or auth.api("source", "docs", source_user)
-            .documents()
-            .get(documentId=sid, includeTabsContent=True)
-            .execute()
-        )
-        target = (
+            .documents().get(documentId=sid, includeTabsContent=True).execute()))
+        target = _side("target", endpoint, lambda: (
             pace() or auth.api("target", "docs", target_user)
-            .documents()
-            .get(documentId=tid, includeTabsContent=True)
-            .execute()
-        )
+            .documents().get(documentId=tid, includeTabsContent=True).execute()))
         scope = (
             "all readable Docs tabs, text-run styles, document styles and structures"
         )
     elif mime.endswith(".presentation"):
-        source = (
+        endpoint = "slides.googleapis.com/v1/presentations.get"
+        source = _side("source", endpoint, lambda: (
             pace() or auth.api("source", "slides", source_user)
-            .presentations()
-            .get(presentationId=sid)
-            .execute()
-        )
-        target = (
+            .presentations().get(presentationId=sid).execute()))
+        target = _side("target", endpoint, lambda: (
             pace() or auth.api("target", "slides", target_user)
-            .presentations()
-            .get(presentationId=tid)
-            .execute()
-        )
+            .presentations().get(presentationId=tid).execute()))
         scope = "readable Slides pages, masters, layouts, notes and element properties"
     else:
         raise RuntimeError("Native feature reader not implemented for " + mime)

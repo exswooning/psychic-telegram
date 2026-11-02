@@ -508,12 +508,31 @@ class Verifier:
         self._on_api_attempt = on_api_attempt
         self._on_progress = on_progress
         self._operation = "initialising verifier"
+        import verify_resilience as vr
+        self._vr = vr
+        self._unverified = vr.UnverifiedStore(db)
+        self._retry_ctx: dict[str, dict] = {}       # transient-unverified files awaiting the retry pass
+        self._known_unverified: set[str] = set()
+        self._stats = {"identical": 0, "different": 0, "unverified": 0, "verified": 0, "phase": "idle",
+                       "currentDocument": None, "currentMime": None, "currentSince": None,
+                       "lastSuccessfulDocument": None, "lastSuccessAt": None, "lastApiStatus": None,
+                       "retryAttempt": 0, "retryDelay": 0.0}
 
     def _report_progress(self, operation: str, completed: int | None = None,
                          total: int | None = None, item: str | None = None) -> None:
         self._operation = operation
         if self._on_progress:
             self._on_progress(operation=operation, completed=completed, total=total, item=item)
+
+    def _publish_stats(self, **changes) -> None:
+        """What the heartbeat says beyond counts: which document, what phase (a live request, a retry
+        wait, a breaker cooldown, or between documents), the last success and the breaker states."""
+        self._stats.update(changes)
+        if self._on_progress:
+            st = dict(self._stats)
+            st["pendingRetry"] = len(self._retry_ctx)
+            st["breakers"] = {k: b.state for k, b in self._vr.BREAKERS.items()}
+            self._on_progress(stats=st)
 
     # -- plumbing ---------------------------------------------------------
     def _x(self, fn, operation: str | None = None, request_count: int = 1):
@@ -528,14 +547,17 @@ class Verifier:
             if self._on_api_attempt:
                 self._on_api_attempt("start", operation=operation, request_count=request_count,
                                      attempt=attempt)
+            self._stats.update(phase="request", retryAttempt=attempt)
             try:
                 result = fn()
             except Exception as exc:
+                self._stats.update(phase="retry-wait", lastApiStatus=self._vr.classify(exc).status or type(exc).__name__)
                 if self._on_api_attempt:
                     self._on_api_attempt("finish", operation=operation, request_count=request_count,
                                          attempt=attempt, error=f"{type(exc).__name__}: {str(exc)[:180]}")
                 raise
             else:
+                self._stats.update(phase="compare", lastApiStatus=200)
                 if self._on_api_attempt:
                     self._on_api_attempt("finish", operation=operation, request_count=request_count,
                                          attempt=attempt)
@@ -592,7 +614,7 @@ class Verifier:
     @staticmethod
     def _blank() -> dict:
         return {"checked": 0, "identical": 0, "differences": [], "missing": [], "extras": [],
-                "duplicates": [], "notCopied": [], "errors": [], "notes": []}
+                "duplicates": [], "notCopied": [], "errors": [], "notes": [], "unverified": []}
 
     # -- Drive ------------------------------------------------------------
     def _remember_drive_permissions(self, svc, fid, metadata):
@@ -681,10 +703,77 @@ class Verifier:
     def _export(self, svc, fid, mime) -> bytes:
         return self._x(lambda: svc.files().export_media(fileId=fid, mimeType=mime).execute())
 
+    def _note_unverified(self, res, sid, tid, sm, tm, ev, failure, err_text, entry, other_diffs) -> None:
+        """A file whose content was not compared. Recorded in the result (so the service cannot be
+        IDENTICAL), in the ledger (so a restart keeps it and the next pass retries it) and, when the
+        cause was transient, queued for this run's retry pass."""
+        mime = sm.get("mimeType") or ""
+        attempts = self._unverified.record(self.src_user, "drive", sid, tid, mime, failure)
+        row = {"source": sid, "target": tid, "name": sm.get("name"), "mime": mime, "state": failure.state,
+               "status": failure.status, "endpoint": failure.endpoint, "attempts": attempts}
+        res["unverified"].append(row)
+        self._stats["unverified"] += 1
+        if failure.transient:
+            self._retry_ctx[sid] = {"row": row, "tid": tid, "sm": sm, "tm": tm, "ev": ev, "err": err_text,
+                                    "entry": entry, "other": other_diffs}
+        self._publish_stats(phase="compare")
+
+    def _retry_unverified(self, res, src, tgt) -> None:
+        """Compare again the files that failed on a transient fault, after a cooldown, up to
+        VERIFY_RETRY_PASSES times. A file still failing stays UNVERIFIED (and the service INCOMPLETE);
+        one that now compares is counted as what it is -- identical or different -- and its error
+        and ledger row are removed. Nothing here writes to either tenant."""
+        passes = int(os.getenv("VERIFY_RETRY_PASSES", "2"))
+        wait = float(os.getenv("VERIFY_RETRY_WAIT_SEC", "90"))
+        for n in range(1, passes + 1):
+            if not self._retry_ctx:
+                return
+            self._publish_stats(phase="circuit-cooldown", retryAttempt=n, retryDelay=wait)
+            end = time.monotonic() + wait
+            while time.monotonic() < end:
+                _stop_check()
+                time.sleep(min(2.0, max(end - time.monotonic(), 0)))
+            todo = list(self._retry_ctx.items())
+            for i, (sid, ctx) in enumerate(todo):
+                self._report_progress("Drive retry unverified", i, len(todo), f"file {sid}")
+                ev2: dict = {}
+                self._publish_stats(currentDocument=sid, currentMime=ctx["sm"].get("mimeType"),
+                                    currentSince=time.time(), phase="compare", retryAttempt=n)
+                content = self._content(src, tgt, sid, ctx["tid"], ctx["sm"], ctx["tm"], ev2)
+                failure = ev2.get("unverified")
+                if failure is not None:
+                    ctx["row"]["attempts"] = self._unverified.record(self.src_user, "drive", sid, ctx["tid"],
+                                                                     ctx["row"]["mime"], failure)
+                    ctx["row"].update(state=failure.state, status=failure.status)
+                    if not failure.transient:
+                        del self._retry_ctx[sid]
+                    continue
+                del self._retry_ctx[sid]
+                self._unverified.resolve(self.src_user, "drive", sid)
+                res["unverified"].remove(ctx["row"])
+                if ctx["err"] in res["errors"]:
+                    res["errors"].remove(ctx["err"])
+                self._stats["unverified"] -= 1
+                self._stats["verified"] += 1
+                ctx["ev"].update(ev2, retried=True)
+                ctx["ev"].pop("error", None)
+                if content or ctx["entry"] is not None:
+                    if ctx["entry"] is None:
+                        ctx["entry"] = {"item": ctx["sm"].get("name"), "path": ctx["ev"].get("path"),
+                                        "source": sid, "target": ctx["tid"], "diffs": []}
+                        res["differences"].append(ctx["entry"])
+                    ctx["entry"]["diffs"] = list(ctx["entry"]["diffs"]) + list(content)
+                    self._stats["different"] += 1
+                else:
+                    res["identical"] += 1
+                    self._stats["identical"] += 1
+                self._publish_stats(lastSuccessfulDocument=sid, lastSuccessAt=time.time())
+
     def drive(self) -> dict:
         res = self._blank()
         src, tgt = self.auth.source_drive(self.src_user), self.auth.target_drive(self.tgt_user)
         sc, tc = {}, {}
+        self._known_unverified = {r["source_id"] for r in self._unverified.pending(self.src_user, "drive")}
         # Every target the ledger knows -- not only the ones opened below -- so a sampled
         # run does not mistake the rest of the migration for strays.
         # Shortcuts too: a migrated shortcut is mapped as one, and leaving it out
@@ -753,6 +842,9 @@ class Verifier:
                 tp = self._drive_path(tgt, tid, tc)
                 diffs = compare_drive_file(sm, tm, sp, tp)
                 ev = {"kind": kind, "name": sm.get("name"), "path": sp, "opened": False}
+                unverified, err_text, content = None, None, []
+                self._publish_stats(currentDocument=sid, currentMime=sm.get("mimeType"), currentSince=time.time(),
+                                    phase="compare")
                 if kind == "file":
                     target_keys[(tp, tm.get("name"), tm.get("md5Checksum"))] = tid
                     reused = drive_content_cache_get(self.db, self.src_user, sid, tid, sm, tm)
@@ -770,8 +862,13 @@ class Verifier:
                             drive_content_cache_put(self.db, self.src_user, sid, tid, sm, tm, content, ev)
                     from copy_resolution import remember_content
                     remember_content(self, sid, tid, sm, tm, ev, content)
+                    unverified = ev.pop("unverified", None)
+                    err_text = None
                     if ev.get("error"):
-                        res["errors"].append(f"file {sid}: {ev.pop('error')}")
+                        err_text = f"file {sid}: {ev.pop('error')}"
+                        res["errors"].append(err_text)
+                    elif sid in self._known_unverified:
+                        self._unverified.resolve(self.src_user, "drive", sid)    # compared now
                     if getattr(self.settings, "rewrite_drive_links", False):
                         try:
                             diffs += self._native_links(tid, sm)
@@ -790,12 +887,26 @@ class Verifier:
                     if getattr(self, "_not_owner", False):
                         diffs = [d for d in diffs if not d.startswith("folder path differs")]
                 diffs += sharing
-                self.evidence.append({"service": "drive", **ev})
+                record = {"service": "drive", **ev}
+                self.evidence.append(record)
+                entry = None
                 if diffs:
-                    res["differences"].append({"item": sm.get("name"), "path": sp, "source": sid, "target": tid, "diffs": diffs})
-                else:
+                    entry = {"item": sm.get("name"), "path": sp, "source": sid, "target": tid, "diffs": diffs}
+                    res["differences"].append(entry)
+                if unverified is not None:
+                    # The content was NOT compared: whatever else matched, this file is not "identical".
+                    self._note_unverified(res, sid, tid, sm, tm, record, unverified, err_text, entry,
+                                          [d for d in diffs if d not in content])
+                elif not diffs:
                     res["identical"] += 1
+                    self._stats["identical"] += 1
+                else:
+                    self._stats["different"] += 1
+                if unverified is None:
+                    self._stats["verified"] += 1
+                    self._publish_stats(lastSuccessfulDocument=sid, lastSuccessAt=time.time(), phase="compare")
             self._report_progress(operation, len(pairs), len(pairs))
+        self._retry_unverified(res, src, tgt)
         # Strays and duplicates on the target the ledger would never mention.
         try:
             extra = self._target_files(tgt)
@@ -1013,8 +1124,11 @@ class Verifier:
             if mime in ("application/vnd.google-apps.document", "application/vnd.google-apps.presentation"):
                 from native_fidelity import compare_native
                 kind = "docs" if mime.endswith(".document") else "slides"
-                differences,scope=self._x(lambda: compare_native(self.auth,self.src_user,self.tgt_user,sid,tid,mime,self.db.target_for_source_id,
-                                                                 pace=lambda: self._native_pace(kind, "read")))
+                # One breaker per API family: after a few documents fail on a Google 5xx the rest are
+                # not sent for a cooldown (they are queued as unverified, never passed).
+                differences,scope=self._vr.guarded(kind, lambda: self._x(
+                    lambda: compare_native(self.auth,self.src_user,self.tgt_user,sid,tid,mime,self.db.target_for_source_id,
+                                           pace=lambda: self._native_pace(kind, "read"))))
                 ev.update(opened=True,how=scope,nativeFeaturesChecked=True,nativeFeaturesMatched=not differences)
                 return differences
             if mime in NATIVE_EXPORT:
@@ -1054,8 +1168,10 @@ class Verifier:
                 out.append(f"content differs: sha256 {sha256(a)[:12]} -> {sha256(b)[:12]} ({len(a)} -> {len(b)} bytes)")
             return out
         except Exception as exc:      # noqa: BLE001
+            failure = self._vr.classify(exc)
             ev["how"] = f"could not be opened: {error_detail(exc)}"
             ev["error"] = f"content could not be compared: {error_detail(exc)}"
+            ev["unverified"] = failure      # drive() records it; it is never an identical
             return []
 
     def _native_links(self, tid, sm) -> list[str]:
@@ -1885,6 +2001,11 @@ def verdict_of(users: dict, services: tuple[str, ...]) -> tuple[str, list[str]]:
             if r.get("coverageComplete") is False:
                 incomplete = True
                 reasons.append(f"{user}: {svc} has required scopes that are not fully checked")
+            if r.get("unverified"):
+                incomplete = True
+                states = sorted({u.get("state", "UNVERIFIED") for u in r["unverified"]})
+                reasons.append(f"{user}: {svc} has {len(r['unverified'])} object(s) not verified "
+                               f"({', '.join(states)}) -- not identical, not different: unread")
             if r["errors"]:
                 incomplete = True
                 reasons.append(f"{user}: {svc} had {len(r['errors'])} check(s) that could not be made")
@@ -1908,7 +2029,8 @@ def service_complete(result: dict) -> bool:
     Known differences are complete checks. An error, or zero checks without an explicitly
     verified empty source, is incomplete and must not be presented as a pass.
     """
-    return (not result.get("errors") and result.get("coverageComplete") is not False
+    return (not result.get("errors") and not result.get("unverified")
+            and result.get("coverageComplete") is not False
             and (result.get("checked", 0) > 0 or result.get("emptySource", False)))
 
 
@@ -1951,6 +2073,23 @@ def run(auth, db, settings, users: list[str] | None = None, services=ALL_SERVICE
         with progress_lock:
             progress(message)
 
+    def stats_line(st: dict, items_done: int, now: float) -> str:
+        """The verifier's own account of itself: verified/identical/different/unverified, what is queued
+        for retry, the document in hand and how long, the last success, the breaker states and the
+        phase -- a live request, a retry wait, a breaker cooldown or between documents -- so a stuck
+        worker reads differently from one that is waiting on purpose."""
+        wall = time.time()
+        since = lambda t: (f"{int(wall - t)}s" if t else "-")
+        return (f"verified={st['verified']} identical={st['identical']} different={st['different']} "
+                f"unverified={st['unverified']} pendingRetry={st['pendingRetry']} phase={st['phase']} "
+                f"retryAttempt={st['retryAttempt']} retryDelay={int(st['retryDelay'])}s "
+                f"lastApiStatus={st['lastApiStatus'] if st['lastApiStatus'] is not None else '-'} "
+                f"circuitBreakerState={','.join(f'{k}:{v}' for k, v in sorted(st['breakers'].items())) or 'closed'} "
+                f"currentDocument={st['currentDocument'] or '-'} currentDocumentMimeType={st['currentMime'] or '-'} "
+                f"currentDocumentElapsed={since(st['currentSince'])} "
+                f"lastSuccessfulDocument={st['lastSuccessfulDocument'] or '-'} "
+                f"lastSuccessfulComparison={since(st['lastSuccessAt'])} ago")
+
     def heartbeat() -> None:
         while not stop_heartbeats.wait(60):
             now = time.monotonic()
@@ -1980,6 +2119,8 @@ def run(auth, db, settings, users: list[str] | None = None, services=ALL_SERVICE
                     detail += f" apiOpenFor={int(now - state['last_api_started'])}s"
                 if state["detail"]:
                     detail += f" | currentItem={state['detail']}"
+                if state.get("stats"):
+                    detail += " | " + stats_line(state["stats"], state["items_completed"], now)
                 if state["last_error"]:
                     error_age = int(now - state["last_error_at"])
                     detail += f" | lastError={state['last_error']} ({error_age}s ago)"
@@ -2051,6 +2192,9 @@ def run(auth, db, settings, users: list[str] | None = None, services=ALL_SERVICE
                     state["last_error_at"] = now
                 else:
                     state["last_api_result"] = "ok"
+            elif event == "progress" and "stats" in details:
+                state["stats"] = details["stats"]
+                return
             elif event == "progress":
                 completed = details.get("completed")
                 total = details.get("total")
@@ -2352,6 +2496,8 @@ def run_and_save(auth, db, settings, users=None, services=ALL_SERVICES, retry=la
 
 def main(argv=None) -> int:
     import argparse
+    # The verifier only reads: a hung request must not hold a worker for the engines' 300 s.
+    os.environ.setdefault("GOOGLE_HTTP_TIMEOUT_SEC", os.getenv("VERIFY_HTTP_TIMEOUT_SEC", "90"))
 
     from auth import AuthManager
     from config import Settings
@@ -2383,7 +2529,11 @@ def main(argv=None) -> int:
     migration_main._install_signal_handlers()
     try:
         run_and_save(AuthManager(settings), db, settings, a.user, services,
-                     retry=retry_on_google_error(max_retries=settings.max_retries),
+                     retry=retry_on_google_error(
+                         max_retries=settings.max_retries,
+                         # One document may spend at most this long on retries and waits, a Retry-After
+                         # included: a Docs 503 held info@s. at item 326 of 1,403 for 27 minutes.
+                         max_elapsed=float(os.getenv("VERIFY_RETRY_MAX_ELAPSED_SEC", "180"))),
                      progress=lambda m: print(m, flush=True),
                      limit=a.limit, base=verify_dir(a.account_id),
                      repair_after_user=a.repair_after_user)
