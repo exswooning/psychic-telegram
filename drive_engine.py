@@ -1451,6 +1451,17 @@ class DriveMigrator:
             self._bump("folders")
             return f"dryrun:{item['id']}"
 
+        placed = self._take_placed(item, tgt_parent)
+        if placed is not None:
+            # The folder an earlier run made here, its mapping since lost: adopted, so the files
+            # under it find their own copies instead of a new, empty folder beside it.
+            self.db.record_mapping(self.source_user, item["id"], placed["id"], "folder",
+                                   parent_target_id=tgt_parent, source_name=item["name"])
+            self.db.log_audit(self.source_user, item["id"], "folder", "SUCCESS",
+                              modified_time=item.get("modifiedTime"))
+            self._bump("folders")
+            return placed["id"]
+
         body = {"name": item["name"], "mimeType": FOLDER_MIME, "parents": [tgt_parent]}
         if item.get("modifiedTime"):
             body["modifiedTime"] = item["modifiedTime"]
@@ -1545,8 +1556,10 @@ class DriveMigrator:
         return None
 
     def _index_placed(self) -> dict[tuple, list[dict]]:
-        """The target's files no mapping names, by _placed_key. One listing per user."""
-        mapped = set(self.db.mapped_ids(self.source_user, ("file",)).values())
+        """The target's files AND folders no mapping names, by _placed_key. One listing per user.
+        Folders too: a user whose mappings were lost (an A/B arm cleared it.department@'s, account 3)
+        would otherwise get every folder re-created and every file copied again beside its first copy."""
+        mapped = set(self.db.mapped_ids(self.source_user, ("file", "folder")).values())
         where = (dict(corpora="drive", driveId=self.target_drive_id, includeItemsFromAllDrives=True,
                       supportsAllDrives=True, q="trashed = false") if self.shared_drive
                  else dict(spaces="drive", q="'me' in owners and trashed = false"))
@@ -1559,7 +1572,7 @@ class DriveMigrator:
                     fields="nextPageToken,files(id,name,mimeType,createdTime,modifiedTime,"
                            "md5Checksum,parents)").execute(), write=False)
                 for f in resp.get("files", []):
-                    if f["id"] not in mapped and f.get("mimeType") != FOLDER_MIME:
+                    if f["id"] not in mapped:
                         for p in f.get("parents") or []:
                             out.setdefault(self._placed_key(f, p), []).append(f)
                 token = resp.get("nextPageToken")

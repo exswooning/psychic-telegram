@@ -625,6 +625,12 @@ def migrate_user(auth: AuthManager, db: MigrationDB, settings: Settings,
                                 "continuing with the rest", source_user, name)
                     db.log_audit(source_user, source_user, name,
                                  "SKIPPED_NO_ACCESS", detail)
+                elif SHUTDOWN.is_set():
+                    # Stopped by the operator mid-service: the user ends INTERRUPTED (below) and
+                    # the next run resumes it. Logged as a stop, not a failure with a traceback --
+                    # one Stop printed 20 "gmail failed" tracebacks (account 3, 2026-11-03).
+                    log.info("[%s] %s stopped by operator: %s", source_user, name, str(exc)[:160])
+                    db.log_audit(source_user, source_user, name, "INTERRUPTED", detail)
                 else:
                     failures[name] = detail
                     log.exception("[%s] %s failed", source_user, name)
@@ -916,6 +922,7 @@ def run_batch(auth: AuthManager, db: MigrationDB, settings: Settings,
                     "see User profiles", source)
 
     _warn_if_ledger_is_stale(db, auth, pairs)
+    _reopen_lost_mappings(db, [p[0] for p in pairs])
 
     # Worker count used to be decided ONCE, when Settings() was built at
     # process startup, and frozen for the rest of the process -- including
@@ -1719,6 +1726,24 @@ def _wait_until_usable(auth, emails: list[str], timeout_s: float = 600, every_s:
         log.warning("%d new target account(s) still refused after %ds; migrating them anyway: %s",
                     len(waiting), int(timeout_s), ", ".join(waiting[:10]))
     return waiting
+
+
+def _reopen_lost_mappings(db, users) -> list:
+    """Reopen a DONE user whose ledger says Drive items were copied but whose mappings for them are
+    gone, so this run walks their Drive again. The walk adopts the copies already on the target
+    (drive_engine._take_placed, folders included) instead of copying them twice. Live (account 3,
+    2026-11-03): an A/B arm cleared it.department@'s mappings, the "copied" rows kept the user DONE,
+    Drive was skipped, and the mail link scan blocked on links to its own files."""
+    try:
+        lost = db.lost_drive_mappings(users)
+    except Exception as exc:      # noqa: BLE001 - a check, never a reason a run cannot start
+        log.warning("could not check for lost Drive mappings (%s); continuing", str(exc)[:160])
+        return []
+    for user, n in lost:
+        log.warning("[%s] %d copied Drive item(s) have lost their mapping; reopening the user so "
+                    "this run adopts the copies and the links to them resolve", user, n)
+        db.reopen_identity(user)
+    return lost
 
 
 def _warn_if_ledger_is_stale(db, auth, pairs) -> None:

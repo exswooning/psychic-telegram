@@ -138,12 +138,17 @@ def test_a_blocked_scan_owes_the_clean_mail_to_the_dms_so_repair_cannot_copy_it(
     missing-mail recovery copied the whole mailbox through the engine ahead of the DMS."""
     migrator, src, ids = mailbox
     settings.mail_link_scan = "exhaustive"
-    unmapped = "UNKNOWNFILEID" + "x" * 21        # a file the source still holds, no run mapped
-    src.messages[ids["linked"]]["raw"] = base64.urlsafe_b64encode(
-        LINKED.replace(SRC_FILE.encode(), unmapped.encode())).decode()
-    migrator.auth.source_drive(SRC_USER).store[unmapped] = {
-        "id": unmapped, "owners": [{"emailAddress": SRC_USER}]}
-    with pytest.raises(RuntimeError, match="blocked"):
+    # A message the scan genuinely cannot read (an unmapped link no longer blocks: 2026-11-03).
+    import split_mail
+    real = split_mail.classify_payload
+
+    def unreadable(message, *a, **k):
+        if message.get("id") == ids["linked"]:
+            raise split_mail.ClassificationIncomplete("MIME type is unavailable")
+        return real(message, *a, **k)
+    import unittest.mock
+    with unittest.mock.patch.object(split_mail, "classify_payload", unreadable), \
+            pytest.raises(RuntimeError, match="blocked"):
         migrator.run()
     assert db.get_audit(SRC_USER, ids["plain"], "message")["status"] == DEFERRED_TO_DMS
     assert db.get_audit(SRC_USER, ids["linked"], "message")["status"] == "FAILED_SPLIT"

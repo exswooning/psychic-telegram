@@ -34,12 +34,11 @@ def test_changed_ids_only_and_cross_owner_lookup():
 
 
 def test_unmapped_internal_and_unknown_are_blocked_but_positive_external_is_deferred():
+    """Still blocked (operator, 2026-11-03): the DMS would carry the link unrewritten, and the live
+    "unmigrated" files were a user's own with lost mappings -- fixed by re-walking, not by sending."""
     m = payload(f"https://drive.google.com/file/d/{SRC_FILE}".encode())
     assert classify_payload(m, lambda x: None)["route"] == "BLOCKED"
-    assert (
-        classify_payload(m, lambda x: None, unknown=lambda x: "external")["route"]
-        == "DMS"
-    )
+    assert classify_payload(m, lambda x: None, unknown=lambda x: "external")["route"] == "DMS"
 
 
 def test_binary_attachment_is_not_fetched_but_external_text_part_is_checked():
@@ -282,11 +281,9 @@ def test_reconciliation_detects_new_unclassified_mail_before_done(
     )
 
 
-def test_encrypted_body_is_not_silently_given_to_dms():
-    with pytest.raises(ClassificationIncomplete):
-        classify_payload(
-            {"payload": {"mimeType": "multipart/encrypted"}}, lambda x: None
-        )
+def test_an_encrypted_body_goes_to_the_dms_as_it_is_and_says_so():
+    got = classify_payload({"payload": {"mimeType": "multipart/encrypted"}}, lambda x: None)
+    assert got["route"] == "DMS" and got["encrypted"] and "encrypted" in got["why"]
 
 
 def test_delivery_reports_and_attached_messages_are_walked_when_decoded():
@@ -481,3 +478,55 @@ def test_an_arms_reconcile_is_scoped_to_its_identity_file(monkeypatch, tmp_path)
                         lambda *a, **k: seen.update(k) or {"blocked": []})
     assert dms_migrate.wait_then_tally(60, 10, False, tally=False, users=["audit@s.example"]) == 0
     assert seen["users"] == ["audit@s.example"]
+
+
+def test_an_attached_email_gmail_did_not_expand_is_read_from_its_raw_bytes():
+    """shiv@ (account 3, 2026-11-03): 10 messages blocked on "Encapsulated message needs explicit
+    inspection" -- a forwarded email whose parts Gmail left unexpanded."""
+    msg = {"payload": {"mimeType": "multipart/mixed", "parts": [
+        payload(b"see attached")["payload"], {"mimeType": "message/rfc822", "body": {"size": 900}}]}}
+    raw = (b"From: a@x\r\nContent-Type: multipart/mixed; boundary=B\r\n\r\n--B\r\n"
+           b"Content-Type: message/rfc822\r\n\r\nFrom: b@x\r\nContent-Type: text/plain\r\n\r\n"
+           b"https://drive.google.com/file/d/" + SRC_FILE.encode() + b"/view\r\n--B--\r\n")
+    got = classify_payload(msg, lambda x: TGT_FILE if x == SRC_FILE else None, fetch_raw=lambda: raw)
+    assert got["route"] == "ENGINE" and got["changed"] == {SRC_FILE: TGT_FILE}
+    with pytest.raises(ClassificationIncomplete):        # without the raw bytes it still cannot be read
+        classify_payload(msg, lambda x: None)
+
+
+
+class _Drives:
+    def __init__(self, known):
+        self.known = known
+
+    def get(self, driveId, **k):
+        from resilience import PermanentAPIError
+        known = self.known
+
+        class R:
+            def execute(_):
+                if driveId not in known:
+                    raise PermanentAPIError("HTTP 404 (notFound): Shared drive not found")
+                return {"id": driveId}
+        return R()
+
+
+def _shared_drive_link(gmail_migrator, auth, settings, drive_id, tenant_drives):
+    settings.mail_only_with_links = True
+    settings.rewrite_drive_links = True
+    settings.source_admin = "admin@" + settings.source_domain
+    src = auth.source_drive(SRC_USER)
+    src.store[SRC_FILE] = {"id": SRC_FILE, "owners": [], "driveId": drive_id}
+    admin_drive = auth.source_drive(settings.source_admin)
+    admin_drive.drives = lambda: _Drives(tenant_drives)
+    return gmail_migrator._split_unknown_link(SRC_FILE)
+
+
+def test_a_link_into_another_organisations_shared_drive_is_external(gmail_migrator, auth, settings):
+    """it.department@ (account 3, 2026-11-03): 3 links into a shared drive the source admin cannot
+    see blocked the whole mailbox. Another organisation's drive cannot migrate; the link stands."""
+    assert _shared_drive_link(gmail_migrator, auth, settings, "0AFOREIGN", tenant_drives=set()) == "external"
+
+
+def test_a_link_into_the_tenants_own_shared_drive_still_blocks(gmail_migrator, auth, settings):
+    assert _shared_drive_link(gmail_migrator, auth, settings, "0AOURS", tenant_drives={"0AOURS"}) == "unresolved"

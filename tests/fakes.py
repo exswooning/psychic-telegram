@@ -543,6 +543,7 @@ class _DriveFiles:
             "mimeType": body.get("mimeType"),
             "parents": parents,
             "modifiedTime": body.get("modifiedTime"),
+            "createdTime": body.get("createdTime"),       # Drive keeps a createdTime it is given
             "description": body.get("description"),
             "starred": body.get("starred", False),
             "trashed": False,

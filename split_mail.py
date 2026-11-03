@@ -51,6 +51,7 @@ def classify_payload(message, lookup, fetch_text_attachment=None, unknown=None, 
         raise ClassificationIncomplete("Gmail full response has no MIME payload")
     ids = set()
     unexpanded = []
+    encrypted = []
 
     def walk(part, depth=0):
         if depth > 60:
@@ -62,9 +63,9 @@ def classify_payload(message, lookup, fetch_text_attachment=None, unknown=None, 
             "application/pkcs7-mime",
             "application/x-pkcs7-mime",
         ):
-            raise ClassificationIncomplete(
-                "Encrypted MIME content cannot be classified for link rewriting"
-            )
+            # Nobody can read its links, so no route can rewrite them: it goes as it is, recorded.
+            encrypted.append(mime)
+            return
         if mime.startswith("multipart/") or (mime.startswith("message/") and children):
             if not children:
                 # Gmail's `full` format does not expand an attached message's own parts (live:
@@ -78,9 +79,14 @@ def classify_payload(message, lookup, fetch_text_attachment=None, unknown=None, 
                 walk(child, depth + 1)
             return
         if mime.startswith("message/"):
-            raise ClassificationIncomplete(
-                "Encapsulated message needs explicit inspection"
-            )
+            # A forwarded or attached email whose parts Gmail did not expand (shiv@, 10 messages,
+            # account 3, 2026-11-02): its text is scanned from the whole message's raw bytes.
+            if fetch_raw is None:
+                raise ClassificationIncomplete(
+                    "Encapsulated message needs explicit inspection"
+                )
+            unexpanded.append(mime)
+            return
         if not mime.startswith("text/"):
             if not mime:
                 raise ClassificationIncomplete("MIME type is unavailable")
@@ -100,8 +106,15 @@ def classify_payload(message, lookup, fetch_text_attachment=None, unknown=None, 
         )
 
     walk(message["payload"])
+    if encrypted:
+        return {"route": "DMS", "changed": {}, "unresolved": [], "linkIds": [], "encrypted": True,
+                "why": "encrypted MIME: its links cannot be read by anyone, so it goes to the DMS as it is"}
     if unexpanded:
-        ids |= ids_in_raw(fetch_raw())
+        try:
+            ids |= ids_in_raw(fetch_raw())
+        except ClassificationIncomplete:
+            return {"route": "DMS", "changed": {}, "unresolved": [], "linkIds": [], "encrypted": True,
+                    "why": "encrypted MIME inside an attached message: its links cannot be read"}
     changed = {}
     unresolved = []
     for source in sorted(ids):
@@ -110,6 +123,10 @@ def classify_payload(message, lookup, fetch_text_attachment=None, unknown=None, 
             changed[source] = target
         elif not target and (unknown is None or unknown(source) != "external"):
             unresolved.append(source)
+    # A link to an internal file with no mapping still BLOCKS: the DMS imports the whole mailbox and
+    # would carry it unrewritten, and such a file belongs in the migration -- live (account 3,
+    # 2026-11-03) the "unmigrated" files were it.department@'s own, copied once but with their
+    # mappings lost; main._reopen_lost_mappings now re-walks such a user so the links resolve.
     return {
         "route": "BLOCKED" if unresolved else "ENGINE" if changed else "DMS",
         "changed": changed,

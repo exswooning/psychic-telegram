@@ -496,7 +496,32 @@ class GmailMigrator:
             self._scan_count("unreachableLinks", 1)
             return "external"
         owners = [o.get("emailAddress", "").rsplit("@", 1)[-1].lower() for o in meta.get("owners", [])]
+        if not owners and meta.get("driveId") and self._foreign_shared_drive(meta["driveId"]):
+            # In a shared drive the source tenant does not hold (another organisation's, shared in):
+            # nothing here can migrate it, and the link reads the same either way. Live (account 3,
+            # 2026-11-03): 3 of it.department@'s links pointed into one and blocked its whole mailbox.
+            self._scan_count("foreignSharedDriveLinks", 1)
+            return "external"
         return "external" if owners and all(x and x != self.settings.source_domain.lower() for x in owners) else "unresolved"
+
+    def _foreign_shared_drive(self, drive_id: str) -> bool:
+        """Is this shared drive outside the source tenant? Asked of the source admin with domain-admin
+        access, once per drive: 404 = not the tenant's. Anything unsure is NOT foreign (it blocks)."""
+        cache = self.__dict__.setdefault("_drive_owner_cache", {})
+        if drive_id not in cache:
+            admin = getattr(self.settings, "source_admin", "") or ""
+            if not admin:
+                return False
+            try:
+                self._retry(lambda: self.auth.source_drive(admin).drives().get(
+                    driveId=drive_id, useDomainAdminAccess=True, fields="id").execute(),
+                    label="gmail.split.link_drive")
+                cache[drive_id] = False
+            except PermanentAPIError as exc:
+                cache[drive_id] = str(exc).startswith("HTTP 404")
+            except Exception:      # noqa: BLE001 - unsure is not foreign
+                return False
+        return cache[drive_id]
 
     def _split_classify(self, mid):
         from split_mail import classify_payload
@@ -549,6 +574,10 @@ class GmailMigrator:
                 classified, plan = cached if cached is not None else self._split_classify(mid)
                 if plan and plan["route"] == "BLOCKED":
                     raise RuntimeError("Unresolved Drive link mapping: " + ", ".join(plan["unresolved"]))
+                if plan and plan.get("encrypted"):
+                    # Recorded, never silent: nothing in it could be read, so it goes as it is.
+                    encrypted_why = plan["why"]
+                    self.db.log_audit(self.source_user, mid, "message_link", "LINK_SCAN_ENCRYPTED", encrypted_why)
                 if plan and plan["route"] == "DMS":
                     prior = self.db.get_audit(self.source_user, mid, "message")
                     detail = plan.get("why") or "no changed Drive link; awaiting verified DMS delivery"

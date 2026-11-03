@@ -81,7 +81,7 @@ SERVICE_TYPES: dict[str, tuple[str, ...]] = {
     # repointed. They must clear with the messages they describe, or a reset
     # leaves evidence of a rewrite for mail that is no longer there.
     # delegate: a mailbox delegation owed to a colleague with no target account yet.
-    "gmail": ("message", "draft", "filter", "signature", "link_rewrite",
+    "gmail": ("message", "draft", "filter", "signature", "link_rewrite", "message_link",
               "link_repair", "thread", "delegate", "forwarding"),
     # subscription: a calendar the user follows, re-followed on the target;
     # calendar_subscription is the audit row of one that could not be.

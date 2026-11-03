@@ -1259,6 +1259,21 @@ class MigrationDB:
             out.append(payload)
         return out
 
+    def lost_drive_mappings(self, users) -> list:
+        """(user, n) for DONE users with Drive items the audit calls copied but no mapping names.
+        finished_but_unmapped sees only users with NO mappings left; a partial loss slipped past."""
+        if not users:
+            return []
+        marks = ",".join("?" * len(users))
+        return [tuple(r) for r in self.conn.execute(
+            f"""SELECT a.source_user, COUNT(*) FROM audit_log a
+                 JOIN identity_map i ON i.source_email = a.source_user AND i.status = 'DONE'
+                WHERE a.source_user IN ({marks}) AND a.item_type IN ('file','folder')
+                  AND a.status = 'SUCCESS'
+                  AND NOT EXISTS (SELECT 1 FROM id_mapping m WHERE m.source_user = a.source_user
+                                  AND m.source_id = a.item_id AND m.type = a.item_type)
+                GROUP BY a.source_user ORDER BY 2 DESC""", list(users))]
+
     def finished_but_unmapped(self):
         """Users whose status says DONE while nothing maps to the target.
 
