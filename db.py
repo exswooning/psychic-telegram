@@ -1775,7 +1775,7 @@ def verification_rollup(users, verifications: list[dict]) -> dict:
     by_user: dict[str, list[dict]] = {}
     for v in verifications:
         by_user.setdefault(v["user"], []).append(v)
-    totals = {"IDENTICAL": 0, "DIFFERENCES": 0, "INCOMPLETE": 0, "NOT_VERIFIED": 0, "EMPTY": 0}
+    totals = {"IDENTICAL": 0, "DIFFERENCES": 0, "INCOMPLETE": 0, "NOT_VERIFIED": 0}
     out_users = []
     for u in users:
         svcs = list(by_user.get(u["source_email"], []))
