@@ -95,7 +95,7 @@ def enabled(db):
         return False
 
 
-REPAIR_CAPABILITY_VERSION = 9
+REPAIR_CAPABILITY_VERSION = 10   # 10: gmail duplicates (gmail_duplicates.py) can be trashed; users already marked handled are retried
 
 
 def _newly_supported(rows):

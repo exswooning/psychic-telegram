@@ -232,3 +232,13 @@ def test_backfill_leaves_an_account_alone_while_an_ab_runs_on_it(db, settings, m
     monkeypatch.setattr(api, '_ab_running_for', lambda aid: True)
     monkeypatch.setattr(api.job_admission, 'try_admit', lambda *a: pytest.fail('must not even ask'))
     api._dispatch_verification_repairs()
+
+
+def test_a_new_gmail_repair_retries_a_user_already_marked_handled(monkeypatch):
+    """audit@ (2 Nov 2026) was marked handled under capability 9 and skipped by the
+    dispatcher on every tick after gmail_duplicates shipped, so its duplicates never got a repair."""
+    rows = [{"service": "gmail", "differences": [], "notCopied": [{"type": "message"}], "missing": []}]
+    monkeypatch.setattr(R, "REPAIR_CAPABILITY_VERSION", 9)
+    before = R.fingerprint(rows)
+    monkeypatch.setattr(R, "REPAIR_CAPABILITY_VERSION", 10)
+    assert R.fingerprint(rows) != before
