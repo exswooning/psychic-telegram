@@ -910,7 +910,10 @@ class Verifier:
         # Strays and duplicates on the target the ledger would never mention.
         try:
             extra = self._target_files(tgt)
-            for f in extra:
+            stray_op = "Drive stray check (target files the ledger does not map)"
+            for n, f in enumerate(extra):
+                if n % 10 == 0:
+                    self._report_progress(stray_op, n, len(extra))
                 if f["id"] in seen_targets:
                     continue
                 try:

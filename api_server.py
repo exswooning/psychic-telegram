@@ -2661,7 +2661,7 @@ def _verification_view(account_id: int | None) -> dict:
     st = Settings(account_id=account_id)
     out: dict = {"accountId": account_id, "onComplete": st.verify_on_complete,
                  "perService": st.verify_sample_per_service, "users": [],
-                 "totals": {"IDENTICAL": 0, "DIFFERENCES": 0, "INCOMPLETE": 0, "NOT_VERIFIED": 0}}
+                 "totals": {"IDENTICAL": 0, "DIFFERENCES": 0, "INCOMPLETE": 0, "NOT_VERIFIED": 0, "EMPTY": 0}}
     path = _ledger_path(account_id)
     if not os.path.isfile(path):
         return out

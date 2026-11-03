@@ -1912,7 +1912,7 @@ export const quickReportUrl = (accountId?: number) =>
   `${CP_BASE}/api/v2/quick/latest.md${accountId ? `?account_id=${accountId}` : ''}`
 
 /* One-to-one check: each user compared against both tenants as they finish (verify_sample.py). */
-export type OneToOneVerdict = 'IDENTICAL' | 'DIFFERENCES' | 'INCOMPLETE' | 'NOT_VERIFIED'
+export type OneToOneVerdict = 'IDENTICAL' | 'DIFFERENCES' | 'INCOMPLETE' | 'NOT_VERIFIED' | 'EMPTY'
 export interface RetainedCopyResolution {
   source: string
   target: string

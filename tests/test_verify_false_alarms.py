@@ -25,3 +25,15 @@ def test_an_empty_source_reads_identical_and_an_unchecked_one_does_not():
     V.save_user_results(db, {"users": {"u": {"tasks": dict(base, emptySource=True)}}})
     V.save_user_results(db, {"users": {"u": {"tasks": dict(base)}}})
     assert [r[2] for r in db.rows] == ["IDENTICAL", "INCOMPLETE"]
+
+
+def test_zero_item_service_reads_empty_not_identical(tmp_path):
+    import db as D
+    rows = [{"source_user": "u", "service": s, "verified_at": "t", "verdict": "IDENTICAL", "checked": c,
+             "identical": c, "sampled_of": None, "payload": '{"scopeVersion": 2}'}
+            for s, c in (("tasks", 0), ("drive", 5))]
+    parsed = D.parse_user_verification_rows(rows)
+    assert {r["service"]: r["verdict"] for r in parsed} == {"tasks": "EMPTY", "drive": "IDENTICAL"}
+    users = [{"source_email": "u", "target_email": "t", "status": "DONE", "services_done": ""}]
+    assert D.verification_rollup(users, parsed)["users"][0]["verdict"] == "IDENTICAL"
+    assert D.verification_rollup(users, parsed[:1])["users"][0]["verdict"] == "EMPTY"

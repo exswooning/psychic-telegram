@@ -1731,7 +1731,10 @@ def bulk_seed_identities(db: MigrationDB, pairs: Iterable[tuple[str, str]]) -> N
 
 # Worst verdict wins a user's rollup: one DIFFERENCES service means the user is not
 # clean, however many others came back IDENTICAL.
-_VERDICT_RANK = {"DIFFERENCES": 3, "INCOMPLETE": 2, "NOT_VERIFIED": 2, "IDENTICAL": 1}
+# EMPTY: the source was read live and holds nothing, so zero items were compared. It is a
+# pass, but never "identical" -- no item was matched -- and a user is EMPTY only when
+# every service is.
+_VERDICT_RANK = {"DIFFERENCES": 3, "INCOMPLETE": 2, "NOT_VERIFIED": 2, "IDENTICAL": 1, "EMPTY": 0}
 
 
 def parse_user_verification_rows(rows) -> list[dict]:
@@ -1753,6 +1756,8 @@ def parse_user_verification_rows(rows) -> list[dict]:
         effective = r["verdict"]
         if effective == "IDENTICAL" and payload.get("coverageComplete") is False:
             effective = "INCOMPLETE"
+        if effective == "IDENTICAL" and not r["checked"]:
+            effective = "EMPTY"
         out.append({"user": r["source_user"], "service": r["service"], "verifiedAt": r["verified_at"],
                     "verdict": effective, "itemVerdict": r["verdict"], "checked": r["checked"], "identical": r["identical"],
                     "sampledOf": r["sampled_of"], **payload})
@@ -1770,7 +1775,7 @@ def verification_rollup(users, verifications: list[dict]) -> dict:
     by_user: dict[str, list[dict]] = {}
     for v in verifications:
         by_user.setdefault(v["user"], []).append(v)
-    totals = {"IDENTICAL": 0, "DIFFERENCES": 0, "INCOMPLETE": 0, "NOT_VERIFIED": 0}
+    totals = {"IDENTICAL": 0, "DIFFERENCES": 0, "INCOMPLETE": 0, "NOT_VERIFIED": 0, "EMPTY": 0}
     out_users = []
     for u in users:
         svcs = list(by_user.get(u["source_email"], []))
