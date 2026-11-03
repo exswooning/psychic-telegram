@@ -95,3 +95,20 @@ def test_only_messages_confirmed_gone_are_forgotten(db):
     items = [{"source": "gone", "target": "t1"}, {"source": "there", "target": "t2"}, {"source": "unsure", "target": "t3"}]
     assert C.reopen_missing_messages(db, _Gmail(), SRC_USER, items) == 1
     assert forgot == [("gone", "message")]
+
+
+def test_a_service_that_later_ran_clean_clears_its_old_failed_row(auth, db, settings, identity):
+    """Six stale 'gmail FAILED' rows counted against the DMS hand-off after the mail had finished."""
+    settings.user_workers = 1
+    auth.source_gmail(SRC_USER).add_message(b"Message-ID: <x@t>\r\nSubject: s\r\n\r\nbody")
+    db.log_audit(SRC_USER, SRC_USER, "gmail", "FAILED", "Mail link scan interrupted; DMS handoff not ready")
+    main.run_batch(auth, db, settings, {"gmail"}, False, 0)
+    assert db.get_audit(SRC_USER, SRC_USER, "gmail")["status"] == "SUCCESS"
+
+
+def test_a_service_that_failed_again_keeps_its_failed_row(auth, db, settings, identity, monkeypatch):
+    import gmail_engine as G
+    settings.user_workers = 1
+    monkeypatch.setattr(G.GmailMigrator, "run", lambda self, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+    main.run_batch(auth, db, settings, {"gmail"}, False, 0)
+    assert db.get_audit(SRC_USER, SRC_USER, "gmail")["status"] == "FAILED"

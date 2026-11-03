@@ -667,6 +667,19 @@ def migrate_user(auth: AuthManager, db: MigrationDB, settings: Settings,
                         failures.pop(service,None)
                         stats=result["services"].get(service)
                         if isinstance(stats,dict):stats["completion_incomplete"]=False
+        # A service that ran clean this time clears its own old FAILED row. Nothing did: a service
+        # that failed once stayed "failed" in the ledger for ever (account 3, 2026-11-03: six mail rows
+        # from a stopped run counted against the DMS hand-off after their mail had finished).
+        if not SHUTDOWN.is_set():
+            try:
+                for name, stats in result["services"].items():
+                    if name in failures or (isinstance(stats, dict) and stats.get("completion_incomplete")):
+                        continue
+                    prior = db.get_audit(source_user, source_user, name)
+                    if prior and str(prior["status"]).startswith("FAILED"):
+                        db.log_audit(source_user, source_user, name, "SUCCESS", "cleared: a later run finished it")
+            except Exception as exc:      # noqa: BLE001 - bookkeeping never fails a finished user
+                log.debug("[%s] could not clear an old service failure: %s", source_user, exc)
         interrupted = SHUTDOWN.is_set() or (result.get("acceptance") or {}).get("state") == "INTERRUPTED"
         status = "INTERRUPTED" if interrupted else "DONE"
         if failures and not interrupted:

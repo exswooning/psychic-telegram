@@ -5989,9 +5989,15 @@ def _migration_progress(account_id: int | None) -> dict:
                 # from a superseded run, so a clean 199-user migration read as
                 # "4 failed, 2 retried on the next migration" against people
                 # who cannot be retried because they are gone.
+                #
+                # Not an item a later run mapped: its FAILED row is history, not a gap. Live
+                # (account 3, 2026-11-03): 168 of "188 unresolved failures" were 30 October rows for
+                # info@'s messages that had since been migrated, and they stopped the DMS starting.
                 "SELECT COUNT(*) n FROM audit_log a WHERE a.status LIKE 'FAILED%' "
                 "AND EXISTS (SELECT 1 FROM identity_map m "
-                "            WHERE m.source_email = a.source_user)"
+                "            WHERE m.source_email = a.source_user) "
+                "AND NOT EXISTS (SELECT 1 FROM id_mapping mp WHERE mp.source_user = a.source_user "
+                "                AND mp.source_id = a.item_id AND mp.type = a.item_type)"
             ).fetchone()["n"]
             # Skips were invisible: the page showed migrated and failed with
             # nothing between them, while 56,975 items on a live tenant were
