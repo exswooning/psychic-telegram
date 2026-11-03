@@ -5,6 +5,7 @@ content checks. Integer byte values remain decimal strings through the API.
 """
 from __future__ import annotations
 
+import logging
 import json
 from concurrent.futures import ThreadPoolExecutor
 from db import utc_now
@@ -102,6 +103,22 @@ def mailbox_completion(auth, db, settings, source_user, target_user, retry=lambd
                 result["missing"].append({"source": sid, "target": tid, "why": "Mapped message absent from destination inventory"})
     except Exception as exc:
         result["errors"].append("Destination mailbox inventory failed: " + str(exc)[:180])
+    try:
+        drafts = v._pairs("draft")
+        if drafts:
+            live_drafts, token, tgt = set(), None, auth.target_gmail(target_user)
+            while True:
+                r = tgt.users().drafts().list(userId="me", maxResults=500, pageToken=token).execute()
+                live_drafts |= {d["id"] for d in r.get("drafts", [])}
+                token = r.get("nextPageToken")
+                if not token:
+                    break
+            for sid, tid, _ in drafts:
+                if tid not in live_drafts:
+                    result["missing"].append({"source": sid, "target": tid, "type": "draft",
+                                              "why": "Mapped draft absent from destination"})
+    except Exception as exc:      # noqa: BLE001 - a draft listing that fails is no reason to fail the mailbox
+        logging.getLogger(__name__).warning("[%s] could not list the target's drafts: %s", source_user, exc)
     deferred = set()
     if getattr(settings, "mail_only_with_links", False):
         from config import DEFERRED_TO_DMS
@@ -120,7 +137,8 @@ def mailbox_completion(auth, db, settings, source_user, target_user, retry=lambd
     return {"complete": not gap and not deferred, "handoffReady": not gap and bool(deferred),
             "awaitingDms": len(deferred), "notCopied": len(result["notCopied"]),
             "missing": len(result["missing"]), "errors": result["errors"],
-            "missingItems": [{"source": m["source"], "target": m["target"]} for m in result["missing"]],
+            "missingItems": [{"source": m["source"], "target": m["target"], "type": m.get("type", "message")}
+                            for m in result["missing"]],
             "scope": "full source ID and mapped destination presence; content checked separately"}
 
 
@@ -242,16 +260,20 @@ def reopen_missing_messages(db, target_gmail, source_user, missing_items, retry=
     from googleapiclient.errors import HttpError
     reopened = 0
     for item in missing_items:
+        kind = item.get("type", "message")
         try:
-            retry(lambda: target_gmail.users().messages().get(
-                userId="me", id=item["target"], format="minimal").execute())()
+            if kind == "draft":
+                retry(lambda: target_gmail.users().drafts().get(userId="me", id=item["target"]).execute())()
+            else:
+                retry(lambda: target_gmail.users().messages().get(
+                    userId="me", id=item["target"], format="minimal").execute())()
             continue                                  # it is there: the listing was wrong, not the ledger
         except HttpError as exc:
             if getattr(getattr(exc, "resp", None), "status", None) != 404:
                 continue
         except Exception:      # noqa: BLE001 - unsure is not gone
             continue
-        db.forget_mapping(source_user, item["source"], "message")
+        db.forget_mapping(source_user, item["source"], kind)
         reopened += 1
     return reopened
 

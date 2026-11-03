@@ -112,3 +112,45 @@ def test_a_service_that_failed_again_keeps_its_failed_row(auth, db, settings, id
     monkeypatch.setattr(G.GmailMigrator, "run", lambda self, **k: (_ for _ in ()).throw(RuntimeError("boom")))
     main.run_batch(auth, db, settings, {"gmail"}, False, 0)
     assert db.get_audit(SRC_USER, SRC_USER, "gmail")["status"] == "FAILED"
+
+
+def test_a_draft_gone_from_the_target_is_forgotten_by_its_own_404():
+    forgot = []
+
+    class DB:
+        def forget_mapping(self, user, sid, kind):
+            forgot.append((sid, kind))
+
+    class Drafts:
+        def __init__(self, gone):
+            self.gone = gone
+
+        def get(self, userId, id, **k):
+            err = _err(404) if id in self.gone else None
+            return SimpleNamespace(execute=lambda: (_ for _ in ()).throw(err) if err else {"id": id})
+
+    class Gmail:
+        def users(self):
+            return self
+
+        def drafts(self):
+            return Drafts({"d-gone"})
+
+    items = [{"source": "s1", "target": "d-gone", "type": "draft"},
+             {"source": "s2", "target": "d-here", "type": "draft"}]
+    assert C.reopen_missing_messages(DB(), Gmail(), SRC_USER, items) == 1
+    assert forgot == [("s1", "draft")]                 # a draft is forgotten as a draft, never as a message
+
+
+def test_a_contact_deleted_on_the_target_is_copied_again(auth, db, settings, identity):
+    import contacts_engine
+    settings.migrate_contacts = True
+    src = auth.source_people(SRC_USER)
+    src.add_contact("Ada", "ada@example.com")
+    m = contacts_engine.ContactsMigrator(auth, db, settings, SRC_USER, TGT_USER)
+    m.run()
+    tgt = auth.target_people(TGT_USER)
+    assert len(tgt.contacts) == 1
+    tgt.contacts.clear()                                # the target mailbox was emptied
+    stats = contacts_engine.ContactsMigrator(auth, db, settings, SRC_USER, TGT_USER).run()
+    assert stats.get("recopied_missing") == 1 and len(tgt.contacts) == 1

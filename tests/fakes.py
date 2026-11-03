@@ -2532,6 +2532,8 @@ class _Tasks:
 
     def _list(self, tasklist: str, updatedMin: Optional[str] = None,
               showDeleted: bool = False, **_):
+        if tasklist not in self.s.lists:
+            raise http_error(404, "notFound", tasklist)          # as the API does for a deleted list
         rows = self.s.task_store.get(tasklist, [])
         if not showDeleted:
             rows = [t for t in rows if not t.get("deleted")]
