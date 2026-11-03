@@ -59,3 +59,39 @@ def test_a_user_whose_target_was_emptied_is_copied_again_in_the_same_run(auth, d
     again = [f for f in td.store.values() if f.get("name", "").startswith("report-")]
     assert len(again) == 3, out
     assert out[0]["status"] == "DONE", out
+
+
+def test_a_mailbox_emptied_behind_the_ledger_is_inserted_again_in_the_same_run(auth, db, settings, identity):
+    """audit@ (account 3, 2026-11-03): 9 mapped messages gone from the target FAILED the user."""
+    settings.migration_checks_enabled = True
+    settings.user_workers = 1
+    src = auth.source_gmail(SRC_USER)
+    for n in range(4):
+        src.add_message(f"Message-ID: <m{n}@t>\r\nSubject: s{n}\r\n\r\nbody {n}".encode())
+    out = main.run_batch(auth, db, settings, {"gmail"}, False, 0)
+    tg = auth.target_gmail(TGT_USER)
+    assert len(tg.messages) == 4, out
+    tg.messages.clear()                                   # the account is emptied
+    db.set_identity_status(SRC_USER, "PENDING")
+    db.conn.execute("UPDATE identity_map SET services_done='' WHERE source_email=?", (SRC_USER,))
+    db.conn.commit()
+    out = main.run_batch(auth, db, settings, {"gmail"}, False, 0)
+    assert len(tg.messages) == 4 and out[0]["status"] == "DONE", out
+
+
+def test_only_messages_confirmed_gone_are_forgotten(db):
+    from tests.fakes import http_error
+    forgot = []
+    db.forget_mapping = lambda user, sid, kind: forgot.append((sid, kind))
+
+    class _Msgs:
+        def get(self, userId, id, **k):
+            answer = {"t1": http_error(404), "t2": {"id": "t2"}, "t3": http_error(500)}[id]
+            return SimpleNamespace(execute=lambda: (_ for _ in ()).throw(answer) if isinstance(answer, Exception) else answer)
+
+    class _Gmail:
+        def users(self):
+            return SimpleNamespace(messages=lambda: _Msgs())
+    items = [{"source": "gone", "target": "t1"}, {"source": "there", "target": "t2"}, {"source": "unsure", "target": "t3"}]
+    assert C.reopen_missing_messages(db, _Gmail(), SRC_USER, items) == 1
+    assert forgot == [("gone", "message")]

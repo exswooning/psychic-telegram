@@ -534,6 +534,22 @@ def migrate_user(auth: AuthManager, db: MigrationDB, settings: Settings,
         if (checkpoints or settings.mail_only_with_links) and not SHUTDOWN.is_set() and not delta:
             from migration_checks import mailbox_completion
             check = mailbox_completion(auth, db, settings, source_user, target_user)
+            # Mapped messages gone from the target (a mailbox emptied after the ledger was written):
+            # the confirmed-gone mappings are forgotten and the mailbox inserted once more, instead
+            # of the user failing the coverage check on every run. Same rule as Drive, above.
+            if check.get("missingItems"):
+                from migration_checks import reopen_missing_messages
+                reopened = reopen_missing_messages(db, auth.target_gmail(target_user), source_user,
+                                                   check["missingItems"])
+                if reopened:
+                    log.warning("[%s] %d mapped message(s) were gone from the target; mappings "
+                                "forgotten, inserting them again", source_user, reopened)
+                    again = GmailMigrator(auth, db, settings, source_user, target_user).run(
+                        delta=delta, since_epoch_days=delta_days, drive_in_scope="drive" in services)
+                    stats["recopied_missing"] = reopened
+                    stats["inserted"] = stats.get("inserted", 0) + again.get("inserted", 0)
+                    check = mailbox_completion(auth, db, settings, source_user, target_user)
+            check.pop("missingItems", None)
             stats["coverage_check"] = check
             stats["awaiting_dms"] = check.get("awaitingDms", 0)
             stats["completion_incomplete"] = (not check["complete"] and not check.get("handoffReady")) or bool(stats.get("inline_verification_failed"))

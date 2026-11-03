@@ -120,6 +120,7 @@ def mailbox_completion(auth, db, settings, source_user, target_user, retry=lambd
     return {"complete": not gap and not deferred, "handoffReady": not gap and bool(deferred),
             "awaitingDms": len(deferred), "notCopied": len(result["notCopied"]),
             "missing": len(result["missing"]), "errors": result["errors"],
+            "missingItems": [{"source": m["source"], "target": m["target"]} for m in result["missing"]],
             "scope": "full source ID and mapped destination presence; content checked separately"}
 
 
@@ -230,6 +231,28 @@ def reopen_missing_mappings(db, target_drive, source_user, missing_items, retry=
         if gone:
             db.forget_mapping(source_user, item["source"], item.get("type") or "file")
             reopened += 1
+    return reopened
+
+
+def reopen_missing_messages(db, target_gmail, source_user, missing_items, retry=lambda f: f) -> int:
+    """Forget the mappings of mapped messages CONFIRMED gone from the target, so the next pass
+    inserts them again. Asked for by id: only a 404 is gone; a read that fails is never forgotten.
+    Live (account 3, 2026-11-03): an earlier benchmark emptied audit@t, the ledger still mapped its
+    9 inserted messages, and the user FAILED its mail coverage check every run."""
+    from googleapiclient.errors import HttpError
+    reopened = 0
+    for item in missing_items:
+        try:
+            retry(lambda: target_gmail.users().messages().get(
+                userId="me", id=item["target"], format="minimal").execute())()
+            continue                                  # it is there: the listing was wrong, not the ledger
+        except HttpError as exc:
+            if getattr(getattr(exc, "resp", None), "status", None) != 404:
+                continue
+        except Exception:      # noqa: BLE001 - unsure is not gone
+            continue
+        db.forget_mapping(source_user, item["source"], "message")
+        reopened += 1
     return reopened
 
 
