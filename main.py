@@ -921,8 +921,14 @@ def run_batch(auth: AuthManager, db: MigrationDB, settings: Settings,
         log.warning("[%s] Directory profile not reconciled; migrating the data anyway -- "
                     "see User profiles", source)
 
-    _warn_if_ledger_is_stale(db, auth, pairs)
-    _reopen_lost_mappings(db, [p[0] for p in pairs])
+    # Only in a pass that copies Drive: reopening forgets Drive mappings, and in a later pass of an
+    # ordered run (mail) nothing re-copies them -- live (account 3, 2026-11-03 03:28) a stale-ledger
+    # repair at the start of the mail pass forgot it.department@'s 2,053 mappings after Drive had run,
+    # and the mail scan then blocked on links to its own files. A mail-only pass leaves it to the
+    # next run's Drive pass (and its link scan blocks meanwhile, which is the safe side).
+    if "drive" in services:
+        _warn_if_ledger_is_stale(db, auth, pairs)
+        _reopen_lost_mappings(db, [p[0] for p in pairs])
 
     # Worker count used to be decided ONCE, when Settings() was built at
     # process startup, and frozen for the rest of the process -- including

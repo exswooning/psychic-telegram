@@ -38,3 +38,15 @@ def test_a_done_user_with_lost_mappings_is_reopened(auth, db, settings, identity
     assert main._reopen_lost_mappings(db, [SRC_USER]) == [(SRC_USER, 1)]
     status = db.conn.execute("SELECT status FROM identity_map WHERE source_email=?", (SRC_USER,)).fetchone()[0]
     assert status == "PENDING"
+
+
+def test_the_repairs_run_only_in_a_pass_that_copies_drive(auth, db, settings, identity, monkeypatch):
+    """A repair at the start of the mail pass forgot mappings after Drive had run (it.department@)."""
+    ran = []
+    monkeypatch.setattr(main, "_warn_if_ledger_is_stale", lambda *a: ran.append("stale"))
+    monkeypatch.setattr(main, "_reopen_lost_mappings", lambda *a: ran.append("lost") or [])
+    settings.user_workers = 1
+    main.run_batch(auth, db, settings, {"gmail"}, False, 0)
+    assert ran == []
+    main.run_batch(auth, db, settings, {"drive"}, False, 0)
+    assert ran == ["stale", "lost"]
