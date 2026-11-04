@@ -33,6 +33,13 @@ def list_threads(svc, fid, execute=lambda fn: fn()):
         seen.add(token)
 
 
+def _text(value):
+    # Drive keeps a comment's text without the trailing space the engine writes after the
+    # "[Author, date]" prefix, so an exact comparison called every action-only reply
+    # (empty body) "differs" and refused it. Trailing whitespace is not a difference.
+    return (value or "").rstrip()
+
+
 def content(row, lookup):
     author = (row.get("author") or {}).get("displayName") or "unknown"
     return (
@@ -53,8 +60,8 @@ def differences(source, target, lookup):
         candidates = [
             c
             for c in remaining
-            if c.get("content", "")
-            in (wanted, rewrite_text(comment.get("content", ""), lookup)[0])
+            if _text(c.get("content"))
+            in (_text(wanted), _text(rewrite_text(comment.get("content", ""), lookup)[0]))
         ]
         if len(candidates) > 1:
             # Two threads with the same words on different spots (live, finance@s.: one PDF,
@@ -72,15 +79,15 @@ def differences(source, target, lookup):
             if comment.get(field) != found.get(field):
                 diffs.append("comment " + field + " differs")
         want = Counter(
-            (content(r, lookup), r.get("action", ""))
+            (_text(content(r, lookup)), r.get("action", ""))
             for r in comment.get("replies", [])
         )
         actual = Counter(
-            (r.get("content", ""), r.get("action", ""))
+            (_text(r.get("content")), r.get("action", ""))
             for r in found.get("replies", [])
         )
         raw = Counter(
-            (rewrite_text(r.get("content", ""), lookup)[0], r.get("action", ""))
+            (_text(rewrite_text(r.get("content", ""), lookup)[0]), r.get("action", ""))
             for r in comment.get("replies", [])
         )
         if actual not in (want, raw):
@@ -128,13 +135,13 @@ def reconcile(migrator, sid, tid):
                 raise RuntimeError(
                     "Mapped comment/reply is missing; do not create another blindly"
                 )
-            if any(found.get(k, "") != v for k, v in body.items()):
+            if any(_text(found.get(k)) != _text(v) for k, v in body.items()):
                 raise RuntimeError(
                     "Existing target comment/reply differs; preserve possible target edits"
                 )
             return mapped
         matches = [
-            r for r in candidates if all(r.get(k, "") == v for k, v in body.items())
+            r for r in candidates if all(_text(r.get(k)) == _text(v) for k, v in body.items())
         ]
         if len(matches) > 1:
             raise RuntimeError("Ambiguous comment/reply copies")

@@ -23,3 +23,49 @@ def test_same_words_different_anchors_are_identical():
 def test_a_missing_twin_is_still_found():
     source = [_src(A1, "2026-10-25T01:44:41Z"), _src(A2, "2026-10-25T01:44:38Z")]
     assert differences(source, [_tgt(A1)], lambda fid: None) == ["comment thread missing or ambiguous"]
+
+
+def test_an_action_only_reply_with_drive_trimmed_space_is_not_a_difference():
+    """Live, info@s. (2026-11-03): 6 action-only replies were refused as 'differs; preserve' because
+    the engine wrote '[Author, date] ' and Drive kept '[Author, date]'. Nothing had changed."""
+    from migration_comments import _text
+    assert _text("[Author, 2020-11-11] ") == _text("[Author, 2020-11-11]") == "[Author, 2020-11-11]"
+    author = {"displayName": "Author"}
+    src_reply = {"id": "r1", "content": "", "action": "RESOLVE", "createdTime": "2020-11-11T09:00:00Z", "author": author}
+    src = {"content": "[Finance, 2023-01-13] x", "anchor": A1, "replies": [src_reply]}
+    tgt = {"content": "[Finance, 2023-01-13] x", "anchor": A1,
+           "replies": [{"id": "t1", "content": "[Author, 2020-11-11]", "action": "RESOLVE"}]}
+    assert differences([src], [tgt], lambda fid: None) == []
+
+
+def test_a_real_reply_edit_on_the_target_is_still_a_difference():
+    author = {"displayName": "Author"}
+    src_reply = {"id": "r1", "content": "please check", "createdTime": "2020-11-11T09:00:00Z", "author": author}
+    src = {"content": "[Finance, 2023-01-13] x", "anchor": A1, "replies": [src_reply]}
+    tgt = {"content": "[Finance, 2023-01-13] x", "anchor": A1,
+           "replies": [{"id": "t1", "content": "[Author, 2020-11-11] please check, edited by a person"}]}
+    assert differences([src], [tgt], lambda fid: None) == ["comment replies differ"]
+
+
+def test_reconcile_does_not_refuse_an_action_only_reply_already_copied(db, settings, monkeypatch):
+    """The live path: reconcile -> deliver refused the reply with 'differs; preserve'."""
+    from types import SimpleNamespace
+    import migration_comments as MC
+    from tests.conftest import SRC_USER, TGT_USER
+    settings.source_domain = "s.example"
+    db.record_mapping(SRC_USER, "src-file", "tgt-file", "file")
+    author = {"displayName": "Author"}
+    src_reply = {"id": "r1", "content": "", "action": "RESOLVE", "createdTime": "2020-11-11T09:00:00Z", "author": author}
+    src_thread = {"id": "c1", "content": "x", "anchor": A1, "replies": [src_reply],
+                  "author": {"displayName": "Finance"}, "createdTime": "2023-01-13T10:00:00Z"}
+    tgt_thread = {"id": "tc1", "content": "[Finance, 2023-01-13] x", "anchor": A1,
+                  "replies": [{"id": "tr1", "content": "[Author, 2020-11-11]", "action": "RESOLVE"}]}
+    db.record_mapping(SRC_USER, "src-file::c1", "tc1", "comment")
+    db.record_mapping(SRC_USER, "src-file::c1::r1", "tr1", "comment_reply")
+    answers = iter([[src_thread], [tgt_thread]])
+    monkeypatch.setattr(MC, "list_threads", lambda svc, fid, execute=None: next(answers))
+    migrator = SimpleNamespace(db=db, settings=settings, source_user=SRC_USER, target_user=TGT_USER,
+                               src=None, tgt=None, _retry=lambda fn, **k: fn(), _tgt_write_limiter=None,
+                               _project_limiter=None)
+    migrator.target_user = TGT_USER
+    assert MC.reconcile(migrator, "src-file", "tgt-file") == 0

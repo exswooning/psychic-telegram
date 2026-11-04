@@ -404,6 +404,13 @@ RUN_KINDS = [
      "second file found the first file's mapping.",
      "Comment mappings are keyed by file (migration_comments.reconcile); the next run copies "
      "the second file's comment.", True),
+    ("run.comment_differs", ("comment",),
+     lambda t: "Existing target comment/reply differs" in t,
+     "A copied comment reply is reported as different, but nothing differs",
+     "Drive drops the trailing space the engine writes after an action-only reply's "
+     "\"[Author, date]\" prefix, so an exact comparison refused the reply as changed.",
+     "Comparison ignores trailing whitespace (migration_comments._text), fixed 2026-11-04; the "
+     "next run stops reporting it. Real text edits on the target are still preserved, not overwritten.", True),
     ("run.held_for_drive", None,
      lambda t: "held: this user's Drive did not migrate" in t,
      "Mail or calendar held back for Drive",
