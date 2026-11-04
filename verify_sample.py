@@ -676,9 +676,15 @@ class Verifier:
             raise error
         return self._drive_meta(svc, fid)
 
-    def _drive_path(self, svc, fid, cache: dict) -> str:
+    def _drive_path(self, svc, fid, cache: dict, budget_sec: float | None = None) -> str:
+        # The walk is bounded per file: one file whose parents keep failing held the stray
+        # check for 40+ minutes (info@, 3 Nov 2026). Running out of budget is an error for that
+        # file, never a guessed path.
+        deadline = time.monotonic() + budget_sec if budget_sec else None
         parts, cur, guard = [], fid, 0
         while cur and guard < 200:
+            if deadline and time.monotonic() > deadline:
+                raise TimeoutError(f"path of {fid} not read within {budget_sec:.0f}s")
             guard += 1
             if cur not in cache:
                 cache[cur] = self._drive_meta(svc, cur)
@@ -948,7 +954,12 @@ class Verifier:
                     res.setdefault("repairBackups", []).append({"target": f["id"], "name": f.get("name")})
                     res["notes"].append("Repair backup kept on purpose so a repair can be undone: " + f["id"])
                     continue
-                key = (self._drive_path(tgt, f["id"], tc), f.get("name"), f.get("md5Checksum"))
+                try:
+                    path = self._drive_path(tgt, f["id"], tc, budget_sec=float(os.getenv("VERIFY_PATH_BUDGET_SEC", "120")))
+                except TimeoutError as exc:
+                    res["errors"].append(f"target file {f['id']} not checked as a stray: {exc}")
+                    continue
+                key = (path, f.get("name"), f.get("md5Checksum"))
                 if key in target_keys:
                     res["duplicates"].append({"target": f["id"], "name": f.get("name"), "path": key[0],
                                               "duplicateOf": target_keys[key]})
