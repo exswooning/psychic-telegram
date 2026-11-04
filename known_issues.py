@@ -196,9 +196,8 @@ ISSUES = [
      "In split mode the engine writes the link mail with its links rewritten, and Google's "
      "import, run after, can bring the same message again with the original links (19 on "
      "finance@s., 2026-11-01). The import's copy still points at the source.",
-     "Automatic (gmail_duplicates): where exactly one copy is mapped in the ledger, the other "
-     "copies go to Trash (30 days, recorded per id); a group with none or several mapped is "
-     "left and listed.", True),
+     "Kept on purpose: nothing is trashed. Each copy stays where it is and is listed, so the "
+     "operator can decide which to remove.", False),
     ("gmail.rate_limited", "gmail", lambda t: "HTTP 429" in t or "rateLimitExceeded" in t,
      "Gmail refused a read during the check",
      "Gmail's per-user limit: a check reading the same mailbox as a running migration or "

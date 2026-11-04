@@ -95,7 +95,7 @@ def enabled(db):
         return False
 
 
-REPAIR_CAPABILITY_VERSION = 10   # 10: gmail duplicates (gmail_duplicates.py) can be trashed; users already marked handled are retried
+REPAIR_CAPABILITY_VERSION = 9
 
 
 def _newly_supported(rows):
@@ -297,12 +297,6 @@ def scoped_repair(auth, db, settings, user, per):
            for i in (per.get("gmail") or {}).get("notCopied", [])):
         out["missing_mail"] = repair.repair_verified_missing_mail(
             auth, db, st, {"users": {user: per}}, apply=True)
-    if "gmail" in per:
-        import gmail_duplicates
-        try:
-            out["gmail_duplicates"] = gmail_duplicates.trash_duplicates(auth, db, st, user, apply=True)
-        except Exception as exc:      # noqa: BLE001 - one repair failing must not stop the rest
-            out["gmail_duplicates"] = {"errors": [str(exc)]}
     out["gmail_labels"] = repair.repair_verified_gmail_labels(
         auth, db, st, {"users": {user: per}}, apply=True)
     if any(i.get("type") == "draft" and i.get("status") == "UNMAPPED_SOURCE"
@@ -328,7 +322,7 @@ def affected_services(out):
     """Conservative invalidation: recheck writes, attempted repairs and failed reads only."""
     affected=set((out.get("read_retry") or {}).get("services",[]))
     for service, keys in {
-        "gmail":("gmail_labels","missing_mail","missing_drafts","gmail_duplicates"), "drive":("drive_findings","native_links","drive_retry","modified_times","external_access"),
+        "gmail":("gmail_labels","missing_mail","missing_drafts"), "drive":("drive_findings","native_links","drive_retry","modified_times","external_access"),
         "calendar":("calendar_scope",), "contacts":("contacts",), "tasks":("tasks",), "directory":("directory",)}.items():
         for key in keys:
             row=out.get(key) or {}
