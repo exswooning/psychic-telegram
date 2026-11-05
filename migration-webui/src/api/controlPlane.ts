@@ -2008,6 +2008,28 @@ export const runOneToOne = (reason: string, opts: { accountId?: number; users?: 
                            ...(opts.repair === false ? { repair: false } : {}) }),
   })
 
+// Error-to-fix workflow: separate from tenant mutation controls.
+export interface ErrorCase {
+  id:number; account_id:number; category:string; service:string; reason:string; title:string; state:string
+  occurrences:number; first_seen:string; last_seen:string; version:string; next_action:string
+  affected_users:number; affected_items:number; candidate_commit:string|null
+}
+export interface ErrorCaseDetail extends ErrorCase {
+  events:Record<string,unknown>[]; affected:Record<string,unknown>[]
+  history:{state:string;detail:string;at:string}[]; attempts:Record<string,unknown>[]
+}
+export interface ErrorResolutionView {
+  cases:ErrorCase[]; policy:{enabled:number;daily_limit:number}
+  runners:{id:number;label:string;enabled:number;last_seen:string|null;detail:string}[]
+  canManage:boolean;canManageGlobal:boolean;collection:string;resolutionRule:string
+}
+export const fetchErrorResolution=()=>cpFetch<ErrorResolutionView>(`/api/v2/error-resolution${chosenMigration()?`?account_id=${chosenMigration()}`:''}`)
+export const fetchErrorCase=(id:number)=>cpFetch<ErrorCaseDetail>(`/api/v2/error-resolution/cases/${id}`)
+export const errorCaseAction=(id:number,action:string,reason:string)=>cpFetch<ActionResult>(`/api/v2/error-resolution/cases/${id}/action`,{method:'POST',body:JSON.stringify({action,reason})})
+export const configureErrorResolution=(enabled:boolean,daily_limit:number,reason:string)=>cpFetch<ActionResult>('/api/v2/error-resolution/policy',{method:'POST',body:JSON.stringify({enabled,daily_limit,reason})})
+export const connectErrorRunner=(reason:string,all_accounts:boolean)=>cpFetch<{runnerId:number;apiUrl:string;token:string}>('/api/v2/error-resolution/runners',{method:'POST',body:JSON.stringify({reason,all_accounts,account_id:chosenMigration()||null})})
+export const revokeErrorRunner=(id:number,reason:string)=>cpFetch<ActionResult>(`/api/v2/error-resolution/runners/${id}/revoke`,{method:'POST',body:JSON.stringify({reason})})
+
 /** Whether this account's findings are repaired on their own when it is idle. */
 export const fetchRepairPolicy = (accountId?: number) =>
   cpFetch<{ accountId: number | null; enabled: boolean }>(`/api/v2/repair-policy${accountId ? `?account_id=${accountId}` : ''}`)

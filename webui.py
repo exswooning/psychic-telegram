@@ -877,6 +877,15 @@ class Job:
                 # same contract the in-memory list had. The previous run's
                 # transcript is already preserved by _save_result().
                 self._log_fh = open(self.log_path, "w", encoding="utf-8")
+                try:
+                    with open(os.path.join(HERE, 'DEPLOYED_COMMIT'), encoding='utf-8') as version_file:
+                        version = version_file.read().strip()
+                except OSError:
+                    version = 'unknown'
+                self._log_fh.write(json.dumps({'bitport_event': 1, 'kind': 'run_started',
+                    'version': version, 'run_id': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+                    'operation': name})+'\n')
+                self._log_fh.flush()
             except OSError as exc:
                 return False, f"could not open job log {self.log_path}: {exc}"
             try:
@@ -942,6 +951,8 @@ class Job:
             chunk = chunk[:keep + 1]
         with self.lock:
             for line in chunk.splitlines():
+                if line.startswith('{"bitport_event": 1,'):
+                    continue  # machine telemetry remains on disk; keep the readable transcript clear
                 # FutureWarnings from the google libraries drown everything else.
                 if "FutureWarning" in line or "warnings.warn" in line:
                     continue

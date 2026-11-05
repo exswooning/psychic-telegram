@@ -1768,6 +1768,12 @@ def _child_output(job_name: str, account_id: int | None):
     # (live, a migrate card's log opened on the previous day's run).
     fh.write(f"=== run started {_dt.datetime.now(_dt.timezone.utc):%Y-%m-%dT%H:%M:%SZ}: "
              f"{job_name} ===\n".encode())
+    try:
+        version = open(os.path.join(HERE, 'DEPLOYED_COMMIT'), encoding='utf-8').read().strip()
+    except OSError:
+        version = 'unknown'
+    fh.write((json.dumps({'bitport_event': 1, 'kind': 'run_started', 'version': version,
+        'run_id': _dt.datetime.now(_dt.timezone.utc).isoformat(), 'operation': job_name})+'\n').encode())
     return fh
 
 
@@ -7022,6 +7028,7 @@ async def _watch_runs() -> None:
         try:
             await asyncio.sleep(WATCH_POLL_SEC)
             await _off_loop(watcher.tick)
+            await _off_loop(error_resolution_api.dispatch_rechecks, sys.modules[__name__])
         except asyncio.CancelledError:
             raise
         except Exception as exc:      # noqa: BLE001 - the watcher must outlive any single bad look
@@ -9429,6 +9436,10 @@ async def heartbeat(hb: Heartbeat, _: None = Depends(node_auth)):
                     **hb.model_dump(exclude={"node_id"}))
     await HUB.broadcast(_envelope("NODE_HEARTBEAT", hb.model_dump()))
     return {"ok": True}
+
+
+import error_resolution_api
+error_resolution_api.register(app, sys.modules[__name__])
 
 
 def main(argv: list[str] | None = None) -> int:

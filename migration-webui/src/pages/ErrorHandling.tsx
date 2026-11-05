@@ -21,6 +21,7 @@ import {
 import { Refresh as RefreshIcon } from '@mui/icons-material'
 import { fetchFailures, FailureRow } from '@/api/controlPlane'
 import ForensicModal from '@/components/ForensicModal'
+import { Link as RouterLink } from 'react-router-dom'
 
 /** Rows drawn at once: a failed run can leave thousands, and drawing them all made the page heavy. */
 const PAGE = 200
@@ -77,6 +78,7 @@ const ErrorHandling: React.FC = () => {
     <Box>
       <Stack direction="row" alignItems="center" sx={{ mb: 0.5 }}>
         <Typography variant="h4" sx={{ fontWeight: 700, flexGrow: 1 }}>Failures</Typography>
+        <Button component={RouterLink} to="/error-resolution">Error resolution</Button>
         <Tooltip title="Re-check">
           <span>
             <IconButton size="small" onClick={refresh} disabled={loading} aria-label="Re-check">

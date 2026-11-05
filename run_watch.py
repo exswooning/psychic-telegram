@@ -521,6 +521,18 @@ class Watcher:
         self._offset: dict = {}          # (account, job) -> bytes of log already scanned
         self._swept_at = 0.0             # when sweep_cleared last ran
         self._gone: dict = {}            # run key -> when it was first seen gone with no exit code
+        self._error_maintenance_at = 0.0
+
+    def _collect_errors(self, account_id, job_name):
+        try:
+            import error_resolution
+            path = self.log_path_for(account_id, job_name)
+            if path and os.path.isfile(path):
+                stamp = os.path.join(HERE, 'DEPLOYED_COMMIT')
+                version = open(stamp, encoding='utf-8').read().strip() if os.path.isfile(stamp) else 'unknown'
+                error_resolution.ingest_file(path, account_id, job_name, version)
+        except Exception as exc:
+            log.warning('structured error collection failed; legacy watcher continues: %s', exc)
 
     # -- who is running -------------------------------------------------
     def _observe(self) -> None:
@@ -705,6 +717,7 @@ class Watcher:
         watched = 0
         for (aid, name, _pid) in list(self._live):
             try:
+                self._collect_errors(aid, name)
                 if name in ("migrate", "delta"):
                     self._watch_migration(aid, name); watched += 1
                 elif name.startswith("seed"):
@@ -714,6 +727,7 @@ class Watcher:
         finished = unhandled_finished()
         for ev in finished:
             try:
+                self._collect_errors(ev['account_id'], ev['job_name'])
                 self._handle_finished(ev)
             except Exception as exc:      # noqa: BLE001
                 log.warning("handling finished run %s failed: %s", ev.get("id"), exc)
@@ -721,5 +735,16 @@ class Watcher:
         if self.now() - self._swept_at >= SWEEP_SEC:
             self._swept_at = self.now()
             closed = sweep_cleared(self.ledger_path_for)
+        try:
+            import error_resolution
+            stamp = os.path.join(HERE, 'DEPLOYED_COMMIT')
+            version = open(stamp, encoding='utf-8').read().strip() if os.path.isfile(stamp) else 'unknown'
+            error_resolution.drain_sources(version)
+            error_resolution.sweep_verified(self.ledger_path_for)
+            if self.now()-self._error_maintenance_at >= 3600:
+                error_resolution.prune_events()
+                self._error_maintenance_at=self.now()
+        except Exception as exc:
+            log.warning('error resolution observer failed: %s', exc)
         return {"live": len(self._live), "watched": watched, "finished": len(finished),
                 "closed": len(closed)}
