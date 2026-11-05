@@ -502,6 +502,7 @@ class Verifier:
         # minutes at 0/1 (info@, 4 Nov 2026), retrying a read that timed out every time.
         self._file_deadline: float | None = None
         self._native_lock = threading.Lock()
+        self._gmail_budgets = {}
         self.src_user, self.tgt_user = source_user, target_user
         self._retry = retry
         self.evidence: list[dict] = []
@@ -550,8 +551,9 @@ class Verifier:
             if self._file_deadline and time.monotonic() > self._file_deadline:
                 raise TimeoutError("this file's retry budget ran out; recorded as unverified")
             attempt += 1
+            count = request_count() if callable(request_count) else request_count
             if self._on_api_attempt:
-                self._on_api_attempt("start", operation=operation, request_count=request_count,
+                self._on_api_attempt("start", operation=operation, request_count=count,
                                      attempt=attempt)
             self._stats.update(phase="request", retryAttempt=attempt)
             try:
@@ -559,13 +561,13 @@ class Verifier:
             except Exception as exc:
                 self._stats.update(phase="retry-wait", lastApiStatus=self._vr.classify(exc).status or type(exc).__name__)
                 if self._on_api_attempt:
-                    self._on_api_attempt("finish", operation=operation, request_count=request_count,
+                    self._on_api_attempt("finish", operation=operation, request_count=count,
                                          attempt=attempt, error=f"{type(exc).__name__}: {str(exc)[:180]}")
                 raise
             else:
                 self._stats.update(phase="compare", lastApiStatus=200)
                 if self._on_api_attempt:
-                    self._on_api_attempt("finish", operation=operation, request_count=request_count,
+                    self._on_api_attempt("finish", operation=operation, request_count=count,
                                          attempt=attempt)
                 return result
         return self._retry(counted)()
@@ -1225,6 +1227,14 @@ class Verifier:
         _native_project_limiter(kind, op).acquire()
 
     # -- Gmail ------------------------------------------------------------
+    def _gmail_budget(self, side):
+        import verify_gmail_quota
+        with self._native_lock:
+            if side not in self._gmail_budgets:
+                user = self.src_user if side == "source" else self.tgt_user
+                self._gmail_budgets[side] = verify_gmail_quota.for_mailbox(self.auth, self.settings, side, user)
+            return self._gmail_budgets[side]
+
     def _label_names(self, svc) -> dict:
         r = self._x(lambda: svc.users().labels().list(userId="me").execute())
         return {l["id"]: l["name"] for l in r.get("labels", [])}
@@ -1254,6 +1264,22 @@ class Verifier:
         return b"", self._x(lambda: svc.users().messages().get(
             userId="me", id=mid, format="metadata", metadataHeaders=list(RECEIPT_HEADERS)).execute())
 
+    def _gmail_single(self, svc, mid, fmt, budget, cost):
+        def read():
+            budget.acquire(cost, _stop_check)
+            try:
+                message = svc.users().messages().get(userId="me", id=mid, format=fmt,
+                    **({"metadataHeaders": list(RECEIPT_HEADERS)} if fmt != "raw" else {})).execute()
+                if fmt != "raw":
+                    return b"", message
+                raw = message.get("raw", "")
+                raw = raw if isinstance(raw, str) else raw.decode()
+                return base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4)), message
+            except Exception as exc:
+                budget.penalise(exc)
+                raise
+        return self._x(read)
+
     def _raw_many(self, svc, message_ids: list[str], side: str, progress_offset: int = 0,
                   progress_total: int | None = None, fmt: str = "raw") -> tuple[dict[int, tuple[bytes, dict]], dict[int, Exception]]:
         """Read a bounded batch of raw messages, falling back for test/service adapters.
@@ -1268,14 +1294,16 @@ class Verifier:
         values: dict[int, tuple[bytes, dict]] = {}
         errors: dict[int, Exception] = {}
         progress_total = progress_total if progress_total is not None else len(message_ids)
-        one = self._raw if fmt == "raw" else self._head
+        from verify_gmail_quota import read_cost, is_quota_error
+        budget = self._gmail_budget(side)
+        cost = read_cost(fmt)
         if not hasattr(svc, "new_batch_http_request"):
             for index, message_id in enumerate(message_ids):
                 operation = f"Gmail {side} {fmt} message reads"
                 self._report_progress(operation, progress_offset + index, progress_total,
                                       f"message {message_id}")
                 try:
-                    values[index] = one(svc, message_id)
+                    values[index] = self._gmail_single(svc, message_id, fmt, budget, cost)
                 except Exception as exc:  # noqa: BLE001 - retain per-message failure
                     errors[index] = exc
             return values, errors
@@ -1316,29 +1344,42 @@ class Verifier:
                     except Exception as exc:  # noqa: BLE001 - malformed one-item response
                         errors[index] = exc
 
-            batch = svc.new_batch_http_request(callback=receive)
-            for index, message_id in enumerate(chunk):
-                request = (svc.users().messages().get(userId="me", id=message_id, format="raw") if fmt == "raw"
-                           else svc.users().messages().get(userId="me", id=message_id, format="metadata",
-                                                           metadataHeaders=list(RECEIPT_HEADERS)))
-                batch.add(request, request_id=str(offset + index))
             self._report_progress(operation, progress_offset + offset, progress_total, item)
 
             def execute_batch():
-                # A multipart batch can return HTTP 200 while individual reads contain
-                # quota/5xx errors. Surface one transient item error to the normal retry
-                # policy; successful siblings are safe to repeat because these are reads.
-                for index in range(offset, offset + len(chunk)):
-                    values.pop(index, None)
+                # Keep successes and permanent errors. Rebuild only rejected/unknown parts;
+                # outer HTTP failure can happen after some successful callbacks too.
+                pending = [i for i in range(offset, offset + len(chunk)) if i not in values
+                           and (i not in errors or retryable_part_error(errors[i]))]
+                if not pending:
+                    return
+                budget.acquire(cost * len(pending), _stop_check)
+                batch = svc.new_batch_http_request(callback=receive)
+                for index in pending:
                     errors.pop(index, None)
-                batch.execute()
-                transient = next((errors[i] for i in range(offset, offset + len(chunk))
+                    request = (svc.users().messages().get(userId="me", id=message_ids[index], format="raw") if fmt == "raw"
+                               else svc.users().messages().get(userId="me", id=message_ids[index], format="metadata",
+                                                               metadataHeaders=list(RECEIPT_HEADERS)))
+                    batch.add(request, request_id=str(index))
+                try:
+                    batch.execute()
+                except Exception as exc:
+                    budget.penalise(exc)
+                    raise
+                transient = next((errors[i] for i in pending
                                   if i in errors and retryable_part_error(errors[i])), None)
                 if transient is not None:
+                    quota_error = next((errors[i] for i in pending
+                                        if i in errors and is_quota_error(errors[i])), None)
+                    if quota_error is not None:
+                        budget.penalise(quota_error)
                     raise transient
+                self._report_progress(operation, progress_offset + offset + len(chunk), progress_total, item)
 
             try:
-                self._x(execute_batch, operation=operation, request_count=len(chunk))
+                self._x(execute_batch, operation=operation, request_count=lambda: sum(
+                    i not in values and (i not in errors or retryable_part_error(errors[i]))
+                    for i in range(offset, offset + len(chunk))))
             except Exception as exc:  # noqa: BLE001 - a rejected batch must finish as item errors
                 for index in range(offset, offset + len(chunk)):
                     if index not in values:
@@ -1350,7 +1391,8 @@ class Verifier:
                     from verification_reads import status_of
                     if status_of(errors[index]) == 400:
                         try:
-                            values[index] = one(svc, message_ids[index])
+                            # Single-message fallback still passes through quota pacing.
+                            values[index] = self._gmail_single(svc, message_ids[index], fmt, budget, cost)
                             errors.pop(index, None)
                         except Exception as exc:
                             errors[index] = exc

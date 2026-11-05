@@ -6,6 +6,13 @@ import pytest
 import verify_sample as V
 
 
+@pytest.fixture(autouse=True)
+def no_wall_clock_pacing(monkeypatch):
+    # Quota scheduling itself is exercised with a simulated clock in its own tests.
+    monkeypatch.setattr(V.Verifier, '_gmail_budget', lambda *a: SimpleNamespace(
+        acquire=lambda *a: None, penalise=lambda *a: None))
+
+
 class Mail:
     def __init__(self, errors=None):
         self.errors = errors or {}
