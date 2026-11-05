@@ -497,6 +497,10 @@ class Verifier:
                  limit: int | None = None, on_api_attempt=None, on_progress=None):
         self.auth, self.db, self.settings = auth, db, settings
         self._native_mine: dict = {}      # this user's own per-minute Docs/Sheets/Slides buckets
+        # Set only while one unverified file is being compared again (_retry_unverified): past it,
+        # no further attempt starts for that file. Live, one Google Doc held the retry pass for 15+
+        # minutes at 0/1 (info@, 4 Nov 2026), retrying a read that timed out every time.
+        self._file_deadline: float | None = None
         self._native_lock = threading.Lock()
         self.src_user, self.tgt_user = source_user, target_user
         self._retry = retry
@@ -543,6 +547,8 @@ class Verifier:
         def counted():
             nonlocal attempt
             _stop_check()
+            if self._file_deadline and time.monotonic() > self._file_deadline:
+                raise TimeoutError("this file's retry budget ran out; recorded as unverified")
             attempt += 1
             if self._on_api_attempt:
                 self._on_api_attempt("start", operation=operation, request_count=request_count,
@@ -745,7 +751,11 @@ class Verifier:
                 ev2: dict = {}
                 self._publish_stats(currentDocument=sid, currentMime=ctx["sm"].get("mimeType"),
                                     currentSince=time.time(), phase="compare", retryAttempt=n)
-                content = self._content(src, tgt, sid, ctx["tid"], ctx["sm"], ctx["tm"], ev2)
+                self._file_deadline = time.monotonic() + float(os.getenv("VERIFY_RETRY_FILE_BUDGET_SEC", "120"))
+                try:
+                    content = self._content(src, tgt, sid, ctx["tid"], ctx["sm"], ctx["tm"], ev2)
+                finally:
+                    self._file_deadline = None
                 failure = ev2.get("unverified")
                 if failure is not None:
                     ctx["row"]["attempts"] = self._unverified.record(self.src_user, "drive", sid, ctx["tid"],
