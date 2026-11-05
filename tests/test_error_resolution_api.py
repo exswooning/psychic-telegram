@@ -142,3 +142,89 @@ def test_revoke_prevents_future_claims_and_global_policy_requires_superadmin(cp)
         ).status_code
         == 401
     )
+
+
+def test_qualified_release_needs_exact_install_and_fresh_full_recheck(
+    cp, monkeypatch, tmp_path
+):
+    import os
+    import api_server as api
+    import control_plane_db as db
+
+    mine = _signup(cp, "qualification@example.com")
+    cid = case(mine)
+    _, token = E.create_runner(mine, "qualified fixture worker")
+    headers = {"Authorization": "Bearer " + token}
+    monkeypatch.setattr(E, "globally_idle", lambda root: True)
+    claim = cp.post(
+        "/api/v2/error-resolution/worker/claim", json={}, headers=headers
+    ).json()["attempt"]
+    endpoint = f"/api/v2/error-resolution/worker/{claim['attemptId']}/report"
+    candidate = "b" * 40
+
+    def report(state):
+        return cp.post(
+            endpoint,
+            headers=headers,
+            json={
+                "lease": claim["lease"],
+                "state": state,
+                "candidate_commit": candidate,
+                "evidence": {"testsPassed": True, "qualified": True},
+            },
+        )
+
+    assert report("TESTING").status_code == 200
+    assert report("WAITING_DEPLOYMENT").status_code == 200
+    # Exercise the actual HTTP report gate against a TEMPORARY installation.
+    monkeypatch.setattr(E, "__file__", str(tmp_path / "error_resolution.py"))
+    stamp = tmp_path / "DEPLOYED_COMMIT"
+    stamp.write_text(candidate[:7])
+    assert report("DEPLOYED").status_code == 409
+    stamp.write_text("c" * 40)
+    assert report("DEPLOYED").status_code == 409
+    stamp.write_text(candidate)
+    assert report("DEPLOYED").status_code == 200
+    assert report("RECHECKING").status_code == 200
+    assert E.case_detail(cid)["state"] == "RECHECKING"
+    commands = []
+    monkeypatch.setattr(
+        api,
+        "_run_admitted",
+        lambda argv, *a: (commands.append(argv) or True, "fixture admitted"),
+    )
+    from error_resolution_api import dispatch_rechecks
+
+    dispatch_rechecks(api)
+    assert len(commands) == 1
+    assert "--limit" not in commands[0] and "--repair-after-user" not in commands[0]
+    assert commands[0][-2:] == ["--user", "alice@source.example"]
+    assert not E.sweep_verified(lambda aid: os.environ["MIGRATION_DB"])
+
+    def verified(sampled):
+        with db.rw() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO user_verification VALUES(?,?,?,?,?,?,?,?)",
+                (
+                    "alice@source.example",
+                    "gmail",
+                    E.utc(),
+                    "IDENTICAL",
+                    10,
+                    10,
+                    100 if sampled else None,
+                    json.dumps(
+                        {
+                            "scopeVersion": 2,
+                            "coverageComplete": True,
+                            "sampled": sampled,
+                        }
+                    ),
+                ),
+            )
+
+    verified(True)
+    assert not E.sweep_verified(lambda aid: os.environ["MIGRATION_DB"])
+    verified(False)
+    assert E.sweep_verified(lambda aid: os.environ["MIGRATION_DB"]) == [cid]
+    assert E.case_detail(cid)["state"] == "RESOLVED"

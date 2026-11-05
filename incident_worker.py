@@ -154,7 +154,11 @@ def check_prefix(tree, repo, home):
         + ') (literal "/dev/null"))\n'
     )
     profile += "(allow signal (target self))\n"
-    file = home / "checks.sb"
+    # Generated tests may write in home/tree. The launcher profile must be a
+    # sibling outside both or a test could loosen the next process's sandbox.
+    file = home.with_name("checks.sb")
+    if any(file.resolve().is_relative_to(p.resolve()) for p in (tree, home)):
+        raise ValueError("Isolation profile must be outside test-writable paths")
     file.write_text(profile)
     return ["sandbox-exec", "-f", str(file)]
 
@@ -353,6 +357,7 @@ def process_attempt(client, attempt, repo, root, config):
                 "Coding agent did not finish successfully; inspect its private local transcript"
             )
         names, tests = validate_changes(tree, base)
+        snapshot = {name: (tree / name).read_bytes() for name in names}
         report(
             "TESTING",
             "Candidate prepared; checking regression against original code and patched source.",
@@ -431,6 +436,15 @@ def process_attempt(client, attempt, repo, root, config):
         )
         if compile_rc:
             raise RuntimeError("Candidate syntax checks failed")
+        checked_names, _ = validate_changes(tree, base)
+        if checked_names != names or any(
+            (tree / name).read_bytes() != content for name, content in snapshot.items()
+        ):
+            raise RuntimeError(
+                "Tests changed the candidate; no commit or push is allowed"
+            )
+        if stop.is_set():
+            raise RuntimeError("Worker yielded before publishing the candidate")
         subprocess.run(["git", "add", "--", *names], cwd=tree, check=True)
         subprocess.run(
             [

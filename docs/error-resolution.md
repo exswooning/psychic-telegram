@@ -70,6 +70,9 @@ Policy and revocation are available in the UI. No model runs for each routine lo
    suite must then pass under OS isolation, with syntax checks. On macOS the built-in
    Seatbelt launcher allows source/venv/temp reads and temporary writes, with no
    network or tenant credentials. Unsupported OS isolation leaves the attempt held.
+   The isolation profile is outside every test-writable directory. After tests,
+   the trusted runner revalidates the complete changed-file set and every candidate
+   byte; a test that changes the candidate cannot cause a commit or push.
 4. The tested candidate is committed locally and pushed to a separate
    `bitport/incident-<case>-<attempt>` branch. The primary source branch is unchanged.
 5. **Qualification and deployment are held by default.** Optional trusted local
@@ -90,6 +93,18 @@ Policy and revocation are available in the UI. No model runs for each routine lo
 
 This first implementation uses Codex. Existing copyable incident briefs remain
 usable by Claude; an unattended Claude execution adapter is not included.
+
+## Qualification
+
+`BITPORT_OS_QUALIFICATION=1 python -m pytest tests/test_worker_qualification.py`
+exercises real Git, isolated pytest, failing-before/passing-after regressions,
+candidate immutability, profile/host-file/network denial, successful release-hook
+ordering, qualification refusal and deployment refusal. It uses a controlled coding
+CLI and a temporary fake installation; it does not qualify a Google migration or
+grant blanket approval to future generated fixes. API regressions separately cover
+the exact installed-commit gate, admitted full read-only rechecks and closure only
+after fresh complete verification. Candidate-specific sandbox qualification and
+normal deployment gates remain required for each real generated release.
 
 ## Limits
 
