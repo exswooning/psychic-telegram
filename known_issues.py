@@ -411,6 +411,12 @@ RUN_KINDS = [
      "\"[Author, date]\" prefix, so an exact comparison refused the reply as changed.",
      "Comparison ignores trailing whitespace (migration_comments._text), fixed 2026-11-04; the "
      "next run stops reporting it. Real text edits on the target are still preserved, not overwritten.", True),
+    ("drive.parent_folder", "drive", lambda t: "mapped parent folder IDs differ" in t,
+     "A file sits in a duplicate of its folder",
+     "The target already had two folders with the same name and creation time (16 Dec 2025, before "
+     "this migration). The ledger maps the first; some files sit in the second.",
+     "Automatic (repair_parent_folders): a file in a same-name duplicate is moved to the mapped folder "
+     "and read back; a file in a folder with another name is left and listed.", True),
     ("run.held_for_drive", None,
      lambda t: "held: this user's Drive did not migrate" in t,
      "Mail or calendar held back for Drive",

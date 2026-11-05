@@ -393,6 +393,60 @@ def _group_members(svc, address):
         seen.add(token)
 
 
+def repair_parent_folders(auth, db, settings, user, result, apply=False):
+    """Move a file into the target folder its source folder maps to, when it sits in a DIFFERENT
+    folder with the same name (a duplicate the target already had). Live (account 3, 5 Nov 2026):
+    35 files sat in the second of two identical "for website" folders, created 16 Dec 2025 before
+    this migration, while the ledger mapped the first. Only a same-name duplicate is moved; a file
+    whose folder has another name is left and reported. Nothing is deleted; the move is verified
+    by reading the file back, and recorded per file."""
+    out = {"candidates": 0, "changed": 0, "verified": 0, "errors": [], "left": []}
+    target = _target(db, settings, user)
+    src, tgt = auth.source_drive(user), auth.target_drive(target)
+    for item in result.get("differences", []):
+        if not any(d == "mapped parent folder IDs differ" for d in item.get("diffs", [])):
+            continue
+        sid, tid = item.get("source"), item.get("target")
+        if not sid or not tid or sid == tid:
+            continue
+        out["candidates"] += 1
+        try:
+            sf = src.files().get(fileId=sid, supportsAllDrives=True, fields="parents").execute()
+            tf = tgt.files().get(fileId=tid, supportsAllDrives=True,
+                                 fields="id,name,parents,ownedByMe,trashed,mimeType").execute()
+            parents = sf.get("parents") or []
+            if len(parents) != 1 or tf.get("trashed"):
+                out["left"].append({"target": tid, "why": "source has no single parent, or the copy is trashed"})
+                continue
+            expected = db.get_target_id(user, parents[0], "folder") or db.target_for_source_id(parents[0])
+            current = tf.get("parents") or []
+            if not expected or current == [expected]:
+                out["verified"] += 1
+                continue
+            want = tgt.files().get(fileId=expected, supportsAllDrives=True, fields="id,name,trashed").execute()
+            here = [tgt.files().get(fileId=p, supportsAllDrives=True, fields="id,name").execute() for p in current]
+            if want.get("trashed") or not here or any(h.get("name") != want.get("name") for h in here):
+                out["left"].append({"target": tid, "name": tf.get("name"),
+                                    "why": "not a same-name duplicate of the mapped folder"})
+                record(db, user, "drive-parent", tid, "NEEDS_ATTENTION",
+                       {"expected": expected, "current": current})
+                continue
+            if not apply or settings.dry_run:
+                continue
+            tgt.files().update(fileId=tid, addParents=expected, removeParents=",".join(current),
+                               supportsAllDrives=True, fields="id").execute()
+            after = tgt.files().get(fileId=tid, supportsAllDrives=True, fields="parents").execute()
+            if (after.get("parents") or []) != [expected]:
+                raise RuntimeError("move did not leave the file in its mapped folder")
+            record(db, user, "drive-parent", tid, "MOVED",
+                   {"from": current, "to": expected, "name": tf.get("name")})
+            out["changed"] += 1
+            out["verified"] += 1
+        except Exception as exc:      # noqa: BLE001 - one file failing must not stop the rest
+            out["errors"].append(f"{tid}: {error_detail(exc)}")
+    return out
+
+
 def repair_drive(auth, db, settings, user, result, apply=False):
     from verify_sample import _stop_check
 
@@ -467,6 +521,7 @@ def repair_drive(auth, db, settings, user, result, apply=False):
                 "NEEDS_ATTENTION",
                 {"target": tid, "error": message},
             )
+    out["parent_folders"] = repair_parent_folders(auth, db, settings, user, result, apply)
     duplicates = quarantine_duplicates(auth, db, settings, user, result, apply)
     out["duplicates"] = duplicates
     out["candidates"] += duplicates["candidates"]
