@@ -1624,15 +1624,27 @@ class Verifier:
             deliberately_skipped = {r[0] for r in self.db.conn.execute(
                 "SELECT item_id FROM audit_log WHERE source_user=? AND item_type='message' AND status='SKIPPED_CHAT'",
                 (self.src_user,))}
+            # Mail without a Drive link is handed to Google's DMS, not missing: the ledger records it
+            # as DEFERRED_TO_DMS. Live (info@/audit@, 5 Nov 2026) 822 of them read as "no mapping".
+            from config import DEFERRED_TO_DMS
+            deferred = {r[0] for r in self.db.conn.execute(
+                "SELECT item_id FROM audit_log WHERE source_user=? AND item_type='message' AND status=?",
+                (self.src_user, DEFERRED_TO_DMS))}
+            owed = 0
             scanned = 0
             for message in self._list_all(src, side="source"):
                 scanned += 1
                 sid = message.get("id")
+                if sid and sid in deferred and sid not in known:
+                    owed += 1
+                    continue
                 if sid and sid not in known and sid not in draft_messages and sid not in deliberately_skipped and ("message", sid) not in existing:
                     res["notCopied"].append({"type": "message", "id": sid,
                         "status": "UNMAPPED_SOURCE", "error": "Live source message has no migration mapping; destination coverage is not established"})
                     existing.add(("message", sid))
             res["notes"].append(f"Source coverage: inventoried {scanned} live message IDs, including spam and trash; checked unmapped messages and drafts")
+            if owed:
+                res["notes"].append(f"{owed} message(s) without a Drive link are owed to Google's DMS, not missing")
             if deliberately_skipped:
                 res["notes"].append(f"{len(deliberately_skipped)} legacy chat message(s) are outside Gmail migration coverage")
         except Exception as exc:
