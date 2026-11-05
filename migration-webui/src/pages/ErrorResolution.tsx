@@ -5,7 +5,7 @@ import ReasonCodeDialog from '@/components/ReasonCodeDialog'
 import { fetchErrorResolution, fetchErrorCase, errorCaseAction, configureErrorResolution, connectErrorRunner, revokeErrorRunner } from '@/api/controlPlane'
 import type { ErrorResolutionView, ErrorCaseDetail } from '@/api/controlPlane'
 
-const labels: Record<string,string> = { QUEUED:'Queued for investigation', FIXING:'Preparing a fix', TESTING:'Testing',
+const labels: Record<string,string> = { QUEUED:'Queued for investigation', QUALIFICATION_QUEUED:'Queued for qualification', FIXING:'Preparing a fix', TESTING:'Testing',
   WAITING_QUALIFICATION:'Qualification needed', WAITING_DEPLOYMENT:'Waiting to deploy', DEPLOYED:'Deployed; needs recheck',
   RECHECKING:'Rechecking', RESOLVED:'Verified resolved', OWNER_ACTION:'Account or owner action', FAILED:'Needs attention',
   RECOVERING:'Recovery being observed', DETECTED:'Detected' }
@@ -35,7 +35,7 @@ export default function ErrorResolution() {
       if(action.kind==='connect') {
         const config=await connectErrorRunner(reason,allAccounts)
         download(`bitport-coding-runner-${config.runnerId}.json`,config)
-        setNotice('Scoped configuration downloaded once. Keep it private (chmod 600). Start incident_worker.py on your source laptop; no Google credentials are needed. Qualification and deployment stay held until trusted hooks are configured.')
+        setNotice('Scoped configuration downloaded once. Keep it private (chmod 600). Start incident_worker.py on your source laptop; no Google credentials are needed. Eligible Gmail quota-classification candidates are checked automatically. Deployment stays held until configured.')
       } else if(action.kind==='policy'||action.kind==='limit') {
         const r=await configureErrorResolution(action.kind==='limit'?!!view.policy.enabled:!view.policy.enabled,daily,reason)
         if(!r.ok)throw new Error(r.detail||'Policy change refused')
@@ -85,7 +85,7 @@ export default function ErrorResolution() {
       <Typography sx={{my:1}}>{c.next_action}</Typography><Typography variant="caption" color="text.secondary">Observed version {c.version} · Last seen {new Date(c.last_seen).toLocaleString()}{c.candidate_commit?` · Candidate ${c.candidate_commit.slice(0,7)}`:''}</Typography>
       <Stack direction="row" gap={1} sx={{mt:1}}><Button onClick={()=>fetchErrorCase(c.id).then(setDetail).catch(e=>setError(String(e)))}>View evidence</Button>
       {view?.canManage&&c.state!=='RESOLVED'&&<Button onClick={()=>setAction({kind:'recheck',id:c.id})}>Recheck affected data</Button>}
-      {view?.canManage&&['FAILED','WAITING_QUALIFICATION','DETECTED'].includes(c.state)&&['code','unknown'].includes(c.category)&&<Button onClick={()=>setAction({kind:'queue',id:c.id})}>Queue investigation</Button>}</Stack>
+      {view?.canManage&&['FAILED','WAITING_QUALIFICATION','DETECTED'].includes(c.state)&&['code','unknown'].includes(c.category)&&<Button onClick={()=>setAction({kind:'queue',id:c.id})}>{c.state==='WAITING_QUALIFICATION'&&c.candidate_commit?'Retry qualification':'Queue investigation'}</Button>}</Stack>
     </CardContent></Card>)}</Stack>
     {detail&&<Card variant="outlined" sx={{mt:2}}><CardContent><Stack direction="row" justifyContent="space-between"><Typography variant="h6">Case #{detail.id}: evidence</Typography><Button onClick={()=>setDetail(null)}>Close evidence</Button></Stack>
       <Typography variant="body2">The latest 20 recorded events and 200 affected items are shown. Full affected scope is retained for resolution checks.</Typography>

@@ -169,12 +169,29 @@ def test_qualified_release_needs_exact_install_and_fresh_full_recheck(
             json={
                 "lease": claim["lease"],
                 "state": state,
+                "source_commit": "a" * 40,
                 "candidate_commit": candidate,
-                "evidence": {"testsPassed": True, "qualified": True},
+                "evidence": {
+                    "testsPassed": True,
+                    "qualified": True,
+                    "qualificationScenario": "gmail-quota-live-v1",
+                    "artifactHash": "f" * 64,
+                },
             },
         )
 
     assert report("TESTING").status_code == 200
+    # Trusted server-side canary records are prerequisites to the release gate.
+    with db.rw() as conn:
+        conn.execute(
+            "INSERT INTO candidate_canary_artifacts VALUES(?,?,?,?)",
+            (claim["attemptId"], candidate, "a" * 40, "f" * 64),
+        )
+        for side in ("source", "target"):
+            conn.execute(
+                "INSERT INTO candidate_canary_reads VALUES(?,?,?,?)",
+                (claim["attemptId"], side, 2, 3),
+            )
     assert report("WAITING_DEPLOYMENT").status_code == 200
     # Exercise the actual HTTP report gate against a TEMPORARY installation.
     monkeypatch.setattr(E, "__file__", str(tmp_path / "error_resolution.py"))

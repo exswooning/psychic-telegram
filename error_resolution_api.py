@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from fastapi import Depends, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictInt
 
 import error_resolution as E
 
@@ -35,6 +35,14 @@ class RunnerReport(BaseModel):
     source_commit: str = ""
     candidate_commit: str = ""
     evidence: dict = Field(default_factory=dict)
+
+
+class CanaryRead(BaseModel):
+    lease: str = Field(min_length=32, max_length=100)
+    candidate_commit: str = Field(min_length=40, max_length=40)
+    side: str
+    slot: StrictInt
+    proof: dict[str, str]
 
 
 def register(app, api):
@@ -222,7 +230,8 @@ def register(app, api):
                 "attempt": None,
                 "reason": "Migration/verification/repair has priority.",
             }
-        return {"attempt": await api._off_loop(E.claim, runner)}
+        held = await api._off_loop(E.claim_qualification, runner)
+        return {"attempt": held or await api._off_loop(E.claim, runner)}
 
     @app.post("/api/v2/error-resolution/worker/{attempt}/heartbeat")
     async def beat(attempt: int, body: RunnerReport, runner=Depends(runner_auth)):
@@ -235,6 +244,25 @@ def register(app, api):
             "enabled": E.policy()["enabled"],
             "yield": not E.globally_idle(api.HERE),
         }
+
+    @app.post("/api/v2/error-resolution/worker/{attempt}/canary")
+    async def canary(attempt: int, body: CanaryRead, runner=Depends(runner_auth)):
+        import candidate_canary
+
+        try:
+            return await api._off_loop(
+                candidate_canary.probe,
+                runner,
+                attempt,
+                body.lease,
+                body.candidate_commit,
+                body.side,
+                body.slot,
+                body.proof,
+                api.HERE,
+            )
+        except candidate_canary.CanaryRefused as exc:
+            raise HTTPException(409, str(exc)) from None
 
     @app.post("/api/v2/error-resolution/worker/{attempt}/report")
     async def report(attempt: int, body: RunnerReport, runner=Depends(runner_auth)):

@@ -51,6 +51,7 @@ STATES = {
     "RECOVERING",
     "OWNER_ACTION",
     "QUEUED",
+    "QUALIFICATION_QUEUED",
     "FIXING",
     "TESTING",
     "WAITING_QUALIFICATION",
@@ -619,7 +620,7 @@ def _move(db, cid, state, detail):
 def queue_case(cid):
     with cpdb.rw() as db:
         row = db.execute(
-            "SELECT category,state FROM error_cases WHERE id=?", (cid,)
+            "SELECT category,state,candidate_commit FROM error_cases WHERE id=?", (cid,)
         ).fetchone()
         if not row or row["category"] not in {"code", "unknown"}:
             raise ValueError(
@@ -627,6 +628,14 @@ def queue_case(cid):
             )
         if row["state"] not in {"DETECTED", "FAILED", "WAITING_QUALIFICATION"}:
             raise ValueError("This case is already queued or has an active workflow")
+        if row["state"] == "WAITING_QUALIFICATION" and row["candidate_commit"]:
+            _move(
+                db,
+                cid,
+                "QUALIFICATION_QUEUED",
+                "The existing candidate is queued for qualification; no new coding attempt is required.",
+            )
+            return
         _move(
             db,
             cid,
@@ -781,6 +790,10 @@ def claim(runner):
             "INSERT INTO error_fix_attempts(case_id,runner_id,lease_hash,lease_until,state,started_at,updated_at) VALUES(?,?,?,?,'FIXING',?,?)",
             (row["id"], runner["id"], digest(lease), now + 120, utc(), utc()),
         ).lastrowid
+        db.execute(
+            "INSERT INTO candidate_case_snapshots VALUES(?,?)",
+            (attempt, row["last_seen"]),
+        )
         _move(
             db,
             row["id"],
@@ -788,6 +801,65 @@ def claim(runner):
             "Coding runner is reproducing this incident in an isolated source checkout.",
         )
     return {"attemptId": attempt, "lease": lease, "bundle": bundle(row["id"])}
+
+
+def claim_qualification(runner):
+    """Re-lease an existing held candidate without another coding-model call."""
+    lease = secrets.token_urlsafe(32)
+    with cpdb.rw() as db:
+        db.execute("BEGIN IMMEDIATE")
+        if not db.execute(
+            "SELECT enabled FROM error_resolution_policy WHERE id=1"
+        ).fetchone()[0]:
+            return None
+        if db.execute(
+            "SELECT 1 FROM error_fix_attempts WHERE finished_at IS NULL"
+        ).fetchone():
+            return None
+        row = db.execute(
+            "SELECT a.* FROM error_fix_attempts a JOIN error_cases c ON c.id=a.case_id "
+            "WHERE c.state='QUALIFICATION_QUEUED' AND a.state='WAITING_QUALIFICATION' "
+            "AND a.runner_id=? AND a.id=(SELECT MAX(x.id) FROM error_fix_attempts x WHERE x.case_id=c.id) "
+            + ("AND c.account_id=? " if runner["account_id"] != -1 else "")
+            + "ORDER BY c.last_seen LIMIT 1",
+            (runner["id"], runner["account_id"])
+            if runner["account_id"] != -1
+            else (runner["id"],),
+        ).fetchone()
+        if not row or not row["candidate_commit"] or not row["source_commit"]:
+            return None
+        db.execute(
+            "UPDATE error_fix_attempts SET state='TESTING',lease_hash=?,lease_until=?,"
+            "updated_at=?,finished_at=NULL WHERE id=?",
+            (digest(lease), time.time() + 120, utc(), row["id"]),
+        )
+        # A fresh lease needs fresh sandbox reads; prior partial successes do not count.
+        db.execute(
+            "DELETE FROM candidate_canary_reads WHERE attempt_id=?", (row["id"],)
+        )
+        db.execute(
+            "DELETE FROM candidate_canary_artifacts WHERE attempt_id=?", (row["id"],)
+        )
+        db.execute(
+            "INSERT OR REPLACE INTO candidate_case_snapshots "
+            "SELECT ?,last_seen FROM error_cases WHERE id=?",
+            (row["id"], row["case_id"]),
+        )
+        _move(
+            db,
+            row["case_id"],
+            "TESTING",
+            "Rechecking the existing candidate against the current qualification scenarios.",
+        )
+    return {
+        "attemptId": row["id"],
+        "lease": lease,
+        "bundle": bundle(row["case_id"]),
+        "resume": True,
+        "sourceCommit": row["source_commit"],
+        "candidateCommit": row["candidate_commit"],
+        "evidence": json.loads(row["evidence"]),
+    }
 
 
 ALLOWED_TRANSITIONS = {
@@ -824,6 +896,18 @@ def report(
             raise ValueError("Invalid candidate commit")
         if source_commit and not re.fullmatch(r"[0-9a-f]{40}", source_commit):
             raise ValueError("Invalid source commit")
+        if (
+            row["source_commit"]
+            and source_commit
+            and row["source_commit"] != source_commit
+        ):
+            raise ValueError("Attempt source commit cannot change")
+        if (
+            row["candidate_commit"]
+            and candidate_commit
+            and row["candidate_commit"] != candidate_commit
+        ):
+            raise ValueError("Attempt candidate commit cannot change")
         evidence = evidence or {}
         if state == "WAITING_DEPLOYMENT" and not (
             evidence.get("testsPassed") is True
@@ -833,6 +917,41 @@ def report(
             raise ValueError(
                 "Tests, qualification evidence and candidate commit are required"
             )
+        if state == "WAITING_DEPLOYMENT":
+            if evidence.get("qualificationScenario") != "gmail-quota-live-v1":
+                raise ValueError(
+                    "No server-verifiable qualification scenario covers this candidate"
+                )
+            reads = db.execute(
+                "SELECT side,successful_slots FROM candidate_canary_reads WHERE attempt_id=?",
+                (attempt,),
+            ).fetchall()
+            if {r["side"]: r["successful_slots"] for r in reads} != {
+                "source": 3,
+                "target": 3,
+            }:
+                raise ValueError(
+                    "Both fixed sandbox mailbox slots must pass for this candidate"
+                )
+            if not re.fullmatch(r"[0-9a-f]{64}", str(evidence.get("artifactHash", ""))):
+                raise ValueError("The qualified candidate artifact hash is required")
+            artifact = db.execute(
+                "SELECT candidate_commit,base_commit,artifact_hash FROM candidate_canary_artifacts WHERE attempt_id=?",
+                (attempt,),
+            ).fetchone()
+            if not artifact or tuple(artifact) != (
+                candidate_commit,
+                source_commit,
+                evidence["artifactHash"],
+            ):
+                raise ValueError("Verified candidate Git artifact evidence is required")
+            snapshot = db.execute(
+                "SELECT s.case_seen_at,c.last_seen FROM candidate_case_snapshots s "
+                "JOIN error_cases c ON c.id=? WHERE s.attempt_id=?",
+                (row["case_id"], attempt),
+            ).fetchone()
+            if not snapshot or snapshot["case_seen_at"] != snapshot["last_seen"]:
+                raise ValueError("The case changed since this candidate was claimed")
         if state == "DEPLOYED":
             installed = (Path(__file__).parent / "DEPLOYED_COMMIT").read_text().strip()
             if (
@@ -840,7 +959,10 @@ def report(
                 or installed != candidate_commit
             ):
                 raise ValueError("Candidate is not the installed release")
-        terminal = state in {"FAILED", "WAITING_QUALIFICATION", "RECHECKING"}
+        terminal = state in {"FAILED", "WAITING_QUALIFICATION", "RECHECKING"} or (
+            state == "WAITING_DEPLOYMENT"
+            and evidence.get("deploymentConfigured") is False
+        )
         db.execute(
             "UPDATE error_fix_attempts SET state=?,lease_until=?,updated_at=?,finished_at=?,detail=?,source_commit=?,candidate_commit=?,evidence=? WHERE id=?",
             (
@@ -863,6 +985,8 @@ def report(
                             "durationSeconds",
                             "branch",
                             "artifactHash",
+                            "qualificationScenario",
+                            "deploymentConfigured",
                         }
                     }
                 )[:4000],

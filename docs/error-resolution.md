@@ -75,16 +75,32 @@ Policy and revocation are available in the UI. No model runs for each routine lo
    byte; a test that changes the candidate cannot cause a commit or push.
 4. The tested candidate is committed locally and pushed to a separate
    `bitport/incident-<case>-<attempt>` branch. The primary source branch is unchanged.
-5. **Qualification and deployment are held by default.** Optional trusted local
-   config entries `qualifyCommand` and `deployCommand` are argv arrays, not shell
-   strings. Placeholders `{worktree}`, `{commit}`, `{case_id}` come only from the
-   worker, never from the incident. They must point to reviewed external wrappers.
-   Qualification must exercise explicitly authorised sandbox tenants in isolation.
-   The deployment wrapper must verify exact candidate hashes, retain rollback,
-   preserve UI/credentials/data, use the unchanged normal sync_vps.sh gates with no
-   overrides, verify release/service health, and stamp the full 40-character
-   DEPLOYED_COMMIT only after matching the installed artifact hashes. Neither an agent's claim nor unit
-   test success is qualification evidence.
+5. The built-in candidate-specific scenario covers only a change to the body of
+   `is_quota_error` in `verify_gmail_quota.py`, together with new regression tests.
+   It verifies the exact clean commit and parent, restricts the classifier to a
+   small set of pure operations, runs a hash-pinned independent contract, then
+   runs the candidate inside OS isolation against four read-only Gmail status
+   observations: two each for `info@s.` and `nest@t.`. Each observation performs
+   a list and a get (eight provider requests in a passing canary). A bounded broker fixes
+   the accounts and mapping, exposes only status codes, and never hands the
+   worker credentials, message IDs, headers, or content. Source uses a read-only
+   Gmail grant; target uses its existing `gmail.modify` grant but only list/get.
+   Quota rejection/retry cases are injected in the independent contract; the live
+   four-read canary does not prove full mailbox fidelity or a live throttle.
+   The server independently verifies Git commit/tree/blob proofs, requires the
+   parent to equal the installed release, and binds the two successful slots on
+   each side to that candidate and the verified SHA-256 artifact hash.
+   Unknown changes, missing access and busy servers remain held. **Retry
+   qualification** reuses the existing candidate and does not call the coding
+   model again.
+   Optional trusted local `qualifyCommand` and `deployCommand` settings are argv
+   arrays, never shell strings; `{worktree}`, `{commit}`, `{case_id}` come only
+   from the runner. An extra qualification hook can add checks but cannot bypass
+   the built-in scenario or its server-verified evidence. Without a deployment hook, a qualified candidate is held in
+   **Waiting to deploy**. A deployment wrapper must verify exact candidate hashes,
+   retain rollback, preserve UIs/credentials/data, use the unchanged normal
+   sync_vps.sh gates without overrides, verify service health, and stamp the full
+   40-character DEPLOYED_COMMIT only after verifying installed artifact hashes.
 6. The server checks that the candidate matches its installed release before
    accepting DEPLOYED. It schedules a full read-only affected-scope verification
    when globally idle. Cases with broad/unknown scope require scope selection in
@@ -103,8 +119,11 @@ ordering, qualification refusal and deployment refusal. It uses a controlled cod
 CLI and a temporary fake installation; it does not qualify a Google migration or
 grant blanket approval to future generated fixes. API regressions separately cover
 the exact installed-commit gate, admitted full read-only rechecks and closure only
-after fresh complete verification. Candidate-specific sandbox qualification and
-normal deployment gates remain required for each real generated release.
+after fresh complete verification. `tests/test_candidate_qualification.py` and
+`tests/test_candidate_canary_api.py` cover commit/scope binding, isolated relay,
+request limits, both sandbox sides, priority, retries and failure paths. Their
+provider responses are mocked; an actual candidate's live canary still runs against
+the authorized sandbox. Every other code class needs its own trusted scenario.
 
 ## Limits
 

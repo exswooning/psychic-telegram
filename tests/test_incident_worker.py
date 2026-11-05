@@ -1,7 +1,37 @@
 from pathlib import Path
+import io
+import json
 import subprocess
+import urllib.error
+
+import pytest
 
 import incident_worker as W
+
+
+def test_canary_failure_reports_only_safe_actionable_reason():
+    client = W.Client({"apiUrl": "http://127.0.0.1", "token": "x" * 40})
+
+    def fail(detail):
+        def open_request(*args, **kwargs):
+            raise urllib.error.HTTPError(
+                "http://local",
+                409,
+                "refused",
+                {},
+                io.BytesIO(json.dumps({"detail": detail}).encode()),
+            )
+
+        client.http.open = open_request
+        with pytest.raises(RuntimeError) as exc:
+            client.call("7/canary", {})
+        return str(exc.value)
+
+    assert "mapping has changed" in fail(
+        "The authorized sandbox user mapping has changed"
+    )
+    assert "HTTP 403" in fail("Sandbox Gmail metadata read failed (HTTP 403)")
+    assert "secret" not in fail("token=secret and private data")
 
 
 def test_candidate_runs_regression_on_base_then_tests_patch_and_stops_without_qualification(
@@ -109,3 +139,56 @@ def test_failed_model_never_tests_commits_pushes_or_deploys(tmp_path, monkeypatc
         {"codex": "/usr/bin/true"},
     )
     assert states == ["FAILED"]
+
+
+def test_candidate_is_qualified_even_when_deployment_is_not_configured(
+    tmp_path, monkeypatch
+):
+    import candidate_qualification as qualification
+    from tests.test_worker_qualification import fixture_repo
+
+    repo, _ = fixture_repo(tmp_path)
+    reports = []
+
+    class Client:
+        def call(self, path, body):
+            if path.endswith("/report"):
+                reports.append(body.copy())
+            return {"ok": True}
+
+    def run(argv, cwd, log, **kwargs):
+        if argv[1] == "exec":
+            (cwd / "engine.py").write_text("def retry(status, reason): return True\n")
+            (cwd / "tests/test_candidate.py").write_text(
+                "def test_candidate(): assert True\n"
+            )
+        elif "pytest" in argv and "tests/test_candidate.py" in argv:
+            return 1
+        return 0
+
+    monkeypatch.setattr(W, "run_process", run)
+    monkeypatch.setattr(W, "check_prefix", lambda *args, **kwargs: [])
+    monkeypatch.setattr(qualification, "supported", lambda *args: True)
+    monkeypatch.setattr(
+        qualification,
+        "qualify",
+        lambda *args: (
+            True,
+            "passed",
+            {"qualificationScenario": "gmail-quota-live-v1", "artifactHash": "f" * 64},
+        ),
+    )
+    W.process_attempt(
+        Client(),
+        {
+            "attemptId": 1,
+            "lease": "x" * 32,
+            "bundle": {"caseId": 7, "service": "gmail"},
+        },
+        repo,
+        tmp_path / "attempts",
+        {"codex": "/usr/bin/true"},
+    )
+    assert [r["state"] for r in reports] == ["TESTING", "TESTING", "WAITING_DEPLOYMENT"]
+    assert reports[-1]["evidence"]["qualified"] is True
+    assert reports[-1]["evidence"]["deploymentConfigured"] is False

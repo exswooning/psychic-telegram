@@ -26,6 +26,20 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+_CANARY_MESSAGES = {
+    "Automatic coding is paused",
+    "A migration, verification or repair has priority",
+    "The configured sandbox mailbox lacks enough messages for the canary",
+    "Configured sandbox domains no longer match the authorized pair",
+    "The authorized sandbox user mapping has changed",
+    "The sandbox canary requires configured service-account keys",
+    "Sandbox read budget exhausted for this candidate",
+    "The case changed since this candidate was claimed",
+    "Candidate parent does not match the installed release",
+    "Installed release identity is unavailable",
+    "A live, scoped Gmail candidate lease is required",
+}
+
 
 class Client:
     def __init__(self, config):
@@ -65,6 +79,19 @@ class Client:
             with self.http.open(request, timeout=30) as response:
                 return json.loads(response.read(1_000_000))
         except urllib.error.HTTPError as exc:
+            if path.endswith("/canary"):
+                try:
+                    detail = json.loads(exc.read(2048)).get("detail")
+                except (ValueError, OSError, AttributeError):
+                    detail = None
+                if isinstance(detail, str) and (
+                    detail in _CANARY_MESSAGES
+                    or re.fullmatch(
+                        r"Sandbox Gmail metadata read failed(?: \(HTTP [0-9]{3}\))?",
+                        detail,
+                    )
+                ):
+                    raise RuntimeError("Sandbox canary: " + detail) from None
             raise RuntimeError(
                 f"Runner API refused request (HTTP {exc.code}); check connection or scoped credential"
             ) from None
@@ -119,7 +146,7 @@ def run_process(argv, cwd, log, timeout=600, stop=None, env=None):
                     proc.wait()
 
 
-def check_prefix(tree, repo, home):
+def check_prefix(tree, repo, home, readonly_files=()):
     """Tests of generated code need OS isolation too, not just a cleaned environment."""
     if platform.system() != "Darwin" or not shutil.which("sandbox-exec"):
         raise RuntimeError(
@@ -146,6 +173,13 @@ def check_prefix(tree, repo, home):
         "(allow file-read* " + " ".join("(subpath " + q(p) + ")" for p in paths) + ")\n"
     )
     profile += '(allow file-read* (literal "/") (literal "/dev/null") (literal "/dev/urandom") (literal "/dev/random") (subpath "/private/etc"))\n'
+    for path in readonly_files:
+        resolved = Path(path).resolve()
+        if any(resolved.is_relative_to(p.resolve()) for p in (tree, home)):
+            raise ValueError(
+                "Trusted qualification files must be outside test-writable paths"
+            )
+        profile += "(allow file-read* (literal " + q(resolved) + "))\n"
     profile += (
         "(allow file-write* (subpath "
         + q(tree.resolve())
@@ -192,6 +226,10 @@ def validate_changes(tree, base):
         "error_resolution.py",
         "error_resolution_api.py",
         "incident_worker.py",
+        "candidate_qualification.py",
+        "candidate_canary.py",
+        "candidate_canary_harness.py",
+        "candidate_scope.py",
         "control_plane_db.py",
         "deploy_remote.py",
         "wipe_tenant.py",
@@ -245,6 +283,47 @@ def trusted_hook(config, name, values):
         return None
     # Substitute only fixed runner-generated paths/commit IDs. Never a log field.
     return [arg.format(**values) for arg in cmd]
+
+
+def qualify_existing(
+    client,
+    aid,
+    lease,
+    candidate,
+    tree,
+    repo,
+    private,
+    home,
+    stop,
+    base,
+    case,
+    qualifier,
+):
+    import candidate_qualification
+
+    if not candidate_qualification.supported(tree, base, candidate, case):
+        return (
+            False,
+            "No trusted qualification scenario covers this candidate; it is held.",
+            {},
+        )
+    passed, detail, evidence = candidate_qualification.qualify(
+        client, aid, lease, candidate, tree, repo, private, home, stop, base, case
+    )
+    if not passed:
+        return False, detail, {}
+    if qualifier and run_process(
+        qualifier,
+        tree,
+        private / "qualification.log",
+        timeout=900,
+        stop=stop,
+        env=clean_env(home),
+    ):
+        return False, "Additional sandbox qualification failed; candidate is held.", {}
+    if not candidate_qualification.supported(tree, base, candidate, case):
+        return False, "Candidate changed after qualification; it is held.", {}
+    return True, detail, evidence
 
 
 def process_attempt(client, attempt, repo, root, config):
@@ -482,26 +561,45 @@ def process_attempt(client, attempt, repo, root, config):
         }
         qualifier = trusted_hook(config, "qualifyCommand", values)
         deploy = trusted_hook(config, "deployCommand", values)
-        if not qualifier or not deploy:
+        import candidate_qualification
+
+        if not candidate_qualification.supported(tree, base, candidate, case):
             report(
                 "WAITING_QUALIFICATION",
-                "Regression and isolated suite passed; candidate pushed. Trusted sandbox qualification/deployment hooks are not configured.",
+                "No trusted qualification scenario covers this candidate; it is held.",
             )
             return
-        if run_process(
-            qualifier,
+        # Bind the exact candidate to the lease before any sandbox read.
+        report(
+            "TESTING",
+            "Running the candidate-specific Gmail quota contract and read-only sandbox canary.",
+        )
+        passed, detail, qualification = qualify_existing(
+            client,
+            aid,
+            lease,
+            candidate,
             tree,
-            private / "qualification.log",
-            timeout=900,
-            stop=stop,
-            env=clean_env(home),
-        ):
+            repo,
+            private,
+            home,
+            stop,
+            base,
+            case,
+            qualifier,
+        )
+        if not passed:
+            report("WAITING_QUALIFICATION", detail)
+            return
+        evidence.update(qualification)
+        evidence["qualified"] = True
+        evidence["deploymentConfigured"] = bool(deploy)
+        if not deploy:
             report(
-                "WAITING_QUALIFICATION",
-                "Sandbox qualification failed; candidate is held.",
+                "WAITING_DEPLOYMENT",
+                "Candidate-specific qualification passed; deployment is not configured and the case remains open.",
             )
             return
-        evidence["qualified"] = True
         report(
             "WAITING_DEPLOYMENT",
             "Qualified candidate awaits a normal idle deployment gate.",
@@ -536,6 +634,130 @@ def process_attempt(client, attempt, repo, root, config):
         thread.join(timeout=2)
 
 
+def resume_qualification(client, attempt, repo, root, config):
+    """Requalify the recorded candidate without another coding-model invocation."""
+    aid, lease = attempt["attemptId"], attempt["lease"]
+    private = root / f"attempt-{aid}"
+    tree, home = private / "source", private / "checks-home"
+    base, candidate, case = (
+        attempt["sourceCommit"],
+        attempt["candidateCommit"],
+        attempt["bundle"],
+    )
+    evidence = dict(attempt.get("evidence") or {})
+    stop = threading.Event()
+    stage = ["TESTING"]
+
+    def report(state, detail):
+        client.call(
+            f"{aid}/report",
+            {
+                "lease": lease,
+                "state": state,
+                "detail": detail,
+                "source_commit": base,
+                "candidate_commit": candidate,
+                "evidence": evidence,
+            },
+        )
+        stage[0] = state
+
+    def keep_alive():
+        failures = 0
+        while not stop.wait(20):
+            try:
+                response = client.call(
+                    f"{aid}/heartbeat",
+                    {
+                        "lease": lease,
+                        "state": stage[0],
+                        "detail": "Requalifying existing candidate: " + stage[0],
+                    },
+                )
+                failures = 0
+                if not response.get("enabled") or response.get("yield"):
+                    stop.set()
+            except Exception:
+                failures += 1
+                if stage[0] != "WAITING_DEPLOYMENT" or failures >= 3:
+                    stop.set()
+
+    thread = threading.Thread(target=keep_alive, daemon=True)
+    thread.start()
+    try:
+        if (
+            any(p.is_symlink() for p in (private, tree, home))
+            or not tree.is_dir()
+            or not home.is_dir()
+            or evidence.get("testsPassed") is not True
+        ):
+            raise RuntimeError(
+                "The previously tested candidate worktree or evidence is unavailable"
+            )
+        values = {
+            "worktree": str(tree),
+            "commit": candidate,
+            "case_id": str(case["caseId"]),
+        }
+        qualifier = trusted_hook(config, "qualifyCommand", values)
+        deploy = trusted_hook(config, "deployCommand", values)
+        passed, detail, result = qualify_existing(
+            client,
+            aid,
+            lease,
+            candidate,
+            tree,
+            repo,
+            private,
+            home,
+            stop,
+            base,
+            case,
+            qualifier,
+        )
+        if not passed:
+            raise RuntimeError(detail)
+        evidence.update(result)
+        evidence.update(qualified=True, deploymentConfigured=bool(deploy))
+        if not deploy:
+            report(
+                "WAITING_DEPLOYMENT",
+                "Candidate-specific qualification passed; deployment is not configured and the case remains open.",
+            )
+            return
+        report(
+            "WAITING_DEPLOYMENT",
+            "Qualified candidate awaits a normal idle deployment gate.",
+        )
+        if run_process(
+            deploy,
+            tree,
+            private / "deploy.log",
+            timeout=900,
+            stop=stop,
+            env=clean_env(),
+        ):
+            raise RuntimeError("Deployment gate refused or rollout failed")
+        report(
+            "DEPLOYED",
+            "Trusted rollout completed; the server confirms the installed candidate.",
+        )
+        report("RECHECKING", "Fresh complete affected-scope verification is required.")
+    except Exception as exc:
+        try:
+            report(
+                "FAILED"
+                if stage[0] == "WAITING_DEPLOYMENT"
+                else "WAITING_QUALIFICATION",
+                str(exc)[:500],
+            )
+        except Exception:
+            pass
+    finally:
+        stop.set()
+        thread.join(timeout=2)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, required=True)
@@ -563,7 +785,10 @@ def main(argv=None):
             try:
                 attempt = client.call("claim", {})["attempt"]
                 if attempt:
-                    process_attempt(client, attempt, repo, root, config)
+                    if attempt.get("resume"):
+                        resume_qualification(client, attempt, repo, root, config)
+                    else:
+                        process_attempt(client, attempt, repo, root, config)
             except Exception as exc:
                 print(
                     type(exc).__name__

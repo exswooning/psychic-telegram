@@ -104,7 +104,19 @@ def test_tests_cannot_change_a_candidate_after_it_was_validated(tmp_path, monkey
 @pytest.mark.parametrize(
     "mode", ["pass", "qualification-refused", "deployment-refused"]
 )
-def test_real_isolated_regression_and_release_hook_flow(tmp_path, mode):
+def test_real_isolated_regression_and_release_hook_flow(tmp_path, mode, monkeypatch):
+    import candidate_qualification
+
+    monkeypatch.setattr(candidate_qualification, "supported", lambda *args: True)
+    monkeypatch.setattr(
+        candidate_qualification,
+        "qualify",
+        lambda *args: (
+            True,
+            "fixture canary passed",
+            {"qualificationScenario": "gmail-quota-live-v1", "artifactHash": "f" * 64},
+        ),
+    )
     repo, origin = fixture_repo(tmp_path)
     base = W.git(repo, "rev-parse", "HEAD")
     installation = tmp_path / "fake-installation"
@@ -176,18 +188,22 @@ def test_real_isolated_regression_and_release_hook_flow(tmp_path, mode):
     )
     states = [r["state"] for r in reports]
     if mode == "pass":
-        assert states == ["TESTING", "WAITING_DEPLOYMENT", "DEPLOYED", "RECHECKING"], (
-            reports
-        )
+        assert states == [
+            "TESTING",
+            "TESTING",
+            "WAITING_DEPLOYMENT",
+            "DEPLOYED",
+            "RECHECKING",
+        ], reports
         assert (
             reports[-1]["evidence"]["testsPassed"]
             and reports[-1]["evidence"]["qualified"]
         )
     elif mode == "qualification-refused":
-        assert states == ["TESTING", "WAITING_QUALIFICATION"], reports
+        assert states == ["TESTING", "TESTING", "WAITING_QUALIFICATION"], reports
         assert not (installation / "DEPLOYED_COMMIT").exists()
     else:
-        assert states == ["TESTING", "WAITING_DEPLOYMENT", "FAILED"], reports
+        assert states == ["TESTING", "TESTING", "WAITING_DEPLOYMENT", "FAILED"], reports
         assert not (installation / "DEPLOYED_COMMIT").exists()
     attempt = tmp_path / "attempts/attempt-1"
     assert "1 failed" in (attempt / "regression-before.log").read_text()

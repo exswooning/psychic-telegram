@@ -57,4 +57,12 @@ describe('Error resolution',()=>{
     fireEvent.click(screen.getByRole('checkbox',{name:'Show resolved'}))
     expect(await screen.findByTestId('error-case-7')).toHaveTextContent('Verified resolved')
   })
+  it('offers qualification retry for an existing held candidate',async()=>{
+    api.fetchErrorResolution.mockResolvedValue(view({cases:[{...example,state:'WAITING_QUALIFICATION',candidate_commit:'b'.repeat(40)}]}))
+    show()
+    fireEvent.click(await screen.findByRole('button',{name:'Retry qualification'}))
+    fireEvent.change(screen.getByLabelText('Reason Code'),{target:{value:'Retry candidate qualification'}})
+    fireEvent.click(screen.getByRole('button',{name:'Confirm'}))
+    await waitFor(()=>expect(api.errorCaseAction).toHaveBeenCalledWith(7,'queue','Retry candidate qualification'))
+  })
 })
