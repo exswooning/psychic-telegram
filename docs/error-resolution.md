@@ -133,3 +133,16 @@ Redaction removes common secrets and pseudonymises export identifiers; it is not
 a general proof that arbitrary application log text contains no personal data.
 Avoid logging message bodies or secrets at the source. Original detailed logs are
 available only through their existing authenticated UI.
+
+### macOS worker fails before Python starts
+
+If launchd reports `EX_CONFIG` (78) and `posix_spawn ... Operation not permitted`
+while the same worker runs interactively, check its standard-output/error paths.
+On the operator Mac, placing those logs under Documents prevented launchd from
+starting the process. Use `~/Library/Logs/Bitport/worker.log` and
+`~/Library/Logs/Bitport/worker-error.log` (expanded absolute paths in the plist),
+create the directory first, and reload only the worker LaunchAgent. Keep the
+scoped credential, investigation limits and deployment gates unchanged; do not
+disable macOS security protections. Verify both a live launchd PID and a fresh
+Connected heartbeat in Error resolution. This fixes worker availability, not
+migration findings or candidate qualification.
