@@ -530,6 +530,23 @@ def repair_drive(auth, db, settings, user, result, apply=False):
     return out
 
 
+# Operator policy (6 Nov 2026): a duplicate on the target is QUARANTINED, never deleted, and the
+# person who uses the file keeps access to it at all times. In code that means:
+#   - a rename only: same folder, same owner, same sharing -- nothing is moved, trashed or unshared;
+#   - the original (the copy the ledger maps) is never touched;
+#   - sharing is read before and after, and a rename that left it different is undone at once;
+#   - the original name and location are recorded, so the rename can be reversed exactly.
+QUARANTINE_POLICY = ("rename-only", "same-parent", "sharing-unchanged", "original-untouched", "reversible")
+
+
+def _access(tgt, fid) -> list:
+    """Who can open the file, as a comparable list: the policy's proof that access did not change."""
+    rows = _pages(tgt.permissions(), fileId=fid, supportsAllDrives=True, pageSize=100,
+                  fields="nextPageToken,permissions(id,type,role,emailAddress,domain,deleted)")
+    return sorted((r.get("id"), r.get("type"), r.get("role"), r.get("emailAddress") or r.get("domain") or "")
+                  for r in rows if not r.get("deleted"))
+
+
 def quarantine_duplicates(auth, db, settings, user, result, apply=False):
     """Quarantine confirmed extras by a reversible rename in their current parent.
 
@@ -597,23 +614,24 @@ def quarantine_duplicates(auth, db, settings, user, result, apply=False):
                     max(int(em.get("size") or 0), int(cm.get("size") or 0))
                     > MAX_COMPARE_BYTES
                 ):
-                    raise RuntimeError(
-                        "Binary duplicate needs bounded streaming comparison before quarantine"
+                    # Too big to hold in memory: Drive's own content checksum (equal above) plus an
+                    # equal size is the proof, the same one the one-to-one check trusts.
+                    if not em.get("size") or em.get("size") != cm.get("size"):
+                        raise RuntimeError("Large duplicate binaries differ in size")
+                else:
+                    a = (
+                        tgt.files()
+                        .get_media(fileId=extra, supportsAllDrives=True)
+                        .execute()
                     )
-                a = (
-                    tgt.files()
-                    .get_media(fileId=extra, supportsAllDrives=True)
-                    .execute()
-                )
-                b = (
-                    tgt.files()
-                    .get_media(fileId=canonical, supportsAllDrives=True)
-                    .execute()
-                )
-                if hashlib.sha256(a).digest() != hashlib.sha256(b).digest():
-                    raise RuntimeError("Duplicate binary SHA256 values differ")
-            if not etag:
-                raise RuntimeError("Duplicate ETag unavailable")
+                    b = (
+                        tgt.files()
+                        .get_media(fileId=canonical, supportsAllDrives=True)
+                        .execute()
+                    )
+                    if hashlib.sha256(a).digest() != hashlib.sha256(b).digest():
+                        raise RuntimeError("Duplicate binary SHA256 values differ")
+            access_before = _access(tgt, extra)
             quarantine_name = (
                 ".Quarantined duplicate " + extra[:8] + " - " + em.get("name", extra)
             )
@@ -640,7 +658,15 @@ def quarantine_duplicates(auth, db, settings, user, result, apply=False):
                 body={"name": quarantine_name, "appProperties": props},
                 fields="id,parents",
             )
-            _conditional(req, etag)
+            if etag:
+                _conditional(req, etag)
+            else:
+                # Some files (native Docs) come back with no ETag. The same guard, by version: the
+                # file must be exactly as it was read a moment ago, or it is left alone.
+                now, _ = _meta(tgt, extra)
+                if (now.get("version"), now.get("modifiedTime")) != (em.get("version"), em.get("modifiedTime")):
+                    raise RuntimeError("Duplicate changed while it was being checked; left alone")
+                req.execute()
             after, _ = _meta(tgt, extra)
             if (
                 after.get("parents") != em.get("parents")
@@ -648,6 +674,11 @@ def quarantine_duplicates(auth, db, settings, user, result, apply=False):
                 or after.get("md5Checksum") != em.get("md5Checksum")
             ):
                 raise RuntimeError("Quarantine readback failed")
+            if _access(tgt, extra) != access_before:
+                tgt.files().update(fileId=extra, supportsAllDrives=True,
+                                   body={"name": em.get("name"), "appProperties": proof},
+                                   fields="id").execute()
+                raise RuntimeError("Quarantine changed who can open the file; the rename was undone")
             record(
                 db,
                 user,

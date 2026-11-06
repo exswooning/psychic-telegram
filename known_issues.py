@@ -417,6 +417,14 @@ RUN_KINDS = [
      "this migration). The ledger maps the first; some files sit in the second.",
      "Automatic (repair_parent_folders): a file in a same-name duplicate is moved to the mapped folder "
      "and read back; a file in a folder with another name is left and listed.", True),
+    ("drive.forms_response_sheet", "drive", lambda t: "native Sheet entered values, formatting, or structures differ" in t,
+     "A Form's responses Sheet differs from the source",
+     "A responses Sheet is filled by its Form. Google offers no way to copy a Form's past responses "
+     "into the new Sheet or to link them (the Form's linkedSheetId is read-only), so the copy's rows "
+     "and structure differ from the source's. Seen on 6 Sheets across 5 users (account 3, 6 Nov 2026).",
+     "DOCUMENTED EXCEPTION, not repaired. The Sheet and its Form are copied, owned and shared as in the "
+     "source, so the people who use them keep access; only the response rows differ. A repair keeps a "
+     "backup of the target copy. Relinking the Form to its Sheet is done by hand (form_relink.py).", False),
     ("run.held_for_drive", None,
      lambda t: "held: this user's Drive did not migrate" in t,
      "Mail or calendar held back for Drive",
