@@ -320,7 +320,13 @@ def drive(v, result):
         def comments():
             from migration_comments import list_threads,differences
             compared=matched=0
-            for sid,tid,_ in v._pairs("file",sample=True):
+            # One list call per side per file (~1 per second): ~50 minutes for 1,500 files, so say
+            # where it is. Live (info@, 6 Nov 2026) it ran under the stale "Drive stray check" label
+            # with no counter and read as stuck.
+            pairs=v._pairs("file",sample=True)
+            for n,(sid,tid,_) in enumerate(pairs):
+                if n%25==0:
+                    v._report_progress("Drive comment threads",n,len(pairs))
                 try:
                     a=list_threads(src,sid,v._x)
                 except Exception as exc:
