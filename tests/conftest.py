@@ -113,6 +113,14 @@ def identity(db):
 
 
 @pytest.fixture(autouse=True)
+def _gmail_quota_state_in_tmp(tmp_path, monkeypatch):
+    """verify_gmail_quota keeps its shared budget under ~/.cache; a test must never read or write the
+    real one (a cooldown left by one run would pace the next)."""
+    import verify_gmail_quota
+    monkeypatch.setattr(verify_gmail_quota.Path, "home", lambda: tmp_path)
+
+
+@pytest.fixture(autouse=True)
 def _reset_chat_shared_state():
     """FakeChat shares one store per tenant (as real Chat does), so it has to
     be cleared between tests or spaces leak across them."""

@@ -1860,6 +1860,12 @@ class FakeAuth:
         self._svcs: dict[tuple, FakeService] = {}
         self.delegation_failures: set[tuple[str, str]] = set()
 
+    def _credentials(self, tenant: str, user: str):
+        """What the real AuthManager hands the Gmail verification quota (verify_gmail_quota.for_mailbox):
+        a delegated identity with a service-account email and the impersonated subject."""
+        from types import SimpleNamespace
+        return SimpleNamespace(service_account_email=f"fake-sa@{tenant}.test", _subject=user)
+
     def _get(self, tenant: str, api: str, user: str) -> FakeService:
         key = (tenant, api, user)
         if key not in self._svcs:
