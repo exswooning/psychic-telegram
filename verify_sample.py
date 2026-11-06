@@ -2195,7 +2195,7 @@ def run(auth, db, settings, users: list[str] | None = None, services=ALL_SERVICE
                           f"| noItemProgress={no_item_progress}s | lastApi={last_api}")
                 if state["in_flight"] and state["last_api_started"] is not None:
                     detail += f" apiOpenFor={int(now - state['last_api_started'])}s"
-                if state["detail"]:
+                if state.get("detail"):
                     detail += f" | currentItem={state['detail']}"
                 if state.get("stats"):
                     detail += " | " + stats_line(state["stats"], state["items_completed"], now)
@@ -2309,7 +2309,7 @@ def run(auth, db, settings, users: list[str] | None = None, services=ALL_SERVICE
             with lock:
                 activity[u] = {"service": svc, "started": now,
                                "service_started": now, "last_heartbeat": now,
-                               "operation": f"{svc} initialising", "api_attempts": 0,
+                               "operation": f"{svc} initialising", "detail": "", "api_attempts": 0,
                                "http_calls": 0, "retry_rounds": 0, "in_flight": 0, "last_api_started": None,
                                "last_api_at": None, "last_api_result": "", "last_error": "",
                                "last_error_at": now,
