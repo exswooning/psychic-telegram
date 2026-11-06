@@ -95,7 +95,7 @@ def enabled(db):
         return False
 
 
-REPAIR_CAPABILITY_VERSION = 9
+REPAIR_CAPABILITY_VERSION = 10   # 10: quarantine handles large binaries, ETag-less files and same-name duplicate folders
 
 
 def _newly_supported(rows):

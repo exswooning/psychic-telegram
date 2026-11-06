@@ -62,3 +62,38 @@ def test_the_policy_is_named_in_code():
 
 def _perm_ids(td, fid):
     return sorted(p.get("id") for p in td.perms.get(fid, []))
+
+
+def test_a_duplicate_in_a_same_name_copy_of_the_folder_is_quarantined_where_it_is(auth, db, settings, identity):
+    settings.source_read_only = True
+    td = auth.target_drive(TGT_USER)
+    f1, f2 = td.add_folder("for website"), td.add_folder("for website")      # the target had this folder twice
+    keep = td.add_binary("plan.pdf", parent=f1, data=b"same bytes")
+    dup = td.add_binary("plan.pdf", parent=f2, data=b"same bytes")
+    for fid in (keep, dup):
+        td.store[fid]["ownedByMe"] = True
+    db.record_mapping(SRC_USER, "src-plan", keep, "file")
+    td.store[dup]["appProperties"] = {"bitportSourceId": "src-plan", "bitportSourceUser": SRC_USER}
+    out = _run(auth, db, settings, keep, dup)
+    assert out["changed"] == 1 and not out["errors"], out
+    assert td.store[dup]["parents"] == [f2]                                   # not moved
+
+
+def test_a_duplicate_in_a_folder_with_another_name_is_left(auth, db, settings, identity):
+    settings.source_read_only = True
+    td = auth.target_drive(TGT_USER)
+    f1, f2 = td.add_folder("for website"), td.add_folder("somewhere else")
+    keep = td.add_binary("plan.pdf", parent=f1, data=b"same bytes")
+    dup = td.add_binary("plan.pdf", parent=f2, data=b"same bytes")
+    for fid in (keep, dup):
+        td.store[fid]["ownedByMe"] = True
+    db.record_mapping(SRC_USER, "src-plan", keep, "file")
+    td.store[dup]["appProperties"] = {"bitportSourceId": "src-plan", "bitportSourceUser": SRC_USER}
+    out = _run(auth, db, settings, keep, dup)
+    assert out["changed"] == 0 and any("not a same-name folder" in e for e in out["errors"])
+    assert td.store[dup]["name"] == "plan.pdf"
+
+
+def test_users_with_findings_are_retried_after_the_quarantine_change():
+    import verification_repairs as R
+    assert R.REPAIR_CAPABILITY_VERSION >= 10

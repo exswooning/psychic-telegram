@@ -547,6 +547,17 @@ def _access(tgt, fid) -> list:
                   for r in rows if not r.get("deleted"))
 
 
+def _same_named_parents(tgt, a, b) -> bool:
+    """The two copies sit in different folders with the SAME name: the target already had a folder twice
+    (account 3: 163 of environment@'s duplicates sit in the second copy of a folder). The rename keeps
+    the file in its own folder, so this only decides whether the two really are the same item."""
+    pa, pb = a.get("parents") or [], b.get("parents") or []
+    if len(pa) != 1 or len(pb) != 1:
+        return False
+    name = lambda fid: tgt.files().get(fileId=fid, supportsAllDrives=True, fields="name").execute().get("name")
+    return name(pa[0]) == name(pb[0])
+
+
 def quarantine_duplicates(auth, db, settings, user, result, apply=False):
     """Quarantine confirmed extras by a reversible rename in their current parent.
 
@@ -588,13 +599,11 @@ def quarantine_duplicates(auth, db, settings, user, result, apply=False):
             if not provenance and not legacy_inventory_checked:
                 _source_drive_fully_paired(auth, db, user)
                 legacy_inventory_checked = True
-            if (
-                em.get("mimeType") != cm.get("mimeType")
-                or em.get("name") != cm.get("name")
-                or em.get("parents") != cm.get("parents")
-            ):
+            if em.get("mimeType") != cm.get("mimeType") or em.get("name") != cm.get("name"):
+                raise RuntimeError("Candidate name or type differs from the canonical copy")
+            if em.get("parents") != cm.get("parents") and not _same_named_parents(tgt, em, cm):
                 raise RuntimeError(
-                    "Candidate name, type or location differs from the canonical copy"
+                    "Candidate location differs from the canonical copy and is not a same-name folder"
                 )
             if em.get("mimeType", "").startswith("application/vnd.google-apps."):
                 if not _native_duplicate_equal(
