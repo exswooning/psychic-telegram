@@ -155,7 +155,7 @@ const OneToOne: React.FC = () => {
   const [picked, setPicked] = useState<Set<string>>(new Set())
   const [asking, setAsking] = useState(false)
   const [everything, setEverything] = useState(false)
-  const [repairToo, setRepairToo] = useState(true)
+  const [repairToo, setRepairToo] = useState(false)
   const [busy, setBusy] = useState(false)
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null)
 
