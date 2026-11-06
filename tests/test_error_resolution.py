@@ -242,7 +242,16 @@ def test_only_complete_fresh_all_affected_scope_resolves_case(cp):
     assert E.list_cases(3)[0]["state"] == "RESOLVED"
     # Recurrence reopens it, with fresh evidence required again.
     record(cp, line(), filename="next-run.log")
-    assert E.list_cases(3)[0]["state"] == "RECOVERING"
+    reopened = E.list_cases(3)[0]
+    assert reopened["state"] == "RECOVERING"
+    assert reopened["next_action"] == E.NEXT["quota"][1]
+    with cpdb.ro() as control:
+        history = control.execute(
+            "SELECT state,detail FROM error_case_history WHERE case_id=? ORDER BY id DESC LIMIT 1",
+            (cid,),
+        ).fetchone()
+    assert history["state"] == "RECOVERING"
+    assert "recurred" in history["detail"]
     db.close()
 
 

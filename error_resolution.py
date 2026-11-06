@@ -374,6 +374,15 @@ def _case(db, account, event, version, now):
             (now, new_state, version, version, row["id"]),
         )
         cid = row["id"]
+        if row["state"] == "RESOLVED":
+            # A new occurrence invalidates the previous success message as well
+            # as its state. Keep the earlier resolution in history, not as the
+            # current instruction shown to the operator.
+            db.execute("UPDATE error_cases SET next_action=? WHERE id=?", (action, cid))
+            db.execute(
+                "INSERT INTO error_case_history(case_id,state,detail,at) VALUES(?,?,?,?)",
+                (cid, new_state, "Error recurred; fresh evidence required. " + action, now),
+            )
     else:
         cid = db.execute(
             "INSERT INTO error_cases(account_id,fingerprint,category,service,reason,title,state,first_seen,last_seen,version,next_action) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
