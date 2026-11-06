@@ -146,3 +146,21 @@ scoped credential, investigation limits and deployment gates unchanged; do not
 disable macOS security protections. Verify both a live launchd PID and a fresh
 Connected heartbeat in Error resolution. This fixes worker availability, not
 migration findings or candidate qualification.
+
+### Structured Drive comment quotes (6 November 2026)
+
+Read-only account 3 Migration details showed a historical comment failure:
+`'dict' object has no attribute 'rstrip'` (one occurrence). That grouped row
+provides neither the original run nor source version; neither is inferred from
+the current installed release. Local reproduction exercises `reconcile -> deliver
+-> _text`: `quotedFileContent` is a structured object but every body field was
+being trimmed as text, failing both mapped-comment reuse and duplicate detection.
+
+Delivery comparison now normalizes trailing whitespace only for `content`, and
+compares quote objects, anchors and actions exactly. Four failing-before/passing-
+after cases cover mapped/unmapped copies and changed quoted content; target edits
+and uncertain deliveries still block writes. All 55 targeted comment, first-pass
+pipeline and comment-progress checks pass with fake services and isolated ledgers.
+This is local qualification, not a live repair or proof of migration parity.
+Deployment and live recheck remain pending while tenant work is active; this
+comment fix is outside the generated Gmail-quota canary's scope.

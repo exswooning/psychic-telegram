@@ -40,6 +40,17 @@ def _text(value):
     return (value or "").rstrip()
 
 
+def _body_matches(found, body):
+    # Only comment text has Drive's trailing-whitespace normalization.
+    # quotedFileContent is an object; anchors/actions and quote fields must
+    # retain exact equality so target edits are never mistaken for our copy.
+    return all(
+        _text(found.get(key)) == _text(value)
+        if key == "content" else found.get(key) == value
+        for key, value in body.items()
+    )
+
+
 def content(row, lookup):
     author = (row.get("author") or {}).get("displayName") or "unknown"
     return (
@@ -135,13 +146,13 @@ def reconcile(migrator, sid, tid):
                 raise RuntimeError(
                     "Mapped comment/reply is missing; do not create another blindly"
                 )
-            if any(_text(found.get(k)) != _text(v) for k, v in body.items()):
+            if not _body_matches(found, body):
                 raise RuntimeError(
                     "Existing target comment/reply differs; preserve possible target edits"
                 )
             return mapped
         matches = [
-            r for r in candidates if all(_text(r.get(k)) == _text(v) for k, v in body.items())
+            r for r in candidates if _body_matches(r, body)
         ]
         if len(matches) > 1:
             raise RuntimeError("Ambiguous comment/reply copies")

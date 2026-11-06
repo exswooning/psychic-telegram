@@ -1,6 +1,8 @@
 """Two comment threads with the same words on different spots of one file are told apart by
 their anchors (live, finance@s.: a PDF carrying "[FINANCE, 2023-01-13]" twice read as
 "missing or ambiguous" plus an "extra" thread, though both had been copied exactly)."""
+import pytest
+
 from migration_comments import differences
 
 A1, A2 = "[null,null,[[[5,[[0.67,0.84,0.91,0.86]]]]]]", "[null,null,[[[5,[[0.67,0.84,0.74,0.86]]]]]]"
@@ -69,3 +71,45 @@ def test_reconcile_does_not_refuse_an_action_only_reply_already_copied(db, setti
                                _project_limiter=None)
     migrator.target_user = TGT_USER
     assert MC.reconcile(migrator, "src-file", "tgt-file") == 0
+
+
+@pytest.mark.parametrize("mapped", [False, True])
+@pytest.mark.parametrize("changed_quote", [False, True])
+def test_reconcile_preserves_structured_quote_and_target_edits(
+    db, settings, monkeypatch, mapped, changed_quote
+):
+    """A quote is an object, not text; matching must not crash or lose its fields."""
+    from copy import deepcopy
+    from types import SimpleNamespace
+    import migration_comments as MC
+    from tests.conftest import SRC_USER, TGT_USER
+
+    db.record_mapping(SRC_USER, "quoted-file", "target-file", "file")
+    source = {"id": "c1", "content": "review", "author": {"displayName": "Author"},
+              "createdTime": "2026-11-01T00:00:00Z", "anchor": A1,
+              "quotedFileContent": {"mimeType": "text/plain", "value": "quote "}}
+    target = deepcopy(source)
+    target.update(id="tc1", content="[Author, 2026-11-01] review ")
+    if changed_quote:
+        target["quotedFileContent"]["value"] = "quote"
+    if mapped:
+        db.record_mapping(SRC_USER, "quoted-file::c1", "tc1", "comment")
+    answers = iter([[source], [target]])
+    monkeypatch.setattr(MC, "list_threads", lambda *a, **k: next(answers))
+    class NoWrites:
+        def comments(self):
+            raise AssertionError("Must not write a duplicate or overwrite a target edit")
+    migrator = SimpleNamespace(db=db, settings=settings, source_user=SRC_USER,
+                              target_user=TGT_USER, src=None, tgt=NoWrites())
+    if changed_quote and not mapped:
+        # An uncertain previous delivery must still block any duplicate create.
+        with db.write() as conn:
+            conn.execute("CREATE TABLE comment_delivery_attempts (source_user TEXT,item_key TEXT,target_file TEXT,state TEXT,updated_at TEXT,PRIMARY KEY(source_user,item_key))")
+            conn.execute("INSERT INTO comment_delivery_attempts VALUES(?,?,?,'UNCERTAIN','now')",
+                         (SRC_USER, "quoted-file::c1", "target-file"))
+    if changed_quote:
+        with pytest.raises(RuntimeError, match="differs|uncertain"):
+            MC.reconcile(migrator, "quoted-file", "target-file")
+    else:
+        assert MC.reconcile(migrator, "quoted-file", "target-file") == 0
+        assert db.get_target_id(SRC_USER, "quoted-file::c1", "comment") == "tc1"
