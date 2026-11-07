@@ -615,6 +615,11 @@ class Verifier:
             f"AND status LIKE 'FAILED%' AND item_type IN ({q})", (self.src_user, *types)).fetchall()
         out = []
         for r in rows:
+            # An item that failed once and is MAPPED now was copied since (a later run, or a repair): its old
+            # failure row is history, not a gap. info@'s repair delivered 137 held messages and the check
+            # still listed all 168 as not copied (7 Nov 2026).
+            if r["item_type"] != types[-1] and self.db.get_target_id(self.src_user, r["item_id"], r["item_type"]):
+                continue
             if r["item_type"] == types[-1] and self.db.conn.execute(
                     f"SELECT 1 FROM audit_log WHERE source_user=? AND status='SUCCESS' AND timestamp>? "
                     f"AND item_type IN ({','.join('?' * len(items))}) LIMIT 1",
