@@ -48,3 +48,26 @@ def test_a_file_whose_comments_run_out_of_time_is_unread_not_a_stall(auth, db, s
     VC.drive(v, res)
     comments = next(c for c in res["checks"] if c["key"] == "drive.comments")
     assert comments["status"] == "INCOMPLETE" and slow in comments["note"], comments
+
+
+def test_the_current_document_does_not_outlive_its_comparison(auth, db, settings, identity):
+    """The heartbeat kept showing the last compared file with a growing timer through the stray check and the
+    comment phase, and read as a 22-minute hang on info@ (7 Nov 2026) though the file finished in seconds.
+    It now clears when the file is done, and the comment phase names the file it is reading."""
+    settings.user_workers = 1
+    settings.migrate_comments = True
+    sd = auth.source_drive(SRC_USER)
+    for n in range(3):
+        sd.add_binary(f"report-{n}.pdf", data=b"quarterly %d" % n)
+    main.run_batch(auth, db, settings, {"drive"}, False, 0)
+    v = V.Verifier(auth, db, settings, SRC_USER, TGT_USER)
+    published = []
+    real = v._publish_stats
+    v._publish_stats = lambda **kw: (published.append(dict(kw)), real(**kw))[1]
+    res = v.drive()
+    assert v._stats["currentDocument"] is None and v._stats["currentSince"] is None   # none left after the compare
+    import verification_coverage as VC
+    VC.drive(v, res)
+    reading = [p for p in published if p.get("currentMime") == "comment threads"]
+    assert len(reading) == 3 and all(p["currentDocument"] for p in reading)           # each file, by name
+    assert v._stats["currentDocument"] is None                                        # and cleared when done

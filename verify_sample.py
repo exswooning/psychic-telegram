@@ -789,7 +789,8 @@ class Verifier:
                 else:
                     res["identical"] += 1
                     self._stats["identical"] += 1
-                self._publish_stats(lastSuccessfulDocument=sid, lastSuccessAt=time.time())
+                self._publish_stats(lastSuccessfulDocument=sid, lastSuccessAt=time.time(),
+                                    currentDocument=None, currentMime=None, currentSince=None)
 
     def drive(self) -> dict:
         res = self._blank()
@@ -926,8 +927,13 @@ class Verifier:
                     self._stats["different"] += 1
                 if unverified is None:
                     self._stats["verified"] += 1
-                    self._publish_stats(lastSuccessfulDocument=sid, lastSuccessAt=time.time(), phase="compare")
+                    self._publish_stats(lastSuccessfulDocument=sid, lastSuccessAt=time.time(), phase="compare",
+                                        currentDocument=None, currentMime=None, currentSince=None)
             self._report_progress(operation, len(pairs), len(pairs))
+        # The compare loop is over: no document is "current" any more. It used to keep showing the last file
+        # with a timer that grew through the stray check and the comment phase, and read as a 22-minute hang
+        # on info@ (7 Nov 2026) when the document itself had finished in seconds.
+        self._publish_stats(currentDocument=None, currentMime=None, currentSince=None)
         self._retry_unverified(res, src, tgt)
         # Strays and duplicates on the target the ledger would never mention.
         try:

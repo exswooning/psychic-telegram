@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 import json
 
 VERSION = 2
@@ -329,6 +330,7 @@ def drive(v, result):
             for n,(sid,tid,_) in enumerate(pairs):
                 if n%25==0:
                     v._report_progress("Drive comment threads",n,len(pairs))
+                v._publish_stats(currentDocument=sid, currentMime="comment threads", currentSince=time.time())
                 try:
                     # One time budget for BOTH sides of this file (VERIFY_DOC_BUDGET_SEC): a slow file is
                     # unread, not a reason to hold the user -- ecodev@'s JPEG sat at 287s of 300 (7 Nov 2026).
@@ -350,6 +352,7 @@ def drive(v, result):
                 diffs=differences(a,b,v.db.target_for_source_id)
                 compared+=len(a);matched+=len(a) if not diffs else 0
                 if diffs:result["differences"].append({"source":sid,"target":tid,"scope":"drive-comments","diffs":diffs})
+            v._publish_stats(currentDocument=None, currentMime=None, currentSince=None)
             note="Original author/date are retained as attribution text when replayed; native author identities/history are not reproduced."
             if unread:
                 # Never a pass: a file whose threads were not read in time is named, not skipped silently.
