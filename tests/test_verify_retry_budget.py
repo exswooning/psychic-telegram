@@ -67,3 +67,22 @@ def test_a_budget_already_running_is_not_replaced(db, settings):
     with v._doc_budget():
         assert v._file_deadline == mark                     # the retry pass's shorter budget stands
     assert v._file_deadline == mark
+
+
+def test_the_sheet_cell_budget_can_be_raised_for_a_qualified_sheet(monkeypatch):
+    import native_repair
+    from types import SimpleNamespace
+
+    class Svc:
+        def spreadsheets(self):
+            return self
+
+        def get(self, **kw):
+            doc = {"sheets": [{"properties": {"sheetId": 1, "title": "t", "sheetType": "OBJECT",
+                                              "gridProperties": {"rowCount": 3000, "columnCount": 1000}}}]}
+            return SimpleNamespace(execute=lambda: doc)
+
+    with pytest.raises(RuntimeError, match="per-read budget"):
+        native_repair.read_sheet(Svc(), "x")                      # 3,000,000 allocated cells > 2,000,000
+    monkeypatch.setenv("VERIFY_SHEET_CELL_BUDGET", "5000000")
+    native_repair.read_sheet(Svc(), "x")                          # no longer refused for size

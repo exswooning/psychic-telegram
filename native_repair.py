@@ -29,9 +29,15 @@ def _rewrite(value, lookup):
     return value
 
 
-def read_sheet(svc, fid, cell_budget=2000000, pace=lambda: None):
+def read_sheet(svc, fid, cell_budget=None, pace=lambda: None):
     """Read native structures and bounded grid windows, including every tab. `pace` is called
     before each request: a big sheet is many requests, and Google allows 60 reads a minute per user."""
+    if cell_budget is None:
+        # The grid's ALLOCATED cells (rows x columns, blank included). 2,000,000 by default; a sheet
+        # that is larger is refused rather than read in thousands of requests. Raise it for a sheet
+        # the operator has qualified: VERIFY_SHEET_CELL_BUDGET.
+        import os
+        cell_budget=int(os.getenv("VERIFY_SHEET_CELL_BUDGET","2000000"))
     fields=SHEET_FIELDS.split(",data(",1)[0]+")"
     pace();doc=svc.spreadsheets().get(spreadsheetId=fid,fields=fields).execute()
     cells=sum(int(s["properties"].get("gridProperties",{}).get("rowCount",0))*int(s["properties"].get("gridProperties",{}).get("columnCount",0)) for s in doc.get("sheets",[]))

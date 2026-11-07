@@ -95,7 +95,7 @@ def enabled(db):
         return False
 
 
-REPAIR_CAPABILITY_VERSION = 10   # 10: quarantine handles large binaries, ETag-less files and same-name duplicate folders
+REPAIR_CAPABILITY_VERSION = 11   # 11: gone drafts, contacts and task lists are copied again; oversized native duplicates by provenance
 
 
 def _newly_supported(rows):
@@ -287,6 +287,10 @@ def scoped_repair(auth, db, settings, user, per):
                 for e in result.get("errors", []))], "scope": "bounded fresh reads; no source writes"}
     if "contacts" in per:
         out["contacts"] = repair.retry_failed_contact_names(auth, db, st, apply=True, users={user})
+    try:
+        out["recopy_gone"] = finding_repairs.recopy_gone_items(auth, db, st, user, per)
+    except Exception as exc:      # noqa: BLE001 - one repair failing must not stop the rest
+        out["recopy_gone"] = {"errors": [str(exc)]}
     types = (("message", "draft") if "gmail" in per else ()) + (("event",) if "calendar" in per else ())
     if types:
         out["failed_items"] = retry_failed.retry(auth, db, st, apply=True, users={user}, item_types=types)
@@ -322,8 +326,8 @@ def affected_services(out):
     """Conservative invalidation: recheck writes, attempted repairs and failed reads only."""
     affected=set((out.get("read_retry") or {}).get("services",[]))
     for service, keys in {
-        "gmail":("gmail_labels","missing_mail","missing_drafts"), "drive":("drive_findings","native_links","drive_retry","modified_times","external_access"),
-        "calendar":("calendar_scope",), "contacts":("contacts",), "tasks":("tasks",), "directory":("directory",)}.items():
+        "gmail":("gmail_labels","missing_mail","missing_drafts","recopy_gone"), "drive":("drive_findings","native_links","drive_retry","modified_times","external_access"),
+        "calendar":("calendar_scope",), "contacts":("contacts","recopy_gone"), "tasks":("tasks","recopy_gone"), "directory":("directory",)}.items():
         for key in keys:
             row=out.get(key) or {}
             if any(row.get(n) for n in ("candidates","attempted","changed","verified","drifted","errors")):

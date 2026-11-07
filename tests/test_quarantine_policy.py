@@ -97,3 +97,38 @@ def test_a_duplicate_in_a_folder_with_another_name_is_left(auth, db, settings, i
 def test_users_with_findings_are_retried_after_the_quarantine_change():
     import verification_repairs as R
     assert R.REPAIR_CAPABILITY_VERSION >= 10
+
+
+def _native_pair(auth, db, settings, tag_canonical):
+    settings.source_read_only = True
+    td = auth.target_drive(TGT_USER)
+    keep = td.add_native("Plan")
+    dup = td.add_native("Plan")
+    for fid in (keep, dup):
+        td.store[fid]["ownedByMe"] = True
+    prov = {"bitportSourceId": "src-plan", "bitportSourceUser": SRC_USER}
+    td.store[dup]["appProperties"] = dict(prov)
+    if tag_canonical:
+        td.store[keep]["appProperties"] = dict(prov)
+    db.record_mapping(SRC_USER, "src-plan", keep, "file")
+    return td, keep, dup
+
+
+def test_an_oversized_native_duplicate_is_quarantined_when_both_copies_carry_the_same_source_tag(auth, db, settings, identity, monkeypatch):
+    td, keep, dup = _native_pair(auth, db, settings, tag_canonical=True)
+    def too_big(*a, **k):
+        raise RuntimeError("Native duplicate snapshot exceeds the bounded comparison size")
+    monkeypatch.setattr(F, "_native_duplicate_equal", too_big)
+    out = _run(auth, db, settings, keep, dup)
+    assert out["changed"] == 1 and not out["errors"], out
+    assert td.store[dup]["name"].startswith(".Quarantined duplicate ")
+
+
+def test_an_oversized_native_duplicate_without_the_canonical_tag_is_left(auth, db, settings, identity, monkeypatch):
+    td, keep, dup = _native_pair(auth, db, settings, tag_canonical=False)
+    def too_big(*a, **k):
+        raise RuntimeError("Native duplicate snapshot exceeds the bounded comparison size")
+    monkeypatch.setattr(F, "_native_duplicate_equal", too_big)
+    out = _run(auth, db, settings, keep, dup)
+    assert out["changed"] == 0 and out["errors"]
+    assert td.store[dup]["name"] == "Plan"

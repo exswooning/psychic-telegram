@@ -425,6 +425,13 @@ RUN_KINDS = [
      "DOCUMENTED EXCEPTION, not repaired. The Sheet and its Form are copied, owned and shared as in the "
      "source, so the people who use them keep access; only the response rows differ. A repair keeps a "
      "backup of the target copy. Relinking the Form to its Sheet is done by hand (form_relink.py).", False),
+    ("drive.sheet_too_large", "drive", lambda t: "allocated cells exceed the explicit per-read budget" in t,
+     "A Sheet is too large to compare cell by cell",
+     "The check reads a Sheet's grid in bounded requests and refuses one whose ALLOCATED cells (rows x "
+     "columns, blank included) exceed 2,000,000 -- reading it would take thousands of requests (seen on "
+     "suchanaadhikari@, account 3).",
+     "None automatic. Raise VERIFY_SHEET_CELL_BUDGET for a Sheet the operator has qualified; until then "
+     "the Sheet reads UNVERIFIED, never identical.", False),
     ("run.held_for_drive", None,
      lambda t: "held: this user's Drive did not migrate" in t,
      "Mail or calendar held back for Drive",

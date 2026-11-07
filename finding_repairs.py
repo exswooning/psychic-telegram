@@ -558,6 +558,44 @@ def _same_named_parents(tgt, a, b) -> bool:
     return name(pa[0]) == name(pb[0])
 
 
+def recopy_gone_items(auth, db, settings, user, per) -> dict:
+    """Copy again what the check found GONE from the target: a task list, a contact, a draft the ledger
+    still maps. Only a migration pass did this (audit@, account 3: 2 task lists, 1 contact, 23 drafts
+    stayed missing through every repair). The engines confirm each one is gone (a 404 for that very
+    item) before forgetting its mapping, and write only to the target."""
+    out = {"candidates": 0, "changed": 0, "errors": [], "recopied": []}
+    if settings.dry_run:
+        return out
+    target = _target(db, settings, user)
+    tasks = per.get("tasks") or {}
+    contacts = per.get("contacts") or {}
+    drafts = [{"source": m["source"], "target": m["target"], "type": "draft"}
+              for m in (per.get("gmail") or {}).get("missing", [])
+              if "draft not on the target" in str(m.get("why"))]
+    jobs = []
+    if any("task list" in str(e) and "404" in str(e) for e in tasks.get("errors", [])):
+        jobs.append(("tasks", lambda: __import__("tasks_engine").TasksMigrator(auth, db, settings, user, target).run()))
+    if any("not on the target" in str(m.get("why")) for m in contacts.get("missing", [])):
+        jobs.append(("contacts", lambda: __import__("contacts_engine").ContactsMigrator(auth, db, settings, user, target).run()))
+    if drafts:
+        def run_drafts():
+            from migration_checks import reopen_missing_messages
+            if reopen_missing_messages(db, auth.target_gmail(target), user, drafts):
+                return __import__("gmail_engine").GmailMigrator(auth, db, settings, user, target).run()
+            return {}
+        jobs.append(("drafts", run_drafts))
+    for name, job in jobs:
+        out["candidates"] += 1
+        try:
+            stats = job() or {}
+            out["recopied"].append(name)
+            out["changed"] += int(stats.get("recopied_missing", 0) or 0) + int(stats.get("drafts", 0) or 0) \
+                + int(stats.get("tasks", 0) or 0) + int(stats.get("contacts", 0) or 0)
+        except Exception as exc:      # noqa: BLE001 - one service failing must not stop the others
+            out["errors"].append(f"{name}: {error_detail(exc)}")
+    return out
+
+
 def quarantine_duplicates(auth, db, settings, user, result, apply=False):
     """Quarantine confirmed extras by a reversible rename in their current parent.
 
@@ -606,9 +644,21 @@ def quarantine_duplicates(auth, db, settings, user, result, apply=False):
                     "Candidate location differs from the canonical copy and is not a same-name folder"
                 )
             if em.get("mimeType", "").startswith("application/vnd.google-apps."):
-                if not _native_duplicate_equal(
-                    auth, target, extra, canonical, em["mimeType"]
-                ):
+                try:
+                    equal = _native_duplicate_equal(
+                        auth, target, extra, canonical, em["mimeType"]
+                    )
+                except RuntimeError as exc:
+                    # Too big to snapshot (17 on account 3). Both copies carrying Bitport's tag for
+                    # the SAME source file is the proof instead: Bitport made them both from it.
+                    cprov = cm.get("appProperties", {})
+                    if ("exceeds the bounded comparison size" not in str(exc)
+                            or cprov.get("bitportSourceId") != owner["source_id"]
+                            or cprov.get("bitportSourceUser") != user
+                            or not provenance):
+                        raise
+                    equal = True
+                if not equal:
                     raise RuntimeError(
                         "Native snapshots differ or cannot establish duplicate equivalence"
                     )
