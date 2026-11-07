@@ -324,24 +324,40 @@ def drive(v, result):
             # where it is. Live (info@, 6 Nov 2026) it ran under the stale "Drive stray check" label
             # with no counter and read as stuck.
             pairs=v._pairs("file",sample=True)
+            unread=[]
+            from resilience import RetryBudgetExceeded
             for n,(sid,tid,_) in enumerate(pairs):
                 if n%25==0:
                     v._report_progress("Drive comment threads",n,len(pairs))
                 try:
-                    a=list_threads(src,sid,v._x)
-                except Exception as exc:
-                    # A Form has no Drive comments; the API answers 404 for its threads. That is no
-                    # comments, not an unreadable file -- confirmed by its type, never assumed.
-                    if "404" in str(exc) and _is_form(src, sid, v._x):
-                        continue
-                    raise
-                b=list_threads(v.auth.target_drive(v.tgt_user),tid,v._x)
+                    # One time budget for BOTH sides of this file (VERIFY_DOC_BUDGET_SEC): a slow file is
+                    # unread, not a reason to hold the user -- ecodev@'s JPEG sat at 287s of 300 (7 Nov 2026).
+                    with v._doc_budget():
+                        try:
+                            a=list_threads(src,sid,v._x)
+                        except RetryBudgetExceeded:
+                            raise
+                        except Exception as exc:
+                            # A Form has no Drive comments; the API answers 404 for its threads. That is no
+                            # comments, not an unreadable file -- confirmed by its type, never assumed.
+                            if "404" in str(exc) and _is_form(src, sid, v._x):
+                                continue
+                            raise
+                        b=list_threads(v.auth.target_drive(v.tgt_user),tid,v._x)
+                except RetryBudgetExceeded:
+                    unread.append(sid)
+                    continue
                 diffs=differences(a,b,v.db.target_for_source_id)
                 compared+=len(a);matched+=len(a) if not diffs else 0
                 if diffs:result["differences"].append({"source":sid,"target":tid,"scope":"drive-comments","diffs":diffs})
+            note="Original author/date are retained as attribution text when replayed; native author identities/history are not reproduced."
+            if unread:
+                # Never a pass: a file whose threads were not read in time is named, not skipped silently.
+                return check("drive.comments","Comment thread text, replies, anchors and resolution","INCOMPLETE",compared,matched,
+                    note=f"{len(unread)} file(s) had comment threads not read within the time budget (first: {', '.join(unread[:3])}). "+note)
             return check("drive.comments","Comment thread text, replies, anchors and resolution",
                 "DIFFERENCES" if any(i.get("scope")=="drive-comments" for i in result["differences"]) else "MATCHED" if compared else "EMPTY",compared,matched,
-                note="Original author/date are retained as attribution text when replayed; native author identities/history are not reproduced.")
+                note=note)
         add(v,result,"drive.comments","Comment threads",comments)
     else:
         result["checks"].append(check("drive.comments","Comment threads","NOT_SELECTED",required=False))
