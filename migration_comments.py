@@ -37,7 +37,11 @@ def _text(value):
     # Drive keeps a comment's text without the trailing space the engine writes after the
     # "[Author, date]" prefix, so an exact comparison called every action-only reply
     # (empty body) "differs" and refused it. Trailing whitespace is not a difference.
-    return (value or "").rstrip()
+    # Only text is trimmed: quotedFileContent is an object ({"mimeType", "value"}), and trimming it
+    # failed health@, ward15@ and ward4@ with "'dict' object has no attribute 'rstrip'" (7 Nov 2026).
+    if isinstance(value, str):
+        return value.rstrip()
+    return "" if value is None else value
 
 
 def _body_matches(found, body):

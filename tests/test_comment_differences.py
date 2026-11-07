@@ -113,3 +113,35 @@ def test_reconcile_preserves_structured_quote_and_target_edits(
     else:
         assert MC.reconcile(migrator, "quoted-file", "target-file") == 0
         assert db.get_target_id(SRC_USER, "quoted-file::c1", "comment") == "tc1"
+
+
+def test_a_comment_quoting_file_content_is_compared_not_crashed():
+    """Live (health@, ward15@, ward4@, 7 Nov 2026): quotedFileContent is an object, and trimming it as text
+    raised "'dict' object has no attribute 'rstrip'" -- the comment failed instead of matching."""
+    from migration_comments import _text
+    quoted = {"mimeType": "text/html", "value": "the quoted words"}
+    assert _text(quoted) == quoted and _text(None) == "" and _text("a  ") == "a"
+    src = {"content": "x", "anchor": A1, "quotedFileContent": quoted, "replies": [],
+           "author": {"displayName": "Finance"}, "createdTime": "2023-01-13T10:00:00Z"}
+    tgt = {"content": "[Finance, 2023-01-13] x", "anchor": A1, "quotedFileContent": dict(quoted), "replies": []}
+    assert differences([src], [tgt], lambda fid: None) == []
+
+
+def test_reconcile_accepts_a_thread_that_quotes_file_content(db, settings, monkeypatch):
+    from types import SimpleNamespace
+    import migration_comments as MC
+    from tests.conftest import SRC_USER, TGT_USER
+    settings.source_domain = "s.example"
+    db.record_mapping(SRC_USER, "src-file", "tgt-file", "file")
+    quoted = {"mimeType": "text/html", "value": "quoted"}
+    src_thread = {"id": "c1", "content": "x", "anchor": A1, "quotedFileContent": quoted, "replies": [],
+                  "author": {"displayName": "Finance"}, "createdTime": "2023-01-13T10:00:00Z"}
+    tgt_thread = {"id": "tc1", "content": "[Finance, 2023-01-13] x", "anchor": A1,
+                  "quotedFileContent": dict(quoted), "replies": []}
+    db.record_mapping(SRC_USER, "src-file::c1", "tc1", "comment")
+    answers = iter([[src_thread], [tgt_thread]])
+    monkeypatch.setattr(MC, "list_threads", lambda svc, fid, execute=None: next(answers))
+    migrator = SimpleNamespace(db=db, settings=settings, source_user=SRC_USER, target_user=TGT_USER,
+                               src=None, tgt=None, _retry=lambda fn, **k: fn(), _tgt_write_limiter=None,
+                               _project_limiter=None)
+    assert MC.reconcile(migrator, "src-file", "tgt-file") == 0
