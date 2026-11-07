@@ -144,6 +144,17 @@ describe('Running Now', () => {
     expect(screen.queryByText('gorkhatweed.com')).toBeNull()
   })
 
+  it("never labels another account's job with the viewer's domain when its own pair is unknown", async () => {
+    cp.fetchTenantConfigStatus.mockImplementation((side: string) => Promise.resolve(
+      { side, domain: side === 'source' ? 'gorkhatweed.com' : 'new.gorkhatweed.com', hasKey: true }))
+    cp.fetchMigrations.mockResolvedValue({ migrations: [] })
+    cp.fetchActiveJobs.mockResolvedValue([{ account_id: 3, job_name: 'verify', pid: 9, started_at: 'x' }])
+    client.fetchJob.mockResolvedValue({ running: true, name: 'verify', external: true, pid: 9, elapsed: 60, lines: [] })
+    render(<RunningNow />)
+    await waitFor(() => expect(screen.getByText(/account #3/)).toBeTruthy())
+    expect(screen.queryByText('gorkhatweed.com')).toBeNull()
+  })
+
   it('says such a job is detached rather than pretending it is tracked', async () => {
     client.fetchJob.mockResolvedValue({
       running: true, name: 'seed', external: true, elapsed: 60, lines: [],

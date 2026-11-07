@@ -1447,6 +1447,21 @@ class TestCrossAccountJobAdmission:
         finally:
             job_admission.release(999, "seed")
 
+    def test_a_client_sees_that_another_account_is_busy_but_not_its_pid_or_step(self, cp):
+        import job_admission
+
+        cp.post("/api/v2/auth/signup", json={"email": "plain@example.com", "password": "hunter22222",
+                                             "name": "Plain Client"})
+        job_admission.try_admit(999, "seed", pid=4242)
+        try:
+            r = cp.get("/api/v2/active-jobs")
+            assert r.status_code == 200
+            rows = [x for x in r.json() if x["account_id"] == 999]
+            assert rows and rows[0]["job_name"] == "seed"
+            assert "pid" not in rows[0] and "progress" not in rows[0]
+        finally:
+            job_admission.release(999, "seed")
+
 
 class TestSuperadminAdminEndpoints:
     """The admin dashboard's backend: listing every account and toggling

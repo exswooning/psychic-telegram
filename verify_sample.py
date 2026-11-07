@@ -2162,6 +2162,18 @@ def service_complete(result: dict) -> bool:
             and (result.get("checked", 0) > 0 or result.get("emptySource", False)))
 
 
+def _chat_attempted(db, user: str) -> bool:
+    """A Chat row that is a REFUSAL (no access to the service: a skipped row, or a 403 PERMISSION_DENIED)
+    is not an attempt to copy: education@ spent 3 minutes and 9 retries verifying Chat against a scope
+    nobody granted, and ended INCOMPLETE (live, 7 Nov 2026). A real failure still reads as not copied."""
+    from main import _service_unreachable
+    for r in db.conn.execute("SELECT status, error_message FROM audit_log WHERE source_user=? AND item_type IN "
+                             "('chat','chat_space','chat_message')", (user,)):
+        if not (r["status"] or "").startswith("SKIPPED") and not _service_unreachable(r["error_message"] or ""):
+            return True
+    return False
+
+
 def run(auth, db, settings, users: list[str] | None = None, services=ALL_SERVICES, retry=lambda f: f,
         progress=print, limit: int | None = None, on_user=None, on_service=None) -> dict:
     ident = {r["source_email"]: r["target_email"] for r in db.all_identities() if r["entity_type"] == "user"}
@@ -2173,9 +2185,7 @@ def run(auth, db, settings, users: list[str] | None = None, services=ALL_SERVICE
     if "chat" in services and not getattr(settings, "migrate_chat", False) and not any(
             db.get_target_id(user, sid, "chat_space") for user in chosen
             for sid, in db.conn.execute("SELECT source_id FROM id_mapping WHERE source_user=? AND type='chat_space' LIMIT 1", (user,))
-    ) and not any(db.conn.execute("SELECT 1 FROM audit_log WHERE source_user=? AND item_type IN "
-                                  "('chat','chat_space','chat_message') LIMIT 1", (user,)).fetchone()
-                  for user in chosen):
+    ) and not any(_chat_attempted(db, user) for user in chosen):
         services = tuple(s for s in services if s != "chat")
     report = {"generatedAt": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
               "accountId": getattr(settings, "account_id", None),

@@ -1638,6 +1638,12 @@ async def get_active_jobs(op: Operator = Depends(operator)):
         if t is not None and t.is_alive():
             rows = list(rows) + [{"account_id": aid, "job_name": "repair", "pid": None,
                                   "started_at": prog.get("startedAt"), "progress": dict(prog)}]
+    if op.login_id is not None and not op.is_superadmin:      # a signed-in client; the operator's own token is not one
+        # A capacity refusal caused by someone else's run still has to be explainable, so the row stays;
+        # its pid and its step (which names users and files of that tenant) do not.
+        mine = {op.account_id, op.login_id, *accounts_auth.owned_migrations(op.login_id)} - {None}
+        rows = [r if r.get("account_id") in mine else
+                {k: v for k, v in r.items() if k not in ("pid", "progress")} for r in rows]
     return rows
 
 

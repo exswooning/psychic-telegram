@@ -1,5 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, fireEvent } from '@testing-library/react'
+import { render as rtlRender, screen, fireEvent } from '@testing-library/react'
+import { MemoryRouter } from 'react-router-dom'
+import type { ReactElement } from 'react'
 
 /* A failed run can leave thousands of rows: the page drew them all, the filter had only a
    placeholder for a name, and the rows opened a record on click that a keyboard could not reach. */
@@ -17,6 +19,9 @@ const rows = (n: number) => Array.from({ length: n }, (_, i) => ({
   id: i + 1, source_user: `u${i}@s.example`, item_id: `i${i}`, item_type: 'file', status: 'FAILED',
   error_message: `boom ${i}`, timestamp: '2026-11-01T00:00:00Z',
 }))
+
+// The page links to the error triage view, so it needs a router like the app gives it.
+const render = (ui: ReactElement) => rtlRender(<MemoryRouter>{ui}</MemoryRouter>)
 
 beforeEach(() => { cp.fetchFailures.mockReset() })
 

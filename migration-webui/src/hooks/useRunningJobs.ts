@@ -225,7 +225,11 @@ export function useRunningJobs() {
         // A verify reads both tenants too, and "gorkhatweed.com" on account 3's verify was the
         // viewer's own source (live, 2026-11-01): any job of a known account, bar the ones that
         // name a single side, is labelled with that account's pair.
-        const jobDomain = ownPair && (kind === 'migrate' || kind === 'verify') ? ownPair
+        // The configs above belong to the VIEWER's account: another account's job never borrows them,
+        // whatever its pair is known as (live, 2026-11-07: account 3's repair read "gorkhatweed.com").
+        const foreign = admission?.account_id != null && admission.account_id !== myAccountId
+        const jobDomain = foreign ? ownPair
+          : ownPair && (kind === 'migrate' || kind === 'verify') ? ownPair
           : kind !== 'migrate' && /\btarget\b/i.test(job.name)
           ? tgtCfg?.domain
           // A migration (or delta) reads the source and writes the target -- naming only
