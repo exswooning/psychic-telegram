@@ -134,6 +134,19 @@ def queued_repairable(db, user) -> dict:
     return out
 
 
+def services_to_check(db, user, services) -> tuple:
+    """The services a backlog repair re-reads for this user: those not IDENTICAL on their last check, never
+    checked, or with an open queue row. it.department@'s findings were all Drive, yet each repair re-read
+    its whole mailbox first (account 3: Gmail is a third of all verify time, 54 h of 165)."""
+    ensure(db)
+    last = {r["service"]: r["verdict"] for r in db.conn.execute(
+        "SELECT service, verdict FROM user_verification WHERE source_user=?", (user,))}
+    queued = {r[0] for r in db.conn.execute(
+        "SELECT DISTINCT service FROM verification_repair_queue WHERE source_user=? AND state!='RESOLVED'",
+        (user,))}
+    return tuple(s for s in services if s in queued or last.get(s) != "IDENTICAL")
+
+
 def enable(db):
     ensure(db)
     with db.write() as conn:

@@ -7,6 +7,7 @@ text/format/layout fields remain present. This does not certify revision history
 from __future__ import annotations
 
 import copy
+import os
 from link_rewrite import rewrite_text
 
 ID_FIELDS = {
@@ -112,17 +113,44 @@ def _fetch_image(url: str, deadline: float | None = None) -> bytes:
     return data
 
 
-def _hash_images(value, fetch=None):
-    """Every embedded image's signed URL replaced by sha256 of its bytes."""
+def _image_urls(value, out: dict) -> dict:
+    """Every distinct embedded-image URL in a document, first seen first."""
+    if isinstance(value, dict):
+        for k, v in value.items():
+            if k in IMAGE_KEYS and isinstance(v, str):
+                out.setdefault(v, None)
+            else:
+                _image_urls(v, out)
+    elif isinstance(value, list):
+        for v in value:
+            _image_urls(v, out)
+    return out
+
+
+def _hash_images(value, fetch=None, workers: int | None = None):
+    """Every embedded image's signed URL replaced by sha256 of its bytes. Each distinct URL is fetched
+    once, IMAGE_FETCH_WORKERS (8) at a time: one after another, an image-heavy Doc could not be read
+    inside its 300 s budget and stayed UNVERIFIED on every check (education@, live 7 Nov 2026)."""
     import hashlib
     fetch = fetch or _fetch_image
-    if isinstance(value, dict):
-        return {k: ("sha256:" + hashlib.sha256(fetch(v)).hexdigest()
-                    if k in IMAGE_KEYS and isinstance(v, str) else _hash_images(v, fetch))
-                for k, v in value.items()}
-    if isinstance(value, list):
-        return [_hash_images(v, fetch) for v in value]
-    return value
+    urls = list(_image_urls(value, {}))
+    if not urls:
+        return value
+    workers = max(1, min(len(urls), workers or int(os.getenv("IMAGE_FETCH_WORKERS", "8") or 8)))
+    if workers == 1:
+        digests = {u: "sha256:" + hashlib.sha256(fetch(u)).hexdigest() for u in urls}
+    else:
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="verify-image") as pool:
+            digests = dict(zip(urls, pool.map(lambda u: "sha256:" + hashlib.sha256(fetch(u)).hexdigest(), urls)))
+
+    def swap(v):
+        if isinstance(v, dict):
+            return {k: (digests[x] if k in IMAGE_KEYS and isinstance(x, str) else swap(x)) for k, x in v.items()}
+        if isinstance(v, list):
+            return [swap(x) for x in v]
+        return v
+    return swap(value)
 
 
 def _side(side: str, endpoint: str, read):

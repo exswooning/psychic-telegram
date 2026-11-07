@@ -145,3 +145,47 @@ def test_reconcile_accepts_a_thread_that_quotes_file_content(db, settings, monke
                                src=None, tgt=None, _retry=lambda fn, **k: fn(), _tgt_write_limiter=None,
                                _project_limiter=None)
     assert MC.reconcile(migrator, "src-file", "tgt-file") == 0
+
+
+def _reconcile_with_attempt(db, settings, monkeypatch, attempt_file):
+    """One Doc re-copied to tgt-file-new; an earlier attempt for its comment is on record against `attempt_file`."""
+    from types import SimpleNamespace
+    import migration_comments as MC
+    from tests.conftest import SRC_USER, TGT_USER
+    settings.source_domain = "s.example"
+    db.record_mapping(SRC_USER, "src-file", "tgt-file-new", "file")
+    with db.write() as c:
+        c.execute("""CREATE TABLE IF NOT EXISTS comment_delivery_attempts (
+            source_user TEXT,item_key TEXT,target_file TEXT,state TEXT,updated_at TEXT,
+            PRIMARY KEY(source_user,item_key))""")
+        c.execute("INSERT INTO comment_delivery_attempts VALUES(?,?,?,'CONFIRMED','2026-11-01T00:00:00Z')",
+                  (SRC_USER, "src-file::c1", attempt_file))
+    src_thread = {"id": "c1", "content": "x", "anchor": A1, "replies": [],
+                  "author": {"displayName": "Finance"}, "createdTime": "2023-01-13T10:00:00Z"}
+    answers = iter([[src_thread], []])
+    monkeypatch.setattr(MC, "list_threads", lambda svc, fid, execute=None: next(answers))
+    created = []
+
+    class Create:
+        def execute(self):
+            created.append(1)
+            return {"id": "tc-new"}
+    migrator = SimpleNamespace(db=db, settings=settings, source_user=SRC_USER, target_user=TGT_USER,
+                               src=None, tgt=SimpleNamespace(comments=lambda: SimpleNamespace(
+                                   create=lambda **kw: Create())),
+                               _retry=lambda fn, **k: fn(), _tgt_write_limiter=None, _project_limiter=None)
+    return MC, migrator, created
+
+
+def test_an_attempt_on_an_old_copy_does_not_block_the_new_copys_comments(db, settings, monkeypatch):
+    MC, migrator, created = _reconcile_with_attempt(db, settings, monkeypatch, "tgt-file-OLD")
+    assert MC.reconcile(migrator, "src-file", "tgt-file-new") == 1 and created == [1]
+    row = db.conn.execute("SELECT target_file, state FROM comment_delivery_attempts").fetchone()
+    assert tuple(row) == ("tgt-file-new", "CONFIRMED")
+
+
+def test_an_attempt_on_the_same_file_still_waits_for_a_person(db, settings, monkeypatch):
+    MC, migrator, created = _reconcile_with_attempt(db, settings, monkeypatch, "tgt-file-new")
+    with pytest.raises(RuntimeError, match="Prior uncertain"):
+        MC.reconcile(migrator, "src-file", "tgt-file-new")
+    assert created == []

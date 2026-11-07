@@ -163,9 +163,14 @@ def reconcile(migrator, sid, tid):
         if matches:
             target_id = matches[0]["id"]
         else:
+            # Only an attempt against THIS target file says anything about it. A file re-copied to a new
+            # target (repair, quarantine) clears its comments' mappings but not their attempt rows, and the
+            # old copy's rows then blocked the new copy's comments for good (finance@, it.department@:
+            # "needs reconciliation", live 7 Nov 2026) -- the user's comments never reached the new file.
             prior = migrator.db.conn.execute(
-                "SELECT state FROM comment_delivery_attempts WHERE source_user=? AND item_key=?",
-                (migrator.source_user, key),
+                "SELECT state FROM comment_delivery_attempts WHERE source_user=? AND item_key=? "
+                "AND target_file=?",
+                (migrator.source_user, key, tid),
             ).fetchone()
             if prior:
                 raise RuntimeError(
@@ -173,7 +178,7 @@ def reconcile(migrator, sid, tid):
                 )
             with migrator.db.write() as c:
                 c.execute(
-                    "INSERT INTO comment_delivery_attempts VALUES(?,?,?,'UNCERTAIN',?)",
+                    "INSERT OR REPLACE INTO comment_delivery_attempts VALUES(?,?,?,'UNCERTAIN',?)",
                     (migrator.source_user, key, tid, utc_now()),
                 )
             # No automatic request retry after an ambiguous create response.

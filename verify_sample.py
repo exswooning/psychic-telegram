@@ -30,6 +30,7 @@ itself on the server with nobody watching.
 from __future__ import annotations
 
 import base64
+import copy
 import email
 import hashlib
 import json
@@ -64,6 +65,15 @@ def _stop_check():
 HERE = os.path.dirname(os.path.abspath(__file__))
 FOLDER = "application/vnd.google-apps.folder"
 DRIVE_METADATA_BATCH_SIZE = 25
+
+
+def _drive_file_workers() -> int:
+    """How many of one user's Drive files are compared at once (VERIFY_DRIVE_WORKERS, 1-16; default 6).
+    Bounded by the metadata window (25) and paced by the same per-user and per-project limiters."""
+    try:
+        return max(1, min(16, int(os.getenv("VERIFY_DRIVE_WORKERS", "6"))))
+    except ValueError:
+        return 6
 DRIVE_META_FIELDS = ("id,name,mimeType,parents,size,md5Checksum,modifiedTime,trashed,ownedByMe,version,"
                      "permissions(id,type,role,emailAddress,domain,deleted)")
 # Files larger than this are compared by size and MD5 only. Both sides are read into
@@ -101,9 +111,10 @@ def _gmail_batch_size():
 
 
 def _gmail_read_window():
-    """How many batch pairs are read ahead (VERIFY_GMAIL_WINDOW, 1-8; default 4)."""
+    """How many batch pairs are read ahead (VERIFY_GMAIL_WINDOW, 1-8; default 8). 4 ran a mailbox at about a
+    tenth of Gmail's per-user quota (dharan, 2026-10-23); 8 stays near a fifth. info@'s check was 631 min."""
     try:
-        return max(1, min(8, int(os.getenv("VERIFY_GMAIL_WINDOW", "4"))))
+        return max(1, min(8, int(os.getenv("VERIFY_GMAIL_WINDOW", "8"))))
     except ValueError:
         return 4
 
@@ -641,11 +652,133 @@ class Verifier:
                 "duplicates": [], "notCopied": [], "errors": [], "notes": [], "unverified": []}
 
     # -- Drive ------------------------------------------------------------
+    def _drive_reads_all(self, kind, jobs, src, tgt, sc, tc) -> list[dict]:
+        """The slow reads of one metadata window's files -- folder paths, content, the links inside, sharing --
+        VERIFY_DRIVE_WORKERS at a time (default 6). One at a time, a 1,238-file Drive took 20-170 min at ~1 s a
+        call while the box sat idle (account 3, 7 Nov 2026). Results come back in the window's order; all
+        accounting stays on the caller's thread."""
+        workers = max(1, min(len(jobs), _drive_file_workers()))
+        self._ensure_acl_sets()          # once, here: a copy that loaded them would load them per file
+        if workers == 1:
+            return [self._drive_reads(kind, sid, tid, sm, tm, src, tgt, sc, tc) for sid, tid, sm, tm in jobs]
+        from concurrent.futures import ThreadPoolExecutor
+
+        def one(job):
+            _stop_check()
+            # AuthManager caches transports per thread: each worker resolves its own clients.
+            return self._drive_reads(kind, *job, self.auth.source_drive(self.src_user),
+                                     self.auth.target_drive(self.tgt_user), sc, tc)
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="verify-drive-file") as pool:
+            return list(pool.map(one, jobs))
+
+    def _drive_reads(self, kind, sid, tid, sm, tm, src, tgt, sc, tc) -> dict:
+        """Every READ one paired item needs, on a shallow copy of this verifier so the per-file budget
+        (_file_deadline) and the not-owner flag belong to this file alone. Writes nothing to the result."""
+        w = copy.copy(self)
+        w._file_deadline, w._not_owner = None, False
+        local = Verifier._blank()
+        out = {"local": local, "reused": None, "content": [], "links": [], "linkError": None}
+        carried_in = sm.get("ownedByMe") is False
+        # A file shared into this mailbox belongs to another source user. Its source-side ancestor path
+        # is not readable or meaningful to the copy, and the ACL is deliberately not migrated on behalf
+        # of this user. Avoid repeated parent and permission calls for that out-of-scope metadata.
+        out["sp"] = sp = "" if carried_in else w._drive_path(src, sid, sc)
+        out["tp"] = tp = w._drive_path(tgt, tid, tc)
+        out["diffs"] = compare_drive_file(sm, tm, sp, tp)
+        out["ev"] = ev = {"kind": kind, "name": sm.get("name"), "path": sp, "opened": False}
+        w._publish_stats(currentDocument=sid, currentMime=sm.get("mimeType"), currentSince=time.time(),
+                         phase="compare")
+        if kind == "file":
+            reused = drive_content_cache_get(self.db, self.src_user, sid, tid, sm, tm)
+            if reused is not None:
+                out["reused"] = reused
+            else:
+                out["content"] = w._content(src, tgt, sid, tid, sm, tm, ev)
+                if not ev.get("error"):
+                    drive_content_cache_put(self.db, self.src_user, sid, tid, sm, tm, out["content"], ev)
+            if getattr(self.settings, "rewrite_drive_links", False):
+                try:
+                    out["links"] = w._native_links(tid, sm)
+                except Exception as exc:      # noqa: BLE001 - unread is INCOMPLETE, never a pass
+                    out["linkError"] = f"file {sid}: the links inside could not be read: {error_detail(exc)}"
+        out["carriedIn"] = carried_in
+        out["sharing"] = [] if carried_in else w._sharing(src, tgt, sid, tid, local)
+        out["notOwner"] = bool(getattr(w, "_not_owner", False))
+        return out
+
+    def _drive_merge(self, kind, sid, tid, sm, tm, r, res, target_keys) -> None:
+        """Fold one item's reads into the result, in order, on the caller's thread."""
+        local = r["local"]
+        res["errors"] += local["errors"]
+        if local.get("not_owner"):
+            res["not_owner"] = res.get("not_owner", 0) + local["not_owner"]
+        if local.get("sharing"):
+            sh = res.setdefault("sharing", {"filesCompared": 0, "matched": 0, "notReproduced": 0, "owed": 0})
+            for k, v in local["sharing"].items():
+                sh[k] = sh.get(k, 0) + v
+        sp, tp, diffs, ev = r["sp"], r["tp"], list(r["diffs"]), r["ev"]
+        unverified, err_text, content = None, None, []
+        if kind == "file":
+            target_keys[(tp, tm.get("name"), tm.get("md5Checksum"))] = tid
+            reused = r["reused"]
+            if reused is not None:
+                diffs += reused["diffs"]
+                content = reused["diffs"]
+                ev.update(reused["ev"])
+                ev.update(reused=True, how=f"{reused['ev'].get('how', 'compared')} -- neither copy has "
+                                           f"changed since {reused['at']}, so that comparison is reused")
+                res["contentReused"] = res.get("contentReused", 0) + 1
+            else:
+                content = r["content"]
+                diffs += content
+            from copy_resolution import remember_content
+            remember_content(self, sid, tid, sm, tm, ev, content)
+            unverified = ev.pop("unverified", None)
+            if ev.get("error"):
+                err_text = f"file {sid}: {ev.pop('error')}"
+                res["errors"].append(err_text)
+            elif sid in self._known_unverified:
+                self._unverified.resolve(self.src_user, "drive", sid)    # compared now
+            if r["linkError"]:
+                res["errors"].append(r["linkError"])
+            diffs += r["links"]
+        if r["carriedIn"]:
+            # Carried in: owned by someone outside the source and shared with this
+            # user, copied for them (drive_engine._walk_shared_with_me). The copy is
+            # theirs, in their Drive; the owner's folder and sharing stay with the
+            # owner's original -- by design, not a difference (live, dharan.gov.np).
+            res["carriedIn"] = res.get("carriedIn", 0) + 1
+            diffs = [d for d in diffs if not d.startswith("folder path differs")]
+        elif r["notOwner"]:
+            diffs = [d for d in diffs if not d.startswith("folder path differs")]
+        diffs += r["sharing"]
+        record = {"service": "drive", **ev}
+        self.evidence.append(record)
+        entry = None
+        if diffs:
+            entry = {"item": sm.get("name"), "path": sp, "source": sid, "target": tid, "diffs": diffs}
+            res["differences"].append(entry)
+        if unverified is not None:
+            # The content was NOT compared: whatever else matched, this file is not "identical".
+            self._note_unverified(res, sid, tid, sm, tm, record, unverified, err_text, entry,
+                                  [d for d in diffs if d not in content])
+        elif not diffs:
+            res["identical"] += 1
+            self._stats["identical"] += 1
+        else:
+            self._stats["different"] += 1
+        if unverified is None:
+            self._stats["verified"] += 1
+            self._publish_stats(lastSuccessfulDocument=sid, lastSuccessAt=time.time(), phase="compare",
+                                currentDocument=None, currentMime=None, currentSince=None)
+
     def _remember_drive_permissions(self, svc, fid, metadata):
         if "permissions" in metadata:
             if not hasattr(self, "_drive_permission_cache"):
                 self._drive_permission_cache = {}
-            self._drive_permission_cache[(id(svc), fid)] = metadata.pop("permissions")
+            # Keyed by file id alone -- ids are unique across both tenants -- so a worker thread
+            # with its own client (verify_drive_workers) finds what the batch read stored.
+            self._drive_permission_cache[fid] = metadata.pop("permissions")
         return metadata
 
     def _drive_meta(self, svc, fid):
@@ -670,9 +803,6 @@ class Verifier:
         factory = getattr(svc, "new_batch_http_request", None)
         if not callable(factory) or not ids:
             return {}, {}
-        cache = getattr(self, "_drive_permission_cache", {})
-        for key in [k for k in cache if k[0] == id(svc)]:
-            cache.pop(key, None)  # carried-in items intentionally don't consume ACLs
         result, errors = {}, {}
         def received(request_id, response, error):
             if error is not None:
@@ -819,128 +949,58 @@ class Verifier:
             pairs = self._pairs(kind, sample=True)
             operation = f"Drive compare {kind}s"
             self._report_progress(operation, 0, len(pairs))
-            source_meta, source_errors, target_meta, target_errors = {}, {}, {}, {}
-            for pair_index, (sid, tid, recorded_name) in enumerate(pairs):
-                if pair_index % DRIVE_METADATA_BATCH_SIZE == 0:
-                    window = pairs[pair_index:pair_index + DRIVE_METADATA_BATCH_SIZE]
-                    source_meta, source_errors = self._drive_meta_many(
-                        src, [s for s, t, _ in window if s != t], "source")
-                    target_meta, target_errors = self._drive_meta_many(
-                        tgt, [t for s, t, _ in window if s != t], "target")
-                self._report_progress(operation, pair_index, len(pairs), f"item {sid}")
-                res["checked"] += 1
-                if sid == tid:
-                    # MOVED, not copied (drive_engine._sync_move): the source no longer
-                    # holds it, and what is on the target IS the file -- one id, its own
-                    # history. So it is checked there: present, not binned, its name.
-                    self._check_moved(tgt, sid, recorded_name, res)
-                    continue
-                try:
-                    sm = self._drive_meta_from_batch(src, sid, source_meta, source_errors)
-                    sc[sid] = sm
-                except Exception as exc:      # noqa: BLE001
-                    if _gone_from_source(exc, res):
+            for window_start in range(0, len(pairs), DRIVE_METADATA_BATCH_SIZE):
+                window = pairs[window_start:window_start + DRIVE_METADATA_BATCH_SIZE]
+                # Unconsumed ACLs from the previous window (carried-in items read none) are dropped here;
+                # every worker of that window has finished before this read.
+                self._drive_permission_cache = {}
+                source_meta, source_errors = self._drive_meta_many(src, [s for s, t, _ in window if s != t], "source")
+                target_meta, target_errors = self._drive_meta_many(tgt, [t for s, t, _ in window if s != t], "target")
+                jobs = []
+                for offset, (sid, tid, recorded_name) in enumerate(window):
+                    self._report_progress(operation, window_start + offset, len(pairs), f"item {sid}")
+                    res["checked"] += 1
+                    if sid == tid:
+                        # MOVED, not copied (drive_engine._sync_move): the source no longer
+                        # holds it, and what is on the target IS the file -- one id, its own
+                        # history. So it is checked there: present, not binned, its name.
+                        self._check_moved(tgt, sid, recorded_name, res)
+                        continue
+                    try:
+                        sm = self._drive_meta_from_batch(src, sid, source_meta, source_errors)
+                        sc[sid] = sm
+                    except Exception as exc:      # noqa: BLE001
+                        if _gone_from_source(exc, res):
+                            if kind == "file":
+                                from copy_resolution import record
+                                record(self, res, sid, tid, source_unreadable=True)
+                            continue
+                        res["errors"].append(f"{kind} {sid}: could not read the SOURCE: {error_detail(exc)}")
                         if kind == "file":
                             from copy_resolution import record
                             record(self, res, sid, tid, source_unreadable=True)
                         continue
-                    res["errors"].append(f"{kind} {sid}: could not read the SOURCE: {error_detail(exc)}")
-                    if kind == "file":
-                        from copy_resolution import record
-                        record(self, res, sid, tid, source_unreadable=True)
-                    continue
-                try:
-                    tm = self._drive_meta_from_batch(tgt, tid, target_meta, target_errors)
-                    tc[tid] = tm
-                except Exception as exc:      # noqa: BLE001
-                    if _is_not_found(exc):
-                        res["missing"].append({"source": sid, "target": tid, "name": sm.get("name"),
-                                               "why": f"not on the target ({str(exc)[:80]})"})
-                    else:
-                        res["errors"].append(f"file {tid}: could not read the TARGET: {error_detail(exc)}")
-                    continue
-                if tm.get("trashed") and sm.get("trashed"):
-                    # Binned on the source too, and the mirror carried it across: the
-                    # copy is where its original is (11 of seeduser200's, 2026-10-10).
-                    res["identical"] += 1
-                    continue
-                if tm.get("trashed"):
-                    res["missing"].append({"source": sid, "target": tid, "name": sm.get("name"), "why": "in the target's trash"})
-                    continue
-                carried_in = sm.get("ownedByMe") is False
-                # A file shared into this mailbox belongs to another source
-                # user. Its source-side ancestor path is not readable or
-                # meaningful to the copy, and the ACL is deliberately not
-                # migrated on behalf of this user. Avoid repeated parent and
-                # permission calls for that out-of-scope metadata.
-                sp = "" if carried_in else self._drive_path(src, sid, sc)
-                tp = self._drive_path(tgt, tid, tc)
-                diffs = compare_drive_file(sm, tm, sp, tp)
-                ev = {"kind": kind, "name": sm.get("name"), "path": sp, "opened": False}
-                unverified, err_text, content = None, None, []
-                self._publish_stats(currentDocument=sid, currentMime=sm.get("mimeType"), currentSince=time.time(),
-                                    phase="compare")
-                if kind == "file":
-                    target_keys[(tp, tm.get("name"), tm.get("md5Checksum"))] = tid
-                    reused = drive_content_cache_get(self.db, self.src_user, sid, tid, sm, tm)
-                    if reused is not None:
-                        diffs += reused["diffs"]
-                        content = reused["diffs"]
-                        ev.update(reused["ev"])
-                        ev.update(reused=True, how=f"{reused['ev'].get('how', 'compared')} -- neither copy has "
-                                                   f"changed since {reused['at']}, so that comparison is reused")
-                        res["contentReused"] = res.get("contentReused", 0) + 1
-                    else:
-                        content = self._content(src, tgt, sid, tid, sm, tm, ev)
-                        diffs += content
-                        if not ev.get("error"):
-                            drive_content_cache_put(self.db, self.src_user, sid, tid, sm, tm, content, ev)
-                    from copy_resolution import remember_content
-                    remember_content(self, sid, tid, sm, tm, ev, content)
-                    unverified = ev.pop("unverified", None)
-                    err_text = None
-                    if ev.get("error"):
-                        err_text = f"file {sid}: {ev.pop('error')}"
-                        res["errors"].append(err_text)
-                    elif sid in self._known_unverified:
-                        self._unverified.resolve(self.src_user, "drive", sid)    # compared now
-                    if getattr(self.settings, "rewrite_drive_links", False):
-                        try:
-                            diffs += self._native_links(tid, sm)
-                        except Exception as exc:      # noqa: BLE001 - unread is INCOMPLETE, never a pass
-                            res["errors"].append(f"file {sid}: the links inside could not be read: {error_detail(exc)}")
-                if carried_in:
-                    # Carried in: owned by someone outside the source and shared with this
-                    # user, copied for them (drive_engine._walk_shared_with_me). The copy is
-                    # theirs, in their Drive; the owner's folder and sharing stay with the
-                    # owner's original -- by design, not a difference (live, dharan.gov.np).
-                    res["carriedIn"] = res.get("carriedIn", 0) + 1
-                    diffs = [d for d in diffs if not d.startswith("folder path differs")]
-                    sharing = []
-                else:
-                    sharing = self._sharing(src, tgt, sid, tid, res)
-                    if getattr(self, "_not_owner", False):
-                        diffs = [d for d in diffs if not d.startswith("folder path differs")]
-                diffs += sharing
-                record = {"service": "drive", **ev}
-                self.evidence.append(record)
-                entry = None
-                if diffs:
-                    entry = {"item": sm.get("name"), "path": sp, "source": sid, "target": tid, "diffs": diffs}
-                    res["differences"].append(entry)
-                if unverified is not None:
-                    # The content was NOT compared: whatever else matched, this file is not "identical".
-                    self._note_unverified(res, sid, tid, sm, tm, record, unverified, err_text, entry,
-                                          [d for d in diffs if d not in content])
-                elif not diffs:
-                    res["identical"] += 1
-                    self._stats["identical"] += 1
-                else:
-                    self._stats["different"] += 1
-                if unverified is None:
-                    self._stats["verified"] += 1
-                    self._publish_stats(lastSuccessfulDocument=sid, lastSuccessAt=time.time(), phase="compare",
-                                        currentDocument=None, currentMime=None, currentSince=None)
+                    try:
+                        tm = self._drive_meta_from_batch(tgt, tid, target_meta, target_errors)
+                        tc[tid] = tm
+                    except Exception as exc:      # noqa: BLE001
+                        if _is_not_found(exc):
+                            res["missing"].append({"source": sid, "target": tid, "name": sm.get("name"),
+                                                   "why": f"not on the target ({str(exc)[:80]})"})
+                        else:
+                            res["errors"].append(f"file {tid}: could not read the TARGET: {error_detail(exc)}")
+                        continue
+                    if tm.get("trashed") and sm.get("trashed"):
+                        # Binned on the source too, and the mirror carried it across: the
+                        # copy is where its original is (11 of seeduser200's, 2026-10-10).
+                        res["identical"] += 1
+                        continue
+                    if tm.get("trashed"):
+                        res["missing"].append({"source": sid, "target": tid, "name": sm.get("name"), "why": "in the target's trash"})
+                        continue
+                    jobs.append((sid, tid, sm, tm))
+                for (sid, tid, sm, tm), r in zip(jobs, self._drive_reads_all(kind, jobs, src, tgt, sc, tc)):
+                    self._drive_merge(kind, sid, tid, sm, tm, r, res, target_keys)
             self._report_progress(operation, len(pairs), len(pairs))
         # The compare loop is over: no document is "current" any more. It used to keep showing the last file
         # with a timer that grew through the stray check and the comment phase, and read as a 22-minute hang
@@ -1066,10 +1126,9 @@ class Verifier:
                               "path": "", "opened": False, "moved": True})
 
     def _perms(self, svc, fid) -> list[dict]:
-        key = (id(svc), fid)
         cache = getattr(self, "_drive_permission_cache", {})
-        if key in cache:
-            return cache.pop(key)
+        if fid in cache:
+            return cache.pop(fid)
         out, token, seen = [], None, set()
         while True:
             r = self._x(lambda t=token: svc.permissions().list(
@@ -1098,16 +1157,7 @@ class Verifier:
                 return []
             res["errors"].append(f"sharing of {sid}: could not be read: {error_detail(exc)}")
             return []
-        if not hasattr(self, "_skipped_ids"):
-            self._skipped_ids = {r["item_id"] for r in self.db.conn.execute(
-                # OWED too: a share with a colleague not migrated yet is recorded and granted
-                # once they arrive (repair.reapply_owed_grants) -- explained, not missing.
-                "SELECT item_id FROM audit_log WHERE source_user=? AND item_type='acl' "
-                "AND (status LIKE 'SKIPPED%' OR status LIKE 'OWED%')",
-                (self.src_user,))}
-            self._owed_ids = {r["item_id"] for r in self.db.conn.execute(
-                "SELECT item_id FROM audit_log WHERE source_user=? AND item_type='acl' AND status LIKE 'OWED%'",
-                (self.src_user,))}
+        self._ensure_acl_sets()
         g = compare_grants(sp, tp, self._translate, self.settings.source_domain, self.settings.target_domain,
                            self._skipped_ids, sid, getattr(self, "_owed_ids", set()))
         sh = res.setdefault("sharing", {"filesCompared": 0, "matched": 0, "notReproduced": 0, "owed": 0})
@@ -1118,6 +1168,19 @@ class Verifier:
         out = [f"grant missing on the target: {m}" for m in g["missing"]]
         out += [f"extra grant on the target (nobody granted it): {e}" for e in g["extra"]]
         return out
+
+    def _ensure_acl_sets(self) -> None:
+        """The grants this user's migration deliberately did not make, read once per verifier."""
+        if not hasattr(self, "_skipped_ids"):
+            self._skipped_ids = {r["item_id"] for r in self.db.conn.execute(
+                # OWED too: a share with a colleague not migrated yet is recorded and granted
+                # once they arrive (repair.reapply_owed_grants) -- explained, not missing.
+                "SELECT item_id FROM audit_log WHERE source_user=? AND item_type='acl' "
+                "AND (status LIKE 'SKIPPED%' OR status LIKE 'OWED%')",
+                (self.src_user,))}
+            self._owed_ids = {r["item_id"] for r in self.db.conn.execute(
+                "SELECT item_id FROM audit_log WHERE source_user=? AND item_type='acl' AND status LIKE 'OWED%'",
+                (self.src_user,))}
 
     def _target_files(self, svc) -> list[dict]:
         out, token, seen_tokens, page = [], None, set(), 0
@@ -1453,7 +1516,7 @@ class Verifier:
 
         AuthManager caches transports per thread. Resolve each service INSIDE its
         worker; never send the main thread's httplib2 transport into the pool.
-        At most VERIFY_GMAIL_WINDOW pairs of batches (default 4) are live or held,
+        At most VERIFY_GMAIL_WINDOW pairs of batches (default 8) are live or held,
         yielded in order; ten bodies per side per batch.
         """
         from concurrent.futures import ThreadPoolExecutor
@@ -2118,6 +2181,19 @@ class Verifier:
 # ---------------------------------------------------------------------------
 # A run
 # ---------------------------------------------------------------------------
+def _verdict_by_user(users: dict, expected: dict, services) -> tuple[str, list[str]]:
+    """verdict_of over each user's OWN services; the worst wins (DIFFERENCES, then INCOMPLETE)."""
+    verdicts, reasons = [], []
+    for u, per in users.items():
+        v, r = verdict_of({u: per}, expected.get(u, services))
+        verdicts.append(v)
+        reasons += r
+    for worst in ("DIFFERENCES", "INCOMPLETE"):
+        if worst in verdicts:
+            return worst, reasons
+    return (verdicts[0] if verdicts else verdict_of({}, services)[0]), reasons
+
+
 def verdict_of(users: dict, services: tuple[str, ...]) -> tuple[str, list[str]]:
     """IDENTICAL only when every paired item matched and nothing was left over.
     A check that could not be made is INCOMPLETE, never a pass."""
@@ -2178,7 +2254,7 @@ def _chat_attempted(db, user: str) -> bool:
 
 
 def run(auth, db, settings, users: list[str] | None = None, services=ALL_SERVICES, retry=lambda f: f,
-        progress=print, limit: int | None = None, on_user=None, on_service=None) -> dict:
+        progress=print, limit: int | None = None, on_user=None, on_service=None, services_for=None) -> dict:
     ident = {r["source_email"]: r["target_email"] for r in db.all_identities() if r["entity_type"] == "user"}
     chosen = [u for u in (users or list(ident)) if u in ident]
     services = tuple(s for s in ALL_SERVICES if s in services)
@@ -2190,6 +2266,12 @@ def run(auth, db, settings, users: list[str] | None = None, services=ALL_SERVICE
             for sid, in db.conn.execute("SELECT source_id FROM id_mapping WHERE source_user=? AND type='chat_space' LIMIT 1", (user,))
     ) and not any(_chat_attempted(db, user) for user in chosen):
         services = tuple(s for s in services if s != "chat")
+    # Each user's own services: all of them, or (services_for, the repair backlog) only those with something
+    # open -- a user whose findings are all in Drive does not have its whole mailbox re-read before a repair.
+    expected = {}
+    for u in chosen:
+        mine = tuple(x for x in services if services_for is None or x in set(services_for(u)))
+        expected[u] = mine or services
     report = {"generatedAt": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
               "accountId": getattr(settings, "account_id", None),
               "sourceDomain": settings.source_domain, "targetDomain": settings.target_domain,
@@ -2366,7 +2448,8 @@ def run(auth, db, settings, users: list[str] | None = None, services=ALL_SERVICE
                      on_api_attempt=lambda event, **details: activity_event(u, event, **details),
                      on_progress=lambda **details: activity_event(u, "progress", **details))
         per = {}
-        for service_index, svc in enumerate(services, 1):
+        mine = expected[u]
+        for service_index, svc in enumerate(mine, 1):
             _stop_check()
             now = time.monotonic()
             with lock:
@@ -2378,7 +2461,7 @@ def run(auth, db, settings, users: list[str] | None = None, services=ALL_SERVICE
                                "last_error_at": now,
                                "items_completed": 0, "items_total": None,
                                "last_progress_at": now, "last_logged_bucket": -1}
-            emit(f"verify: {u} | service {service_index} of {len(services)} {svc} started")
+            emit(f"verify: {u} | service {service_index} of {len(mine)} {svc} started")
             v._report_progress(f"{svc} initialising", 0, None)
             service_started = time.monotonic()
             try:
@@ -2420,15 +2503,15 @@ def run(auth, db, settings, users: list[str] | None = None, services=ALL_SERVICE
             followup = on_user(u, per)
             if followup is not None:
                 per = followup["users"][u]
-                rechecked = followup.get("recheckedServices", services)
+                rechecked = followup.get("recheckedServices", mine)
                 evidence = ([e for e in evidence if e.get("service") not in rechecked]
                             + followup.get("evidence", []))
         with lock:
             done[u] = (per, evidence)
             finished = len(done)
         emit_scheduler()
-        user_verdict, _ = verdict_of({u: per}, services)
-        user_completion = ("INCOMPLETE" if len(per) != len(services)
+        user_verdict, _ = verdict_of({u: per}, mine)
+        user_completion = ("INCOMPLETE" if len(per) != len(mine)
                            or any(not service_complete(r) for r in per.values()) else "COMPLETE")
         emit(f"verify: [{finished}/{len(chosen)}] {u} checked; completion={user_completion}; "
              f"verdict={user_verdict}")
@@ -2445,16 +2528,16 @@ def run(auth, db, settings, users: list[str] | None = None, services=ALL_SERVICE
             report["evidence"] += done[u][1]
     service_count = sum(len(per) for per in report["users"].values())
     incomplete_users = sum(
-        1 for per in report["users"].values()
-        if len(per) != len(services) or any(not service_complete(r) for r in per.values())
+        1 for u, per in report["users"].items()
+        if len(per) != len(expected.get(u, services)) or any(not service_complete(r) for r in per.values())
     )
     report["coverage"] = {
         "usersExpected": len(chosen), "usersCompleted": len(report["users"]),
-        "servicesExpected": len(chosen) * len(services), "servicesCompleted": service_count,
+        "servicesExpected": sum(len(expected[u]) for u in chosen), "servicesCompleted": service_count,
         "incompleteUsers": incomplete_users,
         "completion": "COMPLETE" if chosen and len(report["users"]) == len(chosen) and not incomplete_users else "INCOMPLETE",
     }
-    report["verdict"], report["reasons"] = verdict_of(report["users"], services)
+    report["verdict"], report["reasons"] = _verdict_by_user(report["users"], expected, services)
     for u, per in report["users"].items():
         for svc, r in per.items():
             if r["checked"] == 0 and not r["errors"] and not r.get("emptySource"):
@@ -2605,7 +2688,7 @@ def verify_user(auth, db, settings, source_user: str, services, limit: int | Non
 
 def run_and_save(auth, db, settings, users=None, services=ALL_SERVICES, retry=lambda f: f, progress=print,
                  limit: int | None = None, base: str | None = None,
-                 repair_after_user: bool = False) -> dict:
+                 repair_after_user: bool = False, scope_to_findings: bool = False) -> dict:
     # Persist each finished service while a large user is still in progress. If the process
     # is stopped or a later service cannot be checked, completed services remain current in
     # the One-to-one page instead of disappearing with that user's unfinished worker.
@@ -2615,8 +2698,12 @@ def run_and_save(auth, db, settings, users=None, services=ALL_SERVICES, retry=la
         verification_repairs.enable(db)
         callback = lambda user, per: verification_repairs.finished_user(
             auth, db, settings, user, per, limit, retry, progress)
+    services_for = None
+    if scope_to_findings:
+        import verification_repairs
+        services_for = lambda user: verification_repairs.services_to_check(db, user, services)  # noqa: E731
     report = run(auth, db, settings, users, services, retry, progress, limit,
-                 on_user=callback,
+                 on_user=callback, services_for=services_for,
                  on_service=lambda user, service, result: save_user_results(
                      db, {"users": {user: {service: result}}}))
     if repair_after_user:
@@ -2649,6 +2736,8 @@ def main(argv=None) -> int:
     ap.add_argument("--user", action="append", help="limit to these source users")
     ap.add_argument("--services", default=",".join(ALL_SERVICES))
     ap.add_argument("--limit", type=int, help="check only this many of each kind of item per user, evenly spread")
+    ap.add_argument("--scope-to-findings", action="store_true",
+                    help="check each user only on services with something open (the repair backlog's own pass)")
     ap.add_argument("--repair-after-user", action="store_true",
                     help="repair supported findings and recheck each user immediately after verification")
     a = ap.parse_args(argv)
@@ -2677,7 +2766,7 @@ def main(argv=None) -> int:
                          max_elapsed=float(os.getenv("VERIFY_RETRY_MAX_ELAPSED_SEC", "180"))),
                      progress=lambda m: print(m, flush=True),
                      limit=a.limit, base=verify_dir(a.account_id),
-                     repair_after_user=a.repair_after_user)
+                     repair_after_user=a.repair_after_user, scope_to_findings=a.scope_to_findings)
     except (VerificationCancelled, KeyboardInterrupt):
         if a.repair_after_user:
             import verification_repairs

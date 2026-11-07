@@ -432,6 +432,15 @@ RUN_KINDS = [
      "suchanaadhikari@, account 3).",
      "None automatic. Raise VERIFY_SHEET_CELL_BUDGET for a Sheet the operator has qualified; until then "
      "the Sheet reads UNVERIFIED, never identical.", False),
+    ("run.comment_prior_attempt", ("comment",),
+     lambda t: "Prior uncertain comment/reply delivery needs reconciliation" in t,
+     "A comment was not copied because an earlier attempt is on record",
+     "A comment's create call that never answered is not repeated blindly. The record of that attempt was "
+     "kept when its Doc was copied again to a new target file, so the old copy's record blocked the new "
+     "copy's comments (finance@ and it.department@, account 3, 7 Nov 2026).",
+     "Fixed 2026-11-08: only an attempt against the same target file blocks (migration_comments.reconcile); "
+     "the next run copies the comments to the new file. An attempt on the SAME file is still left for a "
+     "person, since a duplicate comment is worse than a late one.", True),
     ("run.held_for_drive", None,
      lambda t: "held: this user's Drive did not migrate" in t,
      "Mail or calendar held back for Drive",

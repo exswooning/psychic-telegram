@@ -269,9 +269,13 @@ class TestOneFailingDocumentAmongMany:
         _fake(monkeypatch, {bad}, lambda: _err(503))
         _verify(docs)
         assert vr.UnverifiedStore(docs.db).pending(SRC_USER)
+        # A later run starts after the breaker's cooldown. Files compare side by side, so the failing one can
+        # finish last and leave the breaker open when this instant "later run" begins.
+        vr.BREAKERS.clear()
         _fake(monkeypatch, set(), None)
         r = _verify(docs)
-        assert r["verdict"] == "IDENTICAL" and vr.UnverifiedStore(docs.db).pending(SRC_USER) == []
+        assert r["verdict"] == "IDENTICAL" and vr.UnverifiedStore(docs.db).pending(SRC_USER) == [], (
+            r["reasons"], {k: v.state for k, v in vr.BREAKERS.items()})
 
 
 # -- verdicts, workers and what the heartbeat says -------------------------------------------------

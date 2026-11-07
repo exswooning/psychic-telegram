@@ -2440,7 +2440,8 @@ def _dispatch_verification_repairs():
         admitted, _ = job_admission.try_admit(aid, "verify")
         if not admitted:
             continue
-        argv = [PY, "verify_sample.py"] + _account_argv(aid) + ["--repair-after-user"]
+        # Only the services with something open: a backlog repair of Drive findings never re-reads the mailbox.
+        argv = [PY, "verify_sample.py"] + _account_argv(aid) + ["--repair-after-user", "--scope-to-findings"]
         for user in users:
             argv += ["--user", user]
         try:

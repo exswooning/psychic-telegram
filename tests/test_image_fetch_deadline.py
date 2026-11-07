@@ -52,3 +52,31 @@ def test_no_deadline_reads_whole_image():
         assert _fetch_image(f"http://127.0.0.1:{srv.server_port}/") == b"abc"
     finally:
         srv.shutdown()
+
+
+def test_images_are_fetched_side_by_side_once_per_distinct_url_and_swapped_in_place():
+    from native_fidelity import _hash_images
+    calls = []
+
+    def fetch(url):
+        calls.append(url)
+        time.sleep(0.2)
+        return url.encode()
+    doc = {"body": [{"inline": {"contentUri": f"u{i % 4}"}} for i in range(8)], "nested": {"contentUrl": "u0"}}
+    start = time.monotonic()
+    out = _hash_images(doc, fetch)
+    assert sorted(calls) == ["u0", "u1", "u2", "u3"]                 # four distinct URLs, each fetched once
+    assert time.monotonic() - start < 0.6                            # side by side, not 4 x 0.2 s in a row
+    import hashlib
+    assert out["body"][5]["inline"]["contentUri"] == "sha256:" + hashlib.sha256(b"u1").hexdigest()
+    assert out["nested"]["contentUrl"] == out["body"][0]["inline"]["contentUri"]
+
+
+def test_a_failed_image_fetch_still_raises():
+    import pytest
+    from native_fidelity import _hash_images
+
+    def fetch(url):
+        raise RuntimeError("boom " + url)
+    with pytest.raises(RuntimeError, match="boom"):
+        _hash_images({"a": {"contentUri": "x"}, "b": {"contentUri": "y"}}, fetch)
