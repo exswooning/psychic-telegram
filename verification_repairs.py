@@ -61,18 +61,77 @@ def enqueue_findings(db, user, per):
                         (user, service, key, category, iid, detail, now, now,
                          known_issues.classify(service, item if category != "notCopied" else {"notCopied": item})))
                     count += 1
+            if result.get("sourceCoverage"):
+                # The source listing is exhaustive even when the comparison samples: an unmapped
+                # source item it no longer names is copied or gone. Only a complete, error-free
+                # check closed these, and the backlog's sampled checks never are one (ward1@: two
+                # messages held open for days, 7 Nov 2026).
+                gone = [r for r in conn.execute(
+                    "SELECT source_user,service,finding_key,item_id,issue FROM verification_repair_queue "
+                    "WHERE source_user=? AND service=? AND state!='RESOLVED' AND category='notCopied' "
+                    "AND detail LIKE '%UNMAPPED_SOURCE%'", (user, service)).fetchall()
+                    if r["finding_key"] not in seen]
+                _resolve(conn, gone, now)
             if not result.get("sampled") and not result.get("errors") and (
                     result.get("checked", 0) > 0 or result.get("emptySource")):
                 gone = [r for r in conn.execute(
                     "SELECT source_user,service,finding_key,item_id,issue FROM verification_repair_queue "
                     "WHERE source_user=? AND service=? AND state!='RESOLVED'", (user, service)).fetchall()
                     if r["finding_key"] not in seen]
-                known_issues.log_resolved(conn, gone, now)
-                for row in gone:
-                    conn.execute("UPDATE verification_repair_queue SET state='RESOLVED',resolved_at=? "
-                                 "WHERE source_user=? AND service=? AND finding_key=?",
-                                 (now, user, service, row["finding_key"]))
+                _resolve(conn, gone, now)
     return count
+
+
+def _resolve(conn, rows, now):
+    import known_issues
+    known_issues.log_resolved(conn, rows, now)
+    for row in rows:
+        conn.execute("UPDATE verification_repair_queue SET state='RESOLVED',resolved_at=? "
+                     "WHERE source_user=? AND service=? AND finding_key=?",
+                     (now, row["source_user"], row["service"], row["finding_key"]))
+
+
+def reconcile_mapped(db, user) -> int:
+    """Close every open not-copied row whose item has a mapping now: copied since, by a repair, a
+    re-walk or a later run. A mapping is the evidence; no Google read is needed (info@'s 137 messages
+    delivered on 7 Nov 2026 stayed open because only a complete, unsampled check closed rows)."""
+    ensure(db)
+    with db.write() as conn:
+        rows = conn.execute("SELECT source_user,service,finding_key,item_id,issue,detail FROM "
+                            "verification_repair_queue WHERE source_user=? AND state!='RESOLVED' "
+                            "AND category='notCopied' AND item_id IS NOT NULL", (user,)).fetchall()
+        done = []
+        for r in rows:
+            try:
+                kind = (json.loads(r["detail"]) or {}).get("type")
+            except (ValueError, AttributeError):
+                kind = None
+            if kind and db.get_target_id(user, r["item_id"], kind):
+                done.append(r)
+        _resolve(conn, done, utc_now())
+    return len(done)
+
+
+def queued_repairable(db, user) -> dict:
+    """Open not-copied items of a kind with an automatic fix, by service, as the repair reads them.
+    The migration's own acceptance check writes these (a pre-copy manifest item with no mapping);
+    the backlog's fresh check never lists them, so its handlers never saw them and the promised
+    re-walk never ran (it.department@: 243 files, 7 Nov 2026). Every handler they reach skips an item
+    that is mapped, so a stale row costs a lookup, never a second copy."""
+    import known_issues
+    automatic = {i[0] for i in known_issues.ISSUES if i[6]}
+    out: dict[str, list] = {}
+    for r in db.conn.execute("SELECT service, issue, detail FROM verification_repair_queue WHERE "
+                             "source_user=? AND state!='RESOLVED' AND category='notCopied'", (user,)):
+        if r["issue"] not in automatic:
+            continue
+        try:
+            item = json.loads(r["detail"])
+        except ValueError:
+            continue
+        if isinstance(item, dict) and item.get("id"):
+            out.setdefault(r["service"], []).append(item)
+    return out
 
 
 def enable(db):
@@ -337,9 +396,21 @@ def finished_user(auth, db, settings, user, per, limit, retry, progress=print):
     import verify_sample as V
     initial = {"users": {user: per}}
     V.save_user_results(db, initial)
+    closed = reconcile_mapped(db, user)
+    if closed:
+        progress(f"repair: {user} {closed} queued item(s) are mapped now; closed")
+    queued = queued_repairable(db, user)
     verdict, _ = V.verdict_of(initial["users"], tuple(per))
-    if verdict == "IDENTICAL":
+    if verdict == "IDENTICAL" and not queued:
         return None
+    # What the handlers read: this check's findings plus the queue's open not-copied items. The
+    # saved results stay this check's own.
+    work = copy.deepcopy(per)
+    for service, items in queued.items():
+        if service not in work:
+            continue
+        have = {i.get("id") for i in work[service].get("notCopied", []) if isinstance(i, dict)}
+        work[service].setdefault("notCopied", []).extend(i for i in items if i.get("id") not in have)
     ensure(db)
     key = _key(db, user, per)
     if not _claim(db, user, key):
@@ -348,7 +419,7 @@ def finished_user(auth, db, settings, user, per, limit, retry, progress=print):
     run_id = db.repair_started()
     progress(f"repair: {user} started; scope=one-user")
     try:
-        out = scoped_repair(auth, db, settings, user, per)
+        out = scoped_repair(auth, db, settings, user, work)
         attempts = ((out.get("contacts") or {}).get("candidates", 0)
                     + sum((out.get("failed_items") or {}).get(k, 0) for k in ("messages", "events", "drafts"))
                     + (out.get("gmail_labels") or {}).get("candidates", 0)

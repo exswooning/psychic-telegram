@@ -1739,6 +1739,9 @@ class Verifier:
                 res["notes"].append(f"{owed} message(s) without a Drive link are owed to Google's DMS, not missing")
             if deliberately_skipped:
                 res["notes"].append(f"{len(deliberately_skipped)} legacy chat message(s) are outside Gmail migration coverage")
+            # Every live source message was listed, sampled check or not: an unmapped message this
+            # listing no longer names is copied or gone (verification_repairs.enqueue_findings).
+            res["sourceCoverage"] = True
         except Exception as exc:
             res["errors"].append(f"could not establish full source mailbox coverage: {str(exc)[:160]}")
 
