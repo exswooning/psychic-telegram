@@ -351,6 +351,16 @@ def _services_that_succeeded(services: dict) -> list[str]:
     return done
 
 
+def _service_unreachable(message) -> bool:
+    """The source manifest could not READ one service because the account has no access to it -- a
+    refusal (HTTP 403 PERMISSION_DENIED, an API or scope not enabled), not a fault in the run.
+    Live (account 3, 7 Nov 2026): Chat answered 403 for six users and, read as fatal, took their
+    calendar, contacts and tasks down with it (incident #11)."""
+    low = str(message).lower()
+    return ("permission_denied" in low and "403" in low) or "has not been used in project" in low \
+        or "service_disabled" in low
+
+
 def is_blocked_externally(exc: Exception) -> bool:
     """Is this obstacle outside the tool's reach entirely?
 
@@ -599,7 +609,22 @@ def migrate_user(auth: AuthManager, db: MigrationDB, settings: Settings,
             acceptance = Acceptance(auth,db,settings,source_user,target_user,acceptance_services)
             result["acceptanceRunId"] = acceptance.run_id
             if not acceptance.ready():
-                raise RuntimeError("Source manifest could not be completed: "+json.dumps(acceptance.errors))
+                unreachable = {s: e for s, e in acceptance.errors.items() if _service_unreachable(e)}
+                if not unreachable or len(unreachable) != len(acceptance.errors):
+                    raise RuntimeError("Source manifest could not be completed: "+json.dumps(acceptance.errors))
+                # Only services the account cannot reach: skip and record them, migrate the rest.
+                for name, why in unreachable.items():
+                    no_access[name] = str(why)
+                    log.warning("[%s] no access to %s (%s) — skipping it and continuing with the rest",
+                                source_user, name, str(why)[:120])
+                    db.log_audit(source_user, source_user, name, "SKIPPED_NO_ACCESS", str(why)[:300])
+                acceptance_services = acceptance_services - set(unreachable)
+                acceptance = (Acceptance(auth,db,settings,source_user,target_user,acceptance_services)
+                              if acceptance_services else None)
+                if acceptance is not None:
+                    result["acceptanceRunId"] = acceptance.run_id
+                    if not acceptance.ready():
+                        raise RuntimeError("Source manifest could not be completed: "+json.dumps(acceptance.errors))
         # One service failing must not take the others with it. A user whose
         # Drive is switched off used to lose their mail as well: Drive
         # raised, the single try block around every service caught it, and
@@ -607,7 +632,7 @@ def migrate_user(auth: AuthManager, db: MigrationDB, settings: Settings,
         # came back FAILED having migrated nothing, though five of the six
         # services were available to them. Migrate what the account has.
         for name, wanted, run_service in plan:
-            if not wanted or SHUTDOWN.is_set():
+            if not wanted or SHUTDOWN.is_set() or name in no_access:
                 continue
             try:
                 result["services"][name] = run_service()
