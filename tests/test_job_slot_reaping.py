@@ -148,8 +148,9 @@ class TestRecordPidStampsOneRow:
     def test_two_pending_reservations_do_not_share_a_pid(self, table):
         # An unbounded UPDATE stamped every pending row for that pair, which
         # made two different jobs look like one process.
-        job_admission.try_admit(7, "migrate")
-        job_admission.try_admit(7, "migrate")
-        job_admission.record_pid(7, "migrate", 4242)
+        # Two reads of one account (discover): a second migrate is refused by one-migration-per-account.
+        job_admission.try_admit(7, "discover")
+        job_admission.try_admit(7, "discover")
+        job_admission.record_pid(7, "discover", 4242)
         pids = sorted((r["pid"] or 0) for r in job_admission.list_active())
         assert pids == [0, 4242]

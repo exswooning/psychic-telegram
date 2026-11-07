@@ -69,3 +69,8 @@ env.sh
 # developer machine every deploy: rsync overwrote the box, so a stale
 # dry_run:true silently turned every action into a no-op.
 /run_state.json
+
+# The job monitor's own memory and inbox
+monitor/state.json
+monitor/state.json.tmp
+monitor/INBOX.md

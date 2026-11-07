@@ -56,6 +56,24 @@ const node = (over = {}) => ({
   ...over,
 })
 
+import { plainLine } from './useRunningJobs'
+
+describe('a verify heartbeat reads as a sentence', () => {
+  it('names who, what and how far', () => {
+    const raw = 'verify: heartbeat info@s.example | service=drive | operation=Drive compare files | serviceElapsed=840s | items=326/1,403 | apiAttempts=980 httpCalls=20'
+    expect(plainLine(raw)).toBe('info@s.example · Drive: compare files · 326 of 1,403')
+    expect(plainLine('verify: progress a@b.c | service=gmail | operation=reading receipts | items=1/9'))
+      .toBe('a@b.c · Gmail: reading receipts · 1 of 9')
+  })
+  it('says "so far" when the count has no total', () => {
+    expect(plainLine('verify: heartbeat finance@s.example | service=gmail | operation=Gmail target inventory | serviceElapsed=811s | items=2,200 | apiAttempts=2240'))
+      .toBe('finance@s.example · Gmail: target inventory · 2,200 so far')
+  })
+  it('leaves any other line as printed', () => {
+    expect(plainLine('=== run started ===')).toBe('=== run started ===')
+  })
+})
+
 describe('Running Now', () => {
   beforeEach(() => {
     Object.values(cp).forEach((f) => f.mockReset())
@@ -67,6 +85,26 @@ describe('Running Now', () => {
     cp.fetchFleet.mockResolvedValue([])
     cp.fetchActiveJobs.mockResolvedValue([])
     client.fetchJob.mockResolvedValue({ running: false, name: '', lines: [] })
+  })
+
+  it('stops polling while the tab is hidden and catches up when shown', async () => {
+    vi.useFakeTimers()
+    try {
+      client.fetchJob.mockResolvedValue({ running: false, name: '', lines: [] })
+      render(<RunningNow />)
+      await vi.advanceTimersByTimeAsync(0)
+      const before = client.fetchJob.mock.calls.length
+      Object.defineProperty(document, 'hidden', { configurable: true, get: () => true })
+      await vi.advanceTimersByTimeAsync(20000)
+      expect(client.fetchJob.mock.calls.length).toBe(before)
+      Object.defineProperty(document, 'hidden', { configurable: true, get: () => false })
+      document.dispatchEvent(new Event('visibilitychange'))
+      await vi.advanceTimersByTimeAsync(0)
+      expect(client.fetchJob.mock.calls.length).toBeGreaterThan(before)
+    } finally {
+      Object.defineProperty(document, 'hidden', { configurable: true, get: () => false })
+      vi.useRealTimers()
+    }
   })
 
   it('lists a running job that has no admission row', async () => {
@@ -91,6 +129,30 @@ describe('Running Now', () => {
     render(<RunningNow />)
     await waitFor(() => expect(screen.getByText('dharan.gov.np → s.example')).toBeTruthy())
     expect(screen.queryByText('dharan.gov.np → mdharan.com')).toBeNull()
+  })
+
+  it("names another account's VERIFY with that account's pair, not the viewer's own source", async () => {
+    // Live: account 3's verify was headed "gorkhatweed.com", the viewer's own source domain.
+    cp.fetchTenantConfigStatus.mockImplementation((side: string) => Promise.resolve(
+      { side, domain: side === 'source' ? 'gorkhatweed.com' : 'new.gorkhatweed.com', hasKey: true }))
+    cp.fetchMigrations.mockResolvedValue({ migrations: [
+      { accountId: 3, sourceDomain: 's.example', targetDomain: 't.example' }] })
+    cp.fetchActiveJobs.mockResolvedValue([{ account_id: 3, job_name: 'verify', pid: 9, started_at: 'x' }])
+    client.fetchJob.mockResolvedValue({ running: true, name: 'verify', external: true, pid: 9, elapsed: 60, lines: [] })
+    render(<RunningNow />)
+    await waitFor(() => expect(screen.getByText('s.example → t.example')).toBeTruthy())
+    expect(screen.queryByText('gorkhatweed.com')).toBeNull()
+  })
+
+  it("never labels another account's job with the viewer's domain when its own pair is unknown", async () => {
+    cp.fetchTenantConfigStatus.mockImplementation((side: string) => Promise.resolve(
+      { side, domain: side === 'source' ? 'gorkhatweed.com' : 'new.gorkhatweed.com', hasKey: true }))
+    cp.fetchMigrations.mockResolvedValue({ migrations: [] })
+    cp.fetchActiveJobs.mockResolvedValue([{ account_id: 3, job_name: 'verify', pid: 9, started_at: 'x' }])
+    client.fetchJob.mockResolvedValue({ running: true, name: 'verify', external: true, pid: 9, elapsed: 60, lines: [] })
+    render(<RunningNow />)
+    await waitFor(() => expect(screen.getByText(/account #3/)).toBeTruthy())
+    expect(screen.queryByText('gorkhatweed.com')).toBeNull()
   })
 
   it('says such a job is detached rather than pretending it is tracked', async () => {

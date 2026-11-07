@@ -17,6 +17,14 @@ import time
 from datetime import datetime, timezone
 
 # Seconds between read-backs of an updated profile (Directory shows writes late).
+CREATION_PAUSES = (5, 10, 20, 40, 60)
+
+
+def _creation_pending(exc) -> bool:
+    return getattr(getattr(exc, "resp", None), "status", None) == 412 and \
+        "creation is not complete" in str(exc).lower()
+
+
 READBACK_PAUSES = (2, 4, 8, 16, 30, 30)
 _sleep = time.sleep
 
@@ -344,7 +352,17 @@ def sync_profiles(
                         raise ValueError("Target profile version is unavailable; compare again before updating")
                     request = writer.users().update(userKey=current["id"], body=body)
                     request.headers["If-Match"] = current["etag"]
-                    request.execute(num_retries=3)
+                    # A just-created account answers 412 "User creation is not complete" for a
+                    # while (5 of account 3's new accounts, 2026-11-02): wait and ask again.
+                    # A 412 for a changed etag says something else and still fails at once.
+                    for pause in CREATION_PAUSES + (None,):
+                        try:
+                            request.execute(num_retries=3)
+                            break
+                        except Exception as exc:
+                            if pause is None or not _creation_pending(exc):
+                                raise
+                            _sleep(pause)
                     # Google's Directory shows an update a little later, not at once:
                     # live (dharan), revenue@ and ward14@ read back their old names
                     # straight after the write and matched on the next pass. Read again,

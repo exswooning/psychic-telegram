@@ -543,12 +543,16 @@ class _DriveFiles:
             "mimeType": body.get("mimeType"),
             "parents": parents,
             "modifiedTime": body.get("modifiedTime"),
+            "createdTime": body.get("createdTime"),       # Drive keeps a createdTime it is given
             "description": body.get("description"),
             "starred": body.get("starred", False),
             "trashed": False,
             "owners": [{"emailAddress": self.s.owner}],
             "capabilities": {"canDownload": True},
         }
+        if parents and parents[0] in self.s.shared_drives:
+            meta["driveId"] = parents[0]          # in a shared drive: the drive owns it
+            meta["owners"] = []
         if body.get("shortcutDetails"):
             meta["shortcutDetails"] = body["shortcutDetails"]
 
@@ -665,9 +669,36 @@ class _DriveFiles:
         dst._mark(fileId)
         return {"id": fileId}
 
+    def _move_out_of_peer_drive(self, fileId: str, to: str) -> dict:
+        """The OTHER tenant's shared drive holds the file and THIS tenant's user is a member of it:
+        they take it out into their own Drive. Refused when that tenant blocks distribution, and a
+        non-member does not even see the file."""
+        peer = self.s.peer
+        meta = peer.store[fileId]
+        did = meta.get("driveId")
+        if not did or not any(p.get("emailAddress") == self.s.owner for p in peer.perms.get(did, [])):
+            raise http_error(404, "notFound", fileId)
+        if peer.distribution_blocked:
+            raise http_error(403, "insufficientFilePermissions",
+                             "The user does not have sufficient permissions for this file.")
+        peer.store.pop(fileId)
+        meta.update(parents=[to], driveId=None, owners=[{"emailAddress": self.s.owner}])
+        self.s.store[fileId] = meta
+        for attr in ("content", "exports", "perms", "comment_store", "_revisions"):
+            here = getattr(peer, attr)
+            if fileId in here:
+                getattr(self.s, attr)[fileId] = here.pop(fileId)
+        peer._seq += 1
+        peer._changed[fileId] = peer._seq
+        self.s._mark(fileId)
+        return {"id": fileId}
+
     def _update(self, fileId: str, body: Optional[dict] = None,
                 media_body=None, addParents: str = "",
                 removeParents: str = "", **_):
+        if (addParents and fileId not in self.s.store and self.s.peer is not None
+                and fileId in self.s.peer.store):
+            return self._move_out_of_peer_drive(fileId, addParents)
         if (addParents and fileId in self.s.store and self.s.peer is not None
                 and addParents in self.s.peer.shared_drives):
             return self._move_across(fileId, addParents)
@@ -979,6 +1010,7 @@ class FakeGmail(FakeService):
         super().__init__(owner, tenant)
         self.messages: dict[str, dict] = {}
         self.drafts: dict[str, dict] = {}
+        self.chip_hits: dict[str, set] = {}
         self.filters: list[dict] = []
         # Every mailbox has a primary send-as entry for its own address.
         self.send_as: list[dict] = [
@@ -1137,12 +1169,33 @@ class _GmailMessages:
             wanted = q.split(":", 1)[1].strip().strip("<>")
             ids = [i for i in ids if str(BytesHeaderParser().parsebytes(
                 base64.urlsafe_b64decode(self.s.messages[i]["raw"])).get("Message-ID", "")).strip().strip("<>") == wanted]
+        elif q and not q.startswith("newer_than:"):
+            ids = [i for i in ids if self._search(q, i, self.s.messages[i])]
         start = int(pageToken or 0)
         page = ids[start: start + maxResults]
         out: dict[str, Any] = {"messages": [{"id": i} for i in page]}
         if start + maxResults < len(ids):
             out["nextPageToken"] = str(start + maxResults)
         return out
+
+    def _search(self, q, mid, m):
+        """The few Gmail operators split mail's search uses. A chip (has:drive ...) has
+        no bytes to match, so a test lists its hits in `chip_hits`."""
+        import re as _re
+        term = _re.sub(r"\s*newer_than:\S+", "", q).strip()
+        raw = base64.urlsafe_b64decode((m.get("raw") or "") + "=" * (-len(m.get("raw") or "") % 4))
+        if term.startswith("has:"):
+            return mid in self.s.chip_hits.get(term, ())
+        if term == "in:drafts":
+            return "DRAFT" in (m.get("labelIds") or [])
+        if term == "in:chats":
+            return "CHAT" in (m.get("labelIds") or [])
+        if term.startswith("filename:"):
+            ext = term.split(":", 1)[1].encode()
+            return bool(_re.search(rb'filename="?[^"\r\n]*\.' + ext + rb'"?', raw, _re.I))
+        if term.startswith('"'):
+            return term.strip('"').encode().lower() in raw.lower()
+        return True
 
     def get(self, **kw):
         return _Call(self.s, "messages.get", self._get, kw)
@@ -1806,6 +1859,12 @@ class FakeAuth:
         self.settings = settings
         self._svcs: dict[tuple, FakeService] = {}
         self.delegation_failures: set[tuple[str, str]] = set()
+
+    def _credentials(self, tenant: str, user: str):
+        """What the real AuthManager hands the Gmail verification quota (verify_gmail_quota.for_mailbox):
+        a delegated identity with a service-account email and the impersonated subject."""
+        from types import SimpleNamespace
+        return SimpleNamespace(service_account_email=f"fake-sa@{tenant}.test", _subject=user)
 
     def _get(self, tenant: str, api: str, user: str) -> FakeService:
         key = (tenant, api, user)
@@ -2479,6 +2538,8 @@ class _Tasks:
 
     def _list(self, tasklist: str, updatedMin: Optional[str] = None,
               showDeleted: bool = False, **_):
+        if tasklist not in self.s.lists:
+            raise http_error(404, "notFound", tasklist)          # as the API does for a deleted list
         rows = self.s.task_store.get(tasklist, [])
         if not showDeleted:
             rows = [t for t in rows if not t.get("deleted")]

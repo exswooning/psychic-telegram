@@ -338,6 +338,11 @@ def target_scopes(settings: "Settings") -> list[str]:
     return scopes
 
 
+def chat_by_default() -> bool:
+    """Whether `all` means Chat too (MIGRATE_CHAT, default off)."""
+    return _env_bool("MIGRATE_CHAT", False)
+
+
 def _env_bool(name: str, default: bool) -> bool:
     val = os.getenv(name)
     if val is None:
@@ -771,6 +776,18 @@ class Settings:
     # cost more API calls than the migration did. It writes nothing to either tenant.
     verify_on_complete: bool = field(default_factory=lambda: _env_bool("VERIFY_ON_COMPLETE", True))
     migration_checks_enabled: bool = field(default_factory=lambda: _env_bool("MIGRATION_CHECKS", True))
+    # Routine mail completion is cheap accounting; full body/label verification
+    # is an explicit option, never implied by matching counts.
+    mail_completion_check: str = field(default_factory=lambda: os.getenv("MAIL_COMPLETION_CHECK", "counts").strip().lower())
+    # Split mail: "search" reads only the bodies Gmail's own search names as link
+    # candidates; "exhaustive" reads every message. Search is not proof of coverage.
+    # Measured 2026-10-30 (audit@s., 758 messages): Gmail search found 0 of 9 known link messages (best
+    # sender query 5 of 9), so exhaustive is the default; "search" is an explicit, lossy choice.
+    mail_link_scan: str = field(default_factory=lambda: os.getenv("MAIL_LINK_SCAN", "exhaustive").strip().lower())
+    # The scan only reads. It was held to per_user_qps (3/s) and took 257 s; 10/s took 79 s, 25/s 33 s,
+    # 40/s 23 s (messages.get is 5 of Gmail's 250 quota units per user per second).
+    mail_scan_qps: float = field(default_factory=lambda: float(os.getenv("MAIL_SCAN_QPS", "30")))
+    mail_scan_workers: int = field(default_factory=lambda: max(1, int(os.getenv("MAIL_SCAN_WORKERS", "36"))))
     first_pass_acceptance: bool = field(default_factory=lambda: _env_bool("FIRST_PASS_ACCEPTANCE", True))
     acceptance_repair_rounds: int = field(default_factory=lambda: min(2, max(0, int(os.getenv("ACCEPTANCE_REPAIR_ROUNDS", "1")))))
     verification_cache_enabled: bool = field(default_factory=lambda: _env_bool("VERIFICATION_CACHE", True))
@@ -854,8 +871,10 @@ class Settings:
     # Chat service switched on for each organisation and a Chat app configured
     # in the Cloud console. Original message timestamps cannot be preserved --
     # see chat_engine.py -- so this is a deliberate, documented trade.
+    # OFF by default since 2026-10-31 (operator): `all` no longer includes Chat. MIGRATE_CHAT=true
+    # brings it back, and naming `--services chat` still selects it for one run.
     migrate_chat: bool = field(
-        default_factory=lambda: _env_bool("MIGRATE_CHAT", True)
+        default_factory=lambda: _env_bool("MIGRATE_CHAT", False)
     )
     chat_space_mode: str = field(
         default_factory=lambda: os.getenv("CHAT_SPACE_MODE", "import").strip().lower()
@@ -962,6 +981,11 @@ class Settings:
     def __post_init__(self) -> None:
         if self.account_id is not None:
             self._load_account_tenant_config()
+        # One process's own copy of the ledger, for ab_transfer's side-by-side arms: a ledger is
+        # per account, so without this every arm of one account would share (and clear) one.
+        # Set only in an arm's child processes, never in a shared one.
+        if os.getenv("BITPORT_LEDGER"):
+            self.db_path = os.environ["BITPORT_LEDGER"]
         if self.transfer_mode == "adaptive" and self.adaptive_sandbox_only and (
                 self.source_domain.lower(), self.target_domain.lower()) != ("s.sarafgloabalexim.com", "t.sarafgloabalexim.com"):
             raise ValueError("Adaptive transfer is restricted to the explicit s. to t. sandbox pair")

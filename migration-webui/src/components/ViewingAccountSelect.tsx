@@ -30,7 +30,9 @@ const ViewingAccountSelect: React.FC = () => {
   }
   return (
     <TextField select size="small" label="Viewing account" value={inUrl ?? kept ?? ''}
-               onChange={(e) => choose(e.target.value)} sx={{ minWidth: 220, mr: 1 }}
+               onChange={(e) => choose(e.target.value)} sx={{ flex: '1 1 200px', minWidth: 200, maxWidth: 420 }}
+               // "My own account" is the empty value: without these the box showed nothing at all.
+               SelectProps={{ displayEmpty: true }} InputLabelProps={{ shrink: true }}
                inputProps={{ 'data-testid': 'viewing-account' }}>
       <MenuItem value="">My own account</MenuItem>
       {accounts.map((a) => <MenuItem key={a.id} value={a.id}>{labelFor(a, accounts)}</MenuItem>)}

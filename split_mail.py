@@ -21,15 +21,37 @@ def decode_part(value):
         raise ClassificationIncomplete("Gmail text body could not be decoded") from exc
 
 
-def classify_payload(message, lookup, fetch_text_attachment=None, unknown=None):
+def ids_in_raw(raw: bytes) -> set:
+    """Drive ids in every text part of a whole RFC 822 message, attached messages included --
+    for what Gmail's `full` format leaves unexpanded. Binary parts are never read."""
+    import email
+    from email import policy
+    msg = email.message_from_bytes(raw, policy=policy.default)
+    ids = set()
+    for part in msg.walk():
+        mime = part.get_content_type().lower()
+        if mime in ("multipart/encrypted", "application/pkcs7-mime", "application/x-pkcs7-mime"):
+            raise ClassificationIncomplete("Encrypted MIME content cannot be classified for link rewriting")
+        if part.is_multipart() or not mime.startswith("text/"):
+            continue
+        body = part.get_payload(decode=True) or b""
+        ids.update(m.group(1).decode("ascii") for m in DRIVE_ID.finditer(body))
+    return ids
+
+
+def classify_payload(message, lookup, fetch_text_attachment=None, unknown=None, fetch_raw=None):
     """Inspect decoded text parts only. Never fetch binary attachments.
 
     unknown(id) returns 'external' only with positive ownership evidence;
-    inaccessible and internal unmapped links block the handoff.
+    inaccessible and internal unmapped links block the handoff. fetch_raw() returns the
+    whole message's bytes, read when Gmail left a part unexpanded (an attached message
+    inside a bounce report): every text part is then scanned from those bytes instead.
     """
     if not isinstance(message.get("payload"), dict):
         raise ClassificationIncomplete("Gmail full response has no MIME payload")
     ids = set()
+    unexpanded = []
+    encrypted = []
 
     def walk(part, depth=0):
         if depth > 60:
@@ -41,19 +63,30 @@ def classify_payload(message, lookup, fetch_text_attachment=None, unknown=None):
             "application/pkcs7-mime",
             "application/x-pkcs7-mime",
         ):
-            raise ClassificationIncomplete(
-                "Encrypted MIME content cannot be classified for link rewriting"
-            )
+            # Nobody can read its links, so no route can rewrite them: it goes as it is, recorded.
+            encrypted.append(mime)
+            return
         if mime.startswith("multipart/") or (mime.startswith("message/") and children):
             if not children:
-                raise ClassificationIncomplete("Multipart body has no readable parts")
+                # Gmail's `full` format does not expand an attached message's own parts (live:
+                # bounce reports blocked two mailboxes' whole hand-off). Unread is not empty:
+                # without the raw bytes this still blocks.
+                if fetch_raw is None:
+                    raise ClassificationIncomplete("Multipart body has no readable parts")
+                unexpanded.append(mime)
+                return
             for child in children:
                 walk(child, depth + 1)
             return
         if mime.startswith("message/"):
-            raise ClassificationIncomplete(
-                "Encapsulated message needs explicit inspection"
-            )
+            # A forwarded or attached email whose parts Gmail did not expand (shiv@, 10 messages,
+            # account 3, 2026-11-02): its text is scanned from the whole message's raw bytes.
+            if fetch_raw is None:
+                raise ClassificationIncomplete(
+                    "Encapsulated message needs explicit inspection"
+                )
+            unexpanded.append(mime)
+            return
         if not mime.startswith("text/"):
             if not mime:
                 raise ClassificationIncomplete("MIME type is unavailable")
@@ -73,6 +106,15 @@ def classify_payload(message, lookup, fetch_text_attachment=None, unknown=None):
         )
 
     walk(message["payload"])
+    if encrypted:
+        return {"route": "DMS", "changed": {}, "unresolved": [], "linkIds": [], "encrypted": True,
+                "why": "encrypted MIME: its links cannot be read by anyone, so it goes to the DMS as it is"}
+    if unexpanded:
+        try:
+            ids |= ids_in_raw(fetch_raw())
+        except ClassificationIncomplete:
+            return {"route": "DMS", "changed": {}, "unresolved": [], "linkIds": [], "encrypted": True,
+                    "why": "encrypted MIME inside an attached message: its links cannot be read"}
     changed = {}
     unresolved = []
     for source in sorted(ids):
@@ -81,6 +123,10 @@ def classify_payload(message, lookup, fetch_text_attachment=None, unknown=None):
             changed[source] = target
         elif not target and (unknown is None or unknown(source) != "external"):
             unresolved.append(source)
+    # A link to an internal file with no mapping still BLOCKS: the DMS imports the whole mailbox and
+    # would carry it unrewritten, and such a file belongs in the migration -- live (account 3,
+    # 2026-11-03) the "unmigrated" files were it.department@'s own, copied once but with their
+    # mappings lost; main._reopen_lost_mappings now re-walks such a user so the links resolve.
     return {
         "route": "BLOCKED" if unresolved else "ENGINE" if changed else "DMS",
         "changed": changed,
@@ -89,7 +135,7 @@ def classify_payload(message, lookup, fetch_text_attachment=None, unknown=None):
     }
 
 
-def reconcile_dms(auth, db, settings, progress=print):
+def reconcile_dms(auth, db, settings, progress=print, users=None):
     """Inspect exact deferred IDs; Google completion counters alone prove nothing.
 
     Also recheck engine link copies after DMS to detect overwritten content,
@@ -102,7 +148,9 @@ def reconcile_dms(auth, db, settings, progress=print):
     from verify_sample import _stop_check
 
     verified_items = []
-    users = [dict(r) for r in db.all_identities() if r["entity_type"] == "user"]
+    wanted = {u.lower() for u in users} if users else None
+    users = [dict(r) for r in db.all_identities() if r["entity_type"] == "user"
+             and (wanted is None or r["source_email"].lower() in wanted)]
     out = {
         "checked": 0,
         "verified": 0,

@@ -203,3 +203,58 @@ def test_partial_service_repair_does_not_hide_other_historical_findings(db, sett
     monkeypatch.setattr(V,'run',lambda *args:fresh)
     R.finished_user(None,db,settings,'u@src',{'gmail':blank()},1,lambda f:f,lambda m:None)
     assert R.due_users(db)==['u@src'], 'older Drive differences still need a full backfill check'
+
+
+def test_backfill_leaves_an_account_alone_while_an_ab_runs_on_it(db, settings, monkeypatch, tmp_path):
+    """The A/B is not an admitted job, so between its steps the account looked idle and the
+    backlog verifier repaired (copied mail into) the user under test mid-comparison."""
+    import json
+    import os
+    import api_server as api
+    path = tmp_path / "ab_progress.json"
+
+    def progress(**kw):
+        path.write_text(json.dumps({"running": True, "pid": os.getpid(), **kw}))
+    progress(accountId=5)
+    assert api._ab_running_for(5, str(path)) and not api._ab_running_for(6, str(path))
+    progress()                                  # written before it carried an account: all held back
+    assert api._ab_running_for(6, str(path))
+    path.write_text(json.dumps({"running": True, "pid": 2 ** 22 - 3, "accountId": 5}))
+    assert not api._ab_running_for(5, str(path))            # a killed run holds nothing
+    path.write_text(json.dumps({"running": False, "pid": os.getpid(), "accountId": 5}))
+    assert not api._ab_running_for(5, str(path))
+    R.enable(db)
+    store(db)
+    monkeypatch.setattr(api.accounts_auth, 'list_accounts', lambda: [{'id': 5}])
+    monkeypatch.setattr(api, '_account_db_path', lambda aid: settings.db_path)
+    monkeypatch.setattr(api.job_queue, 'waiting', lambda: [])
+    monkeypatch.setattr(api, '_REPAIR_THREADS', {})
+    monkeypatch.setattr(api, '_ab_running_for', lambda aid: True)
+    monkeypatch.setattr(api.job_admission, 'try_admit', lambda *a: pytest.fail('must not even ask'))
+    api._dispatch_verification_repairs()
+
+
+
+def test_a_message_held_by_the_fixed_404_link_check_triggers_the_missing_mail_repair(db, settings, monkeypatch):
+    """info@ (account 3): 168 messages held on 30 Oct by a link check fixed on 31 Oct sat as FAILED_SPLIT for a
+    week because the repair written for them took the error but the trigger in scoped_repair did not list it."""
+    import repair, retry_failed
+    called = []
+    monkeypatch.setattr(repair, 'repair_verified_missing_mail', lambda *a, **kw: called.append(1) or {})
+    monkeypatch.setattr(retry_failed, 'retry', lambda *a, **kw: {})
+    monkeypatch.setattr(repair, 'repair_verified_gmail_labels', lambda *a, **kw: {})
+    per = {'gmail': dict(blank(), notCopied=[{'type': 'message', 'id': 'm1',
+                                              'error': 'Pre-delivery link scan: HTTP 404 (notFound): <HttpError 404 ...>'}])}
+    R.scoped_repair(None, db, settings, 'u@src', per)
+    assert called
+
+
+def test_which_held_mail_the_repair_may_deliver():
+    import repair
+    ok = lambda err, **k: repair.repairable_mail_item({'type': 'message', 'id': 'm', 'error': err, **k})
+    assert ok('Pre-delivery link scan: HTTP 404 (notFound): ...')
+    assert ok('Multipart body has no readable parts')
+    assert ok('', status='UNMAPPED_SOURCE')
+    # that link's owner is not migrated yet: delivering now would leave it pointing at the source
+    assert not ok('Pre-delivery link scan: Unresolved Drive link mapping: abc')
+    assert not repair.repairable_mail_item({'type': 'draft', 'id': 'd', 'error': 'Missing Message-ID'})

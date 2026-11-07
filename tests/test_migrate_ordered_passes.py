@@ -144,7 +144,7 @@ class TestTheCommand:
         monkeypatch.setattr(main, "_print_batch_summary", lambda *a, **k: None)
         monkeypatch.setattr(main, "_auto_repair", lambda *a, **k: None)
         main.cmd_migrate(argparse.Namespace(services="all", user=None, ordered=True), settings, db, None)
-        assert seen["passes"] == [{"drive"}, {"gmail"}, {"calendar", "contacts", "tasks", "chat"}]
+        assert seen["passes"] == [{"drive"}, {"gmail"}, {"calendar", "contacts", "tasks"}]      # no Chat since 2026-10-31
 
     def test_unordered_hands_it_none(self, monkeypatch, settings, db):
         seen = {}

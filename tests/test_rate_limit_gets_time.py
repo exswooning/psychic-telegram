@@ -92,10 +92,11 @@ class TestTheLimiterLearnsFromTheFirstRejectionNotOnlyTheLast:
     def test_it_fires_once_per_rejection_including_the_one_that_exhausts_the_budget(self, monkeypatch):
         monkeypatch.setattr(R.time, "sleep", lambda *_: None)
         seen = []
-        boom, calls = self._call_that_always_429s("rateLimitExceeded", on_quota_rejection=lambda: seen.append(1))
+        boom, calls = self._call_that_always_429s("rateLimitExceeded", on_quota_rejection=lambda r: seen.append(r))
         with pytest.raises(RuntimeError, match="exhausted"):
             boom()
         assert len(seen) == calls["n"] == R.RATE_LIMIT_RETRY_BUDGET + 1
+        assert set(seen) == {"rateLimitExceeded"}      # the limiter is told WHICH limit
 
     def test_a_project_limiter_does_not_hear_one_users_budget(self, monkeypatch):
         """Live: one seeduser94 userRateLimitExceeded ratcheted the source
@@ -104,13 +105,13 @@ class TestTheLimiterLearnsFromTheFirstRejectionNotOnlyTheLast:
         monkeypatch.setattr(R.time, "sleep", lambda *_: None)
         seen = []
         boom, _ = self._call_that_always_429s(
-            "userRateLimitExceeded", on_quota_rejection=lambda: seen.append(1),
+            "userRateLimitExceeded", on_quota_rejection=lambda r: seen.append(r),
             quota_reasons=drive_engine.PROJECT_QUOTA_REASONS)
         with pytest.raises(RuntimeError):
             boom()
         assert seen == []
         boom, _ = self._call_that_always_429s(
-            "rateLimitExceeded", on_quota_rejection=lambda: seen.append(1),
+            "rateLimitExceeded", on_quota_rejection=lambda r: seen.append(r),
             quota_reasons=drive_engine.PROJECT_QUOTA_REASONS)
         with pytest.raises(RuntimeError):
             boom()
@@ -119,7 +120,7 @@ class TestTheLimiterLearnsFromTheFirstRejectionNotOnlyTheLast:
     def test_it_is_not_called_for_a_permanent_403(self, monkeypatch):
         monkeypatch.setattr(R.time, "sleep", lambda *_: None)
         seen = []
-        boom, _ = self._call_that_always_429s("insufficientPermissions", on_quota_rejection=lambda: seen.append(1))
+        boom, _ = self._call_that_always_429s("insufficientPermissions", on_quota_rejection=lambda r: seen.append(r))
         with pytest.raises(Exception):
             boom()
         assert seen == []

@@ -496,3 +496,14 @@ class TestATallyDoesNotOutliveTheItemsItDescribes:
         db.save_user_tally("v@a.com", "v@b.com", 1.0, {"services": {}})
         r.reset_service_ledger(db, "u@a.com", ("drive",))
         assert [t["user"] for t in db.user_tallies()] == ["v@a.com"]
+
+
+def test_a_reset_forgets_the_unverified_objects_it_removed(db, settings, identity):
+    """verification_unverified rows describe items a reset declares gone: they go with them."""
+    import verify_resilience as vr
+    vr.UnverifiedStore(db).record(SRC, "drive", "f1", "t1", "x", vr.Failure(
+        vr.UNVERIFIED_TRANSIENT, 503, 2, "docs", "boom"))
+    assert vr.UnverifiedStore(db).pending(SRC, "drive")
+    import reset_drive_ledger as R
+    R.reset_service_ledger(db, SRC, ("drive",))
+    assert vr.UnverifiedStore(db).pending(SRC, "drive") == []

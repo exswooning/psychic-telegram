@@ -35,7 +35,7 @@ const Scope: React.FC = () => {
         <Typography variant="h4" sx={{ fontWeight: 700, flexGrow: 1 }}>Scope</Typography>
         <Tooltip title="Re-check">
           <span>
-            <IconButton size="small" onClick={refresh} disabled={loading}>
+            <IconButton size="small" onClick={refresh} disabled={loading} aria-label="Re-check">
               <RefreshIcon fontSize="small" />
             </IconButton>
           </span>

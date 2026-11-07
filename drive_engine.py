@@ -234,7 +234,7 @@ def _project_limiter(qps: float, tenant: str = "target", db=None):
 
             def _on_change(kind: str, before: float, after: float,
                           t: str = tenant, d=db, n: int = share) -> None:
-                _log_rate_change(kind, before, after, t)
+                _log_rate_change(kind, before, after, t, _PROJECT_LIMITERS[t].last_reason)
                 if kind == "backoff" and d is not None:
                     try:
                         d.save_rate_ceiling(t, _PROJECT_LIMITERS[t].ceiling * n)
@@ -386,12 +386,12 @@ def limiter_events() -> dict:
 
 
 def _log_rate_change(kind: str, before: float, after: float,
-                     tenant: str = "target") -> None:
+                     tenant: str = "target", reason: str | None = None) -> None:
     """Say it out loud. A limiter that silently retunes itself is a limiter
     nobody can debug when a run is mysteriously slow."""
     if kind == "backoff":
-        log.warning("drive %s project rate: %.1f -> %.1f/s (quota pushback)",
-                    tenant, before, after)
+        log.warning("drive %s project rate: %.1f -> %.1f/s (quota pushback: %s)",
+                    tenant, before, after, reason or "unknown")
     else:
         log.info("drive %s project rate: %.1f -> %.1f/s (probing up)",
                  tenant, before, after)
@@ -1451,6 +1451,17 @@ class DriveMigrator:
             self._bump("folders")
             return f"dryrun:{item['id']}"
 
+        placed = self._take_placed(item, tgt_parent)
+        if placed is not None:
+            # The folder an earlier run made here, its mapping since lost: adopted, so the files
+            # under it find their own copies instead of a new, empty folder beside it.
+            self.db.record_mapping(self.source_user, item["id"], placed["id"], "folder",
+                                   parent_target_id=tgt_parent, source_name=item["name"])
+            self.db.log_audit(self.source_user, item["id"], "folder", "SUCCESS",
+                              modified_time=item.get("modifiedTime"))
+            self._bump("folders")
+            return placed["id"]
+
         body = {"name": item["name"], "mimeType": FOLDER_MIME, "parents": [tgt_parent]}
         if item.get("modifiedTime"):
             body["modifiedTime"] = item["modifiedTime"]
@@ -1545,8 +1556,10 @@ class DriveMigrator:
         return None
 
     def _index_placed(self) -> dict[tuple, list[dict]]:
-        """The target's files no mapping names, by _placed_key. One listing per user."""
-        mapped = set(self.db.mapped_ids(self.source_user, ("file",)).values())
+        """The target's files AND folders no mapping names, by _placed_key. One listing per user.
+        Folders too: a user whose mappings were lost (an A/B arm cleared it.department@'s, account 3)
+        would otherwise get every folder re-created and every file copied again beside its first copy."""
+        mapped = set(self.db.mapped_ids(self.source_user, ("file", "folder")).values())
         where = (dict(corpora="drive", driveId=self.target_drive_id, includeItemsFromAllDrives=True,
                       supportsAllDrives=True, q="trashed = false") if self.shared_drive
                  else dict(spaces="drive", q="'me' in owners and trashed = false"))
@@ -1559,7 +1572,7 @@ class DriveMigrator:
                     fields="nextPageToken,files(id,name,mimeType,createdTime,modifiedTime,"
                            "md5Checksum,parents)").execute(), write=False)
                 for f in resp.get("files", []):
-                    if f["id"] not in mapped and f.get("mimeType") != FOLDER_MIME:
+                    if f["id"] not in mapped:
                         for p in f.get("parents") or []:
                             out.setdefault(self._placed_key(f, p), []).append(f)
                 token = resp.get("nextPageToken")
@@ -2754,12 +2767,14 @@ class DriveMigrator:
             # This user's own copy first; else whoever's copy exists. A shortcut usually
             # points at a colleague's file -- live, dharan: ward7 and info@ each had one
             # left SKIPPED_UNRESOLVED_TARGET although planning@'s copy was on the target.
-            mapped = (
-                self.db.get_target_id(self.source_user, target_id, "file")
-                or self.db.get_target_id(self.source_user, target_id, "folder")
-                or self.db.target_for_source_id(target_id, ("file", "folder"))
-            )
-            if not mapped:
+            # Every copy is a candidate, in that order: a colleague's copy this user cannot see
+            # answers 404 (account 3, ward1@, 2026-11-02, which FAILED the user on one shortcut),
+            # and another copy may well be reachable.
+            candidates = list(dict.fromkeys(c for c in (
+                self.db.get_target_id(self.source_user, target_id, "file"),
+                self.db.get_target_id(self.source_user, target_id, "folder"),
+                *self.db.targets_for_source_id(target_id, ("file", "folder"))) if c))
+            if not candidates:
                 self.db.log_audit(self.source_user, item["id"], "shortcut",
                                   "SKIPPED_UNRESOLVED_TARGET",
                                   "shortcut target has not migrated")
@@ -2771,25 +2786,43 @@ class DriveMigrator:
                 self._bump("files")
                 continue
 
-            body = {"name": item["name"], "mimeType": SHORTCUT_MIME,
-                   "parents": [tgt_parent], "shortcutDetails": {"targetId": mapped}}
             # Its own times too: live, seeduser200's shortcut was the one Drive item
             # whose created/modified time was the copy's. Dropped if Drive refuses them.
             times = {k: item[k] for k in ("createdTime", "modifiedTime") if item.get(k)}
-            try:
+            result, last_exc, unreachable = None, None, 0
+            for mapped in candidates:
+                body = {"name": item["name"], "mimeType": SHORTCUT_MIME,
+                        "parents": [tgt_parent], "shortcutDetails": {"targetId": mapped}}
                 try:
-                    result = self._retry(lambda: self.tgt.files().create(
-                        body={**body, **times}, fields="id", supportsAllDrives=True,
-                    ).execute())
-                except (PermanentAPIError, RuntimeError):
-                    if not times:
-                        raise
-                    result = self._retry(lambda: self.tgt.files().create(
-                        body=body, fields="id", supportsAllDrives=True,
-                    ).execute())
-            except (PermanentAPIError, RuntimeError) as exc:
-                self.db.log_audit(self.source_user, item["id"], "shortcut", "FAILED", str(exc))
-                self._bump("failed")
+                    try:
+                        result = self._retry(lambda: self.tgt.files().create(
+                            body={**body, **times}, fields="id", supportsAllDrives=True,
+                        ).execute())
+                    except (PermanentAPIError, RuntimeError):
+                        if not times:
+                            raise
+                        result = self._retry(lambda: self.tgt.files().create(
+                            body=body, fields="id", supportsAllDrives=True,
+                        ).execute())
+                    break
+                except (PermanentAPIError, RuntimeError) as exc:
+                    last_exc = exc
+                    if "404" in str(exc) or "not found" in str(exc).lower():
+                        unreachable += 1
+                        continue        # this copy is not visible to this user; try the next
+                    break               # any other refusal is a real failure
+            if result is None:
+                if last_exc is not None and unreachable == len(candidates):
+                    # Every copy is out of this user's reach for now (not shared with them yet).
+                    # A reasoned skip, re-walked by repair once another copy lands, not a failure.
+                    self.db.log_audit(self.source_user, item["id"], "shortcut",
+                                      "SKIPPED_UNRESOLVED_TARGET",
+                                      f"no copy of the shortcut's target is reachable by this user "
+                                      f"({len(candidates)} tried): {str(last_exc)[:160]}")
+                    self._bump("skipped")
+                else:
+                    self.db.log_audit(self.source_user, item["id"], "shortcut", "FAILED", str(last_exc))
+                    self._bump("failed")
                 continue
 
             self.db.record_mapping(self.source_user, item["id"], result["id"], "shortcut",
@@ -3307,7 +3340,9 @@ class DriveMigrator:
         # Comments BEFORE sharing: Drive emails the people who can see a file about a new
         # comment on it, and once shared that includes a client's outside collaborators.
         # Written first, the only one who can see it is the target owner.
-        if comments and self.settings.migrate_comments:
+        # A Form has no Drive comment threads: the comments API answers it 404 "File not found",
+        # which was recorded as a FAILED comment on every Form copied (live, 2026-10-31).
+        if comments and self.settings.migrate_comments and item.get("mimeType") != FORM_MIME:
             try:
                 commented = self._sync_comments(item["id"], target_id)
                 touched += commented

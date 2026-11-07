@@ -90,12 +90,25 @@ IMAGE_KEYS = ("contentUri", "contentUrl")
 IMAGE_MAX_BYTES = 64 * 1024 * 1024
 
 
-def _fetch_image(url: str) -> bytes:
+def _fetch_image(url: str, deadline: float | None = None) -> bytes:
+    """urlopen's timeout is per socket read, so a slow-dripping image never timed out and a Doc with
+    many images ran far past its budget (education@, live 7 Nov 2026: one Doc 11+ min inside ONE
+    counted call). Read in chunks and stop at the caller's monotonic deadline."""
+    import time
     import urllib.request
-    with urllib.request.urlopen(url, timeout=60) as resp:
-        data = resp.read(IMAGE_MAX_BYTES + 1)
-    if len(data) > IMAGE_MAX_BYTES:
-        raise RuntimeError("Embedded image is larger than the comparison limit")
+    from resilience import RetryBudgetExceeded
+    data = b""
+    with urllib.request.urlopen(url, timeout=30) as resp:
+        while True:
+            if deadline is not None and time.monotonic() > deadline:
+                raise RetryBudgetExceeded("this file's time budget ran out while reading an embedded image; "
+                                          "recorded as unverified", None)
+            chunk = resp.read1(1 << 16)      # read(n) would wait until all n bytes arrived
+            if not chunk:
+                break
+            data += chunk
+            if len(data) > IMAGE_MAX_BYTES:
+                raise RuntimeError("Embedded image is larger than the comparison limit")
     return data
 
 
@@ -112,36 +125,36 @@ def _hash_images(value, fetch=None):
     return value
 
 
-def compare_native(auth, source_user, target_user, sid, tid, mime, lookup, fetch=None):
+def _side(side: str, endpoint: str, read):
+    """Run one read and, if it fails, say which tenant and endpoint it was: a 404 on the source is
+    MISSING_SOURCE and one on the target MISSING_TARGET, a 503 is Google's (verify_resilience.classify)."""
+    try:
+        return read()
+    except Exception as exc:
+        exc.bitport_side, exc.bitport_endpoint = side, endpoint
+        raise
+
+
+def compare_native(auth, source_user, target_user, sid, tid, mime, lookup, fetch=None, pace=lambda: None):
     if mime.endswith(".document"):
-        source = (
-            auth.api("source", "docs", source_user)
-            .documents()
-            .get(documentId=sid, includeTabsContent=True)
-            .execute()
-        )
-        target = (
-            auth.api("target", "docs", target_user)
-            .documents()
-            .get(documentId=tid, includeTabsContent=True)
-            .execute()
-        )
+        endpoint = "docs.googleapis.com/v1/documents.get"
+        source = _side("source", endpoint, lambda: (
+            pace() or auth.api("source", "docs", source_user)
+            .documents().get(documentId=sid, includeTabsContent=True).execute()))
+        target = _side("target", endpoint, lambda: (
+            pace() or auth.api("target", "docs", target_user)
+            .documents().get(documentId=tid, includeTabsContent=True).execute()))
         scope = (
             "all readable Docs tabs, text-run styles, document styles and structures"
         )
     elif mime.endswith(".presentation"):
-        source = (
-            auth.api("source", "slides", source_user)
-            .presentations()
-            .get(presentationId=sid)
-            .execute()
-        )
-        target = (
-            auth.api("target", "slides", target_user)
-            .presentations()
-            .get(presentationId=tid)
-            .execute()
-        )
+        endpoint = "slides.googleapis.com/v1/presentations.get"
+        source = _side("source", endpoint, lambda: (
+            pace() or auth.api("source", "slides", source_user)
+            .presentations().get(presentationId=sid).execute()))
+        target = _side("target", endpoint, lambda: (
+            pace() or auth.api("target", "slides", target_user)
+            .presentations().get(presentationId=tid).execute()))
         scope = "readable Slides pages, masters, layouts, notes and element properties"
     else:
         raise RuntimeError("Native feature reader not implemented for " + mime)
@@ -154,3 +167,56 @@ def compare_native(auth, source_user, target_user, sid, tid, mime, lookup, fetch
     return (
         [] if a == b else ["native document content, formatting or structure differs"]
     ), scope
+
+
+# -- Forms ---------------------------------------------------------------------------------------
+# What native_api.copy_form cannot carry (no API creates it), named rather than hidden.
+FORM_NOT_CARRIED = "fileUploadQuestion"
+
+
+def _form_shape(form: dict) -> dict:
+    """A Form as content: ids the target mints anew (items, questions, sections) dropped, a
+    branch's target section renamed by its position, and an image's signed contentUri (new on
+    every read) left out. Whitespace in the title is normalised, as copy_form writes it."""
+    sections = {}
+    for item in form.get("items", []):
+        if "pageBreakItem" in item:
+            sections[item.get("itemId")] = f"section {len(sections) + 1}"
+
+    def clean(value):
+        if isinstance(value, dict):
+            out = {}
+            for k, v in value.items():
+                if k in ("itemId", "questionId", "contentUri"):
+                    continue
+                out[k] = sections.get(v, v) if k == "goToSectionId" else clean(v)
+            return out
+        if isinstance(value, list):
+            return [clean(v) for v in value]
+        return value
+
+    info = form.get("info") or {}
+    quiz = ((form.get("settings") or {}).get("quizSettings") or {}).get("isQuiz", False)
+    return {"title": " ".join((info.get("title") or "").split()), "description": info.get("description") or "",
+            "quiz": bool(quiz), "items": [clean(i) for i in form.get("items", [])]}
+
+
+def compare_form(src_forms, tgt_forms, source_id: str, target_id: str) -> list[str]:
+    """Differences between a source Form and its rebuilt copy, by content; [] when the same.
+    Past responses and the responses-Sheet link are outside a Form's body and not compared."""
+    a = _form_shape(src_forms.forms().get(formId=source_id).execute())
+    b = _form_shape(tgt_forms.forms().get(formId=target_id).execute())
+    diffs = []
+    for key in ("title", "description", "quiz"):
+        if a[key] != b[key]:
+            diffs.append(f"Form {key} differs")
+    uncarried = [i for i in a["items"] if FORM_NOT_CARRIED in ((i.get("questionItem") or {}).get("question") or {})]
+    if uncarried:
+        diffs.append(f"{len(uncarried)} file-upload question(s) not carried: no API can create one")
+    wanted = [i for i in a["items"] if i not in uncarried]
+    if len(wanted) != len(b["items"]):
+        diffs.append(f"Form has {len(b['items'])} item(s) on the target, {len(wanted)} expected")
+    for n, (x, y) in enumerate(zip(wanted, b["items"]), 1):
+        if x != y:
+            diffs.append(f"Form item {n} ({x.get('title') or 'untitled'}) differs")
+    return diffs

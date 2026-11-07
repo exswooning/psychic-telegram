@@ -27,6 +27,7 @@ import {
 import { fetchQueue, cancelQueued } from '@/api/client'
 import type { QueueEntry, QueueSnapshot } from '@/api/client'
 import { ago } from './QueuePanel.utils'
+import { useViewedAccount } from '@/hooks/useViewedAccount'
 
 const POLL_MS = 5000
 
@@ -62,10 +63,11 @@ export const QueuePanel: React.FC<{ compact?: boolean }> = ({ compact }) => {
   const [q, setQ] = useState<QueueSnapshot | null>(null)
   const [error, setError] = useState<string | null>(null)
 
+  const viewed = useViewedAccount()      // "yours" means the account being looked at
   const refresh = useCallback(() => {
-    fetchQueue().then((s) => { setQ(s); setError(null) })
+    fetchQueue(viewed).then((s) => { setQ(s); setError(null) })
       .catch((e) => setError(e.message))
-  }, [])
+  }, [viewed])
 
   useEffect(() => {
     refresh()

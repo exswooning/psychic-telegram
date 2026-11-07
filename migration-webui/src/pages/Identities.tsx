@@ -561,7 +561,7 @@ const Identities: React.FC = () => {
         </Button>
         <Tooltip title="Re-check">
           <span>
-            <IconButton size="small" onClick={refresh} disabled={loading}>
+            <IconButton size="small" onClick={refresh} disabled={loading} aria-label="Re-check">
               <RefreshIcon fontSize="small" />
             </IconButton>
           </span>

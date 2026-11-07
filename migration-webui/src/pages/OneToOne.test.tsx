@@ -141,18 +141,18 @@ describe('Verify now', () => {
   it('asks for every user by default, with the usual sample', async () => {
     show()
     await confirm()
-    await waitFor(() => expect(cp.run).toHaveBeenCalledWith('checking after the fix', { accountId: 3, users: [], limit: undefined, repair: true }))
+    await waitFor(() => expect(cp.run).toHaveBeenCalledWith('checking after the fix', { accountId: 3, users: [], limit: undefined, repair: false }))
     expect(await screen.findByText('started pid 1')).toBeInTheDocument()
   })
 
-  it('can check without repairing anything', async () => {
+  it('can explicitly enable repair on the target', async () => {
     show()
     fireEvent.click(await screen.findByTestId('verify-now'))
     fireEvent.click(screen.getByLabelText('repair what it finds'))
     fireEvent.change(screen.getByLabelText('Reason Code'), { target: { value: 'first-pass benchmark' } })
     fireEvent.click(screen.getByRole('button', { name: 'Confirm' }))
     await waitFor(() => expect(cp.run).toHaveBeenCalledWith('first-pass benchmark',
-      expect.objectContaining({ repair: false })))
+      expect.objectContaining({ repair: true })))
   })
 
   it('asks for just the users that were ticked', async () => {

@@ -159,6 +159,7 @@ const Users: React.FC = () => {
           fullWidth
           variant="outlined"
           placeholder="Search users by name or email..."
+          inputProps={{ 'aria-label': 'Search users by name or email' }}
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           InputProps={{

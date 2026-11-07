@@ -37,6 +37,7 @@ import logging
 import os
 import re
 import sys
+import threading
 import time
 import unicodedata
 from collections.abc import Iterator
@@ -68,6 +69,9 @@ DRIVE_META_FIELDS = ("id,name,mimeType,parents,size,md5Checksum,modifiedTime,tra
 # Files larger than this are compared by size and MD5 only. Both sides are read into
 # memory to hash, and a sample is small; a 2 GB video is not what it is for.
 MAX_COMPARE_BYTES = 25 * 1024 * 1024
+# What a receipted message is still read for: the headers the check uses, with the labels, read
+# state and date Gmail returns with any metadata read (see Verifier._receipts).
+RECEIPT_HEADERS = ("Message-ID", "Date")
 NATIVE_EXPORT = {
     "application/vnd.google-apps.document": "text/plain",
     "application/vnd.google-apps.spreadsheet": "text/csv",
@@ -199,7 +203,7 @@ def _is_not_found(exc) -> bool:
 
 
 def compare_grants(src_perms: list[dict], tgt_perms: list[dict], translate, src_domain: str, tgt_domain: str,
-                   skipped_ids: set[str], source_id: str) -> dict:
+                   skipped_ids: set[str], source_id: str, owed_ids: set[str] = frozenset()) -> dict:
     """Who can see one file, source against target.
 
     Each grant is reduced to (who, role) -- the thing a person would notice
@@ -221,7 +225,10 @@ def compare_grants(src_perms: list[dict], tgt_perms: list[dict], translate, src_
             f"{source_id}:domain:{who}" if kind == "domain" else f"{source_id}:anyone")
     missing = sorted(want - got)
     explained = [k for k in missing if audit_id(k) in skipped_ids]
+    # Owed (the colleague has no target account YET) is still due; any other skip is a decision
+    # that stands (an outsider with no Google account) and leaves nothing to check.
     return {"matched": len(want & got), "notReproduced": [list(k) for k in explained],
+            "owed": sum(1 for k in explained if audit_id(k) in owed_ids),
             "missing": [list(k) for k in missing if k not in explained], "extra": [list(k) for k in sorted(got - want)]}
 
 
@@ -489,6 +496,13 @@ class Verifier:
     def __init__(self, auth, db, settings, source_user: str, target_user: str, retry=lambda f: f,
                  limit: int | None = None, on_api_attempt=None, on_progress=None):
         self.auth, self.db, self.settings = auth, db, settings
+        self._native_mine: dict = {}      # this user's own per-minute Docs/Sheets/Slides buckets
+        # Set only while one unverified file is being compared again (_retry_unverified): past it,
+        # no further attempt starts for that file. Live, one Google Doc held the retry pass for 15+
+        # minutes at 0/1 (info@, 4 Nov 2026), retrying a read that timed out every time.
+        self._file_deadline: float | None = None
+        self._native_lock = threading.Lock()
+        self._gmail_budgets = {}
         self.src_user, self.tgt_user = source_user, target_user
         self._retry = retry
         self.evidence: list[dict] = []
@@ -499,12 +513,31 @@ class Verifier:
         self._on_api_attempt = on_api_attempt
         self._on_progress = on_progress
         self._operation = "initialising verifier"
+        import verify_resilience as vr
+        self._vr = vr
+        self._unverified = vr.UnverifiedStore(db)
+        self._retry_ctx: dict[str, dict] = {}       # transient-unverified files awaiting the retry pass
+        self._known_unverified: set[str] = set()
+        self._stats = {"identical": 0, "different": 0, "unverified": 0, "verified": 0, "phase": "idle",
+                       "currentDocument": None, "currentMime": None, "currentSince": None,
+                       "lastSuccessfulDocument": None, "lastSuccessAt": None, "lastApiStatus": None,
+                       "retryAttempt": 0, "retryDelay": 0.0}
 
     def _report_progress(self, operation: str, completed: int | None = None,
                          total: int | None = None, item: str | None = None) -> None:
         self._operation = operation
         if self._on_progress:
             self._on_progress(operation=operation, completed=completed, total=total, item=item)
+
+    def _publish_stats(self, **changes) -> None:
+        """What the heartbeat says beyond counts: which document, what phase (a live request, a retry
+        wait, a breaker cooldown, or between documents), the last success and the breaker states."""
+        self._stats.update(changes)
+        if self._on_progress:
+            st = dict(self._stats)
+            st["pendingRetry"] = len(self._retry_ctx)
+            st["breakers"] = {k: b.state for k, b in self._vr.BREAKERS.items()}
+            self._on_progress(stats=st)
 
     # -- plumbing ---------------------------------------------------------
     def _x(self, fn, operation: str | None = None, request_count: int = 1):
@@ -515,20 +548,30 @@ class Verifier:
         def counted():
             nonlocal attempt
             _stop_check()
+            if self._file_deadline and time.monotonic() > self._file_deadline:
+                # RetryBudgetExceeded, not TimeoutError: the ladder does not retry it and the verifier
+                # classes it a transient failure -- the file is unverified now and tried again later.
+                from resilience import RetryBudgetExceeded
+                raise RetryBudgetExceeded("this file's time budget ran out; recorded as unverified",
+                                          None, attempt, 0.0)
             attempt += 1
+            count = request_count() if callable(request_count) else request_count
             if self._on_api_attempt:
-                self._on_api_attempt("start", operation=operation, request_count=request_count,
+                self._on_api_attempt("start", operation=operation, request_count=count,
                                      attempt=attempt)
+            self._stats.update(phase="request", retryAttempt=attempt)
             try:
                 result = fn()
             except Exception as exc:
+                self._stats.update(phase="retry-wait", lastApiStatus=self._vr.classify(exc).status or type(exc).__name__)
                 if self._on_api_attempt:
-                    self._on_api_attempt("finish", operation=operation, request_count=request_count,
+                    self._on_api_attempt("finish", operation=operation, request_count=count,
                                          attempt=attempt, error=f"{type(exc).__name__}: {str(exc)[:180]}")
                 raise
             else:
+                self._stats.update(phase="compare", lastApiStatus=200)
                 if self._on_api_attempt:
-                    self._on_api_attempt("finish", operation=operation, request_count=request_count,
+                    self._on_api_attempt("finish", operation=operation, request_count=count,
                                          attempt=attempt)
                 return result
         return self._retry(counted)()
@@ -572,6 +615,18 @@ class Verifier:
             f"AND status LIKE 'FAILED%' AND item_type IN ({q})", (self.src_user, *types)).fetchall()
         out = []
         for r in rows:
+            # An item that failed once and is MAPPED now was copied since (a later run, or a repair): its old
+            # failure row is history, not a gap. info@'s repair delivered 137 held messages and the check
+            # still listed all 168 as not copied (7 Nov 2026).
+            if r["item_type"] != types[-1] and self.db.get_target_id(self.src_user, r["item_id"], r["item_type"]):
+                # Only a mapping written AFTER the failure counts as the recovery: an earlier copy followed by
+                # a failed later one, a tie at second resolution, or an unreadable time all keep the failure.
+                m = self.db.conn.execute(
+                    "SELECT created_at FROM id_mapping WHERE source_user=? AND source_id=? AND type=?",
+                    (self.src_user, r["item_id"], r["item_type"])).fetchone()
+                if m is None or (m["created_at"] and r["timestamp"] and m["created_at"][:1].isdigit()
+                                 and m["created_at"] > r["timestamp"]):
+                    continue
             if r["item_type"] == types[-1] and self.db.conn.execute(
                     f"SELECT 1 FROM audit_log WHERE source_user=? AND status='SUCCESS' AND timestamp>? "
                     f"AND item_type IN ({','.join('?' * len(items))}) LIMIT 1",
@@ -583,7 +638,7 @@ class Verifier:
     @staticmethod
     def _blank() -> dict:
         return {"checked": 0, "identical": 0, "differences": [], "missing": [], "extras": [],
-                "duplicates": [], "notCopied": [], "errors": [], "notes": []}
+                "duplicates": [], "notCopied": [], "errors": [], "notes": [], "unverified": []}
 
     # -- Drive ------------------------------------------------------------
     def _remember_drive_permissions(self, svc, fid, metadata):
@@ -645,9 +700,15 @@ class Verifier:
             raise error
         return self._drive_meta(svc, fid)
 
-    def _drive_path(self, svc, fid, cache: dict) -> str:
+    def _drive_path(self, svc, fid, cache: dict, budget_sec: float | None = None) -> str:
+        # The walk is bounded per file: one file whose parents keep failing held the stray
+        # check for 40+ minutes (info@, 3 Nov 2026). Running out of budget is an error for that
+        # file, never a guessed path.
+        deadline = time.monotonic() + budget_sec if budget_sec else None
         parts, cur, guard = [], fid, 0
         while cur and guard < 200:
+            if deadline and time.monotonic() > deadline:
+                raise TimeoutError(f"path of {fid} not read within {budget_sec:.0f}s")
             guard += 1
             if cur not in cache:
                 cache[cur] = self._drive_meta(svc, cur)
@@ -672,10 +733,82 @@ class Verifier:
     def _export(self, svc, fid, mime) -> bytes:
         return self._x(lambda: svc.files().export_media(fileId=fid, mimeType=mime).execute())
 
+    def _note_unverified(self, res, sid, tid, sm, tm, ev, failure, err_text, entry, other_diffs) -> None:
+        """A file whose content was not compared. Recorded in the result (so the service cannot be
+        IDENTICAL), in the ledger (so a restart keeps it and the next pass retries it) and, when the
+        cause was transient, queued for this run's retry pass."""
+        mime = sm.get("mimeType") or ""
+        attempts = self._unverified.record(self.src_user, "drive", sid, tid, mime, failure)
+        row = {"source": sid, "target": tid, "name": sm.get("name"), "mime": mime, "state": failure.state,
+               "status": failure.status, "endpoint": failure.endpoint, "attempts": attempts}
+        res["unverified"].append(row)
+        self._stats["unverified"] += 1
+        if failure.transient:
+            self._retry_ctx[sid] = {"row": row, "tid": tid, "sm": sm, "tm": tm, "ev": ev, "err": err_text,
+                                    "entry": entry, "other": other_diffs}
+        self._publish_stats(phase="compare")
+
+    def _retry_unverified(self, res, src, tgt) -> None:
+        """Compare again the files that failed on a transient fault, after a cooldown, up to
+        VERIFY_RETRY_PASSES times. A file still failing stays UNVERIFIED (and the service INCOMPLETE);
+        one that now compares is counted as what it is -- identical or different -- and its error
+        and ledger row are removed. Nothing here writes to either tenant."""
+        passes = int(os.getenv("VERIFY_RETRY_PASSES", "2"))
+        wait = float(os.getenv("VERIFY_RETRY_WAIT_SEC", "90"))
+        for n in range(1, passes + 1):
+            if not self._retry_ctx:
+                return
+            self._publish_stats(phase="circuit-cooldown", retryAttempt=n, retryDelay=wait)
+            end = time.monotonic() + wait
+            while time.monotonic() < end:
+                _stop_check()
+                time.sleep(min(2.0, max(end - time.monotonic(), 0)))
+            todo = list(self._retry_ctx.items())
+            for i, (sid, ctx) in enumerate(todo):
+                self._report_progress("Drive retry unverified", i, len(todo), f"file {sid}")
+                ev2: dict = {}
+                self._publish_stats(currentDocument=sid, currentMime=ctx["sm"].get("mimeType"),
+                                    currentSince=time.time(), phase="compare", retryAttempt=n)
+                self._file_deadline = time.monotonic() + float(os.getenv("VERIFY_RETRY_FILE_BUDGET_SEC", "120"))
+                try:
+                    content = self._content(src, tgt, sid, ctx["tid"], ctx["sm"], ctx["tm"], ev2)
+                finally:
+                    self._file_deadline = None
+                failure = ev2.get("unverified")
+                if failure is not None:
+                    ctx["row"]["attempts"] = self._unverified.record(self.src_user, "drive", sid, ctx["tid"],
+                                                                     ctx["row"]["mime"], failure)
+                    ctx["row"].update(state=failure.state, status=failure.status)
+                    if not failure.transient:
+                        del self._retry_ctx[sid]
+                    continue
+                del self._retry_ctx[sid]
+                self._unverified.resolve(self.src_user, "drive", sid)
+                res["unverified"].remove(ctx["row"])
+                if ctx["err"] in res["errors"]:
+                    res["errors"].remove(ctx["err"])
+                self._stats["unverified"] -= 1
+                self._stats["verified"] += 1
+                ctx["ev"].update(ev2, retried=True)
+                ctx["ev"].pop("error", None)
+                if content or ctx["entry"] is not None:
+                    if ctx["entry"] is None:
+                        ctx["entry"] = {"item": ctx["sm"].get("name"), "path": ctx["ev"].get("path"),
+                                        "source": sid, "target": ctx["tid"], "diffs": []}
+                        res["differences"].append(ctx["entry"])
+                    ctx["entry"]["diffs"] = list(ctx["entry"]["diffs"]) + list(content)
+                    self._stats["different"] += 1
+                else:
+                    res["identical"] += 1
+                    self._stats["identical"] += 1
+                self._publish_stats(lastSuccessfulDocument=sid, lastSuccessAt=time.time(),
+                                    currentDocument=None, currentMime=None, currentSince=None)
+
     def drive(self) -> dict:
         res = self._blank()
         src, tgt = self.auth.source_drive(self.src_user), self.auth.target_drive(self.tgt_user)
         sc, tc = {}, {}
+        self._known_unverified = {r["source_id"] for r in self._unverified.pending(self.src_user, "drive")}
         # Every target the ledger knows -- not only the ones opened below -- so a sampled
         # run does not mistake the rest of the migration for strays.
         # Shortcuts too: a migrated shortcut is mapped as one, and leaving it out
@@ -744,6 +877,9 @@ class Verifier:
                 tp = self._drive_path(tgt, tid, tc)
                 diffs = compare_drive_file(sm, tm, sp, tp)
                 ev = {"kind": kind, "name": sm.get("name"), "path": sp, "opened": False}
+                unverified, err_text, content = None, None, []
+                self._publish_stats(currentDocument=sid, currentMime=sm.get("mimeType"), currentSince=time.time(),
+                                    phase="compare")
                 if kind == "file":
                     target_keys[(tp, tm.get("name"), tm.get("md5Checksum"))] = tid
                     reused = drive_content_cache_get(self.db, self.src_user, sid, tid, sm, tm)
@@ -761,8 +897,13 @@ class Verifier:
                             drive_content_cache_put(self.db, self.src_user, sid, tid, sm, tm, content, ev)
                     from copy_resolution import remember_content
                     remember_content(self, sid, tid, sm, tm, ev, content)
+                    unverified = ev.pop("unverified", None)
+                    err_text = None
                     if ev.get("error"):
-                        res["errors"].append(f"file {sid}: {ev.pop('error')}")
+                        err_text = f"file {sid}: {ev.pop('error')}"
+                        res["errors"].append(err_text)
+                    elif sid in self._known_unverified:
+                        self._unverified.resolve(self.src_user, "drive", sid)    # compared now
                     if getattr(self.settings, "rewrite_drive_links", False):
                         try:
                             diffs += self._native_links(tid, sm)
@@ -781,16 +922,38 @@ class Verifier:
                     if getattr(self, "_not_owner", False):
                         diffs = [d for d in diffs if not d.startswith("folder path differs")]
                 diffs += sharing
-                self.evidence.append({"service": "drive", **ev})
+                record = {"service": "drive", **ev}
+                self.evidence.append(record)
+                entry = None
                 if diffs:
-                    res["differences"].append({"item": sm.get("name"), "path": sp, "source": sid, "target": tid, "diffs": diffs})
-                else:
+                    entry = {"item": sm.get("name"), "path": sp, "source": sid, "target": tid, "diffs": diffs}
+                    res["differences"].append(entry)
+                if unverified is not None:
+                    # The content was NOT compared: whatever else matched, this file is not "identical".
+                    self._note_unverified(res, sid, tid, sm, tm, record, unverified, err_text, entry,
+                                          [d for d in diffs if d not in content])
+                elif not diffs:
                     res["identical"] += 1
+                    self._stats["identical"] += 1
+                else:
+                    self._stats["different"] += 1
+                if unverified is None:
+                    self._stats["verified"] += 1
+                    self._publish_stats(lastSuccessfulDocument=sid, lastSuccessAt=time.time(), phase="compare",
+                                        currentDocument=None, currentMime=None, currentSince=None)
             self._report_progress(operation, len(pairs), len(pairs))
+        # The compare loop is over: no document is "current" any more. It used to keep showing the last file
+        # with a timer that grew through the stray check and the comment phase, and read as a 22-minute hang
+        # on info@ (7 Nov 2026) when the document itself had finished in seconds.
+        self._publish_stats(currentDocument=None, currentMime=None, currentSince=None)
+        self._retry_unverified(res, src, tgt)
         # Strays and duplicates on the target the ledger would never mention.
         try:
             extra = self._target_files(tgt)
-            for f in extra:
+            stray_op = "Drive stray check (target files the ledger does not map)"
+            for n, f in enumerate(extra):
+                if n % 10 == 0:
+                    self._report_progress(stray_op, n, len(extra))
                 if f["id"] in seen_targets:
                     continue
                 try:
@@ -813,7 +976,24 @@ class Verifier:
                         res["notes"].append("Confirmed duplicate retained in target quarantine: " + f["id"])
                         continue
                     res["errors"].append("Quarantined duplicate changed or moved: " + f["id"])
-                key = (self._drive_path(tgt, f["id"], tc), f.get("name"), f.get("md5Checksum"))
+                # A copy repair made of a target file before rewriting it, kept on purpose so the
+                # repair can be undone (finding_repairs._backup) -- Bitport's own, not a stray.
+                try:
+                    kept = self.db.conn.execute(
+                        "SELECT 1 FROM finding_repair_actions WHERE source_user=? AND service='drive-backup' "
+                        "AND state='RETAINED' AND item_id LIKE ?", (self.src_user, "%:" + f["id"])).fetchone()
+                except Exception:      # noqa: BLE001 - no repair has run: nothing retained
+                    kept = None
+                if kept:
+                    res.setdefault("repairBackups", []).append({"target": f["id"], "name": f.get("name")})
+                    res["notes"].append("Repair backup kept on purpose so a repair can be undone: " + f["id"])
+                    continue
+                try:
+                    path = self._drive_path(tgt, f["id"], tc, budget_sec=float(os.getenv("VERIFY_PATH_BUDGET_SEC", "120")))
+                except TimeoutError as exc:
+                    res["errors"].append(f"target file {f['id']} not checked as a stray: {exc}")
+                    continue
+                key = (path, f.get("name"), f.get("md5Checksum"))
                 if key in target_keys:
                     res["duplicates"].append({"target": f["id"], "name": f.get("name"), "path": key[0],
                                               "duplicateOf": target_keys[key]})
@@ -925,12 +1105,16 @@ class Verifier:
                 "SELECT item_id FROM audit_log WHERE source_user=? AND item_type='acl' "
                 "AND (status LIKE 'SKIPPED%' OR status LIKE 'OWED%')",
                 (self.src_user,))}
+            self._owed_ids = {r["item_id"] for r in self.db.conn.execute(
+                "SELECT item_id FROM audit_log WHERE source_user=? AND item_type='acl' AND status LIKE 'OWED%'",
+                (self.src_user,))}
         g = compare_grants(sp, tp, self._translate, self.settings.source_domain, self.settings.target_domain,
-                           self._skipped_ids, sid)
-        sh = res.setdefault("sharing", {"filesCompared": 0, "matched": 0, "notReproduced": 0})
+                           self._skipped_ids, sid, getattr(self, "_owed_ids", set()))
+        sh = res.setdefault("sharing", {"filesCompared": 0, "matched": 0, "notReproduced": 0, "owed": 0})
         sh["filesCompared"] += 1
         sh["matched"] += g["matched"]
         sh["notReproduced"] += len(g["notReproduced"])
+        sh["owed"] = sh.get("owed", 0) + g["owed"]
         out = [f"grant missing on the target: {m}" for m in g["missing"]]
         out += [f"extra grant on the target (nobody granted it): {e}" for e in g["extra"]]
         return out
@@ -955,14 +1139,39 @@ class Verifier:
             seen_tokens.add(next_token)
             token = next_token
 
+    def _doc_budget(self):
+        """A whole document, however many reads it takes, gets one wall-clock budget
+        (VERIFY_DOC_BUDGET_SEC, 300s). Live (info@, 7 Nov 2026): one Google Doc held its user for
+        1,352s -- each read inside the per-call retry limit, the document as a whole unbounded.
+        A budget already running (the retry pass sets a shorter one) is left as it is."""
+        import contextlib
+
+        @contextlib.contextmanager
+        def budget():
+            if self._file_deadline is not None:
+                yield
+                return
+            self._file_deadline = time.monotonic() + float(os.getenv("VERIFY_DOC_BUDGET_SEC", "300"))
+            try:
+                yield
+            finally:
+                self._file_deadline = None
+        return budget()
+
     def _content(self, src, tgt, sid, tid, sm, tm, ev) -> list[str]:
+        with self._doc_budget():
+            return self._content_unbounded(src, tgt, sid, tid, sm, tm, ev)
+
+    def _content_unbounded(self, src, tgt, sid, tid, sm, tm, ev) -> list[str]:
         """Open BOTH files and compare what is inside them."""
         mime = sm.get("mimeType") or ""
         try:
             if mime == "application/vnd.google-apps.spreadsheet":
                 from native_repair import read_sheet, compare_sheets
-                source_sheet = self._x(lambda: read_sheet(self.auth.api("source", "sheets", self.src_user), sid))
-                target_sheet = self._x(lambda: read_sheet(self.auth.api("target", "sheets", self.tgt_user), tid))
+                source_sheet = self._x(lambda: read_sheet(self.auth.api("source", "sheets", self.src_user), sid,
+                                                           pace=lambda: self._native_pace("sheets", "read")))
+                target_sheet = self._x(lambda: read_sheet(self.auth.api("target", "sheets", self.tgt_user), tid,
+                                                           pace=lambda: self._native_pace("sheets", "read")))
                 differences = compare_sheets(source_sheet, target_sheet, self.db.target_for_source_id)
                 if differences and self.db.conn.execute(
                         "SELECT 1 FROM audit_log WHERE item_type='form_link' AND status='RELINKED' "
@@ -972,9 +1181,26 @@ class Verifier:
                                        "Form is relinked" for d in differences]
                 ev.update(opened=True, how="native Sheet entered values, formulas, cell styles and structures; calculated results excluded",nativeFeaturesChecked=True,nativeFeaturesMatched=not differences)
                 return differences
+            if mime == "application/vnd.google-apps.form":
+                # Rebuilt by the Forms API (native_api.copy_form), so compared the same way: without
+                # this a Form was counted as native and never checked, and every user with one
+                # stayed INCOMPLETE (esc.mrc, live 2026-10-31).
+                from native_fidelity import compare_form
+                differences = self._x(lambda: compare_form(self.auth.api("source", "forms", self.src_user),
+                                                           self.auth.api("target", "forms", self.tgt_user), sid, tid))
+                ev.update(opened=True, nativeFeaturesChecked=True, nativeFeaturesMatched=not differences,
+                          how="Form title, description, quiz setting and every item with its options; "
+                              "generated ids, past responses and the responses-Sheet link excluded")
+                return differences
             if mime in ("application/vnd.google-apps.document", "application/vnd.google-apps.presentation"):
-                from native_fidelity import compare_native
-                differences,scope=self._x(lambda: compare_native(self.auth,self.src_user,self.tgt_user,sid,tid,mime,self.db.target_for_source_id))
+                from native_fidelity import compare_native, _fetch_image
+                kind = "docs" if mime.endswith(".document") else "slides"
+                # One breaker per API family: after a few documents fail on a Google 5xx the rest are
+                # not sent for a cooldown (they are queued as unverified, never passed).
+                differences,scope=self._vr.guarded(kind, lambda: self._x(
+                    lambda: compare_native(self.auth,self.src_user,self.tgt_user,sid,tid,mime,self.db.target_for_source_id,
+                                           pace=lambda: self._native_pace(kind, "read"),
+                                           fetch=lambda u: _fetch_image(u, self._file_deadline))))
                 ev.update(opened=True,how=scope,nativeFeaturesChecked=True,nativeFeaturesMatched=not differences)
                 return differences
             if mime in NATIVE_EXPORT:
@@ -993,6 +1219,15 @@ class Verifier:
                 ev["how"] = "not opened: this Google type has no text export"
                 return []
             size = int(sm.get("size") or 0)
+            # Drive's md5Checksum is computed by Google from the bytes it stores, on each tenant. Equal
+            # MD5 and size on both sides already says what downloading both would; downloading them
+            # cost 71 of it.department's 103 minutes (2.6 GB, twice, through the box's uplink). Set
+            # VERIFY_TRUST_MD5=0 to download and compare every byte as before.
+            if (os.getenv("VERIFY_TRUST_MD5", "1").lower() not in ("0", "false", "no")
+                    and sm.get("md5Checksum") and sm.get("md5Checksum") == tm.get("md5Checksum")
+                    and str(sm.get("size")) == str(tm.get("size"))):
+                ev.update(opened=False, how="identical by Drive's own MD5 and size on both tenants (not downloaded)")
+                return []
             if size > MAX_COMPARE_BYTES:
                 ev["how"] = f"not opened: {size:,} bytes is over the {MAX_COMPARE_BYTES:,}-byte comparison limit (size and MD5 only)"
                 return []
@@ -1005,25 +1240,51 @@ class Verifier:
                 out.append(f"content differs: sha256 {sha256(a)[:12]} -> {sha256(b)[:12]} ({len(a)} -> {len(b)} bytes)")
             return out
         except Exception as exc:      # noqa: BLE001
+            failure = self._vr.classify(exc)
             ev["how"] = f"could not be opened: {error_detail(exc)}"
             ev["error"] = f"content could not be compared: {error_detail(exc)}"
+            ev["unverified"] = failure      # drive() records it; it is never an identical
             return []
 
     def _native_links(self, tid, sm) -> list[str]:
+        with self._doc_budget():
+            return self._native_links_unbounded(tid, sm)
+
+    def _native_links_unbounded(self, tid, sm) -> list[str]:
         """A Doc, Sheet or Slide's links live inside it, where no export comparison sees
         them: ask the same builder the rewrite uses what it would still change on the
         TARGET copy -- a link still naming a migrated source file. Reads only."""
-        from drive_engine import _NATIVE_KIND, _native_project_limiter
+        from drive_engine import _NATIVE_KIND
         import link_rewrite
         k = _NATIVE_KIND.get(sm.get("mimeType") or "")
         if not k:
             return []
         n = self._x(lambda: link_rewrite.rewrite_native(
             k, self.auth.api("target", k, self.tgt_user), tid, self.db.target_for_source_id,
-            pace=lambda op: _native_project_limiter(k, op).acquire(), apply=False))
+            pace=lambda op: self._native_pace(k, op), apply=False))
         return [f"links inside still point at the source ({n} rewrite(s) due)"] if n else []
 
+    def _native_pace(self, kind: str, op: str) -> None:
+        """This user's own per-minute quota AND the project's, as the engine paces its link
+        rewrite (drive_engine: `pace`). The project bucket alone let one user's Sheets reads
+        burst past Google's 60 a minute per user (live, finance@s.: 429 RESOURCE_EXHAUSTED,
+        six retries spent, the Drive verdict left INCOMPLETE)."""
+        from drive_engine import _native_project_limiter, _native_rate
+        from resilience import RateLimiter
+        with self._native_lock:
+            lim = self._native_mine.setdefault((kind, op), RateLimiter(_native_rate(kind, op, 0)))
+        lim.acquire()
+        _native_project_limiter(kind, op).acquire()
+
     # -- Gmail ------------------------------------------------------------
+    def _gmail_budget(self, side):
+        import verify_gmail_quota
+        with self._native_lock:
+            if side not in self._gmail_budgets:
+                user = self.src_user if side == "source" else self.tgt_user
+                self._gmail_budgets[side] = verify_gmail_quota.for_mailbox(self.auth, self.settings, side, user)
+            return self._gmail_budgets[side]
+
     def _label_names(self, svc) -> dict:
         r = self._x(lambda: svc.users().labels().list(userId="me").execute())
         return {l["id"]: l["name"] for l in r.get("labels", [])}
@@ -1032,8 +1293,45 @@ class Verifier:
         from verification_reads import gmail_raw
         return gmail_raw(svc, mid, self._x)
 
+    def _receipts(self) -> dict[str, str]:
+        """source message id -> target id the engine compared byte for byte as it wrote it
+        (migration_checks.verify_written_mail: the target read back against the source still in
+        memory). Gmail cannot change a message's content after it is written -- only its labels --
+        so a receipt holds while both ids exist, and the check need not download either message
+        again: it reads their labels, read state, date and Message-ID instead. Turned off with
+        VERIFY_USE_RECEIPTS=0, which reads every message in full as before."""
+        if os.getenv("VERIFY_USE_RECEIPTS", "1").lower() in ("0", "false", "no"):
+            return {}
+        try:
+            return {sid: tid for sid, tid in self.db.conn.execute(
+                "SELECT source_id, target_id FROM migration_item_receipts "
+                "WHERE source_user=? AND service='gmail' AND status='VERIFIED'", (self.src_user,))}
+        except Exception:      # noqa: BLE001 - no table yet: no receipts
+            return {}
+
+    def _head(self, svc, mid) -> tuple[bytes, dict]:
+        """Labels, read state, date and the two headers the check needs -- no body."""
+        return b"", self._x(lambda: svc.users().messages().get(
+            userId="me", id=mid, format="metadata", metadataHeaders=list(RECEIPT_HEADERS)).execute())
+
+    def _gmail_single(self, svc, mid, fmt, budget, cost):
+        def read():
+            budget.acquire(cost, _stop_check)
+            try:
+                message = svc.users().messages().get(userId="me", id=mid, format=fmt,
+                    **({"metadataHeaders": list(RECEIPT_HEADERS)} if fmt != "raw" else {})).execute()
+                if fmt != "raw":
+                    return b"", message
+                raw = message.get("raw", "")
+                raw = raw if isinstance(raw, str) else raw.decode()
+                return base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4)), message
+            except Exception as exc:
+                budget.penalise(exc)
+                raise
+        return self._x(read)
+
     def _raw_many(self, svc, message_ids: list[str], side: str, progress_offset: int = 0,
-                  progress_total: int | None = None) -> tuple[dict[int, tuple[bytes, dict]], dict[int, Exception]]:
+                  progress_total: int | None = None, fmt: str = "raw") -> tuple[dict[int, tuple[bytes, dict]], dict[int, Exception]]:
         """Read a bounded batch of raw messages, falling back for test/service adapters.
 
         Gmail has no collection-level raw export. The old loop made two synchronous HTTP
@@ -1046,18 +1344,23 @@ class Verifier:
         values: dict[int, tuple[bytes, dict]] = {}
         errors: dict[int, Exception] = {}
         progress_total = progress_total if progress_total is not None else len(message_ids)
+        from verify_gmail_quota import read_cost, is_quota_error
+        budget = self._gmail_budget(side)
+        cost = read_cost(fmt)
         if not hasattr(svc, "new_batch_http_request"):
             for index, message_id in enumerate(message_ids):
-                operation = f"Gmail {side} raw message reads"
+                operation = f"Gmail {side} {fmt} message reads"
                 self._report_progress(operation, progress_offset + index, progress_total,
                                       f"message {message_id}")
                 try:
-                    values[index] = self._raw(svc, message_id)
+                    values[index] = self._gmail_single(svc, message_id, fmt, budget, cost)
                 except Exception as exc:  # noqa: BLE001 - retain per-message failure
                     errors[index] = exc
             return values, errors
 
         def decode_message(message: dict) -> tuple[bytes, dict]:
+            if fmt != "raw":
+                return b"", message
             raw = message.get("raw", "")
             raw = raw if isinstance(raw, str) else raw.decode()
             return base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4)), message
@@ -1074,7 +1377,7 @@ class Verifier:
             chunk = message_ids[offset:offset + batch_size]
             batch_number = offset // batch_size + 1
             batch_total = (len(message_ids) + batch_size - 1) // batch_size
-            operation = f"Gmail {side} raw message reads"
+            operation = f"Gmail {side} {fmt} message reads"
             item = (f"batch {batch_number}/{batch_total}; messages "
                     f"{progress_offset + offset + 1}-{progress_offset + offset + len(chunk)} "
                     f"of {progress_total}")
@@ -1091,27 +1394,42 @@ class Verifier:
                     except Exception as exc:  # noqa: BLE001 - malformed one-item response
                         errors[index] = exc
 
-            batch = svc.new_batch_http_request(callback=receive)
-            for index, message_id in enumerate(chunk):
-                request = svc.users().messages().get(userId="me", id=message_id, format="raw")
-                batch.add(request, request_id=str(offset + index))
             self._report_progress(operation, progress_offset + offset, progress_total, item)
 
             def execute_batch():
-                # A multipart batch can return HTTP 200 while individual reads contain
-                # quota/5xx errors. Surface one transient item error to the normal retry
-                # policy; successful siblings are safe to repeat because these are reads.
-                for index in range(offset, offset + len(chunk)):
-                    values.pop(index, None)
+                # Keep successes and permanent errors. Rebuild only rejected/unknown parts;
+                # outer HTTP failure can happen after some successful callbacks too.
+                pending = [i for i in range(offset, offset + len(chunk)) if i not in values
+                           and (i not in errors or retryable_part_error(errors[i]))]
+                if not pending:
+                    return
+                budget.acquire(cost * len(pending), _stop_check)
+                batch = svc.new_batch_http_request(callback=receive)
+                for index in pending:
                     errors.pop(index, None)
-                batch.execute()
-                transient = next((errors[i] for i in range(offset, offset + len(chunk))
+                    request = (svc.users().messages().get(userId="me", id=message_ids[index], format="raw") if fmt == "raw"
+                               else svc.users().messages().get(userId="me", id=message_ids[index], format="metadata",
+                                                               metadataHeaders=list(RECEIPT_HEADERS)))
+                    batch.add(request, request_id=str(index))
+                try:
+                    batch.execute()
+                except Exception as exc:
+                    budget.penalise(exc)
+                    raise
+                transient = next((errors[i] for i in pending
                                   if i in errors and retryable_part_error(errors[i])), None)
                 if transient is not None:
+                    quota_error = next((errors[i] for i in pending
+                                        if i in errors and is_quota_error(errors[i])), None)
+                    if quota_error is not None:
+                        budget.penalise(quota_error)
                     raise transient
+                self._report_progress(operation, progress_offset + offset + len(chunk), progress_total, item)
 
             try:
-                self._x(execute_batch, operation=operation, request_count=len(chunk))
+                self._x(execute_batch, operation=operation, request_count=lambda: sum(
+                    i not in values and (i not in errors or retryable_part_error(errors[i]))
+                    for i in range(offset, offset + len(chunk))))
             except Exception as exc:  # noqa: BLE001 - a rejected batch must finish as item errors
                 for index in range(offset, offset + len(chunk)):
                     if index not in values:
@@ -1123,13 +1441,14 @@ class Verifier:
                     from verification_reads import status_of
                     if status_of(errors[index]) == 400:
                         try:
-                            values[index] = self._raw(svc, message_ids[index])
+                            # Single-message fallback still passes through quota pacing.
+                            values[index] = self._gmail_single(svc, message_ids[index], fmt, budget, cost)
                             errors.pop(index, None)
                         except Exception as exc:
                             errors[index] = exc
         return values, errors
 
-    def _gmail_raw_chunks(self, pairs):
+    def _gmail_raw_chunks(self, pairs, fmt: str = "raw"):
         """Overlap independent tenant reads without sharing discovery HTTP clients.
 
         AuthManager caches transports per thread. Resolve each service INSIDE its
@@ -1145,7 +1464,7 @@ class Verifier:
             _stop_check()
             svc = (self.auth.source_gmail(self.src_user) if side == "source"
                    else self.auth.target_gmail(self.tgt_user))
-            return self._raw_many(svc, ids, side, offset, total)
+            return self._raw_many(svc, ids, side, offset, total, fmt=fmt)
         # A bounded read-ahead window of batch pairs, yielded in order. One pair at a
         # time left each mailbox ~10x under Gmail's per-user quota and took 8.7-11.5 h
         # for info@'s 39,756 messages (dharan, 2026-10-23). The window bounds memory too:
@@ -1183,6 +1502,40 @@ class Verifier:
         _stop_check()
         return offset, chunk, source_result, target_result
 
+    @staticmethod
+    def _pair_unreadable(index, sid, tid, source_errors, target_errors, res) -> bool:
+        """Record why a pair could not be read; True when it is not compared."""
+        if index in source_errors:
+            exc = source_errors[index]
+            if not _gone_from_source(exc, res):
+                res["errors"].append(f"message {sid}: could not read the SOURCE: {error_detail(exc)}")
+            return True
+        if index in target_errors:
+            exc = target_errors[index]
+            if _is_not_found(exc):
+                res["missing"].append({"source": sid, "target": tid,
+                                       "why": f"not on the target ({str(exc)[:80]})"})
+            else:
+                res["errors"].append(f"message {tid}: could not read the TARGET: {error_detail(exc)}")
+            return True
+        return False
+
+    @staticmethod
+    def _mail_state_diffs(sm, tm, sl, tl, date_header) -> list[str]:
+        """Labels, read state and date of one message pair -- everything Gmail lets change."""
+        diffs = compare_labels({sl.get(i, i) for i in sm.get("labelIds") or []},
+                               {tl.get(i, i) for i in tm.get("labelIds") or []})
+        if ("UNREAD" in (sm.get("labelIds") or [])) != ("UNREAD" in (tm.get("labelIds") or [])):
+            diffs.append("unread state differs")
+        try:
+            hdr_ms = int(parsedate_to_datetime(date_header).timestamp() * 1000)
+        except Exception:      # noqa: BLE001 - no usable Date header
+            hdr_ms = None
+        ti, si = int(tm.get("internalDate") or 0), int(sm.get("internalDate") or 0)
+        if ti and si and ti != si and (hdr_ms is None or abs(ti - hdr_ms) > 1000):
+            diffs.append(f"date differs: source {si}, target {ti}, Date header {hdr_ms}")
+        return diffs
+
     def gmail(self) -> dict:
         res = self._blank()
         src, tgt = self.auth.source_gmail(self.src_user), self.auth.target_gmail(self.tgt_user)
@@ -1212,6 +1565,31 @@ class Verifier:
             self.evidence.append({"service":"gmail", "name":cached.get("messageId") or sid,
                 "how":"validated receipt reused after two-tenant history reconciliation",
                 "opened":False, "sha256":cached["sourceSha256"][:16]})
+        receipts = self._receipts()
+        receipted = [p for p in pending if receipts.get(p[0]) == p[1]]
+        pending = [p for p in pending if receipts.get(p[0]) != p[1]]
+        self._report_progress("Gmail check receipted messages", 0, len(receipted))
+        for offset, chunk, (smeta, serr), (tmeta, terr) in self._gmail_raw_chunks(receipted, fmt="metadata"):
+            for index, (sid, tid, _) in enumerate(chunk):
+                res["checked"] += 1
+                if self._pair_unreadable(index, sid, tid, serr, terr, res):
+                    continue
+                sm, tm = smeta[index][1], tmeta[index][1]
+                head = {h["name"].lower(): h["value"].strip()
+                        for h in (sm.get("payload") or {}).get("headers", [])}
+                msgid = head.get("message-id", "")
+                mapped_msgids.add(msgid)
+                diffs = self._mail_state_diffs(sm, tm, sl, tl, head.get("date"))
+                self.evidence.append({"service": "gmail", "name": msgid or sid, "opened": False,
+                                      "how": "content compared byte for byte when it was copied (receipt); "
+                                             "labels, read state and date read now"})
+                if diffs:
+                    res["differences"].append({"item": msgid or sid, "source": sid, "target": tid, "diffs": diffs})
+                else:
+                    res["identical"] += 1
+            self._report_progress("Gmail check receipted messages", min(offset + len(chunk), len(receipted)),
+                                  len(receipted))
+        res["receipted"] = len(receipted)
         total_messages = len(pending)
         self._report_progress("Gmail compare mapped messages", 0, total_messages)
         for offset, chunk, source_result, target_result in self._gmail_raw_chunks(pending):
@@ -1219,19 +1597,7 @@ class Verifier:
             target_raw, target_errors = target_result
             for index, (sid, tid, _) in enumerate(chunk):
                 res["checked"] += 1
-                if index in source_errors:
-                    exc = source_errors[index]
-                    if _gone_from_source(exc, res):
-                        continue
-                    res["errors"].append(f"message {sid}: could not read the SOURCE: {error_detail(exc)}")
-                    continue
-                if index in target_errors:
-                    exc = target_errors[index]
-                    if _is_not_found(exc):
-                        res["missing"].append({"source": sid, "target": tid,
-                                               "why": f"not on the target ({str(exc)[:80]})"})
-                    else:
-                        res["errors"].append(f"message {tid}: could not read the TARGET: {error_detail(exc)}")
+                if self._pair_unreadable(index, sid, tid, source_errors, target_errors, res):
                     continue
                 sraw, sm = source_raw[index]
                 traw, tm = target_raw[index]
@@ -1248,17 +1614,7 @@ class Verifier:
                 diffs = []
                 if verdict == "different":
                     diffs += [f"message differs: {n}" for n in notes] or ["message differs"]
-                diffs += compare_labels({sl.get(i, i) for i in sm.get("labelIds") or []},
-                                        {tl.get(i, i) for i in tm.get("labelIds") or []})
-                if ("UNREAD" in (sm.get("labelIds") or [])) != ("UNREAD" in (tm.get("labelIds") or [])):
-                    diffs.append("unread state differs")
-                try:
-                    hdr_ms = int(parsedate_to_datetime(source_headers.get("Date")).timestamp() * 1000)
-                except Exception:      # noqa: BLE001 - no usable Date header
-                    hdr_ms = None
-                ti, si = int(tm.get("internalDate") or 0), int(sm.get("internalDate") or 0)
-                if ti and si and ti != si and (hdr_ms is None or abs(ti - hdr_ms) > 1000):
-                    diffs.append(f"date differs: source {si}, target {ti}, Date header {hdr_ms}")
+                diffs += self._mail_state_diffs(sm, tm, sl, tl, source_headers.get("Date"))
                 self.evidence.append({"service": "gmail", "name": msgid or sid, "how": verdict, "bytes": len(sraw),
                                       "sha256": sha256(sraw)[:16], "opened": True})
                 if verdict in ("identical after rewrite", "equivalent"):
@@ -1360,15 +1716,27 @@ class Verifier:
             deliberately_skipped = {r[0] for r in self.db.conn.execute(
                 "SELECT item_id FROM audit_log WHERE source_user=? AND item_type='message' AND status='SKIPPED_CHAT'",
                 (self.src_user,))}
+            # Mail without a Drive link is handed to Google's DMS, not missing: the ledger records it
+            # as DEFERRED_TO_DMS. Live (info@/audit@, 5 Nov 2026) 822 of them read as "no mapping".
+            from config import DEFERRED_TO_DMS
+            deferred = {r[0] for r in self.db.conn.execute(
+                "SELECT item_id FROM audit_log WHERE source_user=? AND item_type='message' AND status=?",
+                (self.src_user, DEFERRED_TO_DMS))}
+            owed = 0
             scanned = 0
             for message in self._list_all(src, side="source"):
                 scanned += 1
                 sid = message.get("id")
+                if sid and sid in deferred and sid not in known:
+                    owed += 1
+                    continue
                 if sid and sid not in known and sid not in draft_messages and sid not in deliberately_skipped and ("message", sid) not in existing:
                     res["notCopied"].append({"type": "message", "id": sid,
                         "status": "UNMAPPED_SOURCE", "error": "Live source message has no migration mapping; destination coverage is not established"})
                     existing.add(("message", sid))
             res["notes"].append(f"Source coverage: inventoried {scanned} live message IDs, including spam and trash; checked unmapped messages and drafts")
+            if owed:
+                res["notes"].append(f"{owed} message(s) without a Drive link are owed to Google's DMS, not missing")
             if deliberately_skipped:
                 res["notes"].append(f"{len(deliberately_skipped)} legacy chat message(s) are outside Gmail migration coverage")
         except Exception as exc:
@@ -1761,6 +2129,11 @@ def verdict_of(users: dict, services: tuple[str, ...]) -> tuple[str, list[str]]:
             if r.get("coverageComplete") is False:
                 incomplete = True
                 reasons.append(f"{user}: {svc} has required scopes that are not fully checked")
+            if r.get("unverified"):
+                incomplete = True
+                states = sorted({u.get("state", "UNVERIFIED") for u in r["unverified"]})
+                reasons.append(f"{user}: {svc} has {len(r['unverified'])} object(s) not verified "
+                               f"({', '.join(states)}) -- not identical, not different: unread")
             if r["errors"]:
                 incomplete = True
                 reasons.append(f"{user}: {svc} had {len(r['errors'])} check(s) that could not be made")
@@ -1784,8 +2157,21 @@ def service_complete(result: dict) -> bool:
     Known differences are complete checks. An error, or zero checks without an explicitly
     verified empty source, is incomplete and must not be presented as a pass.
     """
-    return (not result.get("errors") and result.get("coverageComplete") is not False
+    return (not result.get("errors") and not result.get("unverified")
+            and result.get("coverageComplete") is not False
             and (result.get("checked", 0) > 0 or result.get("emptySource", False)))
+
+
+def _chat_attempted(db, user: str) -> bool:
+    """A Chat row that is a REFUSAL (no access to the service: a skipped row, or a 403 PERMISSION_DENIED)
+    is not an attempt to copy: education@ spent 3 minutes and 9 retries verifying Chat against a scope
+    nobody granted, and ended INCOMPLETE (live, 7 Nov 2026). A real failure still reads as not copied."""
+    from main import _service_unreachable
+    for r in db.conn.execute("SELECT status, error_message FROM audit_log WHERE source_user=? AND item_type IN "
+                             "('chat','chat_space','chat_message')", (user,)):
+        if not (r["status"] or "").startswith("SKIPPED") and not _service_unreachable(r["error_message"] or ""):
+            return True
+    return False
 
 
 def run(auth, db, settings, users: list[str] | None = None, services=ALL_SERVICES, retry=lambda f: f,
@@ -1799,9 +2185,7 @@ def run(auth, db, settings, users: list[str] | None = None, services=ALL_SERVICE
     if "chat" in services and not getattr(settings, "migrate_chat", False) and not any(
             db.get_target_id(user, sid, "chat_space") for user in chosen
             for sid, in db.conn.execute("SELECT source_id FROM id_mapping WHERE source_user=? AND type='chat_space' LIMIT 1", (user,))
-    ) and not any(db.conn.execute("SELECT 1 FROM audit_log WHERE source_user=? AND item_type IN "
-                                  "('chat','chat_space','chat_message') LIMIT 1", (user,)).fetchone()
-                  for user in chosen):
+    ) and not any(_chat_attempted(db, user) for user in chosen):
         services = tuple(s for s in services if s != "chat")
     report = {"generatedAt": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
               "accountId": getattr(settings, "account_id", None),
@@ -1826,6 +2210,23 @@ def run(auth, db, settings, users: list[str] | None = None, services=ALL_SERVICE
         # intact line so the UI parser and the operator can trust the current state.
         with progress_lock:
             progress(message)
+
+    def stats_line(st: dict, items_done: int, now: float) -> str:
+        """The verifier's own account of itself: verified/identical/different/unverified, what is queued
+        for retry, the document in hand and how long, the last success, the breaker states and the
+        phase -- a live request, a retry wait, a breaker cooldown or between documents -- so a stuck
+        worker reads differently from one that is waiting on purpose."""
+        wall = time.time()
+        since = lambda t: (f"{int(wall - t)}s" if t else "-")
+        return (f"verified={st['verified']} identical={st['identical']} different={st['different']} "
+                f"unverified={st['unverified']} pendingRetry={st['pendingRetry']} phase={st['phase']} "
+                f"retryAttempt={st['retryAttempt']} retryDelay={int(st['retryDelay'])}s "
+                f"lastApiStatus={st['lastApiStatus'] if st['lastApiStatus'] is not None else '-'} "
+                f"circuitBreakerState={','.join(f'{k}:{v}' for k, v in sorted(st['breakers'].items())) or 'closed'} "
+                f"currentDocument={st['currentDocument'] or '-'} currentDocumentMimeType={st['currentMime'] or '-'} "
+                f"currentDocumentElapsed={since(st['currentSince'])} "
+                f"lastSuccessfulDocument={st['lastSuccessfulDocument'] or '-'} "
+                f"lastSuccessfulComparison={since(st['lastSuccessAt'])} ago")
 
     def heartbeat() -> None:
         while not stop_heartbeats.wait(60):
@@ -1854,8 +2255,10 @@ def run(auth, db, settings, users: list[str] | None = None, services=ALL_SERVICE
                           f"| noItemProgress={no_item_progress}s | lastApi={last_api}")
                 if state["in_flight"] and state["last_api_started"] is not None:
                     detail += f" apiOpenFor={int(now - state['last_api_started'])}s"
-                if state["detail"]:
+                if state.get("detail"):
                     detail += f" | currentItem={state['detail']}"
+                if state.get("stats"):
+                    detail += " | " + stats_line(state["stats"], state["items_completed"], now)
                 if state["last_error"]:
                     error_age = int(now - state["last_error_at"])
                     detail += f" | lastError={state['last_error']} ({error_age}s ago)"
@@ -1927,6 +2330,9 @@ def run(auth, db, settings, users: list[str] | None = None, services=ALL_SERVICE
                     state["last_error_at"] = now
                 else:
                     state["last_api_result"] = "ok"
+            elif event == "progress" and "stats" in details:
+                state["stats"] = details["stats"]
+                return
             elif event == "progress":
                 completed = details.get("completed")
                 total = details.get("total")
@@ -1963,7 +2369,7 @@ def run(auth, db, settings, users: list[str] | None = None, services=ALL_SERVICE
             with lock:
                 activity[u] = {"service": svc, "started": now,
                                "service_started": now, "last_heartbeat": now,
-                               "operation": f"{svc} initialising", "api_attempts": 0,
+                               "operation": f"{svc} initialising", "detail": "", "api_attempts": 0,
                                "http_calls": 0, "retry_rounds": 0, "in_flight": 0, "last_api_started": None,
                                "last_api_at": None, "last_api_result": "", "last_error": "",
                                "last_error_at": now,
@@ -2228,6 +2634,8 @@ def run_and_save(auth, db, settings, users=None, services=ALL_SERVICES, retry=la
 
 def main(argv=None) -> int:
     import argparse
+    # The verifier only reads: a hung request must not hold a worker for the engines' 300 s.
+    os.environ.setdefault("GOOGLE_HTTP_TIMEOUT_SEC", os.getenv("VERIFY_HTTP_TIMEOUT_SEC", "90"))
 
     from auth import AuthManager
     from config import Settings
@@ -2241,7 +2649,12 @@ def main(argv=None) -> int:
     ap.add_argument("--repair-after-user", action="store_true",
                     help="repair supported findings and recheck each user immediately after verification")
     a = ap.parse_args(argv)
-    services = tuple(s.strip() for s in a.services.split(","))
+    services = ALL_SERVICES if a.services.strip() == "all" else tuple(s.strip() for s in a.services.split(","))
+    # An unknown name used to be dropped silently: the A/B's `--services all` checked nothing in any
+    # arm, and each arm read whatever rows some other verify had left.
+    unknown = sorted(set(services) - set(ALL_SERVICES))
+    if unknown:
+        ap.error(f"unknown service(s) {', '.join(unknown)}; choose from {', '.join(ALL_SERVICES)}, or all")
     settings = Settings(account_id=a.account_id)
     # The scopes a credential carries follow these flags (config.source_scopes), and main.py switches
     # them on for the services a run names. Without this, reading contacts or tasks is a 403.
@@ -2254,7 +2667,11 @@ def main(argv=None) -> int:
     migration_main._install_signal_handlers()
     try:
         run_and_save(AuthManager(settings), db, settings, a.user, services,
-                     retry=retry_on_google_error(max_retries=settings.max_retries),
+                     retry=retry_on_google_error(
+                         max_retries=settings.max_retries,
+                         # One document may spend at most this long on retries and waits, a Retry-After
+                         # included: a Docs 503 held info@s. at item 326 of 1,403 for 27 minutes.
+                         max_elapsed=float(os.getenv("VERIFY_RETRY_MAX_ELAPSED_SEC", "180"))),
                      progress=lambda m: print(m, flush=True),
                      limit=a.limit, base=verify_dir(a.account_id),
                      repair_after_user=a.repair_after_user)

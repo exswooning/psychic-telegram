@@ -100,6 +100,9 @@ def _http(timeout: int = 300) -> httplib2.Http:
     which httplib2 (0.19 on) raised as RedirectMissingLocation -- so any upload needing a
     second chunk failed: in download_upload, every file over the client's 100 MB chunk
     (found live, 2026-10-10). googleapiclient's own build_http() drops 308 the same way."""
+    # A process may set a shorter bound for every request it makes (the verifier does: a request that
+    # hangs must free its worker long before 300 s); the engines never set it.
+    timeout = int(os.getenv("GOOGLE_HTTP_TIMEOUT_SEC", "") or timeout)
     http = httplib2.Http(timeout=timeout)
     http.redirect_codes = http.redirect_codes - {308}
     return http
@@ -420,6 +423,11 @@ class AuthManager:
             domain_guard.require_not_source(self.settings.source_domain,
                                             self.settings.source_domain)
         svc = self._service("source", "drive", user)
+        if writable:
+            # Past the guard above: this source is a declared sandbox. Returning the wrapper here
+            # (as a98ead0 did) left every deliberate writer -- the move check, move back, link flip,
+            # the contract probe -- unable to write a byte, with "a migration only reads the source".
+            return svc
         return ReadOnlyDrive(svc, keys_db=getattr(self.settings, "db_path", None))
 
     def target_drive(self, user: str):
@@ -460,7 +468,7 @@ class AuthManager:
         """
         from config import DIRECTORY_WRITE_SCOPE, GROUP_WRITE_SCOPE
 
-        if writable:
+        if writable or groups:
             import domain_guard
             domain = (self.settings.source_domain if tenant == "source"
                       else self.settings.target_domain)

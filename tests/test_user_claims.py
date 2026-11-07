@@ -415,7 +415,7 @@ class TestAutoMapCanBootstrapAFreshTarget:
     Live, that read as a button doing nothing, repeatedly.
     """
 
-    def _run(self, monkeypatch, include_missing):
+    def _run(self, monkeypatch, include_missing, existing=None):
         import main
 
         src = ["a@src.com", "b@src.com", "c@src.com"]
@@ -434,8 +434,23 @@ class TestAutoMapCanBootstrapAFreshTarget:
 
         args = type("A", (), {"identities": None, "auto_map": True,
                               "include_missing": include_missing})()
-        main.cmd_init_db(args, S(), None, None)
+        ledger = None
+        if existing:
+            ledger = type("L", (), {"all_identities": lambda self: [
+                {"source_email": k, "target_email": v, "entity_type": "user"} for k, v in existing.items()]})()
+        main.cmd_init_db(args, S(), ledger, None)
         return seeded
+
+    def test_an_operators_own_mapping_is_kept(self, monkeypatch):
+        """info@s -> nest@t is a choice; auto-map must not turn it into info@t (2026-11-02)."""
+        seeded = dict(self._run(monkeypatch, True, {"a@src.com": "nest@tgt.com"}))
+        assert "a@src.com" not in seeded and seeded["b@src.com"] == "b@tgt.com"
+
+    def test_a_mapping_to_a_benchmark_test_account_is_replaced(self, monkeypatch):
+        """A killed A/B arm left audit@s -> audit-ab1-11011714@t; a real run maps it back."""
+        seeded = dict(self._run(monkeypatch, True, {"a@src.com": "a-ab1-11011714@tgt.com",
+                                                   "b@src.com": "b-ab1t-10311353@tgt.com"}))
+        assert seeded["a@src.com"] == "a@tgt.com" and seeded["b@src.com"] == "b@tgt.com"
 
     def test_without_the_flag_only_existing_accounts_are_mapped(self, monkeypatch):
         """The old behaviour, kept as the default: a lift-and-shift merge

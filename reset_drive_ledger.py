@@ -81,7 +81,7 @@ SERVICE_TYPES: dict[str, tuple[str, ...]] = {
     # repointed. They must clear with the messages they describe, or a reset
     # leaves evidence of a rewrite for mail that is no longer there.
     # delegate: a mailbox delegation owed to a colleague with no target account yet.
-    "gmail": ("message", "draft", "filter", "signature", "link_rewrite",
+    "gmail": ("message", "draft", "filter", "signature", "link_rewrite", "message_link",
               "link_repair", "thread", "delegate", "forwarding"),
     # subscription: a calendar the user follows, re-followed on the target;
     # calendar_subscription is the audit row of one that could not be.
@@ -109,7 +109,9 @@ SERVICE_SIDE_TABLES: dict[str, tuple[tuple[str, str], ...]] = {
     "gmail": (("label_map", "source_user"),),
     # When the repair last checked this user's copied times: a reset Drive is copied
     # afresh, so its times are due a check again.
-    "drive": (("mtime_checks", "source_user"),),
+    # Objects the verifier could not read (verify_resilience): they describe items a Drive
+    # reset declares gone, so they go with them.
+    "drive": (("mtime_checks", "source_user"), ("verification_unverified", "source_user")),
     # A chat space this user's run claimed (db.claim): kept, the space it
     # names is gone from the ledger and no member's re-run would migrate it.
     "chat": (("tenant_claims", "owner"),),

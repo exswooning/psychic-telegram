@@ -144,3 +144,42 @@ def test_the_launch_passes_the_process_count(monkeypatch):
     assert A._tuning_env(body, None)["MIGRATE_PROCESSES"] == "2"
     with pytest.raises(Exception):
         A.StartMigration(reason="too many", services=["drive"], processes=9)
+
+
+@pytest.mark.parametrize('users,only,expected', [
+    (['one@source.example'], None, 1),
+    ([f'u{i}@source.example' for i in range(20)], ['u0@source.example'], 1),
+    (['a@source.example', 'b@source.example'], None, 2),
+    ([f'u{i}@source.example' for i in range(20)], None, 8),
+    ([], None, 1),
+])
+def test_auto_processes_are_bounded_by_eligible_users(monkeypatch, users, only, expected):
+    monkeypatch.delenv('MIGRATE_SHARD', raising=False)
+    monkeypatch.setattr(main, '_auto_processes', lambda: 8)
+    calls = []
+    monkeypatch.setattr(main, 'run_batch', lambda *a, **k: calls.append(1) or [])
+    monkeypatch.setattr(main, '_run_pass_in_processes', lambda *a, **k: calls.append(a[-1]) or [])
+    settings = S(); settings.migrate_processes = 0
+    main._run_pass(None, FakeDB(users), settings, {'drive'}, False, 0, only)
+    assert calls == [expected]
+
+
+def test_completed_services_do_not_reserve_empty_processes(monkeypatch):
+    class DB(FakeDB):
+        def all_identities(self):
+            rows = super().all_identities()
+            for r in rows: r['status'] = 'DONE'
+            return rows
+        def services_done(self, source):
+            return {'drive'} if source != 'a@source.example' else {'gmail'}
+    monkeypatch.delenv('MIGRATE_SHARD', raising=False)
+    monkeypatch.setattr(main, '_auto_processes', lambda: 8)
+    calls = []
+    monkeypatch.setattr(main, 'run_batch', lambda *a, **k: calls.append('here') or [])
+    monkeypatch.setattr(main, '_run_pass_in_processes', lambda *a, **k: calls.append('split') or [])
+    settings = S(); settings.migrate_processes = 0
+    main._run_pass(None, DB(['a@source.example', 'b@source.example']), settings, {'drive'}, False, 0, None)
+    assert calls == ['here']
+    assert len(main._pass_user_pairs(DB(['a@source.example', 'b@source.example']), settings, {'drive'}, True, None)) == 2
+    settings.redo_unrewritten_links = settings.rewrite_drive_links = True
+    assert len(main._pass_user_pairs(DB(['a@source.example', 'b@source.example']), settings, {'drive'}, False, None)) == 2

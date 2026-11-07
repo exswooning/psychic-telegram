@@ -37,7 +37,7 @@ export const MigrationSwitcher: React.FC = () => {
   const known = rows.some((r) => r.accountId === current)
   return (
     <TextField select size="small" value={known ? current : ''} label="Migration"
-               data-testid="migration-switcher" sx={{ minWidth: 260, maxWidth: 420 }}
+               data-testid="migration-switcher" sx={{ flex: '1 1 200px', minWidth: 200, maxWidth: 420 }}
                onChange={(e) => {
                  const id = Number(e.target.value)
                  chooseMigration(id === login ? null : id)

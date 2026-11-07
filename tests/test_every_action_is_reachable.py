@@ -102,7 +102,7 @@ class TestTheServicesPageCarriesTheOrphans:
         # actions[] is empty until the fetch lands, and an older server may
         # not offer all of them.
         src = self._page()
-        assert "const has = (k: string) => Boolean(actions[k])" in src
+        assert "const has = (k: string) => scopeAccount !== undefined && Boolean(actions[k])" in src
 
 
 class TestScopeGotItsOwnAction:

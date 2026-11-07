@@ -247,6 +247,25 @@ CREATE TABLE IF NOT EXISTS run_fidelity (
 -- verify_sample.py: what the one-to-one verifier last found for a user, one row
 -- per (user, service), newest wins. `payload` holds the counts and the first few
 -- of each kind of finding; the full report is the verifier's own file.
+-- Objects the verifier could not compare (verify_resilience): kept apart from user_verification
+-- so an item that is merely unread is never confused with one that was read and differs. A row
+-- is deleted when a later pass compares the object; one still here means "not verified".
+CREATE TABLE IF NOT EXISTS verification_unverified (
+  source_user TEXT NOT NULL,
+  service TEXT NOT NULL,
+  source_id TEXT NOT NULL,
+  target_id TEXT NOT NULL DEFAULT '',
+  mime TEXT,
+  state TEXT NOT NULL,
+  http_status INTEGER,
+  endpoint TEXT,
+  error TEXT,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  first_seen TEXT NOT NULL,
+  last_attempt TEXT NOT NULL,
+  next_retry_at TEXT,
+  PRIMARY KEY (source_user, service, source_id)
+);
 CREATE TABLE IF NOT EXISTS user_verification (
     source_user TEXT NOT NULL,
     service     TEXT NOT NULL,
@@ -1240,6 +1259,21 @@ class MigrationDB:
             out.append(payload)
         return out
 
+    def lost_drive_mappings(self, users) -> list:
+        """(user, n) for DONE users with Drive items the audit calls copied but no mapping names.
+        finished_but_unmapped sees only users with NO mappings left; a partial loss slipped past."""
+        if not users:
+            return []
+        marks = ",".join("?" * len(users))
+        return [tuple(r) for r in self.conn.execute(
+            f"""SELECT a.source_user, COUNT(*) FROM audit_log a
+                 JOIN identity_map i ON i.source_email = a.source_user AND i.status = 'DONE'
+                WHERE a.source_user IN ({marks}) AND a.item_type IN ('file','folder')
+                  AND a.status = 'SUCCESS'
+                  AND NOT EXISTS (SELECT 1 FROM id_mapping m WHERE m.source_user = a.source_user
+                                  AND m.source_id = a.item_id AND m.type = a.item_type)
+                GROUP BY a.source_user ORDER BY 2 DESC""", list(users))]
+
     def finished_but_unmapped(self):
         """Users whose status says DONE while nothing maps to the target.
 
@@ -1697,7 +1731,10 @@ def bulk_seed_identities(db: MigrationDB, pairs: Iterable[tuple[str, str]]) -> N
 
 # Worst verdict wins a user's rollup: one DIFFERENCES service means the user is not
 # clean, however many others came back IDENTICAL.
-_VERDICT_RANK = {"DIFFERENCES": 3, "INCOMPLETE": 2, "NOT_VERIFIED": 2, "IDENTICAL": 1}
+# EMPTY: the source was read live and holds nothing, so zero items were compared. It is a
+# pass, but never "identical" -- no item was matched -- and a user is EMPTY only when
+# every service is.
+_VERDICT_RANK = {"DIFFERENCES": 3, "INCOMPLETE": 2, "NOT_VERIFIED": 2, "IDENTICAL": 1, "EMPTY": 0}
 
 
 def parse_user_verification_rows(rows) -> list[dict]:
@@ -1719,6 +1756,8 @@ def parse_user_verification_rows(rows) -> list[dict]:
         effective = r["verdict"]
         if effective == "IDENTICAL" and payload.get("coverageComplete") is False:
             effective = "INCOMPLETE"
+        if effective == "IDENTICAL" and not r["checked"]:
+            effective = "EMPTY"
         out.append({"user": r["source_user"], "service": r["service"], "verifiedAt": r["verified_at"],
                     "verdict": effective, "itemVerdict": r["verdict"], "checked": r["checked"], "identical": r["identical"],
                     "sampledOf": r["sampled_of"], **payload})
