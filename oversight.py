@@ -112,24 +112,38 @@ class Context:
 
 # -- checks ------------------------------------------------------------------------------------------
 def watch_repair_loop(ctx: Context) -> list[dict]:
+    """Only findings a repair is MEANT to clear count: a kind with an automatic fix (known_issues.ISSUES).
+    Duplicates kept by policy, documented exceptions and unnamed kinds are never cleared by a repair,
+    so counting them read every user with one as a loop (first live sweep, 7 Nov 2026: 10 of 10)."""
+    import known_issues
+    automatic = {i[0] for i in known_issues.ISSUES if i[6]}
     out = []
     for aid, path in ctx.ledgers():
         with _ro(path) as c:
             if not {"verification_repair_queue", "verification_repairs"} <= _tables(c):
                 continue
-            for r in c.execute(
-                    "SELECT q.source_user u, MIN(q.first_seen) first, COUNT(*) n, "
-                    "GROUP_CONCAT(DISTINCT q.category) cats FROM verification_repair_queue q "
-                    "WHERE q.resolved_at IS NULL GROUP BY q.source_user"):
+            cols = {r[1] for r in c.execute("PRAGMA table_info(verification_repair_queue)")}
+            if "issue" not in cols:
+                continue
+            per: dict[str, dict] = {}
+            for r in c.execute("SELECT source_user u, first_seen, issue FROM verification_repair_queue "
+                               "WHERE resolved_at IS NULL"):
+                if r["issue"] not in automatic:
+                    continue
+                p = per.setdefault(r["u"], {"first": r["first_seen"], "n": 0, "issues": set()})
+                p["first"], p["n"] = min(p["first"], r["first_seen"]), p["n"] + 1
+                p["issues"].add(r["issue"])
+            for user, p in per.items():
                 runs = c.execute("SELECT COUNT(*) FROM verification_repairs WHERE source_user=? AND "
-                                 "state!='RUNNING' AND finished_at > ?", (r["u"], r["first"])).fetchone()[0]
+                                 "state!='RUNNING' AND finished_at > ?", (user, p["first"])).fetchone()[0]
                 if runs >= REPAIR_LOOP_RUNS:
+                    issues = ", ".join(sorted(p["issues"]))
                     out.append(finding(
-                        "watch_repair_loop", aid, r["u"],
-                        f"Repairs are not converging for {r['u']}",
-                        f"{r['n']} finding(s) ({r['cats']}) open since {r['first']} after {runs} repair "
-                        f"runs. A repair that runs and never clears its finding usually means the rule "
-                        f"that triggers it and the handler that fixes it disagree about which items apply."))
+                        "watch_repair_loop", aid, user, f"Repairs are not converging for {user}",
+                        f"{p['n']} finding(s) of kinds with an automatic fix ({issues}) open since {p['first']} "
+                        f"after {runs} repair runs. A repair that runs and never clears its finding usually "
+                        f"means the rule that triggers it and the handler that fixes it disagree about which "
+                        f"items apply."))
     return out
 
 
