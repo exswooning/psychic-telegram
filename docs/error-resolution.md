@@ -164,3 +164,21 @@ pipeline and comment-progress checks pass with fake services and isolated ledger
 This is local qualification, not a live repair or proof of migration parity.
 Deployment and live recheck remain pending while tenant work is active; this
 comment fix is outside the generated Gmail-quota canary's scope.
+
+### Logging envelopes splitting recurring cases (7 November 2026)
+
+The account 3 Error resolution UI grew from 34 to 84 unresolved groups after
+importing historical logs. Several new rows contained November 3 timestamps and
+different per-user thread names, with source version unknown. This is not evidence
+of 50 new migration defects. A local regression reproduced identical exceptions
+being split solely by their Python logging thread prefix.
+
+Fingerprinting now strips the recognized timestamp/level/thread/logger envelope
+before grouping; original event messages, user attribution and unknown provenance
+remain intact. Distinct exception messages remain separate. The regression failed
+before the fix; all 23 error-resolution tests passed in a temporary source copy
+with isolated ledgers. Existing cases are not merged, deleted or marked resolved.
+Generic traceback headers and duration-only failure summaries still need fuller
+evidence; this change does not reconstruct their underlying exceptions.
+Deployment remains pending while tenant work is active. No live migration fix or
+parity claim follows from these intake tests.

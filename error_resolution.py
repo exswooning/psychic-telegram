@@ -351,7 +351,17 @@ def _case(db, account, event, version, now):
     if not reason_match:
         reason_match = re.search(r"\b\w+(?:Error|Exception)\b", message)
     reason = reason_match[0] if reason_match else category
-    signature = redact(message, True)
+    # Python logging adds a time, thread and logger before the actual error.
+    # Those vary per user/run and must not create a new root-cause case. Keep
+    # the original message in the event for provenance; normalize only its key.
+    signature = re.sub(
+        r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}[,.]\d+\s+"
+        r"(?:DEBUG|INFO|WARNING|ERROR|CRITICAL)\s+\[[^\]\r\n]+\]\s+[\w.]+:\s*",
+        "",
+        message,
+        count=1,
+    )
+    signature = redact(signature, True)
     signature = re.sub(r"\d+", "N", signature)
     if category in {
         "quota",

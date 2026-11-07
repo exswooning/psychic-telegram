@@ -74,6 +74,29 @@ def test_same_family_groups_different_items_and_users_without_recounting(cp):
     assert E.list_cases(3)[0]["occurrences"] == 2
 
 
+def test_log_envelopes_do_not_split_the_same_exception_by_thread(cp):
+    # UI intake on 7 Nov imported timestamped, per-user migration failures
+    # as separate cases. Logging transport metadata is not the root cause.
+    path = record(cp,
+        "2026-11-03 03:30:00,031 ERROR   [health        ] migrate: "
+        "[alice@source.example] gmail failed: TypeError: invalid result\n"
+        "2026-11-07 05:30:12,245 ERROR   [ward15        ] migrate: "
+        "[bob@source.example] gmail failed: TypeError: invalid result\n")
+    (case,) = E.list_cases(3)
+    assert case["occurrences"] == 2
+    assert case["affected_users"] == 2
+    assert case["version"] == "unknown"
+    # Keep the observed log evidence, including its timestamps, intact.
+    with cpdb.ro() as db:
+        messages = [r[0] for r in db.execute("SELECT message FROM error_events WHERE kind='error'")]
+    assert messages[0].startswith("2026-11-03 03:30:00,031")
+    with path.open("a") as f:
+        f.write("2026-11-07 06:30:12,245 ERROR   [ward15        ] migrate: "
+                "[bob@source.example] gmail failed: TypeError: different defect\n")
+    E.ingest_file(path, 3, "verify")
+    assert len(E.list_cases(3)) == 2
+
+
 def test_truncate_and_regrow_same_inode_or_rotate_does_not_skip_new_errors(cp):
     path = record(cp)
     path.write_text(line("TypeError: new failure") + "padding\n" * 200)
