@@ -228,3 +228,21 @@ class TestARegrantableGapStaysOnForTheRunToGrant:
         probe = lambda tenant, scopes: (not (set(scopes) & missing), "not delegated")
         env, notes = fidelity.plan(settings, probe, can_grant=lambda t: False)
         assert env["MIGRATE_CALENDAR_ACLS"] == "false"
+
+
+def test_chat_is_opt_in_even_when_its_scope_mints(settings, monkeypatch):
+    """Account 3, 7 Nov 2026: the launch turned Chat on for every run because its scope minted, Chat then
+    answered 403 in the source manifest, and six users lost calendar, contacts and tasks. A granted scope is
+    not a request for Chat (operator, 2026-10-31)."""
+    monkeypatch.delenv("MIGRATE_CHAT", raising=False)
+    env, off = fidelity.plan(settings, lambda t, s: (True, ""))
+    assert "MIGRATE_CHAT" not in env                          # not switched on
+    assert env["MIGRATE_GROUPS"] == "true"                    # every other optional pass is unchanged
+
+
+def test_chat_is_planned_when_the_operator_asks_for_it(settings, monkeypatch):
+    monkeypatch.setenv("MIGRATE_CHAT", "true")
+    env, off = fidelity.plan(settings, lambda t, s: (True, ""))
+    assert env["MIGRATE_CHAT"] == "true"
+    env, off = fidelity.plan(settings, lambda t, s: (False, "not delegated"))
+    assert env["MIGRATE_CHAT"] == "false"                     # asked for but not granted: written off
