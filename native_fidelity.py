@@ -90,12 +90,25 @@ IMAGE_KEYS = ("contentUri", "contentUrl")
 IMAGE_MAX_BYTES = 64 * 1024 * 1024
 
 
-def _fetch_image(url: str) -> bytes:
+def _fetch_image(url: str, deadline: float | None = None) -> bytes:
+    """urlopen's timeout is per socket read, so a slow-dripping image never timed out and a Doc with
+    many images ran far past its budget (education@, live 7 Nov 2026: one Doc 11+ min inside ONE
+    counted call). Read in chunks and stop at the caller's monotonic deadline."""
+    import time
     import urllib.request
-    with urllib.request.urlopen(url, timeout=60) as resp:
-        data = resp.read(IMAGE_MAX_BYTES + 1)
-    if len(data) > IMAGE_MAX_BYTES:
-        raise RuntimeError("Embedded image is larger than the comparison limit")
+    from resilience import RetryBudgetExceeded
+    data = b""
+    with urllib.request.urlopen(url, timeout=30) as resp:
+        while True:
+            if deadline is not None and time.monotonic() > deadline:
+                raise RetryBudgetExceeded("this file's time budget ran out while reading an embedded image; "
+                                          "recorded as unverified", None)
+            chunk = resp.read1(1 << 16)      # read(n) would wait until all n bytes arrived
+            if not chunk:
+                break
+            data += chunk
+            if len(data) > IMAGE_MAX_BYTES:
+                raise RuntimeError("Embedded image is larger than the comparison limit")
     return data
 
 

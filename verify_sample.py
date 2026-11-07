@@ -1186,13 +1186,14 @@ class Verifier:
                               "generated ids, past responses and the responses-Sheet link excluded")
                 return differences
             if mime in ("application/vnd.google-apps.document", "application/vnd.google-apps.presentation"):
-                from native_fidelity import compare_native
+                from native_fidelity import compare_native, _fetch_image
                 kind = "docs" if mime.endswith(".document") else "slides"
                 # One breaker per API family: after a few documents fail on a Google 5xx the rest are
                 # not sent for a cooldown (they are queued as unverified, never passed).
                 differences,scope=self._vr.guarded(kind, lambda: self._x(
                     lambda: compare_native(self.auth,self.src_user,self.tgt_user,sid,tid,mime,self.db.target_for_source_id,
-                                           pace=lambda: self._native_pace(kind, "read"))))
+                                           pace=lambda: self._native_pace(kind, "read"),
+                                           fetch=lambda u: _fetch_image(u, self._file_deadline))))
                 ev.update(opened=True,how=scope,nativeFeaturesChecked=True,nativeFeaturesMatched=not differences)
                 return differences
             if mime in NATIVE_EXPORT:
