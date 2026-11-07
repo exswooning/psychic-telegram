@@ -240,6 +240,17 @@ past the protected-source guard (a98ead0 had returned the read-only wrapper, so 
 writer worked). `move_probe.py` tries a one-byte move by each route; Move is offered only after a
 direct pass, and a protected source is never written to.
 
+**What no single run watches is watched by `oversight.py`** (the API's `_oversight_loop`, every
+`OVERSIGHT_SEC`=600, 0 = off; `python oversight.py` sweeps once). Nine checks, each a normal incident
+of kind `watch_*` that closes only when the same check runs again and no longer finds it: repairs that
+never converge (a trigger and its handler disagreeing), a file far past its budget or a user with no
+progress, a one-to-one verdict that moved with nothing run in between, failures `known_issues` cannot
+name, `SOURCE_CHANGED` rows, a box with no idle gap for hours (no deploy can land), a tenant that is
+no longer ready (readiness, at most hourly, recently active accounts only), an open Google Workspace
+incident, and one account's ledger or logs naming another account's domain. Deploy drift (box files
+against HEAD, the UI build against the last UI commit) needs git, so it is `monitor/watch.py --drift`
+on the operator's side, hourly in its loop, written to `monitor/INBOX.md` only when it changes.
+
 **Handling an incident.** Read the brief; reproduce from its evidence; fix on
 a **test sandbox tenant**, never a real one; add a test. **Do not deploy
 unattended**: `sync_vps.sh` restarts services and a webui-launched seed or a

@@ -44,8 +44,9 @@ MAX_ESCALATIONS_DAY = int(os.getenv("MONITOR_MAX_ESCALATIONS_DAY", "6"))
 MAX_USD_DAY = float(os.getenv("MONITOR_MAX_USD_DAY", "5"))
 TRIAGE_USD, FIX_USD = float(os.getenv("MONITOR_TRIAGE_USD", "0.05")), float(os.getenv("MONITOR_FIX_USD", "3"))
 BRIEF_CHARS = int(os.getenv("MONITOR_BRIEF_CHARS", "2000"))
-BOX_CMD = os.getenv("BITPORT_BOX_CMD", "/tmp/claude-501/box.sh")     # runs one command on the box
-FEED = os.getenv("MONITOR_FEED_PATH", "logs/incidents/feed.log")
+# One read on the box: monitor/box.sh, over a key the box forces to its read-only reader script
+# (monitor/install_box_reader.sh). It lived in /tmp once, and a cleared /tmp blinded the monitor.
+BOX_CMD = os.getenv("BITPORT_BOX_CMD", os.path.join(HERE, "box.sh"))
 
 LINE = re.compile(r"^(?P<ts>\S+) (?P<what>INCIDENT|RESOLVED) #(?P<id>\d+)(?: (?P<sev>error|warn|info|critical) (?P<kind>\w+))?(?: automatically)?"
                   r"(?: account=(?P<account>\d+))?(?: job=(?P<job>.*?))?(?: :: (?P<msg>.*?))?(?: -> brief: (?P<brief>\S+))?\s*$")
@@ -126,7 +127,7 @@ def box(command: str) -> str:
 
 def fetch_feed(offset: int) -> tuple[list[str], int]:
     """New feed lines since `offset` bytes. A shrunk file (rotated) starts over."""
-    out = box(f"s=$(stat -c %s {FEED}); echo SIZE=$s; tail -c +{offset + 1} {FEED} | head -c 200000")
+    out = box(f"feed {int(offset)}")
     head, _, body = out.partition("\n")
     size = int(head.split("=")[1]) if head.startswith("SIZE=") else offset
     if size < offset:
@@ -135,7 +136,7 @@ def fetch_feed(offset: int) -> tuple[list[str], int]:
 
 
 def fetch_brief(path: str) -> str:
-    return box(f"head -c {BRIEF_CHARS} {path}")
+    return box(f"brief {path} {int(BRIEF_CHARS)}")
 
 
 # -- the pipeline ------------------------------------------------------------------------------------
@@ -246,6 +247,60 @@ def poll(state: dict, lines: list[str], pool: ThreadPoolExecutor, run=run_claude
     return futures
 
 
+DRIFT_EVERY_SEC = int(os.getenv("MONITOR_DRIFT_EVERY_SEC", "3600"))
+
+
+def _git(*args: str) -> bytes:
+    return subprocess.run(["git", *args], cwd=ROOT, capture_output=True, check=True).stdout
+
+
+def drift(box=box, git=_git) -> dict:
+    """What the box runs against what the repo's HEAD says it should. Live (7 Nov 2026): /app served a
+    UI built 28 October, ten days behind, and a staged verify_sample.py older than the one committed --
+    neither raised anything. Python files compared by content; the UI by its build time against the last
+    commit to migration-webui/src."""
+    tracked = [f for f in git("ls-files", "*.py").decode().split() if "/" not in f]
+    want = {f: hashlib.sha256(git("show", f"HEAD:{f}")).hexdigest() for f in tracked}
+    have = {}
+    for line in box("pyhash").splitlines():
+        parts = line.split()
+        if len(parts) == 2:
+            have[parts[1].lstrip("*")] = parts[0]
+    differ = sorted(f for f in want if f in have and have[f] != want[f])
+    missing = sorted(f for f in want if f not in have)
+    ui = {}
+    try:
+        built = int(box("uibuilt").strip() or 0)
+        src = int(git("log", "-1", "--format=%ct", "--", "migration-webui/src").decode().strip() or 0)
+        if built and src > built:
+            ui = {"builtAt": dt.datetime.fromtimestamp(built, dt.timezone.utc).isoformat(timespec="minutes"),
+                  "lastUiCommit": dt.datetime.fromtimestamp(src, dt.timezone.utc).isoformat(timespec="minutes")}
+    except (ValueError, subprocess.CalledProcessError):
+        ui = {"error": "could not read the UI build time"}
+    head = git("rev-parse", "--short", "HEAD").decode().strip()
+    return {"head": head, "differ": differ, "missing": missing, "ui": ui,
+            "drifted": bool(differ or missing or ui)}
+
+
+def note_drift(state: dict, d: dict) -> bool:
+    """Write to the inbox only when the drift CHANGES, so an hourly check is not an hourly line."""
+    sig = json.dumps({k: d[k] for k in ("differ", "missing", "ui")}, sort_keys=True)
+    if state.get("drift_sig") == sig:
+        return False
+    state["drift_sig"], state["drift"] = sig, d
+    if d["drifted"]:
+        parts = []
+        if d["differ"]:
+            parts.append(f"{len(d['differ'])} file(s) differ from HEAD {d['head']}: {', '.join(d['differ'][:12])}")
+        if d["missing"]:
+            parts.append(f"not on the box: {', '.join(d['missing'][:12])}")
+        if d["ui"]:
+            parts.append(f"UI build {d['ui']}")
+        with open(INBOX, "a", encoding="utf-8") as fh:
+            fh.write(f"- {today()} DEPLOY DRIFT: " + "; ".join(parts) + "\n")
+    return True
+
+
 def brief(state: dict) -> str:
     """What a fresh interactive session needs to take the job back: the charter's heading, open items,
     today's spend. Printed by the SessionStart hook so a context reset never drops the duty."""
@@ -256,6 +311,10 @@ def brief(state: dict) -> str:
            f"today: ${d['usd']:.2f} spent, {d['escalations']} escalation(s); open: {len(open_)}"]
     out += [f"  {r['lane']} {r['kind']} {r['status']} attempts={r['attempts']} incidents={r['ids'][-3:]}"
             for _, r in open_[:8]]
+    if (state.get("drift") or {}).get("drifted"):
+        d = state["drift"]
+        out.append(f"deploy drift vs {d['head']}: {len(d['differ'])} differ, {len(d['missing'])} missing"
+                   + (", UI stale" if d["ui"] else ""))
     if os.path.exists(INBOX):
         with open(INBOX, encoding="utf-8") as fh:
             out += ["inbox (needs your go):"] + fh.read().splitlines()[-5:]
@@ -266,6 +325,7 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--once", action="store_true")
     ap.add_argument("--brief", action="store_true")
+    ap.add_argument("--drift", action="store_true", help="compare the box against HEAD once and print it")
     ap.add_argument("--dry-run", action="store_true",
                     help="read the feed from the start and say what each incident would do; no model, no state")
     args = ap.parse_args(argv)
@@ -280,6 +340,12 @@ def main(argv=None) -> int:
     if args.brief:
         print(brief(state))
         return 0
+    if args.drift:
+        d = drift()
+        note_drift(state, d)
+        save(state)
+        print(json.dumps(d, indent=2))
+        return 0
     if "offset" not in state:
         # A first start acts on NEWS only: the feed's history is read past, not re-litigated (and not paid for).
         _, state["offset"] = fetch_feed(0)
@@ -293,6 +359,12 @@ def main(argv=None) -> int:
                 f.result()
         except Exception as exc:      # noqa: BLE001 - a watcher that dies watches nothing
             print(f"monitor: poll failed: {exc!r}", file=sys.stderr, flush=True)
+        if time.time() - state.get("drift_at", 0) >= DRIFT_EVERY_SEC:
+            try:
+                note_drift(state, drift())
+            except Exception as exc:      # noqa: BLE001 - drift is advice; it never stops the feed
+                print(f"monitor: drift check failed: {exc!r}", file=sys.stderr, flush=True)
+            state["drift_at"] = time.time()
         with _LOCK:
             save({k: v for k, v in state.items() if k != "_locks"})
         if args.once:

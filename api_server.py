@@ -889,6 +889,7 @@ async def lifespan(_: FastAPI):
     owed = asyncio.create_task(_owed_grants_loop())
     scheduled = asyncio.create_task(_scheduled_runs_loop())
     housekeep = asyncio.create_task(_housekeeping_loop())
+    oversee = asyncio.create_task(_oversight_loop())
     guard = asyncio.create_task(_source_guard_loop())
     guard_fast = asyncio.create_task(_source_guard_fast_loop())
     verification_repairs_task = asyncio.create_task(_verification_repair_loop())
@@ -897,6 +898,7 @@ async def lifespan(_: FastAPI):
     finally:
         verification_repairs_task.cancel()
         housekeep.cancel()
+        oversee.cancel()
         guard.cancel()
         guard_fast.cancel()
         task.cancel()
@@ -5610,6 +5612,28 @@ async def _owed_grants_loop() -> None:
 
 
 HOUSEKEEPING_SEC = 900
+OVERSIGHT_SEC = int(os.getenv("OVERSIGHT_SEC", "600"))
+
+
+async def _oversight_loop() -> None:
+    """Every 10 minutes: the checks no single run makes (oversight.py) -- repairs that never
+    converge, a file far past its budget, a verdict that moved with nothing run, failures nobody has
+    named, the source changing under a run, a box too busy to deploy to, a tenant no longer ready,
+    an open Google incident, one account's data naming another's domain. Each opens and closes an
+    incident like any other. OVERSIGHT_SEC=0 switches it off."""
+    import oversight
+    if OVERSIGHT_SEC <= 0:
+        return
+    while True:
+        try:
+            await asyncio.sleep(OVERSIGHT_SEC)
+            r = await _off_loop(oversight.run_once)
+            if r["found"] or r["closed"] or r["failed"]:
+                log.info("oversight: %d holding, closed %s, failed %s", r["found"], r["closed"], r["failed"])
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:      # noqa: BLE001 - the loop must outlive any one sweep
+            log.warning("oversight sweep failed: %s", exc)
 
 
 async def _housekeeping_loop() -> None:
