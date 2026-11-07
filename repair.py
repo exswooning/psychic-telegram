@@ -203,6 +203,22 @@ def retry_failed_contact_names(auth, db, settings, apply: bool = False,
     return out
 
 
+def repairable_mail_item(i: dict) -> bool:
+    """A message the check found not copied that the engine can deliver now. ONE rule, used by the repair
+    itself and by verification_repairs.scoped_repair to decide whether to run it: they had drifted apart,
+    so info@'s 168 messages held by the since-fixed 404 link check (30 Oct) never triggered the repair that
+    was written for them (found 7 Nov 2026).
+
+    NOT "Unresolved Drive link mapping": that link's owner is not migrated yet, and delivering now would
+    leave it pointing at the source."""
+    err = i.get("error", "") or ""
+    return i.get("type") == "message" and (
+        i.get("status") == "UNMAPPED_SOURCE" or "Missing Message-ID" in err
+        or "Existing destination Message-ID" in err or "Split classification incomplete" in err
+        # Held by a link check since fixed: a 404 link (e1a935f) or a bounce with no text part (d047c9a).
+        or "Pre-delivery link scan: HTTP 404" in err or "Multipart body has no readable parts" in err)
+
+
 def repair_verified_missing_mail(auth, db, settings, report: dict, apply: bool = False) -> dict:
     """Copy freshly inventoried, unmapped source messages to their mapped target.
 
@@ -217,16 +233,7 @@ def repair_verified_missing_mail(auth, db, settings, report: dict, apply: bool =
     out = {"candidates": 0, "attempted": 0, "mapped": 0, "errors": []}
     for user, services in (report.get("users") or {}).items():
         ids = sorted({i["id"] for i in (services.get("gmail") or {}).get("notCopied", [])
-                      if (i.get("status") == "UNMAPPED_SOURCE" or "Missing Message-ID" in i.get("error", "")
-                          or "Existing destination Message-ID" in i.get("error", "")
-                          or "Split classification incomplete" in i.get("error", "")
-                          # Held by a link check since fixed: a 404 link (e1a935f) or a bounce with
-                          # no text part (d047c9a). The engine delivers them with links rewritten.
-                          # NOT "Unresolved Drive link mapping": that link's owner is not migrated
-                          # yet, and delivering now would leave it pointing at the source.
-                          or "Pre-delivery link scan: HTTP 404" in i.get("error", "")
-                          or "Multipart body has no readable parts" in i.get("error", ""))
-                      and i.get("type") == "message" and i.get("id")})
+                      if repairable_mail_item(i) and i.get("id")})
         # Split deliberately owes these to DMS. Recovery must not silently
         # replace the chosen transport by copying the entire deferred mailbox.
         from config import DEFERRED_TO_DMS

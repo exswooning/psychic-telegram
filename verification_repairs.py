@@ -294,11 +294,7 @@ def scoped_repair(auth, db, settings, user, per):
     types = (("message", "draft") if "gmail" in per else ()) + (("event",) if "calendar" in per else ())
     if types:
         out["failed_items"] = retry_failed.retry(auth, db, st, apply=True, users={user}, item_types=types)
-    if any((i.get("status") == "UNMAPPED_SOURCE" or "Missing Message-ID" in i.get("error", "")
-            or "Existing destination Message-ID" in i.get("error", "")
-            or "Split classification incomplete" in i.get("error", ""))
-           and i.get("type") == "message"
-           for i in (per.get("gmail") or {}).get("notCopied", [])):
+    if any(repair.repairable_mail_item(i) for i in (per.get("gmail") or {}).get("notCopied", [])):
         out["missing_mail"] = repair.repair_verified_missing_mail(
             auth, db, st, {"users": {user: per}}, apply=True)
     out["gmail_labels"] = repair.repair_verified_gmail_labels(
