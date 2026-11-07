@@ -619,7 +619,14 @@ class Verifier:
             # failure row is history, not a gap. info@'s repair delivered 137 held messages and the check
             # still listed all 168 as not copied (7 Nov 2026).
             if r["item_type"] != types[-1] and self.db.get_target_id(self.src_user, r["item_id"], r["item_type"]):
-                continue
+                # Only a mapping written AFTER the failure counts as the recovery: an earlier copy followed by
+                # a failed later one, a tie at second resolution, or an unreadable time all keep the failure.
+                m = self.db.conn.execute(
+                    "SELECT created_at FROM id_mapping WHERE source_user=? AND source_id=? AND type=?",
+                    (self.src_user, r["item_id"], r["item_type"])).fetchone()
+                if m is None or (m["created_at"] and r["timestamp"] and m["created_at"][:1].isdigit()
+                                 and m["created_at"] > r["timestamp"]):
+                    continue
             if r["item_type"] == types[-1] and self.db.conn.execute(
                     f"SELECT 1 FROM audit_log WHERE source_user=? AND status='SUCCESS' AND timestamp>? "
                     f"AND item_type IN ({','.join('?' * len(items))}) LIMIT 1",
