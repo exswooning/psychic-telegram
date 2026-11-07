@@ -549,7 +549,11 @@ class Verifier:
             nonlocal attempt
             _stop_check()
             if self._file_deadline and time.monotonic() > self._file_deadline:
-                raise TimeoutError("this file's retry budget ran out; recorded as unverified")
+                # RetryBudgetExceeded, not TimeoutError: the ladder does not retry it and the verifier
+                # classes it a transient failure -- the file is unverified now and tried again later.
+                from resilience import RetryBudgetExceeded
+                raise RetryBudgetExceeded("this file's time budget ran out; recorded as unverified",
+                                          None, attempt, 0.0)
             attempt += 1
             count = request_count() if callable(request_count) else request_count
             if self._on_api_attempt:
@@ -1117,7 +1121,30 @@ class Verifier:
             seen_tokens.add(next_token)
             token = next_token
 
+    def _doc_budget(self):
+        """A whole document, however many reads it takes, gets one wall-clock budget
+        (VERIFY_DOC_BUDGET_SEC, 300s). Live (info@, 7 Nov 2026): one Google Doc held its user for
+        1,352s -- each read inside the per-call retry limit, the document as a whole unbounded.
+        A budget already running (the retry pass sets a shorter one) is left as it is."""
+        import contextlib
+
+        @contextlib.contextmanager
+        def budget():
+            if self._file_deadline is not None:
+                yield
+                return
+            self._file_deadline = time.monotonic() + float(os.getenv("VERIFY_DOC_BUDGET_SEC", "300"))
+            try:
+                yield
+            finally:
+                self._file_deadline = None
+        return budget()
+
     def _content(self, src, tgt, sid, tid, sm, tm, ev) -> list[str]:
+        with self._doc_budget():
+            return self._content_unbounded(src, tgt, sid, tid, sm, tm, ev)
+
+    def _content_unbounded(self, src, tgt, sid, tid, sm, tm, ev) -> list[str]:
         """Open BOTH files and compare what is inside them."""
         mime = sm.get("mimeType") or ""
         try:
@@ -1201,6 +1228,10 @@ class Verifier:
             return []
 
     def _native_links(self, tid, sm) -> list[str]:
+        with self._doc_budget():
+            return self._native_links_unbounded(tid, sm)
+
+    def _native_links_unbounded(self, tid, sm) -> list[str]:
         """A Doc, Sheet or Slide's links live inside it, where no export comparison sees
         them: ask the same builder the rewrite uses what it would still change on the
         TARGET copy -- a link still naming a migrated source file. Reads only."""
