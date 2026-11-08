@@ -2216,3 +2216,23 @@ class TestRestoreDirectGrants:
         out = repair.restore_direct_grants(auth, db, settings, apply=True, stop=stop)
         assert (out["items"], out["granted"]) == (0, 0)
         assert tgt.perms[tm] == []
+
+
+def test_a_target_that_arrives_with_files_is_reported_before_anything_is_copied(auth, db, settings, identity, quota, caplog):
+    """The target held files and folders from earlier tests (304 later quarantined as duplicates, account 3,
+    8 Nov 2026) and nothing said so until a one-to-one check found them."""
+    import logging
+    import drive_engine
+
+    _server_side(settings)
+    src = auth.source_drive(SRC_USER)
+    fid = src.add_binary("a.pdf")
+    src.store[fid]["createdTime"] = "2026-09-18T15:22:03.790Z"
+    tgt = auth.target_drive(TGT_USER)
+    tgt.add_binary("somebody's older file.pdf")
+    tgt.add_binary("another.pdf")
+    with caplog.at_level(logging.WARNING, logger="drive_engine"):
+        m = drive_engine.DriveMigrator(auth, db, settings, SRC_USER, TGT_USER, quota)
+        m.run()
+    assert m.target_preexisting >= 2
+    assert any("already holds" in r.getMessage() and "before any was migrated" in r.getMessage() for r in caplog.records)

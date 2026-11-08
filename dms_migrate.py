@@ -1006,6 +1006,15 @@ def wait_then_tally(minutes: int, timeout: int, headful: bool, tally: bool = Tru
                 st = Settings()
                 db = MigrationDB(st.db_path)
                 try:
+                    # Google's "complete" is about the import it holds, not the one we asked for: a stale
+                    # 1-user import read "complete" for 45 users (8 Nov 2026). Accept it only when the
+                    # import's user count is the number we expected.
+                    expected = len(users) if users else sum(1 for r in db.all_identities() if r["entity_type"] == "user")
+                    seen = (got.get("metrics") or {}).get("Users processed")
+                    if seen is not None and expected and seen != expected:
+                        log(f"NOT ACCEPTED: the console reports complete for {seen} user(s), but this run is for "
+                            f"{expected} -- it is another import's result, so nothing is recorded as delivered")
+                        return 2
                     from mail_completion import compare_mail_counts, full_mail_check
                     # A pilot (named users) is small enough to record every email it moved; a count
                     # records nothing, and the ledger kept reading "owed" after ward7's 118 arrived.

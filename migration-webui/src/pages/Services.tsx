@@ -257,6 +257,8 @@ const Services: React.FC = () => {
               than whatever the toggles currently say.
             </Alert>
             <Stack spacing={2}>
+              {has('sniff') &&
+                <JobRunner accountId={scopeAccount} name="sniff" spec={actions.sniff} />}
               {has('phased_count_only') &&
                 <JobRunner accountId={scopeAccount} name="phased_count_only" spec={actions.phased_count_only} />}
               {has('phased_migrate') &&

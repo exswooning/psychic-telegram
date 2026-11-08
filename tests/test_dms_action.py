@@ -514,3 +514,19 @@ def test_wipe_refuses_a_protected_target_foreign_users_and_a_missing_grant(db, s
         raise PermissionError("unauthorized_client")
     assert wipe_dms_mail.wipe(settings, db, ["ward7@s.example"], apply=True, client=no_grant, say=out.append) == 2
     assert "no fallback to Trash" in out[-1]
+
+
+def test_a_complete_for_another_imports_users_is_not_accepted(db, settings, monkeypatch):
+    """The console said "complete" for a stale 1-user import while 45 users were expected (8 Nov 2026)."""
+    import dms_migrate
+    import config
+    _ledger_with(db, ["a", "b", "c"])
+    monkeypatch.setattr(config, "Settings", lambda *a, **k: settings)
+    monkeypatch.setattr(dms_migrate, "DONE_POLL_SEC", 0)
+    recorded = []
+    monkeypatch.setattr(dms_migrate, "record_deliveries", lambda *a: recorded.append(1) or 0)
+    monkeypatch.setattr(dms_migrate, "status", lambda *a, **k: {"status": "complete", "metrics": {"Users processed": 1}})
+    assert dms_migrate.wait_then_tally(1, 10, False, tally=False, users=None) == 2
+    monkeypatch.setattr(dms_migrate, "status", lambda *a, **k: {"status": "complete", "metrics": {"Users processed": 3}})
+    monkeypatch.setattr("mail_completion.compare_mail_counts", lambda *a, **k: {"blocked": 0})
+    assert dms_migrate.wait_then_tally(1, 10, False, tally=False, users=None) == 0

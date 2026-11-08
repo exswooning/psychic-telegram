@@ -1532,6 +1532,8 @@ class DriveMigrator:
         # after, so with the folder, the name and the type it names Bitport's own copy.
         return (parent, f.get("name"), f.get("mimeType"), (f.get("createdTime") or "")[:19])
 
+    target_preexisting = 0           # files/folders the target held before this user's first migrated item
+
     def _take_placed(self, item: dict, tgt_parent: str) -> dict | None:
         """A copy an earlier run put in its folder and was stopped before recording:
         _landed writes the mapping first, so a kill between the copy landing and that
@@ -1577,6 +1579,12 @@ class DriveMigrator:
                             out.setdefault(self._placed_key(f, p), []).append(f)
                 token = resp.get("nextPageToken")
                 if not token:
+                    self.target_preexisting = sum(len(v) for v in out.values())
+                    if self.target_preexisting and not mapped:
+                        log.warning("[%s] the target already holds %d file(s)/folder(s) before any was migrated "
+                                    "(none is in the ledger): a copy matching a source file's folder, name, type and "
+                                    "created time is adopted, the rest stays beside the migrated files",
+                                    self.source_user, self.target_preexisting)
                     return out
         except (PermanentAPIError, RuntimeError) as exc:
             log.warning("[%s] could not list the target's files; a copy an earlier run left "

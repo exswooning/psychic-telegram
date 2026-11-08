@@ -403,6 +403,14 @@ ACTIONS: dict[str, dict] = {
         "destructive": True,
         "confirm": "WIPE",
     },
+    "sniff": {
+        "label": "Error sniffer (read-only)",
+        "blurb": "Picks users by evidence (the biggest, the smallest, the deepest, those with open findings) "
+                 "and, for each, reads every scope -- Drive, Gmail, Calendar, Contacts, Tasks -- to predict "
+                 "what will fail, naming what the engine does about each. Writes nothing to either tenant.",
+        "argv": [PY, "sniff.py"],
+        "parallel": True,
+    },
     "dms_metrics_refresh": {
         "label": "Refresh DMS metrics",
         "blurb": "Read the live import counters from the Admin console and "
