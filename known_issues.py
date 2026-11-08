@@ -166,7 +166,10 @@ ISSUES = [
     ("drive.duplicate", "drive", lambda t: "duplicateOf" in t,
      "Two copies of one file on the target",
      "A copy landed twice (an earlier interrupted run).",
-     "None automatic: deleting is the operator's call. Listed with both ids.", False),
+     "Automatic, by the quarantine policy (finding_repairs.QUARANTINE_POLICY, the operator's rule of 6 Nov 2026): "
+     "the extra copy is renamed in place -- same folder, sharing unchanged, the original untouched, reversible -- so "
+     "the user keeps access and nothing is deleted. A copy whose content cannot be proven the same is left and "
+     "listed for a person.", True),
     ("drive.comments", "drive", lambda t: "comment resolution differs" in t or "comment anchor differs" in t
                                          or "comment replies differ" in t,
      "Comments differ",

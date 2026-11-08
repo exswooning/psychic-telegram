@@ -2429,6 +2429,13 @@ def _dispatch_verification_repairs():
             continue
         d = MigrationDB(path)
         try:
+            try:
+                # Rows the ledger alone can close (mapped since, owed to the DMS): no Google read, every pass.
+                closed = verification_repairs.reconcile_ledger(d)
+                if closed:
+                    log.info("verification queue account %s: %d row(s) closed on ledger evidence", aid, closed)
+            except Exception as exc:      # noqa: BLE001 - housekeeping; never stops the dispatcher
+                log.warning("verification queue reconcile failed for account %s: %s", aid, exc)
             if not verification_repairs.enabled(d):
                 with cpdb.ro() as conn:
                     globally_idle = conn.execute("SELECT 1 FROM active_jobs LIMIT 1").fetchone() is None

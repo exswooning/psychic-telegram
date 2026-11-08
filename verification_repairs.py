@@ -75,7 +75,10 @@ def enqueue_findings(db, user, per):
                     detail = json.dumps(item, sort_keys=True, default=str)
                     key = hashlib.sha256((category + ":" + detail).encode()).hexdigest()
                     seen.add(key)
-                    iid = (item.get("source") or item.get("id") or item.get("item")) if isinstance(item, dict) else None
+                    # A duplicate names no source -- only the target copy (and the one it duplicates). Without
+                    # an id here a duplicate row could never be tied to its file or its quarantine.
+                    iid = (item.get("source") or item.get("id") or item.get("item")
+                           or item.get("target")) if isinstance(item, dict) else None
                     conn.execute("""INSERT INTO verification_repair_queue
                         (source_user,service,finding_key,category,item_id,state,detail,first_seen,last_seen,issue)
                         VALUES(?,?,?,?,?,'QUEUED',?,?,?,?)
@@ -138,6 +141,16 @@ def reconcile_mapped(db, user) -> int:
     return len(done)
 
 
+def _named_file(detail) -> str | None:
+    """The Drive file a 'source changed' or comment-read finding is about: the change record's id, or the
+    file a 404 names."""
+    import re
+    text = str(detail or "")
+    m = re.search(r'"id"\s*:\s*"([A-Za-z0-9_-]{16,})"', text.replace('\\"', '"')) or \
+        re.search(r"File not found: ([A-Za-z0-9_-]{16,})", text) or re.search(r"/files/([A-Za-z0-9_-]{16,})/", text)
+    return m.group(1) if m else None
+
+
 def reconcile_target_copies(auth, db, settings, user) -> int:
     """Retire queued 'no destination mapping' Drive rows that were never source files: our own TARGET copies,
     shared back to the source user by the server-side copy (owner in the target domain), and files gone from
@@ -145,9 +158,13 @@ def reconcile_target_copies(auth, db, settings, user) -> int:
     them -- 14 for environment@, 243 for it.department@ (account 3, 8 Nov 2026). Evidence is one read-only
     files.get per row; a read that fails for any other reason leaves the row open."""
     ensure(db)
-    rows = db.conn.execute("SELECT source_user,service,finding_key,item_id,issue FROM verification_repair_queue "
-                           "WHERE source_user=? AND state!='RESOLVED' AND issue='drive.unmapped_source' "
-                           "AND item_id IS NOT NULL", (user,)).fetchall()
+    rows = []
+    for r in db.conn.execute("SELECT source_user,service,finding_key,item_id,issue,detail FROM "
+                             "verification_repair_queue WHERE source_user=? AND state!='RESOLVED' AND issue IN "
+                             "('drive.unmapped_source','drive.source_changed','drive.comments_unreadable')", (user,)):
+        fid = r["item_id"] or _named_file(r["detail"])
+        if fid:
+            rows.append((r, fid))
     if not rows:
         return 0
     target = (getattr(settings, "target_domain", "") or "").lower()
@@ -155,9 +172,9 @@ def reconcile_target_copies(auth, db, settings, user) -> int:
         return 0
     svc = auth.source_drive(user)
     done = []
-    for r in rows:
+    for r, fid in rows:
         try:
-            f = svc.files().get(fileId=r["item_id"], supportsAllDrives=True, fields="id,trashed,owners(emailAddress)").execute()
+            f = svc.files().get(fileId=fid, supportsAllDrives=True, fields="id,trashed,owners(emailAddress)").execute()
         except Exception as exc:      # noqa: BLE001 - only a definite "not there" retires a row
             if getattr(getattr(exc, "resp", None), "status", None) == 404:
                 done.append(r)
@@ -169,6 +186,33 @@ def reconcile_target_copies(auth, db, settings, user) -> int:
         with db.write() as conn:
             _resolve(conn, done, utc_now())
     return len(done)
+
+
+def reconcile_owed_to_dms(db, user) -> int:
+    """Close not-copied mail rows whose message the ledger records as owed to Google's DMS (deferred, no
+    Drive link). That mail is not missing -- it is the DMS's to move, and the check says so as a note. 4,188
+    such rows (noreply@ 4,034) were queued as "unmapped" before the verifier learned the difference, and made
+    up two thirds of account 3's queue (8 Nov 2026)."""
+    from config import DEFERRED_TO_DMS
+    ensure(db)
+    rows = db.conn.execute(
+        "SELECT q.source_user,q.service,q.finding_key,q.item_id,q.issue FROM verification_repair_queue q "
+        "WHERE q.source_user=? AND q.service='gmail' AND q.category='notCopied' AND q.state!='RESOLVED' "
+        "AND EXISTS (SELECT 1 FROM audit_log a WHERE a.source_user=q.source_user AND a.item_id=q.item_id "
+        "AND a.item_type='message' AND a.status=?)", (user, DEFERRED_TO_DMS)).fetchall()
+    if rows:
+        with db.write() as conn:
+            _resolve(conn, rows, utc_now())
+    return len(rows)
+
+
+def reconcile_ledger(db) -> int:
+    """Every user's rows that the ledger alone can close (mapped since, owed to the DMS) -- no Google read.
+    Run by the dispatcher each pass, so stale rows close without waiting for that user's next check."""
+    ensure(db)
+    users = [r[0] for r in db.conn.execute(
+        "SELECT DISTINCT source_user FROM verification_repair_queue WHERE state!='RESOLVED' AND category='notCopied'")]
+    return sum(reconcile_mapped(db, u) + reconcile_owed_to_dms(db, u) for u in users)
 
 
 def queued_repairable(db, user) -> dict:
@@ -219,7 +263,14 @@ def services_to_check(db, user, services) -> tuple:
     queued = {r[0] for r in db.conn.execute(
         "SELECT DISTINCT service FROM verification_repair_queue WHERE source_user=? AND state!='RESOLVED'",
         (user,))}
-    return tuple(s for s in services if s in queued or last.get(s) != "IDENTICAL")
+    out = tuple(s for s in services if s in queued or last.get(s) != "IDENTICAL")
+    if "chat" in out:
+        # Not part of this user's migration: the check retires it rather than re-reading it (verify_sample).
+        import verify_sample
+        from types import SimpleNamespace
+        if not verify_sample.chat_in_scope(db, SimpleNamespace(migrate_chat=None), user):
+            out = tuple(s for s in out if s != "chat")
+    return out
 
 
 def enable(db):

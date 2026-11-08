@@ -132,3 +132,47 @@ def test_an_error_that_names_no_file_still_blocks_every_close(db):
 def test_unverified_files_keep_only_their_own_rows_open(db):
     _stale_then_complete_check(db, unverified=[{"source": STALE["source"], "target": "t1"}])
     assert _open_diffs(db) == [STALE["source"]]
+
+
+# -- the 8 Nov deep check: rows the ledger or the source can close ------------------------------------------
+def test_mail_owed_to_the_dms_is_not_missing(db):
+    """4,188 'unmapped' rows were all mail deferred to the DMS (noreply@ 4,034)."""
+    queue(db, "gmail", {**MAIL_GAP, "id": "owed"})
+    queue(db, "gmail", {**MAIL_GAP, "id": "lost"})
+    db.log_audit(U, "owed", "message", "SKIPPED_NO_DRIVE_LINK", "deferred to the DMS")
+    assert R.reconcile_owed_to_dms(db, U) == 1
+    assert open_ids(db) == ["lost"]
+
+
+def test_the_ledger_pass_closes_mapped_and_owed_rows_for_every_user(db):
+    queue(db, "gmail", {**MAIL_GAP, "id": "owed"})
+    queue(db, "drive", {**DRIVE_GAP, "id": "copied"})
+    db.log_audit(U, "owed", "message", "SKIPPED_NO_DRIVE_LINK", "")
+    db.record_mapping(U, "copied", "t-copied", "file")
+    assert R.reconcile_ledger(db) == 2 and open_ids(db) == []
+
+
+def test_the_file_behind_a_source_change_or_a_comment_404_is_found():
+    assert R._named_file('"Source changed during migration: {\\"change\\":\\"added\\",\\"id\\":\\"1-ASWHf6yUszacLucWlP\\",'
+                         '\\"kind\\":\\"file\\"}"') == "1-ASWHf6yUszacLucWlP"
+    assert R._named_file("Comment threads: HTTP 404 notFound: File not found: 114Fh4gbiUaCtRsI5A9M.") == "114Fh4gbiUaCtRsI5A9M"
+    assert R._named_file("nothing here") is None
+
+
+def test_a_source_change_that_was_our_own_target_copy_is_retired_a_real_one_stays(db, settings):
+    from types import SimpleNamespace
+    settings.target_domain = "t.example"
+    for fid in ("ourcopy0000000000000", "realedit000000000000"):
+        R.enqueue_findings(db, U, {"drive": result(sampled={"of": 9}, errors=[
+            'Source changed during migration: {"change":"added","id":"%s","kind":"file","service":"drive"}' % fid])})
+    drive = _Drive({"ourcopy0000000000000": {"owners": [{"emailAddress": "u@t.example"}]},
+                    "realedit000000000000": {"owners": [{"emailAddress": U}]}})
+    assert R.reconcile_target_copies(SimpleNamespace(source_drive=lambda u: drive), db, settings, U) == 1
+    left = [r[0] for r in db.conn.execute("SELECT detail FROM verification_repair_queue WHERE state!='RESOLVED'")]
+    assert len(left) == 1 and "realedit" in left[0]
+
+
+def test_a_duplicate_row_keeps_its_target_id(db):
+    R.enqueue_findings(db, U, {"drive": result(sampled={"of": 9}, duplicates=[
+        {"duplicateOf": "orig-target", "target": "dup-target", "name": "a.docx", "path": "/a.docx"}])})
+    assert db.conn.execute("SELECT item_id FROM verification_repair_queue").fetchone()[0] == "dup-target"

@@ -2241,6 +2241,37 @@ def service_complete(result: dict) -> bool:
             and (result.get("checked", 0) > 0 or result.get("emptySource", False)))
 
 
+def chat_in_scope(db, settings, user: str) -> bool:
+    """Is Chat part of this user's migration: selected for the run, mapped, or really attempted (a refusal is
+    not an attempt -- _chat_attempted). A Chat that failed outright is in scope and still reads as not copied."""
+    selected = getattr(settings, "migrate_chat", None)
+    if selected is None:
+        import config
+        selected = config.chat_by_default()
+    if selected:
+        return True
+    if db.conn.execute("SELECT 1 FROM id_mapping WHERE source_user=? AND type='chat_space' LIMIT 1",
+                       (user,)).fetchone():
+        return True
+    return _chat_attempted(db, user)
+
+
+def retire_chat(db, users) -> None:
+    """Retire Chat findings of users for whom Chat is not part of the migration: their saved Chat verdict and
+    their open Chat queue rows. Nothing about it is owed, so nothing about it is left open."""
+    if not users or not hasattr(db, "write"):
+        return
+    import verification_repairs
+    verification_repairs.ensure(db)
+    from db import utc_now
+    with db.write() as conn:
+        for u in users:
+            conn.execute("DELETE FROM user_verification WHERE source_user=? AND service='chat'", (u,))
+            rows = conn.execute("SELECT source_user,service,finding_key,item_id,issue FROM verification_repair_queue "
+                                "WHERE source_user=? AND service='chat' AND state!='RESOLVED'", (u,)).fetchall()
+            verification_repairs._resolve(conn, rows, utc_now())
+
+
 def _chat_attempted(db, user: str) -> bool:
     """A Chat row that is a REFUSAL (no access to the service: a skipped row, or a 403 PERMISSION_DENIED)
     is not an attempt to copy: education@ spent 3 minutes and 9 retries verifying Chat against a scope
@@ -2267,20 +2298,20 @@ def run(auth, db, settings, users: list[str] | None = None, services=ALL_SERVICE
     ident = {r["source_email"]: r["target_email"] for r in db.all_identities() if r["entity_type"] == "user"}
     chosen = [u for u in (users or list(ident)) if u in ident]
     services = tuple(s for s in ALL_SERVICES if s in services)
-    # Chat is skipped only when it was never part of this migration: not selected,
-    # nothing mapped and nothing attempted. A chat that failed outright has nothing
-    # mapped either, and must still read as not copied.
-    if "chat" in services and not getattr(settings, "migrate_chat", False) and not any(
-            db.get_target_id(user, sid, "chat_space") for user in chosen
-            for sid, in db.conn.execute("SELECT source_id FROM id_mapping WHERE source_user=? AND type='chat_space' LIMIT 1", (user,))
-    ) and not any(_chat_attempted(db, user) for user in chosen):
-        services = tuple(s for s in services if s != "chat")
+    # Chat is checked per user, and only where it is part of this migration (chat_in_scope). Where it is not,
+    # the user's old Chat verdict and queue rows are retired: 8 verdicts and 41 rows from before Chat went
+    # opt-in kept users INCOMPLETE for a service nobody was migrating (account 3, 8 Nov 2026).
+    no_chat = set()
+    if "chat" in services:
+        no_chat = {u for u in chosen if not chat_in_scope(db, settings, u)}
+        retire_chat(db, no_chat)
     # Each user's own services: all of them, or (services_for, the repair backlog) only those with something
     # open -- a user whose findings are all in Drive does not have its whole mailbox re-read before a repair.
     expected = {}
     for u in chosen:
-        mine = tuple(x for x in services if services_for is None or x in set(services_for(u)))
-        expected[u] = mine or services
+        allowed = tuple(x for x in services if x != "chat" or u not in no_chat)
+        mine = tuple(x for x in allowed if services_for is None or x in set(services_for(u)))
+        expected[u] = mine or allowed
     report = {"generatedAt": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
               "accountId": getattr(settings, "account_id", None),
               "sourceDomain": settings.source_domain, "targetDomain": settings.target_domain,
