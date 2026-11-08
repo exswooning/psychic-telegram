@@ -278,7 +278,7 @@ const Services: React.FC = () => {
                 <DmsImportButton spec={actions.dms_import} accountId={scopeAccount} />
                 {has('dms_reconcile') &&
                   <Box sx={{ mt: 1 }}><DmsImportButton spec={actions.dms_reconcile} accountId={scopeAccount} action="dms_reconcile" /></Box>}
-                {(['dms_wipe_dry', 'dms_wipe'] as const).map((k) => has(k) &&
+                {(['dms_wipe_dry', 'dms_wipe', 'ab_matrix'] as const).map((k) => has(k) &&
                   <Box key={k} sx={{ mt: 1 }}><DmsImportButton spec={actions[k]} accountId={scopeAccount} action={k} /></Box>)}
                 <DmsMetrics accountId={scopeAccount} />
               </Box>

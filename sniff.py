@@ -63,12 +63,25 @@ def pick_users(db, count: int = 8) -> dict:
     return dict(list(chosen.items())[:count])
 
 
-def _first(call):
-    try:
-        call()
-        return "ok"
-    except Exception as exc:        # noqa: BLE001 - the answer is the error text
-        return str(exc)[:120]
+def _throttled(text: str) -> bool:
+    return any(m in text for m in (" 429 ", "Too many", "rateLimit", "backendError", " 500 ", " 503 "))
+
+
+def _first(call, tries: int = 4):
+    """"ok", or the error text. A throttle or a Google hiccup is retried and, if it persists, reported as
+    "throttled: ..." -- it says nothing about the grant (a read-only scan of the same mailbox, run at the
+    same moment, made health@'s Gmail read look like an access failure)."""
+    text = ""
+    for i in range(tries):
+        try:
+            call()
+            return "ok"
+        except Exception as exc:        # noqa: BLE001 - the answer is the error text
+            text = str(exc)[:120]
+            if not _throttled(text):
+                return text
+            time.sleep(2 ** i)
+    return "throttled: " + text
 
 
 def probe_access(auth, user: str) -> dict:
@@ -155,7 +168,8 @@ def sniff_user(auth, settings, user: str, mail_sample: int) -> dict:
              "tasks": lambda: sniff_tasks(auth, user)}
     for name, step in steps.items():
         if out["access"][name] != "ok":
-            out["findings"]["access.failed"] = out["findings"].get("access.failed", 0) + 1
+            if not out["access"][name].startswith("throttled"):      # unknown, not failed: say so, do not predict
+                out["findings"]["access.failed"] = out["findings"].get("access.failed", 0) + 1
             continue
         try:
             res = step()
@@ -212,7 +226,9 @@ def main(argv=None) -> int:
         results.append(r)
         print(f"sniffed {user}: {sum(r['findings'].values())} predicted", flush=True)
     print(render(results))
-    out = os.path.join(HERE, "logs", "sniff", str(args.account_id or "box"))
+    import re
+    acct = args.account_id or (re.search(r"/accounts/(\d+)/", settings.db_path.replace("\\", "/")) or [None, "box"])[1]
+    out = os.path.join(HERE, "logs", "sniff", str(acct))
     os.makedirs(out, exist_ok=True)
     path = os.path.join(out, time.strftime("sniff-%Y%m%dT%H%M%SZ.json", time.gmtime()))
     with open(path, "w", encoding="utf-8") as fh:

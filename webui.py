@@ -659,6 +659,17 @@ ACTIONS: dict[str, dict] = {
                  "what got worse since the last run. Deletes nothing; uses four licences.",
         "argv": [PY, "regression.py"],
     },
+    "ab_matrix": {
+        "label": "Speed matrix: mail by DMS, split and engine",
+        "blurb": "For ONE named user, migrates the same corpus three times -- Drive server-side, mail by the "
+                 "DMS, by split and by the engine -- each into a brand-new target account (one licence per "
+                 "arm; nothing is deleted), checks each one to one, and ranks the arms by errors, then speed. "
+                 "The winner becomes the default for new runs.",
+        "argv": [PY, "ab_transfer.py", "--mode", "server_side", "--mail-mode", "dms", "--mail-mode", "split",
+                 "--mail-mode", "engine", "--fresh-targets", "--report", "logs/ab_results.md"],
+        "browser": True,        # the DMS arm signs in to the Admin consoles
+        "confirm": "NEW ACCOUNTS",
+    },
     "ab_transfer": {
         "label": "A/B: server-side vs download/upload",
         "blurb": "Migrates the same corpus twice, once per transfer mode, "
@@ -1521,7 +1532,7 @@ def _queue_starter(account_id: int | None, label: str,
     itself, and releasing here as well would free the NEXT job's slot.
     """
     env = dict(os.environ, **payload.get("env", {})) or None
-    if any("dms_migrate.py" in a for a in payload["argv"]):
+    if any(("dms_migrate.py" in a or "ab_transfer.py" in a) for a in payload["argv"]):
         # Its console logins are not stored in the queue (job_queue.without_secrets): read them again now.
         env = dict(env or os.environ, **{k: v for k, v in _dms_env(account_id).items()
                                          if job_queue.is_secret(k) and os.environ.get(k) != v})
@@ -5238,6 +5249,23 @@ def _dms_pilot_argv(account_id: int | None, body: dict, argv: list) -> tuple[lis
     return argv + ["--identities", path] + (["--fresh-import"] if fresh else []), ""
 
 
+def _ab_matrix_argv(account_id: int | None, body: dict, argv: list) -> tuple[list, str]:
+    """The speed matrix takes exactly one of this account's own source users."""
+    users = [str(u).strip().lower() for u in (body.get("users") or []) if str(u).strip()]
+    if len(users) != 1:
+        return argv, "name exactly one source user for the speed matrix"
+    from config import Settings
+    from db import MigrationDB
+    db = MigrationDB(Settings(account_id=account_id).db_path)
+    try:
+        known = {r["source_email"].lower() for r in db.all_identities() if r["entity_type"] == "user"}
+    finally:
+        db.close()
+    if users[0] not in known:
+        return argv, "not a user of this account: " + users[0]
+    return argv + ["--user", users[0]], ""
+
+
 def _dms_env(account_id: int | None) -> dict:
     """Environment for the DMS browser run: the account's tenants plus a
     headless display and the admin login the Admin console requires.
@@ -6702,6 +6730,11 @@ class Handler(BaseHTTPRequestHandler):
             env["CONFIGURATION_REVIEW_HASH"] = reviewed
 
         argv = _action_argv(name)
+        if name == "ab_matrix":
+            argv, err = _ab_matrix_argv(account_id, body, argv)
+            if err:
+                self._json({"ok": False, "error": err}, 400)
+                return
         if name in ("dms_import", "dms_reconcile", "dms_wipe", "dms_wipe_dry"):
             if name != "dms_import" and not body.get("users"):
                 self._json({"ok": False, "error": "name the users to record"}, 400)

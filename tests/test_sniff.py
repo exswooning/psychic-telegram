@@ -41,3 +41,23 @@ def test_it_reads_only(monkeypatch):
     import re
     src = open(sniff.__file__).read()
     assert not re.search(r"\.(insert|import_|create|update|patch|delete|trash|modify|batchDelete|copy)\(", src)
+
+
+def test_a_throttle_is_retried_and_never_reported_as_a_failed_grant(monkeypatch):
+    monkeypatch.setattr(sniff.time, "sleep", lambda s: None)
+    calls = []
+
+    def flaky():
+        calls.append(1)
+        if len(calls) < 3:
+            raise RuntimeError('<HttpError 429 returned "Too many concurrent requests for user">')
+    assert sniff._first(flaky) == "ok" and len(calls) == 3
+    always = lambda: (_ for _ in ()).throw(RuntimeError('<HttpError 429 returned "Too many concurrent requests">'))
+    assert sniff._first(always).startswith("throttled")
+    assert sniff._first(lambda: (_ for _ in ()).throw(RuntimeError("403 delegation denied"))) == "403 delegation denied"
+    monkeypatch.setattr(sniff, "probe_access", lambda a, u: {"drive": "throttled: x", "gmail": "ok", "calendar": "ok",
+                                                             "contacts": "ok", "tasks": "ok"})
+    monkeypatch.setattr(sniff, "sniff_gmail", lambda a, u, n: {"sampled": 1})
+    for name in ("sniff_calendar", "sniff_contacts", "sniff_tasks"):
+        monkeypatch.setattr(sniff, name, lambda a, u: {"sampled": 1})
+    assert sniff.sniff_user(None, None, "u@s", 1)["findings"] == {}

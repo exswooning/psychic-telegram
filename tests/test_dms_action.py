@@ -530,3 +530,30 @@ def test_a_complete_for_another_imports_users_is_not_accepted(db, settings, monk
     monkeypatch.setattr(dms_migrate, "status", lambda *a, **k: {"status": "complete", "metrics": {"Users processed": 3}})
     monkeypatch.setattr("mail_completion.compare_mail_counts", lambda *a, **k: {"blocked": 0})
     assert dms_migrate.wait_then_tally(1, 10, False, tally=False, users=None) == 0
+
+
+def test_the_speed_matrix_takes_exactly_one_user_of_this_account(db, settings, monkeypatch):
+    import config
+    _ledger_with(db, ["ward13", "ward7"])
+    monkeypatch.setattr(config, "Settings", lambda account_id=None: settings)
+    base = ["py", "ab_transfer.py"]
+    argv, err = webui._ab_matrix_argv(3, {"users": ["ward13@s.example"]}, base)
+    assert not err and argv == base + ["--user", "ward13@s.example"]
+    assert "exactly one" in webui._ab_matrix_argv(3, {}, base)[1]
+    assert "exactly one" in webui._ab_matrix_argv(3, {"users": ["ward13@s.example", "ward7@s.example"]}, base)[1]
+    assert "not a user of this account" in webui._ab_matrix_argv(3, {"users": ["x@elsewhere.example"]}, base)[1]
+    spec = webui.ACTIONS["ab_matrix"]
+    assert spec["argv"].count("--mail-mode") == 3 and "--fresh-targets" in spec["argv"] and spec["browser"]
+
+
+def test_a_queued_speed_matrix_gets_its_console_logins_back(monkeypatch):
+    seen = {}
+
+    class J:
+        def start(self, label, argv, env=None, **k):
+            seen["env"] = env
+            return True, ""
+    monkeypatch.setattr(webui, "get_job", lambda _a: J())
+    monkeypatch.setattr(webui, "_dms_env", lambda _a: {"DWD_PASSWORD": "from-dwd-env"})
+    webui._queue_starter(3, "ab", {"argv": ["python", "ab_transfer.py", "--user", "u@s"], "env": {}})
+    assert seen["env"]["DWD_PASSWORD"] == "from-dwd-env"
