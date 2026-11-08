@@ -889,6 +889,11 @@ async def lifespan(_: FastAPI):
     owed = asyncio.create_task(_owed_grants_loop())
     scheduled = asyncio.create_task(_scheduled_runs_loop())
     housekeep = asyncio.create_task(_housekeeping_loop())
+    try:
+        import job_queue
+        job_queue.scrub_secrets()      # passwords stored in queued payloads before they were stripped
+    except Exception:                  # noqa: BLE001 - a scrub that fails must not stop the API
+        log.warning("could not scrub secrets from the job queue", exc_info=True)
     oversee = asyncio.create_task(_oversight_loop())
     dms_retry = asyncio.create_task(_dms_retry_loop())
     guard = asyncio.create_task(_source_guard_loop())
@@ -1941,6 +1946,10 @@ def _start_admitted(argv: list[str], account_id: int | None, job_name: str,
     """Spawn into a slot admission has already granted. `then` names what to do once it
     has exited cleanly (see _follow_on) -- one kind, or several, run in the order given;
     it travels with a queued job so a job that waited for a slot still does it."""
+    import account_isolation
+    why = account_isolation.refusal(account_id, env)
+    if why:
+        return False, why
     out = _child_output(job_name, account_id)
     try:
         proc = subprocess.Popen(argv, cwd=HERE, stdout=out,

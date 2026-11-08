@@ -864,6 +864,10 @@ class Job:
               env: dict | None = None, cwd: str | None = None,
               on_finish: Callable[[int | None], None] | None = None,
               retry: dict | None = None) -> tuple[bool, str]:
+        import account_isolation
+        why = account_isolation.refusal(self.account_id, env)
+        if why:
+            return False, why
         with self.lock:
             if self.running:
                 return False, f"{self.name} is still running"
@@ -1509,6 +1513,10 @@ def _queue_starter(account_id: int | None, label: str,
     itself, and releasing here as well would free the NEXT job's slot.
     """
     env = dict(os.environ, **payload.get("env", {})) or None
+    if any("dms_migrate.py" in a for a in payload["argv"]):
+        # Its console logins are not stored in the queue (job_queue.without_secrets): read them again now.
+        env = dict(env or os.environ, **{k: v for k, v in _dms_env(account_id).items()
+                                         if job_queue.is_secret(k) and os.environ.get(k) != v})
     return get_job(account_id).start(
         label, list(payload["argv"]), env=env, cwd=payload.get("cwd") or None,
         on_finish=lambda rc: _job_finished(account_id, label),

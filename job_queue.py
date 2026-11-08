@@ -46,6 +46,39 @@ RUNNER_WEBUI = "webui"
 RUNNER_API = "api"
 
 
+# A queued payload sat in the control-plane database in plain text, so every queued DMS job stored the
+# Admin console passwords (8 Nov 2026). Secrets are never stored: the dispatcher re-reads them from
+# /etc/bitport when the job really starts (webui._queue_starter), and a typed password is never queued.
+SECRET_MARKERS = ("PASSWORD", "SECRET", "TOKEN")
+
+
+def is_secret(name: str) -> bool:
+    return any(m in name.upper() for m in SECRET_MARKERS)
+
+
+def without_secrets(payload: dict) -> dict:
+    env = payload.get("env")
+    if not env:
+        return payload
+    return {**payload, "env": {k: v for k, v in env.items() if not is_secret(k)}}
+
+
+def scrub_secrets() -> int:
+    """Remove secrets from payloads already stored. Returns the rows changed."""
+    changed = 0
+    with cpdb.rw() as conn:
+        for row in conn.execute("SELECT id, payload FROM job_queue").fetchall():
+            try:
+                data = json.loads(row["payload"])
+            except (TypeError, ValueError):
+                continue
+            clean = without_secrets(data)
+            if clean != data:
+                conn.execute("UPDATE job_queue SET payload=? WHERE id=?", (json.dumps(clean), row["id"]))
+                changed += 1
+    return changed
+
+
 class QueueFull(RuntimeError):
     """This account already has this job waiting."""
 
@@ -70,7 +103,7 @@ def enqueue(account_id: int | None, job_name: str, payload: dict,
             cur = conn.execute(
                 "INSERT INTO job_queue (account_id, job_name, payload, "
                 "requested_by, reason, runner) VALUES (?,?,?,?,?,?)",
-                (account_id, job_name, json.dumps(payload), requested_by,
+                (account_id, job_name, json.dumps(without_secrets(payload)), requested_by,
                  reason, runner))
             qid = int(cur.lastrowid)
     except sqlite3.IntegrityError as exc:
