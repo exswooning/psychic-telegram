@@ -62,3 +62,36 @@ def test_only_automatic_not_copied_kinds_are_fed_to_the_handlers(db):
     queue(db, "drive", DRIVE_GAP)
     R.enqueue_findings(db, U, {"gmail": result(sampled={"of": 100}, duplicates=[{"messageId": "x", "target": "t"}])})
     assert list(R.queued_repairable(db, U)) == ["drive"]
+
+
+class _Drive:
+    """files().get(fileId=...) answers from a table: an owner list, trashed, or an HTTP status."""
+    def __init__(self, table):
+        self.table = table
+
+    def files(self):
+        return self
+
+    def get(self, fileId, **kw):
+        def execute():
+            v = self.table[fileId]
+            if isinstance(v, int):
+                from types import SimpleNamespace
+                e = Exception(str(v))
+                e.resp = SimpleNamespace(status=v)
+                raise e
+            return v
+        from types import SimpleNamespace
+        return SimpleNamespace(execute=execute)
+
+
+def test_our_own_target_copies_and_files_gone_from_the_source_are_retired(db, settings):
+    from types import SimpleNamespace
+    settings.target_domain = "t.example"
+    for fid in ("copy", "gone", "real", "broken"):
+        queue(db, "drive", {**DRIVE_GAP, "id": fid})
+    drive = _Drive({"copy": {"owners": [{"emailAddress": "u@t.example"}]}, "gone": 404,
+                    "real": {"owners": [{"emailAddress": "other@outside.example"}]}, "broken": 500})
+    auth = SimpleNamespace(source_drive=lambda u: drive)
+    assert R.reconcile_target_copies(auth, db, settings, U) == 2
+    assert open_ids(db) == ["broken", "real"]              # a real shared file and an unreadable one stay open

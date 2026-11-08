@@ -112,6 +112,39 @@ def reconcile_mapped(db, user) -> int:
     return len(done)
 
 
+def reconcile_target_copies(auth, db, settings, user) -> int:
+    """Retire queued 'no destination mapping' Drive rows that were never source files: our own TARGET copies,
+    shared back to the source user by the server-side copy (owner in the target domain), and files gone from
+    the source. The manifest used to list them (migration_acceptance.inventory) and nothing could ever map
+    them -- 14 for environment@, 243 for it.department@ (account 3, 8 Nov 2026). Evidence is one read-only
+    files.get per row; a read that fails for any other reason leaves the row open."""
+    ensure(db)
+    rows = db.conn.execute("SELECT source_user,service,finding_key,item_id,issue FROM verification_repair_queue "
+                           "WHERE source_user=? AND state!='RESOLVED' AND issue='drive.unmapped_source' "
+                           "AND item_id IS NOT NULL", (user,)).fetchall()
+    if not rows:
+        return 0
+    target = (getattr(settings, "target_domain", "") or "").lower()
+    if not target:
+        return 0
+    svc = auth.source_drive(user)
+    done = []
+    for r in rows:
+        try:
+            f = svc.files().get(fileId=r["item_id"], supportsAllDrives=True, fields="id,trashed,owners(emailAddress)").execute()
+        except Exception as exc:      # noqa: BLE001 - only a definite "not there" retires a row
+            if getattr(getattr(exc, "resp", None), "status", None) == 404:
+                done.append(r)
+            continue
+        owners = [(o.get("emailAddress") or "").lower() for o in f.get("owners") or []]
+        if f.get("trashed") or any(o.endswith("@" + target) for o in owners):
+            done.append(r)
+    if done:
+        with db.write() as conn:
+            _resolve(conn, done, utc_now())
+    return len(done)
+
+
 def queued_repairable(db, user) -> dict:
     """Open not-copied items of a kind with an automatic fix, by service, as the repair reads them.
     The migration's own acceptance check writes these (a pre-copy manifest item with no mapping);
@@ -412,6 +445,13 @@ def finished_user(auth, db, settings, user, per, limit, retry, progress=print):
     closed = reconcile_mapped(db, user)
     if closed:
         progress(f"repair: {user} {closed} queued item(s) are mapped now; closed")
+    try:
+        retired = reconcile_target_copies(auth, db, settings, user)
+        if retired:
+            progress(f"repair: {user} {retired} queued file(s) were our own target copies or gone from the "
+                     f"source, not files owed a copy; closed")
+    except Exception as exc:      # noqa: BLE001 - reading owners is advice; the repair goes on without it
+        progress(f"repair: {user} could not check who owns the queued files: {type(exc).__name__}")
     queued = queued_repairable(db, user)
     verdict, _ = V.verdict_of(initial["users"], tuple(per))
     if verdict == "IDENTICAL" and not queued:

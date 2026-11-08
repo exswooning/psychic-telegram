@@ -75,6 +75,11 @@ def inventory(auth, db, settings, source, target, services):
                             not getattr(settings, "migrate_external_shares", False)
                             or not owners
                             or settings.source_domain.lower() in owners
+                            # A server-side copy stays readable by its source caller, so our own TARGET copies
+                            # show up in the source user's Drive. The walk never takes them back
+                            # (drive_engine._walk_shared_with_me); counting them here left them "owed a copy"
+                            # for ever -- 14 for environment@, 243 for it.department@ (account 3, 8 Nov 2026).
+                            or (settings.target_domain or "").lower() in owners
                         ):
                             continue
                     mime = item.get("mimeType", "")

@@ -128,9 +128,13 @@ ISSUES = [
      "A source file has no copy",
      "Live: a personal account's file inside the user's own folder -- the walk listed only the "
      "user's own files, and shared-with-me shows only direct shares. (Bitport's own copies and "
-     "reasoned skips used to be counted here too; the checker no longer does.)",
+     "reasoned skips used to be counted here too; the checker no longer does. The migration's own "
+     "manifest did too until 8 Nov 2026: our target copies, shared back to the source user by a "
+     "server-side copy, were listed as source files owed a copy -- 14 for environment@, 243 for "
+     "it.department@.)",
      "The walk copies such files in place (drive_engine._sync_outsiders_here); repair re-walks "
-     "the user's Drive.", True),
+     "the user's Drive and retires queued rows that were our own target copies or are gone from the "
+     "source (verification_repairs.reconcile_target_copies).", True),
     ("drive.office_compared_as_native", "drive", lambda t: "must not be an Office file" in t,
      "An Office file could not be compared",
      "Word's mimeType ends in '.document' and PowerPoint's in '.presentation': the checker sent "
