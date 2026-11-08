@@ -206,3 +206,17 @@ def test_non_batch_adapter_retries_with_pacing(monkeypatch):
     values, errors=V.Verifier(None,None,None,'s','t',retry=retry)._raw_many(Mail(),['x'],'target',fmt='metadata')
     assert not errors and values[0][1]['id']=='x'
     assert charges == [20,20] and len(penalties)==1
+
+
+def test_the_default_budget_is_the_measured_one_not_the_old_guess(tmp_path, monkeypatch):
+    """6,000 units/min (4 reads a second) was never refused; 46 reads a second ran clean (8 Nov 2026). The
+    default sits at 80% of that: 800 units/s, about 40 metadata reads a second."""
+    import verify_gmail_quota as Q
+    from types import SimpleNamespace
+    monkeypatch.delenv("VERIFY_GMAIL_UNITS_PER_MINUTE", raising=False)
+    monkeypatch.setattr(Q.Path, "home", lambda: tmp_path)
+    creds = SimpleNamespace(quota_project_id="p", _subject="u@x")
+    b = Q.for_mailbox(SimpleNamespace(_credentials=lambda side, user: creds), SimpleNamespace(), "source", "u@x")
+    assert b.ceiling == 800.0 and b.ceiling / Q.read_cost("metadata") == 40.0
+    monkeypatch.setenv("VERIFY_GMAIL_UNITS_PER_MINUTE", "6000")
+    assert Q.for_mailbox(SimpleNamespace(_credentials=lambda side, user: creds), SimpleNamespace(), "source", "u@x").ceiling == 80.0

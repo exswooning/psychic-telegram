@@ -1,8 +1,14 @@
 """Weighted Gmail read pacing shared by verification threads and processes.
 
-New projects get 6,000 units/min/user: metadata get costs 20, raw get 60.
-Keep 20% headroom by default. A batch is charged for EVERY inner request,
-including retries. Runtime state contains hashed bucket IDs, never credentials.
+Costs are charged as metadata 20, raw 60. The per-mailbox budget used to assume 6,000 units/min (80 u/s with
+20% headroom, so 4 metadata reads a second), and Google never once refused it. Measured on account 3's source
+(deputymayor@, 8 Nov 2026, batches of 10, 8 in flight): 4.1 msg/s at 80 u/s, 16.1 at 320, 46.3 at 960 -- none
+refused; bursts reached 204 msg/s, and refusals began only after ~2,600 reads in ~20 s. So the sustained
+per-user limit sits near 50 metadata reads a second. The default is now 60,000 units/min: 800 u/s after the
+20% headroom, about 40 reads a second -- 10x the old pace, 80% of the clean measured rate. A refusal still
+halves the rate and cools off 60 s (penalise); it climbs back 5% a minute.
+A batch is charged for EVERY inner request, including retries. Runtime state contains hashed bucket IDs,
+never credentials.
 """
 from __future__ import annotations
 
@@ -118,7 +124,7 @@ def for_mailbox(auth, settings, side, user):
     fd = os.open(path, os.O_CREAT | os.O_WRONLY, 0o600)
     os.close(fd)
     path.chmod(0o600)
-    ceiling = _positive_env("VERIFY_GMAIL_UNITS_PER_MINUTE", 6000) * 0.8 / 60
+    ceiling = _positive_env("VERIFY_GMAIL_UNITS_PER_MINUTE", 60000) * 0.8 / 60
     return MailboxBudget(path, key, ceiling)
 
 
