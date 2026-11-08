@@ -557,3 +557,37 @@ def test_a_queued_speed_matrix_gets_its_console_logins_back(monkeypatch):
     monkeypatch.setattr(webui, "_dms_env", lambda _a: {"DWD_PASSWORD": "from-dwd-env"})
     webui._queue_starter(3, "ab", {"argv": ["python", "ab_transfer.py", "--user", "u@s"], "env": {}})
     assert seen["env"]["DWD_PASSWORD"] == "from-dwd-env"
+
+
+def _run_handler(monkeypatch, body, db, settings):
+    """webui.Handler._post_run, with the launch captured: what really gets started."""
+    import config
+    sent, launched = [], {}
+    monkeypatch.setattr(config, "Settings", lambda account_id=None: settings)
+    monkeypatch.setattr(webui, "resolve_target_account", lambda caller, asked: (3, ""))
+    monkeypatch.setattr(webui, "_subscription_ok", lambda a: True)
+    monkeypatch.setattr(webui, "_dms_env", lambda a: {"X": "1"})
+    monkeypatch.setattr(webui, "_account_email", lambda a: "op@x")
+
+    def fake(account_id, label, argv, env=None, **k):
+        launched.update(label=label, argv=argv)
+        return "started", "ok"
+    monkeypatch.setattr(webui, "launch_or_queue", fake)
+    h = object.__new__(webui.Handler)
+    h._account_id = lambda: 3
+    h._json = lambda obj, code=200: sent.append((code, obj))
+    h._post_run(body)
+    return sent, launched
+
+
+def test_the_speed_matrix_really_launches_with_its_user_and_needs_the_typed_words(db, settings, monkeypatch):
+    """The first live press ran without --user: the queued path rebuilt the argv and dropped it (8 Nov 2026)."""
+    _ledger_with(db, ["ward13"])
+    body = {"action": "ab_matrix", "users": ["ward13@s.example"], "confirm": "NEW ACCOUNTS"}
+    sent, launched = _run_handler(monkeypatch, body, db, settings)
+    assert sent[-1][0] == 200 and launched["argv"][-2:] == ["--user", "ward13@s.example"]
+    assert launched["argv"].count("--mail-mode") == 3
+    sent, launched = _run_handler(monkeypatch, {**body, "confirm": ""}, db, settings)
+    assert sent[-1][0] == 400 and not launched
+    sent, launched = _run_handler(monkeypatch, {"action": "ab_matrix", "confirm": "NEW ACCOUNTS"}, db, settings)
+    assert sent[-1][0] == 400 and "exactly one" in sent[-1][1]["error"] and not launched

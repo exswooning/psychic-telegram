@@ -668,6 +668,7 @@ ACTIONS: dict[str, dict] = {
         "argv": [PY, "ab_transfer.py", "--mode", "server_side", "--mail-mode", "dms", "--mail-mode", "split",
                  "--mail-mode", "engine", "--fresh-targets", "--report", "logs/ab_results.md"],
         "browser": True,        # the DMS arm signs in to the Admin consoles
+        "destructive": True,    # spends licences: the server asks for the typed words too
         "confirm": "NEW ACCOUNTS",
     },
     "ab_transfer": {
@@ -6755,7 +6756,7 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         state, msg = launch_or_queue(
-            account_id, spec["label"], _action_argv(name), env=env,
+            account_id, spec["label"], argv, env=env,
             requested_by=_account_email(account_id))
         self._json({"ok": state != "error", "queued": state == "queued",
                     "msg": msg, "error": None if state != "error" else msg})
