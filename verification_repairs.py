@@ -618,6 +618,16 @@ def finished_user(auth, db, settings, user, per, limit, retry, progress=print):
         partial = (V.run(auth, db, settings, [user], recheck, retry,
                         lambda m: progress(f"repair-check: {m}"), limit)
                    if recheck else {"users": {user: {}}, "evidence": []})
+        if user not in partial.get("users", {}):
+            # The recheck took no user: a deploy is waiting (VERIFY_YIELD_TO_DEPLOY). The repairs stand; the check
+            # of them is owed. INTERRUPTED lets the next batch claim this user again -- it was an ERROR, from a
+            # KeyError here (ward15@, 8 Nov 2026).
+            summary = (f"{user}: repairs applied; the recheck of {', '.join(recheck)} was deferred because a "
+                       f"deploy was waiting -- the next batch rechecks")
+            _finish(db, user, [key], "INTERRUPTED", summary)
+            db.repair_finished(run_id, summary)
+            progress(f"repair: {user} recheck deferred: a deploy is waiting; the next batch rechecks")
+            return None
         # Untouched services keep their original database timestamps. This
         # avoids another mailbox read for a Tasks/Drive-only correction.
         combined = copy.deepcopy(per)

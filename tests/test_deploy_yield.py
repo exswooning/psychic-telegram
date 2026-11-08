@@ -99,3 +99,19 @@ def test_a_batch_holds_more_users_than_workers_and_tells_the_job_to_yield(db, se
     [(argv, aid, name, env)] = _dispatch(db, settings, monkeypatch, tmp_path, flag=False)
     assert argv.count("--user") == 12 and "--scope-to-findings" in argv
     assert env["VERIFY_YIELD_TO_DEPLOY"] == "1"
+
+
+def test_a_recheck_skipped_for_a_waiting_deploy_is_deferred_not_an_error(db, settings, monkeypatch):
+    """ward15@ (8 Nov 2026): the repair ran, its recheck took no user because a deploy was waiting, and the
+    missing user became a KeyError recorded as ERROR. It is owed work: INTERRUPTED, claimable again."""
+    R.enable(db)
+    monkeypatch.setattr(R, "scoped_repair", lambda *a: {"gmail_labels": {"candidates": 1}})
+    monkeypatch.setattr(V, "run", lambda *a, **k: {"users": {}, "evidence": []})       # the recheck yielded
+    r = V.Verifier._blank()
+    r.update(checked=1, identical=0, scopeVersion=2, coverageComplete=True,
+             differences=[{"source": "s", "target": "t", "diffs": ["labels added on the target: INBOX"]}])
+    assert R.finished_user(None, db, settings, "u@src", {"gmail": r}, None, lambda f: f, lambda m: None) is None
+    state = db.conn.execute("SELECT state FROM verification_repairs WHERE source_user='u@src'").fetchone()[0]
+    assert state == "INTERRUPTED"
+    key = R._key(db, "u@src", {"gmail": r})
+    assert R._claim(db, "u@src", key) is True                  # the next batch can take it again
