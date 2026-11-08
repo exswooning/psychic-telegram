@@ -618,7 +618,7 @@ describe('MigrationDetail: what a split run says about itself', () => {
     show(detail({ progress: { users: 201, done: 201, running: 0, failed: 0, pending: 0, items: 12000,
                               itemsFailed: 0, itemsSkipped: 3, itemsDeferred: 349560 } }))
     const alert = await screen.findByTestId('awaiting-dms')
-    expect(alert).toHaveTextContent('349,560 mail message(s) are waiting')
+    expect(alert).toHaveTextContent('349,560 email(s) are waiting')
     expect(alert).toHaveTextContent('not on the target yet')
     expect(alert).toHaveTextContent('after this run has finished')
     expect(screen.getByTestId('to-services')).toBeInTheDocument()

@@ -116,7 +116,7 @@ class TestOwedIsNotDeclined:
         self._ledger(db)
         facts = {"kind": "migration", "ledger": RR._ledger(db.conn), "run": {}}
         steps = RR.next_steps(facts, B.evaluate(facts))
-        assert "97 mail message(s)" in steps[0] and "NOT on the target yet" in steps[0]
+        assert "97 email(s)" in steps[0] and "NOT on the target yet" in steps[0]
         assert "after this run, never before" in steps[0]
 
     def test_a_run_with_nothing_deferred_says_nothing_about_the_dms(self, db):

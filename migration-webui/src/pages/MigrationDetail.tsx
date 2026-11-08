@@ -355,7 +355,7 @@ export const MigrationDetail: React.FC = () => {
                         </Typography>} />
                       <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
                         For mail and events that went in before the user&apos;s Drive did. A
-                        message still naming a source file is put back with the link
+                        email still naming a source file is put back with the link
                         repointed (the old copy goes to the trash); an event is edited in place, its links and any calendar it lists as a guest.
                       </Typography>
                       <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
@@ -430,7 +430,7 @@ export const MigrationDetail: React.FC = () => {
                              onClick={() => navigate('/services')}>
                        Other services
                      </Button>}>
-              <strong>{(p?.itemsDeferred ?? 0).toLocaleString()} mail message(s) are waiting
+              <strong>{(p?.itemsDeferred ?? 0).toLocaleString()} email(s) are waiting
               for Google&apos;s Data Migration Service</strong> and are not on the target yet.
               Start it <em>after</em> this run has finished — before, and it moves
               link-bearing mail without rewriting its links. A tally counts this mail as
@@ -1003,15 +1003,15 @@ export const MigrationDetail: React.FC = () => {
                             onChange={(e) => setLinkScan(e.target.value as MailLinkScan)}>
                   <FormControlLabel value="exhaustive" control={<Radio size="small" />} data-testid="link-scan-exhaustive"
                     label={<Typography variant="body2"><strong>Exhaustive link scan (recommended)</strong> — read
-                      every message before delivery, at up to 30 reads a second. Measured on one 758-message
+                      every email before delivery, at up to 30 reads a second. Measured on one 758-email
                       mailbox: 33 s at 25 a second, against 257 s at the old 3 a second. Nothing depends on
                       Gmail&apos;s index.</Typography>} />
                   <FormControlLabel value="search" control={<Radio size="small" />} data-testid="link-scan-search"
                     label={<Typography variant="body2"><strong>Search-first</strong> — Gmail&apos;s own search
-                      names the mail that mentions Drive; only those messages are read. <em>Not safe by
+                      names the mail that mentions Drive; only those emails are read. <em>Not safe by
                       default:</em> Gmail does not index link text. On that mailbox the search found 0 of 9
-                      messages known to carry a Drive link (the best sender query, 5 of 9) and missed 3 of 4
-                      blocking messages. A link it misses goes to the DMS unrewritten.</Typography>} />
+                      emails known to carry a Drive link (the best sender query, 5 of 9) and missed 3 of 4
+                      blocking emails. A link it misses goes to the DMS unrewritten.</Typography>} />
                 </RadioGroup>
               )}
               {mailBy !== 'engine' && (

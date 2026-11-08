@@ -156,7 +156,7 @@ def reconcile_dms(auth, db, settings, progress=print, users=None):
         "verified": 0,
         "blocked": 0,
         "errors": [],
-        "scope": "fresh message content and labels; no tenant writes",
+        "scope": "fresh email content and labels; no tenant writes",
     }
     for row in users:
         source, target = row["source_email"], row["target_email"]

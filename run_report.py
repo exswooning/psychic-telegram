@@ -503,7 +503,7 @@ def next_steps(facts: dict, bench: dict) -> list[str]:
     if deferred:
         # First, because until it is done the migration is not: this mail is not on
         # the target and nothing in the ledger says otherwise.
-        steps.append(f"{deferred:,} mail message(s) were deliberately left for Google's Data Migration "
+        steps.append(f"{deferred:,} email(s) were deliberately left for Google's Data Migration "
                      "Service and are NOT on the target yet. Run it now (Nodes > Deploy > Start Google DMS "
                      "mail import) -- after this run, never before, or it moves link-bearing mail "
                      "without rewriting its links. Then run the tally: it counts them as still owed, "

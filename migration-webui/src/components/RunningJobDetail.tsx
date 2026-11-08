@@ -93,7 +93,7 @@ export const RunningJobDetail: React.FC<{
   const phase = movement?.stage
   const phaseProgress = phase ? `Pass ${phase.pass} of ${phase.of}` : 'Counting work'
   const phaseHint = phase?.services.includes('gmail')
-    ? `${movement?.mail.messagesCopied.toLocaleString()} messages copied; count completion is not 1:1 verification`
+    ? `${movement?.mail.messagesCopied.toLocaleString()} emails copied; count completion is not 1:1 verification`
     : phase?.services.includes('drive') && movement?.driveBaseline
       ? `${movement.driveBaseline.done.toLocaleString()} of ${movement.driveBaseline.total.toLocaleString()} saved baseline IDs mapped; checks may still be running`
       : 'Per-service progress; an overall percentage is not available'
@@ -401,7 +401,7 @@ const HowItMoves: React.FC<{ mv: Movement }> = ({ mv }) => {
         </Box>
         <Box sx={{ flex: 1, minWidth: 0 }} data-testid="how-mail">
           <Typography variant="body2" sx={{ fontWeight: 600 }}>
-            Mail · {of(mv.mail.messagesCopied, mv.mail.messagesOnSource)} messages
+            Mail · {of(mv.mail.messagesCopied, mv.mail.messagesOnSource)} emails
           </Typography>
           <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>{mv.mail.how}</Typography>
         </Box>

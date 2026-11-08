@@ -284,7 +284,7 @@ def repair_verified_missing_mail(auth, db, settings, report: dict, apply: bool =
                         out["mapped"] += int(mapped)
             failed = gm.stats.get("failed", 0)
             if failed:
-                out["errors"].append(f"{user}: {failed} messages could not be copied; inspect item audit records")
+                out["errors"].append(f"{user}: {failed} emails could not be copied; inspect item audit records")
         except Exception as exc:
             out["errors"].append(f"{user}: {str(exc)[:300]}")
     return out
@@ -1551,7 +1551,7 @@ def summarise(result: dict) -> str:
         parts.append(f"{contacts['remaining']:,} rejected contact(s) still need attention")
     labels = result.get("verified_gmail_labels") or {}
     if labels.get("changed"):
-        parts.append(f"Gmail label state aligned on {labels['changed']:,} verified message(s) "
+        parts.append(f"Gmail label state aligned on {labels['changed']:,} verified email(s) "
                      f"({labels.get('labelsAdded', 0):,} added, {labels.get('labelsRemoved', 0):,} removed)")
     for e in labels.get("errors", []):
         parts.append(f"Gmail label repair needs attention: {e}")

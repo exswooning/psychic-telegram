@@ -6464,9 +6464,9 @@ def _movement(conn, account_id, run_users=(), qs="") -> dict:
         "server_side": f"copied by Google straight into {tgt} -- no bytes pass through this server",
         "move": f"moved out of {src} into {tgt} -- one file, not a copy",
     }.get(mode, mode)
-    mail_how = (f"messages carrying a Drive link inserted into {tgt} by this tool, links repointed; "
+    mail_how = (f"emails carrying a Drive link inserted into {tgt} by this tool, links repointed; "
                 "the rest by Google's Data Migration Service after the run") if split else (
-                f"each message read from {src} and inserted into {tgt} by this tool, "
+                f"each email read from {src} and inserted into {tgt} by this tool, "
                 "with its labels, read state, date and thread")
     where = (f" AND source_user IN ({qs})" if run_users else "")
     args = tuple(run_users)
@@ -6772,7 +6772,7 @@ def _repair_payload(d, account_id: int, since: str | None = None) -> dict:
             ("acl_quota", "share grants refused for rate limits",
              "checked against the target"),
             ("gmail_invalid_label",
-             "messages rejected — label pointed at a deleted mailbox",
+             "emails rejected — label pointed at a deleted mailbox",
              "retried on the next migration"),
             ("drive_scope_403",
              "files refused — the token was briefly short a scope",

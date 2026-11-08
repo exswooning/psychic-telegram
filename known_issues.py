@@ -18,7 +18,7 @@ import json
 # id, service, matches(text) on the finding's own words, title, cause, fix, auto
 ISSUES = [
     ("gmail.labels_added", "gmail", lambda t: "labels added on the target" in t,
-     "Gmail added a label the source message does not have",
+     "Gmail added a label the source email does not have",
      "Inserted as SENT only, Gmail on the new tenant filed it as received mail (INBOX, "
      "or a category tab): the sender address is the OLD domain's, not the account's own.",
      "Remove the extra labels on the target copy (repair.repair_verified_gmail_labels); "
@@ -28,17 +28,17 @@ ISSUES = [
      "Label mapping or a later change on the target.",
      "Add the missing labels / read state on the target copy (same repair).", True),
     ("gmail.no_message_id", "gmail", lambda t: "Missing Message-ID" in t,
-     "Old message with no Message-ID header",
+     "Old email with no Message-ID header",
      "Nothing to look the copy up by, so it was not inserted blind (duplicate risk).",
-     "Match by the whole MIME tree's hash against every unclaimed target message; one exact "
+     "Match by the whole MIME tree's hash against every unclaimed target email; one exact "
      "match is adopted, none is inserted once with a durable attempt record "
      "(mail_identity.insert_without_message_id).", True),
     ("gmail.unmapped_source", "gmail", lambda t: "UNMAPPED_SOURCE" in t or "has no migration mapping" in t,
-     "Source message with no copy",
+     "Source email with no copy",
      "Arrived after the run, or the run stopped before it.",
      "Copied by the missing-mail repair (repair.repair_verified_missing_mail) or the delta.", True),
     ("gmail.body_link_copy", "gmail", lambda t: "body differs" in t,
-     "Message body differs",
+     "Email body differs",
      "Usually Bitport's own Drive-link rewrite pointing at one of several copies of a file "
      "shared with many users; otherwise a real content difference.",
      "Checker accepts any genuine copy (verify_sample.copy_lookup, 2026-10-23); what remains "
@@ -52,7 +52,7 @@ ISSUES = [
      "A direct message became a group chat",
      "Chat's import mode can only create spaces and group chats; a DIRECT_MESSAGE cannot be "
      "imported, so the conversation lands as a two-person group chat (measured 2026-10-31).",
-     "None possible through the Chat API: messages, order and times are intact. Listed in the final report.", False),
+     "None possible through the Chat API: chat messages, order and times are intact. Listed in the final report.", False),
     ("chat.members", "chat", lambda t: "Chat participants differ" in t,
      "A Chat participant did not come across",
      "A bot or app (e.g. Drive notifications) cannot be added to an imported space; any other "
@@ -60,7 +60,7 @@ ISSUES = [
      "None possible for a bot. A missing person is added by the missing-member repair when one exists; listed otherwise.", False),
     ("chat.sender", "chat", lambda t: "Original Chat sender identity was not reproduced" in t,
      "A Chat message's sender is the migrating user",
-     "Same cause as an attributed message: Chat lets nobody post as a bot or an account that is "
+     "Same cause as an attributed chat message: Chat lets nobody post as a bot or an account that is "
      "not on the target, so the thread check sees the user as sender.",
      "None possible through the Chat API; the text carries \"[originally from ...]\".", False),
     ("chat.text", "chat", lambda t: "Chat text differs" in t,
@@ -187,15 +187,15 @@ ISSUES = [
     ("gmail.link_scan_fixed", "gmail", lambda t: "Pre-delivery link scan: HTTP 404" in t
                                                 or "Multipart body has no readable parts" in t,
      "Link mail held back by a link check that has since been fixed",
-     "Split mail scans each message for Drive links before delivery. Until 2026-10-31 a link to "
-     "a file nobody can read (404) blocked the message, and until 2026-11-01 so did a bounce "
+     "Split mail scans each email for Drive links before delivery. Until 2026-10-31 a link to "
+     "a file nobody can read (404) blocked the email, and until 2026-11-01 so did a bounce "
      "report with no text part. Both now deliver (an unreadable link is left as found; the "
-     "bounce is read raw), but the messages already held stayed FAILED_SPLIT.",
+     "bounce is read raw), but the emails already held stayed FAILED_SPLIT.",
      "The missing-mail repair delivers them through the engine with links rewritten "
      "(repair.repair_verified_missing_mail now takes these two errors).", True),
     ("gmail.link_owner_not_migrated", "gmail", lambda t: "Unresolved Drive link mapping" in t,
      "Link mail waiting for the linked file's owner",
-     "The message links to a file owned by someone on the source who is not migrated yet, so "
+     "The email links to a file owned by someone on the source who is not migrated yet, so "
      "there is no target copy to point the link at. Delivering it now would leave a link into "
      "the source tenant, which breaks when the source is shut down.",
      "Delivered by the next run once that owner's Drive is migrated (ordered passes: Drive for "
@@ -205,9 +205,9 @@ ISSUES = [
      "An S/MIME or PGP body cannot be read, so whether it carries a Drive link is unknown.",
      "None automatic: a person decides whether to send it through Google's import as it is.", False),
     ("gmail.duplicate", "gmail", lambda t: '"messageId"' in t and '"target"' in t and '"source"' not in t,
-     "A message is on the target twice",
+     "An email is on the target twice",
      "In split mode the engine writes the link mail with its links rewritten, and Google's "
-     "import, run after, can bring the same message again with the original links (19 on "
+     "import, run after, can bring the same email again with the original links (19 on "
      "finance@s., 2026-11-01). The import's copy still points at the source.",
      "Kept on purpose: nothing is trashed. Each copy stays where it is and is listed, so the "
      "operator can decide which to remove.", False),

@@ -1421,9 +1421,9 @@ class Verifier:
         cost = read_cost(fmt)
         if not hasattr(svc, "new_batch_http_request"):
             for index, message_id in enumerate(message_ids):
-                operation = f"Gmail {side} {fmt} message reads"
+                operation = f"Gmail {side} {fmt} email reads"
                 self._report_progress(operation, progress_offset + index, progress_total,
-                                      f"message {message_id}")
+                                      f"email {message_id}")
                 try:
                     values[index] = self._gmail_single(svc, message_id, fmt, budget, cost)
                 except Exception as exc:  # noqa: BLE001 - retain per-message failure
@@ -1449,8 +1449,8 @@ class Verifier:
             chunk = message_ids[offset:offset + batch_size]
             batch_number = offset // batch_size + 1
             batch_total = (len(message_ids) + batch_size - 1) // batch_size
-            operation = f"Gmail {side} {fmt} message reads"
-            item = (f"batch {batch_number}/{batch_total}; messages "
+            operation = f"Gmail {side} {fmt} email reads"
+            item = (f"batch {batch_number}/{batch_total}; emails "
                     f"{progress_offset + offset + 1}-{progress_offset + offset + len(chunk)} "
                     f"of {progress_total}")
 
@@ -1640,7 +1640,7 @@ class Verifier:
         receipts = self._receipts()
         receipted = [p for p in pending if receipts.get(p[0]) == p[1]]
         pending = [p for p in pending if receipts.get(p[0]) != p[1]]
-        self._report_progress("Gmail check receipted messages", 0, len(receipted))
+        self._report_progress("Gmail check receipted emails", 0, len(receipted))
         for offset, chunk, (smeta, serr), (tmeta, terr) in self._gmail_raw_chunks(receipted, fmt="metadata"):
             for index, (sid, tid, _) in enumerate(chunk):
                 res["checked"] += 1
@@ -1659,11 +1659,11 @@ class Verifier:
                     res["differences"].append({"item": msgid or sid, "source": sid, "target": tid, "diffs": diffs})
                 else:
                     res["identical"] += 1
-            self._report_progress("Gmail check receipted messages", min(offset + len(chunk), len(receipted)),
+            self._report_progress("Gmail check receipted emails", min(offset + len(chunk), len(receipted)),
                                   len(receipted))
         res["receipted"] = len(receipted)
         total_messages = len(pending)
-        self._report_progress("Gmail compare mapped messages", 0, total_messages)
+        self._report_progress("Gmail compare mapped emails", 0, total_messages)
         for offset, chunk, source_result, target_result in self._gmail_raw_chunks(pending):
             source_raw, source_errors = source_result
             target_raw, target_errors = target_result
@@ -1698,11 +1698,11 @@ class Verifier:
                     cache.put(sid, tid, {"messageId":msgid, "sourceSha256":sha256(sraw),
                         "targetSha256":sha256(traw), "comparison":verdict})
             completed = min(offset + len(chunk), total_messages)
-            self._report_progress("Gmail compare mapped messages", completed, total_messages)
+            self._report_progress("Gmail compare mapped emails", completed, total_messages)
         for verdict, n in said.items():
-            res["notes"].append(f"{n} message(s) {verdict}: " + (
+            res["notes"].append(f"{n} email(s) {verdict}: " + (
                 "Drive links repointed at the copies on the target, as intended" if verdict == "identical after rewrite"
-                else "the same message, apart from headers Google adds when it inserts one"))
+                else "the same email, apart from headers Google adds when it inserts one"))
         try:
             mapped_ids |= self._draft_message_ids(tgt)
         except Exception as exc:      # noqa: BLE001 - only the stray check suffers; the drafts are still compared
@@ -1716,7 +1716,7 @@ class Verifier:
             for m in self._list_all(tgt):
                 scanned += 1
                 self._report_progress("Gmail target inventory", scanned,
-                                      item=f"message {m.get('id', '?')}")
+                                      item=f"email {m.get('id', '?')}")
                 if m["id"] in mapped_ids:
                     continue
                 hdr = self._x(lambda i=m["id"]: tgt.users().messages().get(
@@ -1731,10 +1731,10 @@ class Verifier:
                     continue
                 (res["duplicates"] if mid in mapped_msgids else res["extras"]).append({"target": m["id"], "messageId": mid})
             if trashed:
-                res["notes"].append(f"{trashed} message(s) in the target's trash -- what an earlier run left before a "
+                res["notes"].append(f"{trashed} email(s) in the target's trash -- what an earlier run left before a "
                                     f"reset or a delete; they are not counted as copies or strays")
             if welcome:
-                res["notes"].append(f"{welcome} message(s) from Google itself (new-mailbox welcome mail) sit on the "
+                res["notes"].append(f"{welcome} email(s) from Google itself (new-mailbox welcome mail) sit on the "
                                     f"target; they were never on the source and are not counted as strays")
         except Exception as exc:      # noqa: BLE001
             res["errors"].append(f"could not list the target's mailbox: {error_detail(exc)}")
@@ -1750,7 +1750,7 @@ class Verifier:
                 "gmail.sourceReferences", "Access to original unavailable Drive references", "NOT_VERIFIED",
                 checked=len(reference_gaps), note="Original unavailable URLs were preserved; "
                 "restoring their access requires the original file owner. Message equality does not establish link access."))
-            res["notes"].append(f"{len(reference_gaps)} source message(s) retain original unavailable Drive references; "
+            res["notes"].append(f"{len(reference_gaps)} source email(s) retain original unavailable Drive references; "
                                 "their content is preserved, but referenced-file access remains unverified")
         try:
             cache.finish()
@@ -1810,9 +1810,9 @@ class Verifier:
                     res["notCopied"].append({"type": "message", "id": sid,
                         "status": "UNMAPPED_SOURCE", "error": "Live source message has no migration mapping; destination coverage is not established"})
                     existing.add(("message", sid))
-            res["notes"].append(f"Source coverage: inventoried {scanned} live message IDs, including spam and trash; checked unmapped messages and drafts")
+            res["notes"].append(f"Source coverage: inventoried {scanned} live email IDs, including spam and trash; checked unmapped emails and drafts")
             if owed:
-                res["notes"].append(f"{owed} message(s) without a Drive link are owed to Google's DMS, not missing")
+                res["notes"].append(f"{owed} email(s) without a Drive link are owed to Google's DMS, not missing")
             if deliberately_skipped:
                 res["notes"].append(f"{len(deliberately_skipped)} legacy chat message(s) are outside Gmail migration coverage")
             # Every live source message was listed, sampled check or not: an unmapped message this

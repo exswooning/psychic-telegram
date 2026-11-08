@@ -6,7 +6,7 @@ const kb = (n: number) => (n >= 1 << 20 ? `${(n / (1 << 20)).toFixed(1)} MB` : `
 
 function line(r: MailLinkScanReport): string {
   const parts = [r.mode === 'search' ? 'search-first' : 'exhaustive', r.state.toLowerCase()]
-  if (typeof r.messages === 'number') parts.push(`${r.messages.toLocaleString()} messages`)
+  if (typeof r.messages === 'number') parts.push(`${r.messages.toLocaleString()} emails`)
   if (r.mode === 'search' && typeof r.candidates === 'number') {
     parts.push(`${r.examined.toLocaleString()} of ${r.candidates.toLocaleString()} candidates read`)
     parts.push(`${r.notRead.toLocaleString()} not read`)
@@ -19,7 +19,7 @@ function line(r: MailLinkScanReport): string {
     parts.push(`${r.unreachableLinks.toLocaleString()} links to source files that answer 404 (left as they are, not blocking)`)
   }
   if (typeof r.recallMissed === 'number') {
-    parts.push(`search missed ${r.recallMissed} of ${r.knownLinkMessages ?? 0} messages already known to carry a link`)
+    parts.push(`search missed ${r.recallMissed} of ${r.knownLinkMessages ?? 0} emails already known to carry a link`)
   }
   if (typeof r.scanSeconds === 'number') parts.push(`${r.scanSeconds}s`)
   if (r.scanQps) parts.push(`${r.scanWorkers ?? '?'} workers at up to ${r.scanQps}/s`)
@@ -36,8 +36,8 @@ export const MailLinkScans: React.FC<{ scans?: MailLinkScanReport[] }> = ({ scan
       Mail link scan (before any mail is copied).
       {scans.map((r) => <Typography variant="body2" key={r.source}>{r.source}: {line(r)}</Typography>)}
       {search && <Typography variant="caption" sx={{ display: 'block', mt: 0.5 }}>
-        Search-first reads only the messages Gmail&apos;s search names as carrying a Drive link. Gmail
-        does not index link text, so a link it misses goes to the DMS unrewritten. An exhaustive scan reads every message.
+        Search-first reads only the emails Gmail&apos;s search names as carrying a Drive link. Gmail
+        does not index link text, so a link it misses goes to the DMS unrewritten. An exhaustive scan reads every email.
       </Typography>}
     </Alert>
   )

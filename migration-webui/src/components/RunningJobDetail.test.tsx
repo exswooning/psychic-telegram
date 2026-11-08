@@ -41,7 +41,7 @@ describe('migration phase accounting', () => {
         mail: { method: 'split', how: 'Link copies then DMS', messagesCopied: 1234, messagesOnSource: 0 } } })
     render(<RunningJobDetail job={job({ kind: 'migrate', pct: null, accountId: 3 })} onClose={() => {}} />)
     await waitFor(() => expect(screen.getByText('Pass 2 of 3')).toBeInTheDocument())
-    expect(screen.getByText(/1,234 messages copied; count completion is not 1:1/)).toBeInTheDocument()
+    expect(screen.getByText(/1,234 emails copied; count completion is not 1:1/)).toBeInTheDocument()
     expect(screen.getByText('Not yet available')).toBeInTheDocument()
     expect(screen.getByText(/DMS reports import progress after/)).toBeInTheDocument()
     expect(screen.queryByText('100%')).not.toBeInTheDocument()
@@ -197,7 +197,7 @@ describe('a running migrate job\'s own metrics', () => {
     expect(screen.getByTestId('how-drive')).toHaveTextContent('31,000 of 31,419 files')
     expect(screen.getByTestId('how-drive')).toHaveTextContent('the source is only read')
     expect(screen.getByTestId('how-drive')).toHaveTextContent('39 Google file(s) rebuilt')
-    expect(screen.getByTestId('how-mail')).toHaveTextContent('114,042 of 207,797 messages')
+    expect(screen.getByTestId('how-mail')).toHaveTextContent('114,042 of 207,797 emails')
   })
 
   it('shows no Data stat when discovery has never run, rather than a fabricated total', async () => {

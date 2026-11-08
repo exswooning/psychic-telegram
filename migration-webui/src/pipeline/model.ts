@@ -192,7 +192,7 @@ export const NODES: PNode[] = [
     'Task lists and their tasks.',
     ['tasks_engine.py']),
   N('chat', 'engines', 1, 'engine', 'Chat', 'chat_engine.py', 'Any machine',
-    'Spaces and messages, replayed as their original senders. Runs last because it is the only pass that can leave a half-built artefact. Needs a Chat app configured in the Cloud console, which has no API.',
+    'Spaces and chat messages, replayed as their original senders. Runs last because it is the only pass that can leave a half-built artefact. Needs a Chat app configured in the Cloud console, which has no API.',
     ['chat_engine.py'], { stage: 'chat', live: true }),
   N('groups', 'engines', 1, 'engine', 'Groups', 'groups_engine.py', 'Any machine',
     'The groups themselves and who is in them.',
@@ -346,7 +346,7 @@ export const EDGES: PEdge[] = [
   // Writes
   ...WRITERS.map((id) => E(id, 'tgt', 'Writes', 'items')),
   E('xfer', 'staging', 'Copies', 'items'), E('staging', 'tgt', 'Moved into place', 'items'),
-  E('drive', 'links', 'Drive mappings', 'map'), E('gmail', 'links', 'Messages', 'items'),
+  E('drive', 'links', 'Drive mappings', 'map'), E('gmail', 'links', 'Emails', 'items'),
   E('links', 'tgt', 'Rewritten mail', 'items'), E('dms', 'tgt', 'Mail', 'items'),
   // Ledger
   ...LEDGERED.map((id) => E(id, 'audit_log', 'Rows', 'items')),

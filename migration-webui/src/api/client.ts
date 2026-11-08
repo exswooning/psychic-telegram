@@ -821,7 +821,7 @@ export interface SeedOptions {
   /** Files owned OUTSIDE the source org (by the target admin), shared into each
    *  user -- runs seed_external_shares.py instead of the corpus. */
   externalOwnedPerUser?: string
-  /** Messages per user. Blank scales with the chosen size. */
+  /** Emails per user. Blank scales with the chosen size. */
   mail?: string
   /** Events per user. Blank scales with the chosen size. */
   events?: string

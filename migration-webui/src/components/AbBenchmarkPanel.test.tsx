@@ -114,7 +114,7 @@ describe('A/B benchmark page', () => {
     render(<AbBenchmarkPanel />)
     await waitFor(() => expect(screen.getByTestId('ab-best')).toHaveTextContent('1.98 per 1,000 items'))
     expect(screen.getByTestId('ab-best')).toHaveTextContent('8.9s per 100 items')
-    expect(screen.getByTestId('ab-corpus')).toHaveTextContent('b@s.example · 1,009 items (1,000 files, 9 messages)')
+    expect(screen.getByTestId('ab-corpus')).toHaveTextContent('b@s.example · 1,009 items (1,000 files, 9 emails)')
     expect(screen.getByText(/timed alone · 8.9s per 100 items/)).toBeTruthy()
   })
 

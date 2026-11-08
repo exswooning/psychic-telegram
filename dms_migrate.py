@@ -378,7 +378,7 @@ def _record_delivered() -> None:
         finally:
             d.close()
         if n:
-            log(f"the import is complete: {n:,} message(s) recorded as delivered by the DMS")
+            log(f"the import is complete: {n:,} email(s) recorded as delivered by the DMS")
     except Exception as exc:      # noqa: BLE001
         log(f"could not record the DMS delivery in the ledger: {exc}")
 
@@ -1034,7 +1034,7 @@ def _main(argv: list[str] | None = None) -> int:
                          "(only for new, empty target accounts -- otherwise a delta import continues)")
     ap.add_argument("--no-tally", action="store_true",
                     help="with --until-done: stop when Google reports the import complete, after the "
-                         "delivery reconcile (the ledger must know which messages the import "
+                         "delivery reconcile (the ledger must know which emails the import "
                          "moved) but without the whole-tenant tally")
     ap.add_argument("--status", action="store_true",
                     help="read the import's live counters and cache them, "

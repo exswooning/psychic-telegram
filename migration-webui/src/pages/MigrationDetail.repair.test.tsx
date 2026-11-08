@@ -50,7 +50,7 @@ const survey = (over: Record<string, unknown> = {}) => ({
     },
     {
       key: 'gmail_invalid_label', count: 32967,
-      label: 'messages rejected — label pointed at a deleted mailbox',
+      label: 'emails rejected — label pointed at a deleted mailbox',
       fix: 'retried on the next migration',
     },
   ],

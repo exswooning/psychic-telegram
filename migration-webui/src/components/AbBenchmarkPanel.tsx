@@ -224,7 +224,7 @@ const AbBenchmarkPanel: React.FC = () => {
                           {a.corpus.user} · {a.corpus.items.toLocaleString()} items
                           ({a.corpus.files.toLocaleString()} files
                           {a.corpus.messages != null
-                            ? `, ${a.corpus.messages.toLocaleString()} messages`
+                            ? `, ${a.corpus.messages.toLocaleString()} emails`
                             : ""}
                           )
                         </Typography>

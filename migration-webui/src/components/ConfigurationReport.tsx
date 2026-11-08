@@ -8,7 +8,7 @@ const labels: Record<string, string> = {
   whoCanJoin: 'Who can join', whoCanViewMembership: 'Who can see members', whoCanViewGroup: 'Who can read conversations',
   allowExternalMembers: 'Allow external members', whoCanPostMessage: 'Who can post', allowWebPosting: 'Allow posting on the web',
   primaryLanguage: 'Primary language', isArchived: 'Conversation history', archiveOnly: 'Archive only',
-  messageModerationLevel: 'Message moderation', spamModerationLevel: 'Spam moderation', replyTo: 'Reply destination',
+  messageModerationLevel: 'Email moderation', spamModerationLevel: 'Spam moderation', replyTo: 'Reply destination',
   customReplyTo: 'Custom reply address', includeCustomFooter: 'Include custom footer', customFooterText: 'Custom footer',
   sendMessageDenyNotification: 'Notify rejected senders', defaultMessageDenyNotificationText: 'Rejection notice',
   membersCanPostAsTheGroup: 'Members can post as the group', includeInGlobalAddressList: 'Show in global address list',

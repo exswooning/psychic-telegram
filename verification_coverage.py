@@ -710,7 +710,7 @@ def finish(result, service):
                 "gmail.settings",
                 "Filters, delegates, forwarding and mailbox settings",
                 "NOT_VERIFIED",
-                note="Message equality does not establish mailbox-setting equality.",
+                note="Email equality does not establish mailbox-setting equality.",
                 required=False,
             )
         )
