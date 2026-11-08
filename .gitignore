@@ -74,3 +74,6 @@ env.sh
 monitor/state.json
 monitor/state.json.tmp
 monitor/INBOX.md
+
+# DMS counters scraped from the console (run state, never source): per account under logs/dms/, and this legacy file
+dms_metrics.json
