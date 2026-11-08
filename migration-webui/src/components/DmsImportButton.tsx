@@ -22,8 +22,8 @@ import { useAccountPair } from '@/hooks/useAccountPair'
    picker -- gorkhatweed (account 2) while the page showed account 3 (8 Nov 2026). Every other action on the
    page already passed it. */
 /* action 'dms_reconcile': record which owed emails the DMS delivered, for named users only (no fresh import). */
-const DmsImportButton: React.FC<{ spec: ActionSpec; accountId?: number | string; action?: 'dms_import' | 'dms_reconcile' }> = ({ spec, accountId, action = 'dms_import' }) => {
-  const record = action === 'dms_reconcile'
+const DmsImportButton: React.FC<{ spec: ActionSpec; accountId?: number | string; action?: 'dms_import' | 'dms_reconcile' | 'dms_wipe' | 'dms_wipe_dry' }> = ({ spec, accountId, action = 'dms_import' }) => {
+  const record = action !== 'dms_import'
   const [open, setOpen] = useState(false)
   const pair = useAccountPair(accountId)
   const [typed, setTyped] = useState('')

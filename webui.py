@@ -386,6 +386,23 @@ ACTIONS: dict[str, dict] = {
         "parallel": True,
         "confirm": "RECORD",
     },
+    "dms_wipe_dry": {
+        "label": "Wipe DMS mail: dry run",
+        "blurb": "Counts, for the users you name, the emails on the TARGET that the ledger does not map "
+                 "(what the DMS imported). Deletes nothing.",
+        "argv": [PY, "wipe_dms_mail.py"],
+        "parallel": True,
+        "confirm": "COUNT",
+    },
+    "dms_wipe": {
+        "label": "Wipe DMS mail",
+        "blurb": "PERMANENTLY deletes, for the users you name, the emails on the TARGET that the ledger does "
+                 "not map (what the DMS imported); the engine's own copies stay. Sandbox targets only.",
+        "argv": [PY, "wipe_dms_mail.py", "--apply"],
+        "parallel": True,
+        "destructive": True,
+        "confirm": "WIPE",
+    },
     "dms_metrics_refresh": {
         "label": "Refresh DMS metrics",
         "blurb": "Read the live import counters from the Admin console and "
@@ -6669,8 +6686,8 @@ class Handler(BaseHTTPRequestHandler):
             env["CONFIGURATION_REVIEW_HASH"] = reviewed
 
         argv = _action_argv(name)
-        if name in ("dms_import", "dms_reconcile"):
-            if name == "dms_reconcile" and not body.get("users"):
+        if name in ("dms_import", "dms_reconcile", "dms_wipe", "dms_wipe_dry"):
+            if name != "dms_import" and not body.get("users"):
                 self._json({"ok": False, "error": "name the users to record"}, 400)
                 return
             argv, err = _dms_pilot_argv(account_id, body, argv)
@@ -6683,7 +6700,7 @@ class Handler(BaseHTTPRequestHandler):
             # account's primary migration Job (one process each). /api/job
             # keeps showing the migration; this job has its own status feed.
             # Recording deliveries shares the import's slot: one feed (/api/dms_status), never both at once.
-            job = get_parallel_job(account_id, "dms_import" if name == "dms_reconcile" else name)
+            job = get_parallel_job(account_id, "dms_import" if name in ("dms_reconcile", "dms_wipe", "dms_wipe_dry") else name)
             ok, msg = job.start(spec["label"], argv, env=env)
             self._json({"ok": ok, "error": None if ok else msg})
             return

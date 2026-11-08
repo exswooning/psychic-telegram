@@ -454,3 +454,63 @@ def test_a_pilot_import_ends_by_recording_deliveries_not_counting(monkeypatch):
     calls.clear()
     assert dms_migrate.wait_then_tally(1, 10, False, tally=False, users=None) == 0   # whole account: counts, as before
     assert calls == [("count",)]
+
+
+# -- wipe_dms_mail: only unmapped emails, permanent, sandbox target only (8 Nov 2026) -------------------------
+class _Gmail:
+    def __init__(self, ids):
+        self.ids, self.deleted = list(ids), []
+
+    def users(self):
+        return self
+
+    def messages(self):
+        return self
+
+    def list(self, **k):
+        return self
+
+    def batchDelete(self, userId, body):
+        self.deleted += body["ids"]
+        self.ids = [i for i in self.ids if i not in body["ids"]]
+        return self
+
+    def execute(self):
+        return {"messages": [{"id": i} for i in self.ids]}
+
+
+def _wipe(db, settings, ids, apply, say, who=("ward7@s.example",)):
+    import wipe_dms_mail
+    g = _Gmail(ids)
+    return wipe_dms_mail.wipe(settings, db, list(who), apply=apply, client=lambda *_: g, say=say), g
+
+
+def test_wipe_keeps_the_engines_copies_and_deletes_the_rest(db, settings, monkeypatch):
+    import domain_guard
+    monkeypatch.setattr(domain_guard, "refuse_reason", lambda *a, **k: "")
+    _ledger_with(db, ["ward7"])
+    db.conn.execute("INSERT INTO id_mapping(source_user, source_id, target_id, type) VALUES (?,?,?,?)",
+                    ("ward7@s.example", "s1", "keep", "message"))
+    db.conn.commit()
+    out = []
+    rc, g = _wipe(db, settings, ["keep", "a", "b"], False, out.append)
+    assert rc == 0 and g.deleted == [] and "2 emails" in out[0] and "dry run" in out[0]      # a dry run deletes nothing
+    rc, g = _wipe(db, settings, ["keep", "a", "b"], True, out.append)
+    assert rc == 0 and sorted(g.deleted) == ["a", "b"] and g.ids == ["keep"]
+
+
+def test_wipe_refuses_a_protected_target_foreign_users_and_a_missing_grant(db, settings, monkeypatch):
+    import domain_guard
+    import wipe_dms_mail
+    _ledger_with(db, ["ward7"])
+    out = []
+    monkeypatch.setattr(domain_guard, "refuse_reason", lambda *a, **k: "t.example is protected")
+    assert _wipe(db, settings, ["a"], True, out.append)[0] == 2 and "REFUSED" in out[-1]
+    monkeypatch.setattr(domain_guard, "refuse_reason", lambda *a, **k: "")
+    assert _wipe(db, settings, ["a"], True, out.append, who=("x@elsewhere.example",))[0] == 2
+    assert _wipe(db, settings, ["a"], True, out.append, who=[f"u{i}@s.example" for i in range(6)])[0] == 2
+
+    def no_grant(*_):
+        raise PermissionError("unauthorized_client")
+    assert wipe_dms_mail.wipe(settings, db, ["ward7@s.example"], apply=True, client=no_grant, say=out.append) == 2
+    assert "no fallback to Trash" in out[-1]
