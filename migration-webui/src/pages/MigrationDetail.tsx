@@ -29,6 +29,7 @@ import RunReports from '@/components/RunReports'
 import QuickVerification from '@/components/QuickVerification'
 import OneToOneSummary from '@/components/OneToOneSummary'
 import CopySafetyCard from '@/components/CopySafetyCard'
+import { itemTypeLabel } from '@/utils/itemTypeLabel'
 
 /**
  * One migration in full: what moved, what failed, and why.
@@ -721,7 +722,7 @@ export const MigrationDetail: React.FC = () => {
                 {d.items.map((it) => (
                   <Chip key={it.type} size="small" variant="outlined"
                         data-testid={`item-${it.type}`}
-                        label={`${it.type} · ${it.count.toLocaleString()}`} />
+                        label={`${itemTypeLabel(it.type)} · ${it.count.toLocaleString()}`} />
                 ))}
               </Stack>
             )}
@@ -867,7 +868,7 @@ export const MigrationDetail: React.FC = () => {
                         <TableCell sx={{ fontWeight: 700 }}>
                           {f.count.toLocaleString()}
                         </TableCell>
-                        <TableCell sx={{ fontSize: 12 }}>{f.itemType}</TableCell>
+                        <TableCell sx={{ fontSize: 12 }}>{itemTypeLabel(f.itemType)}</TableCell>
                         <TableCell sx={{ fontSize: 12, maxWidth: 520 }}>
                           {f.reason}
                         </TableCell>

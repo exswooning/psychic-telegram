@@ -33,6 +33,7 @@ import AiDiagnostics from '@/components/AiDiagnostics'
 import DwdSetup from '@/components/DwdSetup'
 import CoverageAudit from '@/components/CoverageAudit'
 import NextActions from '@/components/NextActions'
+import { itemTypeLabel } from '@/utils/itemTypeLabel'
 
 /**
  * Mission Control — one screen instead of six tabs.
@@ -401,7 +402,7 @@ const MissionControl: React.FC = () => {
                  sx={{ p: 1, borderRadius: 1, cursor: 'pointer', border: '1px solid', borderColor: 'divider',
                        '&:hover': { bgcolor: 'action.hover' } }}>
               <Stack direction="row" spacing={1} alignItems="center">
-                <Chip size="small" color="error" variant="outlined" label={f.item_type} />
+                <Chip size="small" color="error" variant="outlined" label={itemTypeLabel(f.item_type)} />
                 <Typography variant="body2" sx={{ fontWeight: 600 }}>{f.source_user.split('@')[0]}</Typography>
                 <Typography variant="caption" color="text.secondary" noWrap sx={{ flexGrow: 1 }}>
                   {f.error_message?.slice(0, 120) ?? 'no message'}

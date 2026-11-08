@@ -13,6 +13,7 @@ import {
   fetchMetrics, fetchMyMetrics, MetricsSnapshot, LimiterState,
 } from '@/api/controlPlane'
 import { bytes, latency } from '@/utils/metricsSeries'
+import { itemTypeLabel } from '@/utils/itemTypeLabel'
 
 /** Past this, the page says so rather than presenting an old run as current.
  *  A migration can legitimately be quiet for a while; three days cannot. */
@@ -350,7 +351,7 @@ export const Metrics: React.FC = () => {
                     {m.volume.map((v) => (
                       <TableRow key={`${v.itemType}-${v.status}`}
                                 data-testid={`vol-${v.itemType}-${v.status}`}>
-                        <TableCell sx={{ fontSize: 12 }}>{v.itemType}</TableCell>
+                        <TableCell sx={{ fontSize: 12 }}>{itemTypeLabel(v.itemType)}</TableCell>
                         <TableCell sx={{ fontSize: 12 }}>
                           <Chip size="small" variant="outlined"
                                 color={isFailure(v.status) ? 'error'

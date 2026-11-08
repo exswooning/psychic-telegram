@@ -22,6 +22,7 @@ import { Refresh as RefreshIcon } from '@mui/icons-material'
 import { fetchFailures, FailureRow } from '@/api/controlPlane'
 import ForensicModal from '@/components/ForensicModal'
 import { Link as RouterLink } from 'react-router-dom'
+import { itemTypeLabel } from '@/utils/itemTypeLabel'
 
 /** Rows drawn at once: a failed run can leave thousands, and drawing them all made the page heavy. */
 const PAGE = 200
@@ -116,7 +117,7 @@ const ErrorHandling: React.FC = () => {
           {byType.size > 0 ? (
             <Stack direction="row" spacing={1} sx={{ flexWrap: 'wrap', gap: 1 }}>
               {[...byType.entries()].sort((a, b) => b[1] - a[1]).map(([type, count]) => (
-                <Chip key={type} label={`${type} · ${count}`} size="small"
+                <Chip key={type} label={`${itemTypeLabel(type)} · ${count}`} size="small"
                       color="error" variant="outlined"
                       onClick={() => setFilter(type)} />
               ))}
@@ -154,7 +155,7 @@ const ErrorHandling: React.FC = () => {
               <TableBody>
                 {visible.slice(0, shown).map((f) => (
                   <TableRow key={f.id} hover sx={{ cursor: 'pointer' }}
-                            tabIndex={0} aria-label={`Open the record for ${f.item_type} of ${f.source_user}`}
+                            tabIndex={0} aria-label={`Open the record for ${itemTypeLabel(f.item_type)} of ${f.source_user}`}
                             onClick={() => setForensic({ user: f.source_user, item: f.item_id })}
                             onKeyDown={(e) => {
                               if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setForensic({ user: f.source_user, item: f.item_id }) }
@@ -167,7 +168,7 @@ const ErrorHandling: React.FC = () => {
                       <Stack direction="row" spacing={0.5} alignItems="center">
                         <Chip size="small" variant="outlined"
                               color={f.status === 'BLOCKED' ? 'warning' : 'error'}
-                              label={f.item_type} />
+                              label={itemTypeLabel(f.item_type)} />
                         {f.status === 'BLOCKED' && (
                           <Chip size="small" color="warning" variant="filled"
                                 data-testid={`blocked-${f.id}`}
