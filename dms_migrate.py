@@ -452,7 +452,12 @@ def ledger_identities(out_dir: str = os.path.join("logs", "dms")) -> str | None:
     if not rows:
         return None
     os.makedirs(out_dir, exist_ok=True)
-    path = os.path.join(out_dir, "identities-from-ledger.csv")
+    # Named by what it holds (count and a short hash): the console's own file name then says WHICH map it has,
+    # and "already uploaded" can only mean the same users. A fixed name let a 1-user import's map stand in
+    # for 45 users, and the import re-ran 758 emails and reported "complete" (account 3, 8 Nov 2026).
+    import hashlib
+    tag = hashlib.sha256("\n".join(",".join(r) for r in sorted(rows)).encode()).hexdigest()[:8]
+    path = os.path.join(out_dir, f"identities-from-ledger-{len(rows)}u-{tag}.csv")
     with open(path, "w", newline="", encoding="utf-8") as fh:
         w = csv.writer(fh)
         w.writerow(("source_email", "target_email"))
@@ -615,7 +620,15 @@ def start(source_domain: str, source_admin: str, timeout: int,
             # done); re-uploading would restart the slow job, so skip it and
             # let the wait loop below ride out any remaining processing.
             ours = os.path.basename(path).lower() in s2seg
-            if ".csv" in s2seg and (ours or not fresh):
+            if ".csv" in s2seg and not ours and not fresh:
+                # Another map is there. Reusing it re-runs ITS users and nothing else; saying so is the
+                # point. A different map needs a fresh import, which is the operator's choice.
+                result.update(ok=False, step="stale-map", detail=(
+                    "the console's import already holds a different user map than this one "
+                    f"({n} users); starting would re-run that import. Use a fresh import "
+                    "(--fresh-import) to start one with these users."))
+                return result
+            if ".csv" in s2seg and ours:
                 state = "processing" if "processing" in s2seg else "processed"
                 result["did"].append(f"import map already uploaded ({state})")
                 already = True

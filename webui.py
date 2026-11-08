@@ -5160,6 +5160,43 @@ def _account_env(account_id: int | None, base: dict | None = None) -> dict:
 DWD_ENV_FILE = os.getenv("BITPORT_DWD_ENV", "/etc/bitport/dwd.env")
 
 
+DMS_PILOT_MAX_USERS = 5
+
+
+def _dms_pilot_argv(account_id: int | None, body: dict, argv: list) -> tuple[list, str]:
+    """A DMS import for a FEW users, optionally as a fresh import: `users` (source addresses, each one of this
+    account's own) and `fresh`. A fresh import deletes the console's finished import first, so it is allowed
+    only for a short list, never for a whole tenant from a button. Without `users` the argv is unchanged."""
+    users = [str(u).strip().lower() for u in (body.get("users") or []) if str(u).strip()]
+    fresh = bool(body.get("fresh"))
+    if not users:
+        return argv, ("a fresh import needs the users it is for" if fresh else "")
+    if len(users) > DMS_PILOT_MAX_USERS:
+        return argv, f"a pilot import takes at most {DMS_PILOT_MAX_USERS} users"
+    from config import Settings
+    from db import MigrationDB
+    db = MigrationDB(Settings(account_id=account_id).db_path)
+    try:
+        ledger = {r["source_email"].lower(): r["target_email"] for r in db.all_identities() if r["entity_type"] == "user"}
+    finally:
+        db.close()
+    unknown = [u for u in users if u not in ledger]
+    if unknown:
+        return argv, "not users of this account: " + ", ".join(unknown)
+    import csv
+    import hashlib
+    rows = sorted((u, ledger[u]) for u in users)
+    tag = hashlib.sha256("\n".join(",".join(r) for r in rows).encode()).hexdigest()[:8]
+    d = os.path.join(HERE, "logs", "dms", "_none" if account_id is None else str(account_id))
+    os.makedirs(d, exist_ok=True)
+    path = os.path.join(d, f"pilot-{len(rows)}u-{tag}.csv")
+    with open(path, "w", newline="", encoding="utf-8") as fh:
+        w = csv.writer(fh)
+        w.writerow(("source_email", "target_email"))
+        w.writerows(rows)
+    return argv + ["--identities", path] + (["--fresh-import"] if fresh else []), ""
+
+
 def _dms_env(account_id: int | None) -> dict:
     """Environment for the DMS browser run: the account's tenants plus a
     headless display and the admin login the Admin console requires.
@@ -6623,12 +6660,19 @@ class Handler(BaseHTTPRequestHandler):
                 return
             env["CONFIGURATION_REVIEW_HASH"] = reviewed
 
+        argv = _action_argv(name)
+        if name == "dms_import":
+            argv, err = _dms_pilot_argv(account_id, body, argv)
+            if err:
+                self._json({"ok": False, "error": err}, 400)
+                return
+
         if spec.get("parallel"):
             # A dedicated Job instance so it does not collide with the
             # account's primary migration Job (one process each). /api/job
             # keeps showing the migration; this job has its own status feed.
             job = get_parallel_job(account_id, name)
-            ok, msg = job.start(spec["label"], _action_argv(name), env=env)
+            ok, msg = job.start(spec["label"], argv, env=env)
             self._json({"ok": ok, "error": None if ok else msg})
             return
 

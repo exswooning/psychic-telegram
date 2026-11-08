@@ -2122,7 +2122,9 @@ def _export_identities_csv(account_id: int | None) -> tuple[str, int]:
     rows = [(r["source_email"], r["target_email"]) for r in db.all_identities() if r["entity_type"] == "user"]
     d = os.path.join(HERE, "logs", "dms", "_none" if account_id is None else str(account_id))
     os.makedirs(d, exist_ok=True)
-    path = os.path.join(d, "identities.csv")
+    import hashlib
+    tag = hashlib.sha256("\n".join(",".join(r) for r in sorted(rows)).encode()).hexdigest()[:8]
+    path = os.path.join(d, f"identities-{len(rows)}u-{tag}.csv")      # named by content: see dms_migrate
     with open(path, "w", newline="", encoding="utf-8") as fh:
         w = csv.writer(fh)
         w.writerow(("source_email", "target_email"))

@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import {
-  Box, Button, Chip, Dialog, DialogActions, DialogContent, DialogTitle,
-  TextField, Typography,
+  Box, Button, Checkbox, Chip, Dialog, DialogActions, DialogContent, DialogTitle,
+  FormControlLabel, TextField, Typography,
 } from '@mui/material'
 import { PlayArrow as RunIcon } from '@mui/icons-material'
 import { runAction, fetchDmsStatus, ActionSpec } from '@/api/client'
@@ -25,6 +25,9 @@ const DmsImportButton: React.FC<{ spec: ActionSpec; accountId?: number | string 
   const [open, setOpen] = useState(false)
   const pair = useAccountPair(accountId)
   const [typed, setTyped] = useState('')
+  // A pilot: only these source users (comma-separated), optionally as a fresh import. Empty = the whole account.
+  const [pilot, setPilot] = useState('')
+  const [fresh, setFresh] = useState(false)
   const [running, setRunning] = useState(false)
   const [lines, setLines] = useState<string[]>([])
   const [error, setError] = useState<string | null>(null)
@@ -56,13 +59,18 @@ const DmsImportButton: React.FC<{ spec: ActionSpec; accountId?: number | string 
     setError(null)
     setLines([])
     sinceRef.current = 0
-    const r = await runAction('dms_import', spec.confirm, accountId)
+    const users = pilot.split(/[\s,;]+/).map((u) => u.trim()).filter(Boolean)
+    const r = users.length
+      ? await runAction('dms_import', spec.confirm, accountId, { users, fresh })
+      : await runAction('dms_import', spec.confirm, accountId)
     if (!r.ok) {
       setError(r.error || 'could not start the DMS import')
       return
     }
     setOpen(false)
     setTyped('')
+    setPilot('')
+    setFresh(false)
     setRunning(true)
     if (!pollRef.current) pollRef.current = setInterval(poll, 2500)
     poll()
@@ -109,6 +117,14 @@ const DmsImportButton: React.FC<{ spec: ActionSpec; accountId?: number | string 
         <DialogContent>
           {pair && <Typography variant="body2" sx={{ mb: 1, fontWeight: 700 }} data-testid="confirm-account">Runs for {pair}</Typography>}
           <Typography variant="body2" sx={{ mb: 2 }}>{spec.blurb}</Typography>
+          <TextField fullWidth size="small" sx={{ mb: 1 }} value={pilot} onChange={(e) => setPilot(e.target.value)}
+                     label="Pilot: only these source users (optional, up to 5)"
+                     placeholder="ward7@s.example.com — empty runs every user of this account"
+                     inputProps={{ 'data-testid': 'dms-pilot-users' }} />
+          <FormControlLabel sx={{ mb: 1 }} label="Fresh import (replaces a finished import in the console; pilot users only)"
+                            control={<Checkbox size="small" checked={fresh && !!pilot.trim()} disabled={!pilot.trim()}
+                                               onChange={(e) => setFresh(e.target.checked)}
+                                               inputProps={{ 'data-testid': 'dms-fresh' } as never} />} />
           <Typography variant="body2" sx={{ mb: 1 }}>
             Type <strong>{spec.confirm}</strong> to run this.
           </Typography>

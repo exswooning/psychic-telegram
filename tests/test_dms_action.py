@@ -370,3 +370,60 @@ def test_the_scraper_finds_its_account_from_its_ledger_path(monkeypatch):
     monkeypatch.delenv("DMS_METRICS_FILE", raising=False)
     monkeypatch.setenv("MIGRATION_DB", "/opt/bitport/data/accounts/3/migration.db")
     assert dms_migrate.metrics_path().endswith("logs/dms/3/metrics.json")
+
+
+
+# -- the pilot (a few users, optionally a fresh import) and the content-named map (8 Nov 2026) --------------
+def _ledger_with(db, users):
+    for u in users:
+        db.conn.execute("INSERT OR REPLACE INTO identity_map(source_email, target_email, entity_type, status) "
+                        "VALUES (?,?,?,?)", (f"{u}@s.example", f"{u}@t.example", "user", "DONE"))
+    db.conn.commit()
+
+
+def _pilot(db, settings, monkeypatch, body):
+    import config
+    monkeypatch.setattr(config, "Settings", lambda account_id=None: settings)
+    return webui._dms_pilot_argv(3, body, ["py", "dms_migrate.py", "--apply"])
+
+
+def test_without_users_the_dms_argv_is_unchanged(db, settings, monkeypatch):
+    assert _pilot(db, settings, monkeypatch, {}) == (["py", "dms_migrate.py", "--apply"], "")
+
+
+def test_a_pilot_names_its_users_and_a_fresh_import_needs_them(db, settings, monkeypatch):
+    _ledger_with(db, ["ward7", "ward8", "other"])
+    argv, err = _pilot(db, settings, monkeypatch, {"users": ["ward7@s.example"], "fresh": True})
+    assert not err and argv[-3] == "--identities" and argv[-1] == "--fresh-import"
+    rows = open(argv[-2]).read().splitlines()
+    assert rows == ["source_email,target_email", "ward7@s.example,ward7@t.example"]      # only that user
+    assert "needs the users" in _pilot(db, settings, monkeypatch, {"fresh": True})[1]    # never a whole tenant
+
+
+def test_a_pilot_takes_only_this_accounts_users_and_only_a_few(db, settings, monkeypatch):
+    _ledger_with(db, [f"u{i}" for i in range(8)])
+    assert "not users of this account" in _pilot(db, settings, monkeypatch, {"users": ["x@elsewhere.example"]})[1]
+    many = [f"u{i}@s.example" for i in range(8)]
+    assert "at most" in _pilot(db, settings, monkeypatch, {"users": many})[1]
+
+
+def test_the_identity_map_is_named_by_its_content(db, settings, monkeypatch, tmp_path):
+    """A fixed name let a 1-user import's map stand in for 45 users (account 3, 8 Nov 2026): the same users give
+    the same file name, a different set gives a different one."""
+    import config
+    import dms_migrate
+    monkeypatch.setattr(config, "Settings", lambda account_id=None: settings)
+    out = str(tmp_path / "maps")
+    _ledger_with(db, ["a"])
+    one = dms_migrate.ledger_identities(out)
+    assert dms_migrate.ledger_identities(out) == one                 # unchanged users: the same map
+    _ledger_with(db, ["b", "c"])
+    three = dms_migrate.ledger_identities(out)
+    assert three != one and os.path.basename(one).startswith("identities-from-ledger-1u-")
+    assert os.path.basename(three).startswith("identities-from-ledger-3u-")
+
+
+def test_a_console_holding_another_map_is_refused_not_reused():
+    import dms_migrate
+    src = open(dms_migrate.__file__).read()
+    assert 'step="stale-map"' in src and "not ours and not fresh" in src

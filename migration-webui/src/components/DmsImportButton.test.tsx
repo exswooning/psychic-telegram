@@ -19,9 +19,26 @@ describe('the DMS import button', () => {
     render(<DmsImportButton spec={{ label: 'Start Google DMS mail import', confirm: 'DMS' } as never} accountId={3} />)
     fireEvent.click(screen.getByTestId('action-dms_import'))
     expect(screen.getByTestId('confirm-account')).toHaveTextContent('Runs for s.example → t.example')
-    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'DMS' } })
+    fireEvent.change(screen.getByRole('textbox', { name: /type dms/i }), { target: { value: 'DMS' } })
     fireEvent.click(screen.getByRole('button', { name: /run/i }))
     await waitFor(() => expect(client.runAction).toHaveBeenCalledWith('dms_import', 'DMS', 3))
     await waitFor(() => expect(client.fetchDmsStatus).toHaveBeenCalledWith(0, 3))
+  })
+
+  it('sends a pilot: only the users named, as a fresh import only when asked', async () => {
+    render(<DmsImportButton spec={{ label: 'Start Google DMS mail import', confirm: 'DMS' } as never} accountId={3} />)
+    fireEvent.click(screen.getByTestId('action-dms_import'))
+    fireEvent.change(screen.getByTestId('dms-pilot-users'), { target: { value: 'ward7@s.example, ward8@s.example' } })
+    fireEvent.click(screen.getByTestId('dms-fresh'))
+    fireEvent.change(screen.getByRole('textbox', { name: /type dms/i }), { target: { value: 'DMS' } })
+    fireEvent.click(screen.getByRole('button', { name: /run/i }))
+    await waitFor(() => expect(client.runAction).toHaveBeenCalledWith(
+      'dms_import', 'DMS', 3, { users: ['ward7@s.example', 'ward8@s.example'], fresh: true }))
+  })
+
+  it('cannot ask for a fresh import without naming users', () => {
+    render(<DmsImportButton spec={{ label: 'Start Google DMS mail import', confirm: 'DMS' } as never} accountId={3} />)
+    fireEvent.click(screen.getByTestId('action-dms_import'))
+    expect((screen.getByTestId('dms-fresh') as HTMLInputElement).disabled).toBe(true)
   })
 })
