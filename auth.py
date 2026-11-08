@@ -94,7 +94,7 @@ class SourceWriteRefused(PermanentAPIError):
 # write there: this is what refuses them, before Google sees the request. A name that
 # is not a Drive collection (a test fake's helper, the client's own internals) passes
 # through untouched -- the real client exposes nothing else.
-def _http(timeout: int = 300) -> httplib2.Http:
+def _http(timeout: int = 300, service: str | None = None) -> httplib2.Http:
     """An httplib2 connection that does not take 308 for a redirect. Google's resumable
     uploads answer every chunk but the last with 308 "Resume Incomplete" and no Location,
     which httplib2 (0.19 on) raised as RedirectMissingLocation -- so any upload needing a
@@ -103,6 +103,11 @@ def _http(timeout: int = 300) -> httplib2.Http:
     # A process may set a shorter bound for every request it makes (the verifier does: a request that
     # hangs must free its worker long before 300 s); the engines never set it.
     timeout = int(os.getenv("GOOGLE_HTTP_TIMEOUT_SEC", "") or timeout)
+    # One API can need longer than the rest: a large Doc takes over 90 s to read, so under the verifier's 90 s
+    # bound it timed out on every pass and stayed unverified for ever (info@ 1EsCRIcW..., ward15@, 8 Nov 2026).
+    # GOOGLE_HTTP_TIMEOUT_SEC_DOCS (and _SLIDES, _SHEETS) overrides it for that API alone.
+    if service:
+        timeout = int(os.getenv("GOOGLE_HTTP_TIMEOUT_SEC_" + service.upper(), "") or timeout)
     http = httplib2.Http(timeout=timeout)
     http.redirect_codes = http.redirect_codes - {308}
     return http
@@ -385,7 +390,7 @@ class AuthManager:
             return svc
 
         creds = self._credentials(tenant, user)
-        http = google_auth_httplib2.AuthorizedHttp(creds, http=_http())
+        http = google_auth_httplib2.AuthorizedHttp(creds, http=_http(service=api))
         # static_discovery is left at its default: with no discoveryServiceUrl
         # set, the client already resolves that to True and uses the bundled
         # document, so there is no network fetch to avoid here.

@@ -2740,6 +2740,9 @@ def main(argv=None) -> int:
     import argparse
     # The verifier only reads: a hung request must not hold a worker for the engines' 300 s.
     os.environ.setdefault("GOOGLE_HTTP_TIMEOUT_SEC", os.getenv("VERIFY_HTTP_TIMEOUT_SEC", "90"))
+    # Reading a large Doc, Slides deck or Sheet takes longer than 90 s; everything else keeps the short bound.
+    for api in ("DOCS", "SLIDES", "SHEETS"):
+        os.environ.setdefault("GOOGLE_HTTP_TIMEOUT_SEC_" + api, os.getenv("VERIFY_NATIVE_HTTP_TIMEOUT_SEC", "200"))
 
     from auth import AuthManager
     from config import Settings

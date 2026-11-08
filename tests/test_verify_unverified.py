@@ -302,3 +302,16 @@ def test_the_heartbeat_gets_the_documents_state(auth, db, settings, identity):
     st = seen[-1]["stats"]
     assert st["currentDocument"] == "d1" and st["phase"] == "request" and st["pendingRetry"] == 0
     assert {"verified", "identical", "different", "unverified", "lastSuccessfulDocument", "breakers"} <= set(st)
+
+
+def test_one_api_can_have_a_longer_wait_than_the_rest(monkeypatch):
+    """A large Doc takes over 90 s to read: under the verifier's 90 s bound it timed out on every pass and stayed
+    unverified for ever (info@ and ward15@, 8 Nov 2026). Docs, Slides and Sheets get their own bound; Drive and
+    Gmail keep the short one."""
+    import auth
+    monkeypatch.setenv("GOOGLE_HTTP_TIMEOUT_SEC", "90")
+    monkeypatch.setenv("GOOGLE_HTTP_TIMEOUT_SEC_DOCS", "200")
+    assert auth._http(service="docs").timeout == 200
+    assert auth._http(service="drive").timeout == 90 and auth._http().timeout == 90
+    monkeypatch.delenv("GOOGLE_HTTP_TIMEOUT_SEC_DOCS")
+    assert auth._http(service="docs").timeout == 90               # nothing set: the general bound applies
