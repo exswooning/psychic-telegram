@@ -265,8 +265,8 @@ const Services: React.FC = () => {
                   It runs in parallel and spends none of this project&apos;s
                   Gmail quota; watch per-user progress in the Admin console.
                 </Typography>
-                <DmsImportButton spec={actions.dms_import} />
-                <DmsMetrics />
+                <DmsImportButton spec={actions.dms_import} accountId={scopeAccount} />
+                <DmsMetrics accountId={scopeAccount} />
               </Box>
             )}
           </CardContent>

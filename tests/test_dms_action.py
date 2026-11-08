@@ -39,6 +39,28 @@ def test_dms_env_defaults_email_to_target_admin(monkeypatch, tmp_path):
     assert env["DISPLAY"]
 
 
+def _stored_logins(monkeypatch, tmp_path, source_domain, target_domain):
+    f = tmp_path / "dwd.env"
+    f.write_text("DWD_EMAIL_SOURCE=info@s.example\nDWD_PASSWORD_SOURCE=src-secret\nDWD_PASSWORD_TARGET=tgt-secret\n")
+    monkeypatch.setattr(webui, "DWD_ENV_FILE", str(f))
+    monkeypatch.setattr(webui, "_account_env", lambda aid, base=None: {
+        "SOURCE_DOMAIN": source_domain, "TARGET_DOMAIN": target_domain, "TARGET_ADMIN": "info@" + target_domain})
+    return webui._dms_env(7)
+
+
+def test_stored_admin_logins_are_used_for_their_own_pair(monkeypatch, tmp_path):
+    env = _stored_logins(monkeypatch, tmp_path, "s.example", "t.example")
+    assert env["DWD_EMAIL_SOURCE"] == "info@s.example" and env["DWD_PASSWORD"] == "tgt-secret"
+
+
+def test_stored_admin_logins_never_cross_to_another_pair(monkeypatch, tmp_path):
+    """8 Nov 2026: account 2's DMS (gorkhatweed) got account 3's source admin, and account 3's target password
+    was typed into gorkhatweed's sign-in. A file for another pair gives this account no login at all."""
+    env = _stored_logins(monkeypatch, tmp_path, "gorkhatweed.com", "new.gorkhatweed.com")
+    assert "DWD_EMAIL_SOURCE" not in env and "DWD_PASSWORD" not in env and "DWD_PASSWORD_TARGET" not in env
+    assert env["DWD_EMAIL"] == "info@new.gorkhatweed.com"          # its own target admin, no password
+
+
 def test_dms_metrics_refresh_is_readonly_parallel():
     spec = webui.ACTIONS["dms_metrics_refresh"]
     assert spec.get("parallel") is True and spec.get("browser") is True

@@ -5169,15 +5169,25 @@ def _dms_env(account_id: int | None) -> dict:
     env = _account_env(account_id)
     env.setdefault("DISPLAY", os.getenv("BITPORT_XVFB_DISPLAY", ":99"))
     env.setdefault("DWD_EMAIL", env.get("TARGET_ADMIN", ""))
+    stored: dict[str, str] = {}
     try:
         with open(DWD_ENV_FILE, encoding="utf-8") as fh:
             for line in fh:
                 line = line.strip()
                 if line and not line.startswith("#") and "=" in line:
                     k, v = line.split("=", 1)
-                    env[k.strip()] = v.strip()
+                    stored[k.strip()] = v.strip()
     except FileNotFoundError:
         pass
+    # The file holds ONE pair's admin logins. They are used only for that pair: a login named for another
+    # domain means the file is not this account's. Laid over whichever account asked, account 2's DMS got
+    # account 3's source admin and typed account 3's target password into gorkhatweed's sign-in (8 Nov 2026).
+    def _domain(address: str) -> str:
+        return (address or "").rsplit("@", 1)[-1].strip().lower()
+    src_ok = not stored.get("DWD_EMAIL_SOURCE") or _domain(stored["DWD_EMAIL_SOURCE"]) == (env.get("SOURCE_DOMAIN") or "").lower()
+    tgt_ok = not stored.get("DWD_EMAIL") or _domain(stored["DWD_EMAIL"]) == (env.get("TARGET_DOMAIN") or "").lower()
+    if src_ok and tgt_ok:
+        env.update(stored)
     # The Admin console the DMS signs in to is the TARGET's, and dwd_helper
     # reads only the generic DWD_PASSWORD. Taking it from the side-specific key
     # means the file need not carry a generic one -- which admin_secrets would
@@ -5696,15 +5706,21 @@ class Handler(BaseHTTPRequestHandler):
                                      query.get("name", [""])[0] or None))
         elif path == "/api/dms_status":
             # The DMS import runs on its own Job (parallel to the migration),
-            # so it has its own status feed rather than /api/job's.
+            # so it has its own status feed rather than /api/job's. The account is the one the page is
+            # VIEWING when it names one, like every other feed: the header's migration picker said
+            # gorkhatweed while the page showed account 3, and the DMS went to account 2 (8 Nov 2026).
             since = 0
             if "since=" in self.path:
                 try:
                     since = int(self.path.split("since=")[1].split("&")[0])
                 except ValueError:
                     since = 0
-            self._json(get_parallel_job(self._account_id(),
-                                        "dms_import").snapshot(since))
+            asked = self.path.split("account=")[1].split("&")[0] if "account=" in self.path else None
+            watching, scope_err = resolve_target_account(self._account_id(), asked or None)
+            if scope_err:
+                self._json({"error": scope_err}, 403)
+                return
+            self._json(get_parallel_job(watching, "dms_import").snapshot(since))
         elif path == "/api/dms_metrics":
             # DMS counters live only in Google's console, so they are scraped
             # into a cache file (dms_migrate --status) and served from there;

@@ -35,7 +35,8 @@ const statusColor = (s: string): 'info' | 'success' | 'warning' | 'default' => {
  * Refresh that re-scrapes. It never invents a value: if nothing has been
  * scraped yet it says so rather than showing zeros.
  */
-const DmsMetrics: React.FC = () => {
+/* accountId: the viewed account -- the refresh reads that tenant's Admin console. */
+const DmsMetrics: React.FC<{ accountId?: number | string }> = ({ accountId }) => {
   const [resp, setResp] = useState<DmsMetricsResponse | null>(null)
   const [refreshing, setRefreshing] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -59,7 +60,7 @@ const DmsMetrics: React.FC = () => {
     setError(null)
     setRefreshing(true)
     try {
-      const r = await runAction('dms_metrics_refresh')
+      const r = await runAction('dms_metrics_refresh', undefined, accountId)
       if (!r.ok) { setError(r.error || 'could not read the console'); return }
       // the scrape is a ~1-minute browser job; re-read a few times as it lands
       for (let i = 0; i < 8; i++) {

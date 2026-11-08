@@ -17,7 +17,10 @@ import { runAction, fetchDmsStatus, ActionSpec } from '@/api/client'
  * lives in the Admin console -- this feed just shows the browser driver
  * getting there and confirms it started.
  */
-const DmsImportButton: React.FC<{ spec: ActionSpec }> = ({ spec }) => {
+/* accountId: the account the page is VIEWING. Without it the import ran for the header's migration
+   picker -- gorkhatweed (account 2) while the page showed account 3 (8 Nov 2026). Every other action on the
+   page already passed it. */
+const DmsImportButton: React.FC<{ spec: ActionSpec; accountId?: number | string }> = ({ spec, accountId }) => {
   const [open, setOpen] = useState(false)
   const [typed, setTyped] = useState('')
   const [running, setRunning] = useState(false)
@@ -28,7 +31,7 @@ const DmsImportButton: React.FC<{ spec: ActionSpec }> = ({ spec }) => {
 
   const poll = useCallback(async () => {
     try {
-      const job = await fetchDmsStatus(sinceRef.current)
+      const job = await fetchDmsStatus(sinceRef.current, accountId)
       setRunning(job.running)
       if (job.lines.length) {
         sinceRef.current += job.lines.length
@@ -41,7 +44,7 @@ const DmsImportButton: React.FC<{ spec: ActionSpec }> = ({ spec }) => {
     } catch {
       /* a dropped poll must not kill the stream; next tick retries */
     }
-  }, [])
+  }, [accountId])
 
   useEffect(() => () => {
     if (pollRef.current) clearInterval(pollRef.current)
@@ -51,7 +54,7 @@ const DmsImportButton: React.FC<{ spec: ActionSpec }> = ({ spec }) => {
     setError(null)
     setLines([])
     sinceRef.current = 0
-    const r = await runAction('dms_import', spec.confirm)
+    const r = await runAction('dms_import', spec.confirm, accountId)
     if (!r.ok) {
       setError(r.error || 'could not start the DMS import')
       return
