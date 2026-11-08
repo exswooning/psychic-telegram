@@ -132,3 +132,29 @@ def test_an_oversized_native_duplicate_without_the_canonical_tag_is_left(auth, d
     out = _run(auth, db, settings, keep, dup)
     assert out["changed"] == 0 and out["errors"]
     assert td.store[dup]["name"] == "Plan"
+
+
+def test_a_quarantined_native_copy_still_matches_its_original_after_the_rename():
+    """The quarantine renames the copy; the title was part of the compared snapshot, so no quarantined Doc ever
+    matched its original again (education@, shiv@: Drive INCOMPLETE for good, 8 Nov 2026)."""
+    from types import SimpleNamespace
+    body = {"body": {"content": [{"paragraph": "same words"}]}}
+    docs = {"orig": {**body, "title": "Cls8 mark", "documentId": "orig", "revisionId": "r1"},
+            "dup": {**body, "title": ".Quarantined duplicate 17Dz - Cls8 mark", "documentId": "dup", "revisionId": "r9"},
+            "other": {"body": {"content": [{"paragraph": "different"}]}, "title": "Cls8 mark"}}
+    svc = SimpleNamespace(documents=lambda: SimpleNamespace(
+        get=lambda documentId: SimpleNamespace(execute=lambda: docs[documentId])))
+    auth = SimpleNamespace(api=lambda side, kind, user: svc)
+    mime = "application/vnd.google-apps.document"
+    assert F._native_duplicate_equal(auth, "u", "dup", "orig", mime) is True
+    assert F._native_duplicate_equal(auth, "u", "other", "orig", mime) is False      # content still decides
+
+
+def test_a_sheets_name_and_a_forms_drive_name_are_not_content():
+    from types import SimpleNamespace
+    sheets = {"a": {"properties": {"title": "Budget", "locale": "en"}, "sheets": [1]},
+              "b": {"properties": {"title": ".Quarantined duplicate x - Budget", "locale": "en"}, "sheets": [1]}}
+    svc = SimpleNamespace(spreadsheets=lambda: SimpleNamespace(
+        get=lambda spreadsheetId, includeGridData: SimpleNamespace(execute=lambda: sheets[spreadsheetId])))
+    auth = SimpleNamespace(api=lambda side, kind, user: svc)
+    assert F._native_duplicate_equal(auth, "u", "b", "a", "application/vnd.google-apps.spreadsheet") is True

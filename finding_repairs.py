@@ -865,8 +865,14 @@ def _native_duplicate_equal(auth, user, extra, canonical, mime):
             "revisionId",
             "spreadsheetUrl",
             "responderUri",
+            # The Drive name, not content: the quarantine renames the copy, so with the title in the snapshot no
+            # quarantined copy ever matched its original again, and every such user's Drive read INCOMPLETE for
+            # good (education@, shiv@: 8 Nov 2026). A Form's own title (info.title) is content and stays.
+            "title",
         ):
             value.pop(key, None)
+        (value.get("properties") or {}).pop("title", None)          # a Sheet's name
+        (value.get("info") or {}).pop("documentTitle", None)        # a Form's Drive name
         return value
 
     return read(extra) == read(canonical)

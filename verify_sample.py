@@ -1026,12 +1026,18 @@ class Verifier:
                     receipt = None
                 if receipt and receipt["state"] == "QUARANTINED":
                     detail = json.loads(receipt["detail"])
-                    current = self._drive_meta(tgt, f["id"])
-                    canonical = self._drive_meta(tgt, detail["canonical"])
-                    same = bool(current.get("md5Checksum") and current.get("md5Checksum") == canonical.get("md5Checksum"))
-                    if detail.get("native"):
-                        from finding_repairs import _native_duplicate_equal
-                        same = self._x(lambda: _native_duplicate_equal(self.auth, self.tgt_user, f["id"], detail["canonical"], current["mimeType"]))
+                    try:
+                        current = self._drive_meta(tgt, f["id"])
+                        canonical = self._drive_meta(tgt, detail["canonical"])
+                        same = bool(current.get("md5Checksum") and current.get("md5Checksum") == canonical.get("md5Checksum"))
+                        if detail.get("native"):
+                            from finding_repairs import _native_duplicate_equal
+                            same = self._x(lambda: _native_duplicate_equal(self.auth, self.tgt_user, f["id"], detail["canonical"], current["mimeType"]))
+                    except Exception as exc:      # noqa: BLE001 - one file, not the whole listing
+                        # One quarantined copy too big to compare aborted the WHOLE target listing ("could not
+                        # list the target's Drive", education@, 8 Nov 2026). It is this file's check that failed.
+                        res["errors"].append(f"Quarantined duplicate {f['id']} could not be compared: {error_detail(exc)}")
+                        continue
                     if (current.get("parents") == detail.get("originalParents")
                             and current.get("name") == detail.get("quarantinedName")
                             and current.get("ownedByMe") and not current.get("trashed") and same):
