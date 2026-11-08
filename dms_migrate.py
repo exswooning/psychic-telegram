@@ -971,6 +971,15 @@ def identity_sources(identities: str | None) -> list[str] | None:
         return None       # unreadable now: the whole ledger, as before this existed
 
 
+def owes_mail(db, users) -> bool:
+    """Does the ledger hold emails deferred to the DMS for any of these users?"""
+    from config import DEFERRED_TO_DMS
+    marks = ",".join("?" * len(users))
+    return db.conn.execute(
+        f"SELECT 1 FROM audit_log WHERE item_type='message' AND status=? AND source_user IN ({marks}) LIMIT 1",
+        (DEFERRED_TO_DMS, *users)).fetchone() is not None
+
+
 def record_deliveries(st, db, users) -> int:
     """Check each email the DMS owed these users on the target (content and labels) and record the ones
     found as delivered (split_mail.reconcile_dms). Returns how many could not be confirmed."""
@@ -1018,7 +1027,10 @@ def wait_then_tally(minutes: int, timeout: int, headful: bool, tally: bool = Tru
                     from mail_completion import compare_mail_counts, full_mail_check
                     # A pilot (named users) is small enough to record every email it moved; a count
                     # records nothing, and the ledger kept reading "owed" after ward7's 118 arrived.
-                    if not full_mail_check(st) and not users:
+                    # ...but only when the ledger OWES them mail (split mode). A pure-DMS arm never went through the
+                    # engine, so nothing is owed: recording finds 0 rows and called a complete import "incomplete"
+                    # (the speed matrix's DMS arm, 8 Nov 2026) -- it is judged by counts.
+                    if not full_mail_check(st) and not (users and owes_mail(db, users)):
                         checked = compare_mail_counts(AuthManager(st), db, st, progress=log,
                                                       source_users=users or ())
                         log("DMS count completion (not 1:1): " + json.dumps(checked))
