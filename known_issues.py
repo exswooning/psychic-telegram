@@ -119,6 +119,12 @@ ISSUES = [
      "The group does not exist on the target. Classroom-made groups are hidden from the "
      "Directory API, so their members cannot even be read.",
      "None automatic: create the group on the target or share with its people by hand.", False),
+    ("drive.ab_test_residue", "drive", lambda t: bool(__import__("re").search(r"-ab\w*-\d+@", t)),
+     "A grant to a throwaway A/B test account",
+     "The A/B benchmark created 28 accounts on the target (…-ab1-<time>@, …-ab1t-…) and left sharing with them on "
+     "some files, so the check sees grants nobody migrated (account 3, 8 Nov 2026). Not a migration fault.",
+     "DOCUMENTED, left by the operator's choice (8 Nov 2026): the accounts stay (deleting them would hold their "
+     "licences for about 20 days). Removing them, or their grants, clears it.", False),
     ("drive.grant_missing", "drive", lambda t: "grant missing on the target" in t,
      "A share did not come across",
      "A grant refused or skipped during the run.",
@@ -448,6 +454,13 @@ RUN_KINDS = [
      "Fixed 2026-11-08: only an attempt against the same target file blocks (migration_comments.reconcile); "
      "the next run copies the comments to the new file. An attempt on the SAME file is still left for a "
      "person, since a duplicate comment is worse than a late one.", True),
+    ("run.mail_owed_to_dms", ("message", "draft"),
+     lambda t: any(m in t for m in ("Ambiguous destination Message-ID", "Unresolved Drive link mapping")),
+     "Link mail left to Google's DMS",
+     "The engine cannot deliver it rewritten: the target already holds the Message-ID more than once, or a link "
+     "names a file with no copy on the target (9 on audit@, account 3, 8 Nov 2026).",
+     "The operator's choice (8 Nov 2026): the DMS carries it with the rest, its links unrewritten. Owed, never a "
+     "blocker of the DMS (config.DMS_OWED_FAILURES).", True),
     ("run.held_for_drive", None,
      lambda t: "held: this user's Drive did not migrate" in t,
      "Mail or calendar held back for Drive",

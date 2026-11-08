@@ -890,6 +890,7 @@ async def lifespan(_: FastAPI):
     scheduled = asyncio.create_task(_scheduled_runs_loop())
     housekeep = asyncio.create_task(_housekeeping_loop())
     oversee = asyncio.create_task(_oversight_loop())
+    dms_retry = asyncio.create_task(_dms_retry_loop())
     guard = asyncio.create_task(_source_guard_loop())
     guard_fast = asyncio.create_task(_source_guard_fast_loop())
     verification_repairs_task = asyncio.create_task(_verification_repair_loop())
@@ -899,6 +900,7 @@ async def lifespan(_: FastAPI):
         verification_repairs_task.cancel()
         housekeep.cancel()
         oversee.cancel()
+        dms_retry.cancel()
         guard.cancel()
         guard_fast.cancel()
         task.cancel()
@@ -2159,8 +2161,9 @@ def _start_dms(account_id: int | None, *, require_clean: bool, why: str) -> tupl
         if p["failed"] or p["running"] or p["blocked"]:
             return decline(f"{p['failed']} user(s) failed, {p['running']} still running, "
                            f"{p['blocked']} blocked on something outside the tool")
-        if p.get("itemsFailed", 0):
-            return decline(f"{p['itemsFailed']} unresolved item failures; split handoff is incomplete")
+        if p.get("mailBlockingDms", 0):
+            return decline(f"{p['mailBlockingDms']} unresolved mail item(s) the DMS would carry across "
+                           f"unrewritten; split handoff is incomplete")
         if not p["done"] and not p.get("awaitingDms", 0):
             return decline("no user finished")
     st = Settings(account_id=account_id)
@@ -5609,6 +5612,39 @@ async def source_guard_run(body: SourceGuardAction, op: Operator = Depends(opera
     return await _gated(op, f"source_guard.{body.action}", body, f"account:{aid}", _go)
 
 
+DMS_RETRY_SEC = int(os.getenv("DMS_RETRY_SEC", "3600"))
+
+
+def _retry_declined_dms() -> list:
+    """Ask again, for every account whose DMS was declined (an open dms_not_started incident). The gate was
+    decided once, at the end of the split run, and never again: repairs cut account 3's blockers from 188 to
+    9 and nothing started it (8 Nov 2026). The same gate decides; only the moment changes."""
+    import run_watch
+    started = []
+    for inc in run_watch.list_incidents("open", limit=200) + run_watch.list_incidents("acknowledged", limit=200):
+        if inc.get("kind") != "dms_not_started" or inc.get("account_id") is None:
+            continue
+        ok, detail = _start_dms(inc["account_id"], require_clean=True,
+                                why="started automatically: the split handoff now passes its gate")
+        if ok:
+            started.append(inc["account_id"])
+        log.info("DMS retry for account %s: %s", inc["account_id"], detail)
+    return started
+
+
+async def _dms_retry_loop() -> None:
+    if DMS_RETRY_SEC <= 0:
+        return
+    while True:
+        try:
+            await asyncio.sleep(DMS_RETRY_SEC)
+            await _off_loop(_retry_declined_dms)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:      # noqa: BLE001 - the loop must outlive any one attempt
+            log.warning("DMS retry failed: %s", exc)
+
+
 async def _owed_grants_loop() -> None:
     """Grant an owed share as soon as its colleague has a target account, however the
     account came to exist. Every run's repair already does this, but only after a
@@ -6006,7 +6042,10 @@ def _migration_progress(account_id: int | None) -> dict:
              # Waiting on something outside the tool (a Workspace licence),
              # not broken. Counted apart so a failure list keeps meaning
              # "investigate this".
-             "blocked": 0, "items": 0, "itemsFailed": 0}
+             "blocked": 0, "items": 0, "itemsFailed": 0,
+             # What stops the DMS: unmapped MAIL failures it would carry across unrewritten. A comment or a
+             # Drive file that failed says nothing about mail (8 comment failures held account 3's DMS).
+             "mailBlockingDms": 0}
     try:
         from config import DEFERRED_TO_DMS, DELIVERED_BY_DMS, Settings
         path = Settings(account_id=account_id).db_path
@@ -6050,6 +6089,15 @@ def _migration_progress(account_id: int | None) -> dict:
                 "AND NOT EXISTS (SELECT 1 FROM id_mapping mp WHERE mp.source_user = a.source_user "
                 "                AND mp.source_id = a.item_id AND mp.type = a.item_type)"
             ).fetchone()["n"]
+            from config import DMS_OWED_FAILURES
+            out["mailBlockingDms"] = conn.execute(
+                "SELECT COUNT(DISTINCT a.source_user || '|' || a.item_id) n FROM audit_log a "
+                "WHERE a.status LIKE 'FAILED%' AND a.item_type IN ('message','draft') "
+                "AND EXISTS (SELECT 1 FROM identity_map m WHERE m.source_email = a.source_user) "
+                "AND NOT EXISTS (SELECT 1 FROM id_mapping mp WHERE mp.source_user = a.source_user "
+                "                AND mp.source_id = a.item_id AND mp.type = a.item_type) "
+                + "".join(" AND COALESCE(a.error_message,'') NOT LIKE ?" for _ in DMS_OWED_FAILURES),
+                tuple(f"%{m}%" for m in DMS_OWED_FAILURES)).fetchone()["n"]
             # Skips were invisible: the page showed migrated and failed with
             # nothing between them, while 56,975 items on a live tenant were
             # neither. A skip is a decision the tool made -- a draft it will

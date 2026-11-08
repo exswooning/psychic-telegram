@@ -625,7 +625,10 @@ class Verifier:
             f"SELECT item_id, item_type, error_message, timestamp FROM audit_log WHERE source_user=? "
             f"AND status LIKE 'FAILED%' AND item_type IN ({q})", (self.src_user, *types)).fetchall()
         out = []
+        from config import owed_to_dms
         for r in rows:
+            if owed_to_dms(r["item_type"], r["error_message"] or ""):
+                continue            # left to the DMS by the operator's choice: owed, counted by the coverage note
             # An item that failed once and is MAPPED now was copied since (a later run, or a repair): its old
             # failure row is history, not a gap. info@'s repair delivered 137 held messages and the check
             # still listed all 168 as not copied (7 Nov 2026).
@@ -1781,10 +1784,14 @@ class Verifier:
                 (self.src_user,))}
             # Mail without a Drive link is handed to Google's DMS, not missing: the ledger records it
             # as DEFERRED_TO_DMS. Live (info@/audit@, 5 Nov 2026) 822 of them read as "no mapping".
-            from config import DEFERRED_TO_DMS
+            from config import DEFERRED_TO_DMS, owed_to_dms
             deferred = {r[0] for r in self.db.conn.execute(
                 "SELECT item_id FROM audit_log WHERE source_user=? AND item_type='message' AND status=?",
                 (self.src_user, DEFERRED_TO_DMS))}
+            # Link mail left to the DMS by the operator's choice (config.DMS_OWED_FAILURES) is owed too.
+            deferred |= {r[0] for r in self.db.conn.execute(
+                "SELECT item_id, error_message FROM audit_log WHERE source_user=? AND item_type='message' "
+                "AND status LIKE 'FAILED%'", (self.src_user,)) if owed_to_dms("message", r[1])}
             owed = 0
             scanned = 0
             for message in self._list_all(src, side="source"):

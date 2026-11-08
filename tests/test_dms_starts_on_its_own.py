@@ -359,3 +359,17 @@ class TestNoAdminLoginMeansAHumanNotACrash:
         monkeypatch.setattr(webui, "DWD_ENV_FILE", str(f))
         monkeypatch.setattr(webui, "_account_env", lambda aid: {"TARGET_ADMIN": "a@b.com"})
         assert webui._dms_env(3)["DWD_PASSWORD"] == "secret"
+
+
+class TestADeclinedDmsIsAskedAgain:
+    """The gate was decided once, at the end of the split run: repairs cut account 3's blockers from 188 to 9
+    and nothing ever asked again (8 Nov 2026). Every open dms_not_started incident is asked again, hourly."""
+
+    def test_an_open_decline_is_retried_and_starts_once_the_gate_passes(self, wired, monkeypatch):
+        import run_watch
+        monkeypatch.setattr(run_watch, "list_incidents", lambda status, limit=200: (
+            [{"kind": "dms_not_started", "account_id": 3}, {"kind": "crashed", "account_id": 3}] if status == "open" else []))
+        wired["progress"]["mailBlockingDms"] = 9
+        assert A._retry_declined_dms() == [] and not wired["jobs"]          # still blocked: not started
+        wired["progress"]["mailBlockingDms"] = 0
+        assert A._retry_declined_dms() == [3] and [j["name"] for j in wired["jobs"]] == ["dms"]

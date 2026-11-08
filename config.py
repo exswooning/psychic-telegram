@@ -54,6 +54,14 @@ FOLDER_MIME = "application/vnd.google-apps.folder"
 # skipped total, the migrations page -- must treat this one apart, or a split
 # run that never reached the DMS reports mail parity as perfect.
 DEFERRED_TO_DMS = "SKIPPED_NO_DRIVE_LINK"
+# Link mail the engine can never deliver rewritten -- a Message-ID the target already holds more than once,
+# or a link to a file with no copy on the target. The operator's choice (8 Nov 2026): the DMS carries it like
+# the rest, links unrewritten, rather than the engine. Owed to the DMS, not a failure that blocks it.
+DMS_OWED_FAILURES = ("Ambiguous destination Message-ID", "Unresolved Drive link mapping")
+
+
+def owed_to_dms(item_type: str, error: str) -> bool:
+    return item_type in ("message", "draft") and any(m in (error or "") for m in DMS_OWED_FAILURES)
 # Deferred mail becomes delivered only after fresh destination content/label
 # checks with an exact mapped receipt. DMS completion counters alone never
 # establish per-item delivery.
