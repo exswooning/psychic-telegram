@@ -95,3 +95,40 @@ def test_our_own_target_copies_and_files_gone_from_the_source_are_retired(db, se
     auth = SimpleNamespace(source_drive=lambda u: drive)
     assert R.reconcile_target_copies(auth, db, settings, U) == 2
     assert open_ids(db) == ["broken", "real"]              # a real shared file and an unreadable one stay open
+
+
+STALE = {"item": "a.pdf", "source": "11Sp-C6zeiDq3zQX006pm5ypC70IISypIc1MFUh3kuY",
+         "target": "t1", "diffs": ["modified time not preserved: 2026-10-25 -> 2026-11-02"]}
+SHEET_ERROR = ("file 1Bz2p_ShampUD0vMNLhHT7Gl0LwAqX5q3n3OdrlTRPWI: content could not be compared: Native sheet "
+               "allocated cells exceed the explicit per-read budget")
+
+
+def _stale_then_complete_check(db, **check):
+    R.enqueue_findings(db, U, {"drive": result(differences=[STALE])})            # an old finding
+    R.enqueue_findings(db, U, {"drive": result(**check)})                         # a later COMPLETE check
+
+
+def _open_diffs(db):
+    return sorted(r[0] for r in db.conn.execute(
+        "SELECT item_id FROM verification_repair_queue WHERE state!='RESOLVED' AND category='differences'"))
+
+
+def test_an_error_about_one_file_does_not_keep_other_files_stale_rows_open(db):
+    """suchanaadhikari@: one over-large Sheet (a documented exception) kept six stale rows open for ever."""
+    _stale_then_complete_check(db, errors=[SHEET_ERROR])
+    assert _open_diffs(db) == []
+
+
+def test_an_error_names_only_its_own_rows(db):
+    _stale_then_complete_check(db, errors=[f"file {STALE['source']}: could not read the SOURCE: 503"])
+    assert _open_diffs(db) == [STALE["source"]]               # the file the error is about stays open
+
+
+def test_an_error_that_names_no_file_still_blocks_every_close(db):
+    _stale_then_complete_check(db, errors=["could not list the target's mailbox: HTTP 503"])
+    assert _open_diffs(db) == [STALE["source"]]
+
+
+def test_unverified_files_keep_only_their_own_rows_open(db):
+    _stale_then_complete_check(db, unverified=[{"source": STALE["source"], "target": "t1"}])
+    assert _open_diffs(db) == [STALE["source"]]

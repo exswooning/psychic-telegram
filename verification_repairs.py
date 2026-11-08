@@ -32,6 +32,30 @@ def ensure(db):
         known_issues.ensure(conn)
 
 
+_ID = None
+
+
+def _blocking_ids(result) -> set | None:
+    """Which queued rows a complete check's errors keep open: None when an error names no file or message
+    (it could be about anything, so nothing may close), else the ids the errors and unverified rows name.
+    One over-large Sheet (a documented exception) kept every other stale row of suchanaadhikari@ open for
+    good, because ANY error blocked the close (account 3, 8 Nov 2026)."""
+    global _ID
+    if _ID is None:
+        import re
+        _ID = re.compile(r"(?=[A-Za-z_-]*\d)[A-Za-z0-9_-]{16,}")
+    ids: set = set()
+    for e in result.get("errors") or []:
+        found = _ID.findall(str(e))
+        if not found:
+            return None
+        ids.update(found)
+    for u in result.get("unverified") or []:
+        if isinstance(u, dict):
+            ids.update(x for x in (u.get("source"), u.get("target")) if x)
+    return ids
+
+
 def enqueue_findings(db, user, per):
     """Durable item list, without truncating findings to the UI's 25 examples.
 
@@ -73,12 +97,13 @@ def enqueue_findings(db, user, per):
                     "AND detail LIKE '%UNMAPPED_SOURCE%'", (user, service)).fetchall()
                     if r["finding_key"] not in seen]
                 _resolve(conn, gone, now)
-            if not result.get("sampled") and not result.get("errors") and (
+            blocked = _blocking_ids(result)
+            if not result.get("sampled") and blocked is not None and (
                     result.get("checked", 0) > 0 or result.get("emptySource")):
                 gone = [r for r in conn.execute(
                     "SELECT source_user,service,finding_key,item_id,issue FROM verification_repair_queue "
                     "WHERE source_user=? AND service=? AND state!='RESOLVED'", (user, service)).fetchall()
-                    if r["finding_key"] not in seen]
+                    if r["finding_key"] not in seen and r["item_id"] not in blocked]
                 _resolve(conn, gone, now)
     return count
 
