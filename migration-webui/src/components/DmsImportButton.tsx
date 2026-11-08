@@ -21,7 +21,9 @@ import { useAccountPair } from '@/hooks/useAccountPair'
 /* accountId: the account the page is VIEWING. Without it the import ran for the header's migration
    picker -- gorkhatweed (account 2) while the page showed account 3 (8 Nov 2026). Every other action on the
    page already passed it. */
-const DmsImportButton: React.FC<{ spec: ActionSpec; accountId?: number | string }> = ({ spec, accountId }) => {
+/* action 'dms_reconcile': record which owed emails the DMS delivered, for named users only (no fresh import). */
+const DmsImportButton: React.FC<{ spec: ActionSpec; accountId?: number | string; action?: 'dms_import' | 'dms_reconcile' }> = ({ spec, accountId, action = 'dms_import' }) => {
+  const record = action === 'dms_reconcile'
   const [open, setOpen] = useState(false)
   const pair = useAccountPair(accountId)
   const [typed, setTyped] = useState('')
@@ -60,9 +62,13 @@ const DmsImportButton: React.FC<{ spec: ActionSpec; accountId?: number | string 
     setLines([])
     sinceRef.current = 0
     const users = pilot.split(/[\s,;]+/).map((u) => u.trim()).filter(Boolean)
+    if (record && !users.length) {
+      setError('name the users to record')
+      return
+    }
     const r = users.length
-      ? await runAction('dms_import', spec.confirm, accountId, { users, fresh })
-      : await runAction('dms_import', spec.confirm, accountId)
+      ? await runAction(action, spec.confirm, accountId, record ? { users } : { users, fresh })
+      : await runAction(action, spec.confirm, accountId)
     if (!r.ok) {
       setError(r.error || 'could not start the DMS import')
       return
@@ -85,9 +91,9 @@ const DmsImportButton: React.FC<{ spec: ActionSpec; accountId?: number | string 
         startIcon={<RunIcon />}
         disabled={running}
         onClick={() => setOpen(true)}
-        data-testid="action-dms_import"
+        data-testid={`action-${action}`}
       >
-        {running ? 'DMS import running…' : spec.label}
+        {running ? 'DMS job running…' : spec.label}
       </Button>
       {running && (
         <Chip size="small" color="info" label="parallel to the migration"
@@ -118,13 +124,13 @@ const DmsImportButton: React.FC<{ spec: ActionSpec; accountId?: number | string 
           {pair && <Typography variant="body2" sx={{ mb: 1, fontWeight: 700 }} data-testid="confirm-account">Runs for {pair}</Typography>}
           <Typography variant="body2" sx={{ mb: 2 }}>{spec.blurb}</Typography>
           <TextField fullWidth size="small" sx={{ mb: 1 }} value={pilot} onChange={(e) => setPilot(e.target.value)}
-                     label="Pilot: only these source users (optional, up to 5)"
-                     placeholder="ward7@s.example.com — empty runs every user of this account"
+                     label={record ? 'These source users (up to 5)' : 'Pilot: only these source users (optional, up to 5)'}
+                     placeholder={record ? 'ward7@s.example.com' : 'ward7@s.example.com — empty runs every user of this account'}
                      inputProps={{ 'data-testid': 'dms-pilot-users' }} />
-          <FormControlLabel sx={{ mb: 1 }} label="Fresh import (replaces a finished import in the console; pilot users only)"
+          {!record && <FormControlLabel sx={{ mb: 1 }} label="Fresh import (replaces a finished import in the console; pilot users only)"
                             control={<Checkbox size="small" checked={fresh && !!pilot.trim()} disabled={!pilot.trim()}
                                                onChange={(e) => setFresh(e.target.checked)}
-                                               inputProps={{ 'data-testid': 'dms-fresh' } as never} />} />
+                                               inputProps={{ 'data-testid': 'dms-fresh' } as never} />} />}
           <Typography variant="body2" sx={{ mb: 1 }}>
             Type <strong>{spec.confirm}</strong> to run this.
           </Typography>

@@ -971,6 +971,16 @@ def identity_sources(identities: str | None) -> list[str] | None:
         return None       # unreadable now: the whole ledger, as before this existed
 
 
+def record_deliveries(st, db, users) -> int:
+    """Check each email the DMS owed these users on the target (content and labels) and record the ones
+    found as delivered (split_mail.reconcile_dms). Returns how many could not be confirmed."""
+    from auth import AuthManager
+    from split_mail import reconcile_dms
+    checked = reconcile_dms(AuthManager(st), db, st, progress=log, users=users)
+    log("DMS delivery reconciliation: " + json.dumps(checked, default=str))
+    return checked["blocked"]
+
+
 def wait_then_tally(minutes: int, timeout: int, headful: bool, tally: bool = True,
                     users: list[str] | None = None) -> int:
     """Read the import's status until Google says it has stopped running, then
@@ -993,19 +1003,18 @@ def wait_then_tally(minutes: int, timeout: int, headful: bool, tally: bool = Tru
                 from config import Settings
                 from auth import AuthManager
                 from db import MigrationDB
-                from split_mail import reconcile_dms
                 st = Settings()
                 db = MigrationDB(st.db_path)
                 try:
                     from mail_completion import compare_mail_counts, full_mail_check
-                    if not full_mail_check(st):
+                    # A pilot (named users) is small enough to record every email it moved; a count
+                    # records nothing, and the ledger kept reading "owed" after ward7's 118 arrived.
+                    if not full_mail_check(st) and not users:
                         checked = compare_mail_counts(AuthManager(st), db, st, progress=log,
                                                       source_users=users or ())
                         log("DMS count completion (not 1:1): " + json.dumps(checked))
                         return 2 if checked["blocked"] else 0
-                    checked = reconcile_dms(AuthManager(st), db, st, progress=log, users=users)
-                    log("DMS delivery reconciliation: " + json.dumps(checked, default=str))
-                    if checked["blocked"]:
+                    if record_deliveries(st, db, users):
                         return 2
                 finally:
                     db.close()
@@ -1063,6 +1072,9 @@ def _main(argv: list[str] | None = None) -> int:
     ap.add_argument("--fresh-import", action="store_true",
                     help="exit and DELETE a finished import first, so this map starts a new one "
                          "(only for new, empty target accounts -- otherwise a delta import continues)")
+    ap.add_argument("--reconcile-only", action="store_true",
+                    help="no browser: record which emails owed to the DMS are now on the target, for the "
+                         "--identities users (reads both mailboxes; writes only this ledger)")
     ap.add_argument("--no-tally", action="store_true",
                     help="with --until-done: stop when Google reports the import complete, after the "
                          "delivery reconcile (the ledger must know which emails the import "
@@ -1071,6 +1083,19 @@ def _main(argv: list[str] | None = None) -> int:
                     help="read the import's live counters and cache them, "
                          "then exit (does not touch the import)")
     args = ap.parse_args(argv)
+    if args.reconcile_only:
+        users = identity_sources(args.identities)
+        if not users:
+            log("--reconcile-only needs --identities naming the users")
+            return 2
+        from config import Settings
+        from db import MigrationDB
+        st = Settings()
+        db = MigrationDB(st.db_path)
+        try:
+            return 2 if record_deliveries(st, db, users) else 0
+        finally:
+            db.close()
 
     if args.status:
         out = status(args.timeout, args.headful)

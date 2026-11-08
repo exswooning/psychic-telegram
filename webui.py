@@ -378,6 +378,14 @@ ACTIONS: dict[str, dict] = {
         "destructive": True,
         "confirm": "DMS",
     },
+    "dms_reconcile": {
+        "label": "Record DMS deliveries",
+        "blurb": "For the users you name: check each email owed to the DMS on the target (content and "
+                 "labels) and record the ones found as delivered. Reads both mailboxes; changes no mail.",
+        "argv": [PY, "dms_migrate.py", "--reconcile-only"],
+        "parallel": True,
+        "confirm": "RECORD",
+    },
     "dms_metrics_refresh": {
         "label": "Refresh DMS metrics",
         "blurb": "Read the live import counters from the Admin console and "
@@ -6661,7 +6669,10 @@ class Handler(BaseHTTPRequestHandler):
             env["CONFIGURATION_REVIEW_HASH"] = reviewed
 
         argv = _action_argv(name)
-        if name == "dms_import":
+        if name in ("dms_import", "dms_reconcile"):
+            if name == "dms_reconcile" and not body.get("users"):
+                self._json({"ok": False, "error": "name the users to record"}, 400)
+                return
             argv, err = _dms_pilot_argv(account_id, body, argv)
             if err:
                 self._json({"ok": False, "error": err}, 400)
@@ -6671,7 +6682,8 @@ class Handler(BaseHTTPRequestHandler):
             # A dedicated Job instance so it does not collide with the
             # account's primary migration Job (one process each). /api/job
             # keeps showing the migration; this job has its own status feed.
-            job = get_parallel_job(account_id, name)
+            # Recording deliveries shares the import's slot: one feed (/api/dms_status), never both at once.
+            job = get_parallel_job(account_id, "dms_import" if name == "dms_reconcile" else name)
             ok, msg = job.start(spec["label"], argv, env=env)
             self._json({"ok": ok, "error": None if ok else msg})
             return

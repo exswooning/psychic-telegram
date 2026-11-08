@@ -274,6 +274,8 @@ const Services: React.FC = () => {
                   Gmail quota; watch per-user progress in the Admin console.
                 </Typography>
                 <DmsImportButton spec={actions.dms_import} accountId={scopeAccount} />
+                {has('dms_reconcile') &&
+                  <Box sx={{ mt: 1 }}><DmsImportButton spec={actions.dms_reconcile} accountId={scopeAccount} action="dms_reconcile" /></Box>}
                 <DmsMetrics accountId={scopeAccount} />
               </Box>
             )}

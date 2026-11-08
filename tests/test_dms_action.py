@@ -427,3 +427,30 @@ def test_a_console_holding_another_map_is_refused_not_reused():
     import dms_migrate
     src = open(dms_migrate.__file__).read()
     assert 'step="stale-map"' in src and "not ours and not fresh" in src
+
+
+def test_reconcile_only_records_for_the_named_users_and_needs_them(monkeypatch, tmp_path):
+    """A pilot's deliveries are recorded per email, not counted (ward7's 118 kept reading "owed", 8 Nov 2026)."""
+    import dms_migrate
+    seen = {}
+    monkeypatch.setattr(dms_migrate, "record_deliveries", lambda st, db, users: seen.setdefault("users", users) and 0)
+    assert dms_migrate.main(["--reconcile-only"]) == 2                       # nobody named: refused
+    f = tmp_path / "u.csv"
+    f.write_text("source_email,target_email\nward7@s.example,ward7@t.example\n")
+    assert dms_migrate.main(["--reconcile-only", "--identities", str(f)]) == 0
+    assert seen["users"] == ["ward7@s.example"]
+
+
+def test_a_pilot_import_ends_by_recording_deliveries_not_counting(monkeypatch):
+    import dms_migrate
+    import mail_completion
+    calls = []
+    monkeypatch.setattr(dms_migrate, "DONE_POLL_SEC", 0)
+    monkeypatch.setattr(dms_migrate, "status", lambda *a, **k: {"status": "complete"})
+    monkeypatch.setattr(dms_migrate, "record_deliveries", lambda st, db, users: calls.append(("record", users)) or 0)
+    monkeypatch.setattr(mail_completion, "compare_mail_counts", lambda *a, **k: calls.append(("count",)) or {"blocked": 0})
+    assert dms_migrate.wait_then_tally(1, 10, False, tally=False, users=["ward7@s.example"]) == 0
+    assert calls == [("record", ["ward7@s.example"])]
+    calls.clear()
+    assert dms_migrate.wait_then_tally(1, 10, False, tally=False, users=None) == 0   # whole account: counts, as before
+    assert calls == [("count",)]

@@ -41,4 +41,16 @@ describe('the DMS import button', () => {
     fireEvent.click(screen.getByTestId('action-dms_import'))
     expect((screen.getByTestId('dms-fresh') as HTMLInputElement).disabled).toBe(true)
   })
+
+  it('records deliveries only for named users, with no fresh import offered', async () => {
+    render(<DmsImportButton spec={{ label: 'Record DMS deliveries', confirm: 'RECORD' } as never} accountId={3} action="dms_reconcile" />)
+    fireEvent.click(screen.getByTestId('action-dms_reconcile'))
+    expect(screen.queryByTestId('dms-fresh')).toBeNull()
+    fireEvent.change(screen.getByRole('textbox', { name: /type record/i }), { target: { value: 'RECORD' } })
+    fireEvent.click(screen.getByRole('button', { name: /run/i }))
+    expect(await screen.findByText('name the users to record')).toBeTruthy()
+    fireEvent.change(screen.getByTestId('dms-pilot-users'), { target: { value: 'ward7@s.example' } })
+    fireEvent.click(screen.getByRole('button', { name: /run/i }))
+    await waitFor(() => expect(client.runAction).toHaveBeenCalledWith('dms_reconcile', 'RECORD', 3, { users: ['ward7@s.example'] }))
+  })
 })
