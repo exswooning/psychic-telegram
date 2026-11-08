@@ -36,6 +36,9 @@ def pages(v, call, key):
 FORM_MIME = "application/vnd.google-apps.form"
 
 
+COMMENT_WINDOW = 50      # files whose threads are read side by side before the next window starts
+
+
 def _is_form(svc, fid, execute=lambda fn: fn()) -> bool:
     try:
         return execute(lambda: svc.files().get(fileId=fid, fields="mimeType",
@@ -327,31 +330,53 @@ def drive(v, result):
             pairs=v._pairs("file",sample=True)
             unread=[]
             from resilience import RetryBudgetExceeded
-            for n,(sid,tid,_) in enumerate(pairs):
-                if n%25==0:
-                    v._report_progress("Drive comment threads",n,len(pairs))
-                v._publish_stats(currentDocument=sid, currentMime="comment threads", currentSince=time.time())
+            import copy
+            from concurrent.futures import ThreadPoolExecutor
+            from verify_sample import _drive_file_workers
+
+            def read(sid,tid):
+                """Both sides of one file's threads, on a copy of the verifier so this file's budget is its
+                own, with this thread's own Drive clients. Returns the threads, "unread", or None for a Form."""
+                w=copy.copy(v)
+                w._file_deadline=None
+                s,t=v.auth.source_drive(v.src_user),v.auth.target_drive(v.tgt_user)
+                w._publish_stats(currentDocument=sid, currentMime="comment threads", currentSince=time.time())
                 try:
                     # One time budget for BOTH sides of this file (VERIFY_DOC_BUDGET_SEC): a slow file is
                     # unread, not a reason to hold the user -- ecodev@'s JPEG sat at 287s of 300 (7 Nov 2026).
-                    with v._doc_budget():
+                    with w._doc_budget():
                         try:
-                            a=list_threads(src,sid,v._x)
+                            a=list_threads(s,sid,w._x)
                         except RetryBudgetExceeded:
                             raise
                         except Exception as exc:
                             # A Form has no Drive comments; the API answers 404 for its threads. That is no
                             # comments, not an unreadable file -- confirmed by its type, never assumed.
-                            if "404" in str(exc) and _is_form(src, sid, v._x):
-                                continue
+                            if "404" in str(exc) and _is_form(s,sid,w._x):
+                                return None
                             raise
-                        b=list_threads(v.auth.target_drive(v.tgt_user),tid,v._x)
+                        return a,list_threads(t,tid,w._x)
                 except RetryBudgetExceeded:
-                    unread.append(sid)
-                    continue
-                diffs=differences(a,b,v.db.target_for_source_id)
-                compared+=len(a);matched+=len(a) if not diffs else 0
-                if diffs:result["differences"].append({"source":sid,"target":tid,"scope":"drive-comments","diffs":diffs})
+                    return "unread"
+            # Side by side (VERIFY_DRIVE_WORKERS): at one file a time this phase was three times the whole
+            # file comparison (buildingpermit@: 540 s of compare, 2,075 s in all -- 8 Nov 2026). Results come
+            # back in file order; every count and difference is recorded here, on this thread.
+            workers=max(1,min(len(pairs) or 1,_drive_file_workers()))
+            with ThreadPoolExecutor(max_workers=workers,thread_name_prefix="verify-comments") as pool:
+                # In windows, so an error or a Stop waits for at most one window of reads, not the queue.
+                for base in range(0,len(pairs),COMMENT_WINDOW):
+                    window=pairs[base:base+COMMENT_WINDOW]
+                    v._report_progress("Drive comment threads",base,len(pairs))
+                    for (sid,tid,_),got in zip(window,pool.map(lambda p: read(p[0],p[1]),[(a,b) for a,b,_ in window])):
+                        if got is None:
+                            continue
+                        if got=="unread":
+                            unread.append(sid)
+                            continue
+                        a,b=got
+                        diffs=differences(a,b,v.db.target_for_source_id)
+                        compared+=len(a);matched+=len(a) if not diffs else 0
+                        if diffs:result["differences"].append({"source":sid,"target":tid,"scope":"drive-comments","diffs":diffs})
             v._publish_stats(currentDocument=None, currentMime=None, currentSince=None)
             note="Original author/date are retained as attribution text when replayed; native author identities/history are not reproduced."
             if unread:
