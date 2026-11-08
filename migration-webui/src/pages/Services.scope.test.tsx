@@ -1,6 +1,7 @@
 import { render, screen } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 import Services from './Services'
+vi.mock('@/hooks/useAccountPair', () => ({ useAccountPair: () => '' }))
 vi.mock('@/api/controlPlane', () => ({
   fetchMe: () => Promise.resolve({ id: 1, migration_id: 3 }),
   migrationOf: (m: { id: number; migration_id: number }) => m.migration_id ?? m.id,

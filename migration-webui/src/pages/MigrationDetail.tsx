@@ -30,6 +30,7 @@ import QuickVerification from '@/components/QuickVerification'
 import OneToOneSummary from '@/components/OneToOneSummary'
 import CopySafetyCard from '@/components/CopySafetyCard'
 import { itemTypeLabel } from '@/utils/itemTypeLabel'
+import DmsMetrics from '@/components/DmsMetrics'
 
 /**
  * One migration in full: what moved, what failed, and why.
@@ -438,6 +439,7 @@ export const MigrationDetail: React.FC = () => {
               still owed, so mail parity stays short until the DMS has delivered it.
             </Alert>
           )}
+          {(p?.itemsDeferred ?? 0) > 0 && <DmsMetrics accountId={Number(accountId) || undefined} />}
 
           {/* Pressing Run delta changed nothing visible: it moves the same
               counters a finished migration already left on screen, and the

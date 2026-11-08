@@ -2,6 +2,9 @@
 place in the engine run."""
 import pytest
 
+import json
+import os
+import time
 import webui
 
 
@@ -342,3 +345,28 @@ def test_a_second_apply_run_waits_for_the_first_to_let_go_of_the_console(monkeyp
     monkeypatch.setattr(fcntl, "flock", flock)
     dms_migrate.main(["--apply", "--identities", "none.csv"])
     assert waited == [fcntl.LOCK_EX]
+
+
+def test_each_account_has_its_own_dms_counters(monkeypatch, tmp_path):
+    """One box-wide dms_metrics.json meant a refresh for account 2 overwrote what account 3's page showed
+    (8 Nov 2026). The scraper writes under logs/dms/<account>/ and the API reads that account's file."""
+    import dms_migrate
+    monkeypatch.delenv("DMS_METRICS_FILE", raising=False)
+    monkeypatch.setattr(dms_migrate, "HERE", str(tmp_path))
+    monkeypatch.setattr(webui, "DMS_METRICS_FILE", str(tmp_path / "legacy.json"))
+    for aid, imported in ((2, 5), (3, 777)):
+        path = dms_migrate.metrics_path(aid)
+        assert path.endswith(f"logs/dms/{aid}/metrics.json")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as fh:
+            json.dump({"status": "In progress", "metrics": {"Emails imported": imported}, "read_at": int(time.time())}, fh)
+    assert webui._dms_metrics_payload(3)["data"]["metrics"]["Emails imported"] == 777
+    assert webui._dms_metrics_payload(2)["data"]["metrics"]["Emails imported"] == 5
+    assert webui._dms_metrics_payload(9)["data"] is None            # an account that never ran one
+
+
+def test_the_scraper_finds_its_account_from_its_ledger_path(monkeypatch):
+    import dms_migrate
+    monkeypatch.delenv("DMS_METRICS_FILE", raising=False)
+    monkeypatch.setenv("MIGRATION_DB", "/opt/bitport/data/accounts/3/migration.db")
+    assert dms_migrate.metrics_path().endswith("logs/dms/3/metrics.json")

@@ -4,6 +4,7 @@ import ServicesPanel from './ServicesPanel'
 
 const fetchHostServices = vi.fn()
 const restartHostUnit = vi.fn()
+vi.mock('@/hooks/useAccountPair', () => ({ useAccountPair: () => '' }))
 vi.mock('@/api/client', () => ({
   fetchHostServices: (...a: unknown[]) => fetchHostServices(...a),
   restartHostUnit: (...a: unknown[]) => restartHostUnit(...a),

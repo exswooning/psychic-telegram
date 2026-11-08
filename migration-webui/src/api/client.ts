@@ -221,8 +221,9 @@ export interface DmsMetricsResponse {
 
 // The DMS counters live only in Google's console; the server scrapes them
 // into a cache (dms_migrate --status) and serves the last read here.
-export async function fetchDmsMetrics(): Promise<DmsMetricsResponse> {
-  return getJSON<DmsMetricsResponse>('/api/dms_metrics')
+export async function fetchDmsMetrics(accountId?: number | string): Promise<DmsMetricsResponse> {
+  const account = accountId !== undefined && accountId !== null ? `?account=${encodeURIComponent(String(accountId))}` : ''
+  return getJSON<DmsMetricsResponse>(`/api/dms_metrics${account}`)
 }
 
 export interface JobResult {

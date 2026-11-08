@@ -14,6 +14,7 @@ import DmsImportButton from '@/components/DmsImportButton'
 import DmsMetrics from '@/components/DmsMetrics'
 import ConfigurationReport from '@/components/ConfigurationReport'
 import { fetchMe, migrationOf } from '@/api/controlPlane'
+import { useAccountPair } from '@/hooks/useAccountPair'
 
 /**
  * The migration capabilities that the per-user run does not cover.
@@ -43,6 +44,7 @@ const Services: React.FC = () => {
   // Which tenant every action on this page acts on. It was implicit --
   // whichever the session resolved to -- and unnamed anywhere on screen.
   const [scopeAccount, setScopeAccount] = useState<number | undefined>()
+  const pair = useAccountPair(scopeAccount)
 
   useEffect(() => {
     // The global migration picker is authoritative. A second selector here
@@ -85,6 +87,12 @@ const Services: React.FC = () => {
         the migrate step would touch.
       </Typography>
 
+      {scopeAccount !== undefined && pair && (
+        <Alert severity="info" sx={{ mb: 2 }} data-testid="acting-on">
+          Everything on this page acts on <strong>{pair}</strong> — the migration chosen in the header's
+          Migration box, not the Viewing account box beside it.
+        </Alert>
+      )}
       {scopeAccount !== undefined && <TenantScopePicker accountId={scopeAccount}
                          onAccountChange={setScopeAccount} locked />}
 

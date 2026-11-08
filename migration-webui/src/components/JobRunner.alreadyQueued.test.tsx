@@ -9,6 +9,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import JobRunner from './JobRunner'
 import * as client from '@/api/client'
 
+vi.mock('@/hooks/useAccountPair', () => ({ useAccountPair: () => '' }))
 vi.mock('@/api/client', async () => {
   const actual = await vi.importActual<typeof client>('@/api/client')
   return { ...actual, fetchJob: vi.fn(), runAction: vi.fn() }

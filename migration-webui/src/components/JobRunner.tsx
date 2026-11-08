@@ -5,6 +5,7 @@ import {
 } from '@mui/material'
 import { PlayArrow as RunIcon, Stop as StopIcon } from '@mui/icons-material'
 import { runAction, stopJob, fetchJob, ActionSpec } from '@/api/client'
+import { useAccountPair } from '@/hooks/useAccountPair'
 
 /**
  * One button that runs a whitelisted ACTIONS entry and streams its output.
@@ -32,6 +33,7 @@ const JobRunner: React.FC<{
   const [lines, setLines] = useState<string[]>([])
   const [rc, setRc] = useState<number | null>(null)
   const [confirmOpen, setConfirmOpen] = useState(false)
+  const pair = useAccountPair(accountId)
   const [typed, setTyped] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [queued, setQueued] = useState<string | null>(null)
@@ -236,6 +238,7 @@ const JobRunner: React.FC<{
       <Dialog open={confirmOpen} onClose={() => setConfirmOpen(false)}>
         <DialogTitle>Confirm: {spec.label}</DialogTitle>
         <DialogContent>
+          {pair && <Typography variant="body2" sx={{ mb: 1, fontWeight: 700 }} data-testid="confirm-account">Runs for {pair}</Typography>}
           <Typography variant="body2" sx={{ mb: 2 }}>{spec.blurb}</Typography>
           <Typography variant="body2" sx={{ mb: 1 }}>
             Type <strong>{spec.confirm}</strong> to run this.

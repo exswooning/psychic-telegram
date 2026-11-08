@@ -1394,12 +1394,15 @@ def queue_payload(account_id: int | None = None) -> dict:
     }
 
 
-def _dms_metrics_payload() -> dict:
-    """The last DMS counters scraped from the console, plus their age and
-    whether a refresh scrape is running right now."""
+def _dms_metrics_payload(account_id: int | None = None) -> dict:
+    """The last DMS counters scraped from the console for THIS account (dms_migrate.metrics_path), plus their
+    age. A fixed file named by DMS_METRICS_FILE (tests, one-off use) still wins."""
+    import dms_migrate
+    path = os.getenv("DMS_METRICS_FILE") or (dms_migrate.metrics_path(account_id) if account_id is not None
+                                             else DMS_METRICS_FILE)
     data, age = None, None
     try:
-        with open(DMS_METRICS_FILE, encoding="utf-8") as fh:
+        with open(path, encoding="utf-8") as fh:
             data = json.load(fh)
         read_at = data.get("read_at")
         if read_at:
@@ -5725,7 +5728,12 @@ class Handler(BaseHTTPRequestHandler):
             # DMS counters live only in Google's console, so they are scraped
             # into a cache file (dms_migrate --status) and served from there;
             # a refresh is a separate browser job the UI can trigger.
-            self._json(_dms_metrics_payload())
+            asked = self.path.split("account=")[1].split("&")[0] if "account=" in self.path else None
+            watching, scope_err = resolve_target_account(self._account_id(), asked or None)
+            if scope_err:
+                self._json({"error": scope_err}, 403)
+                return
+            self._json(_dms_metrics_payload(watching))
         elif path == "/api/job_history":
             # The last COMPLETED run of a given job name, read back from
             # disk -- covers exactly the gap /api/job can't: a browser tab

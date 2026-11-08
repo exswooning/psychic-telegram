@@ -8,6 +8,7 @@ const client = vi.hoisted(() => ({
   fetchDmsStatus: vi.fn(async () => ({ running: false, lines: [] })),
 }))
 vi.mock('@/api/client', () => client)
+vi.mock('@/hooks/useAccountPair', () => ({ useAccountPair: (id?: number) => (id === 3 ? 's.example → t.example' : '') }))
 
 import DmsImportButton from './DmsImportButton'
 
@@ -17,6 +18,7 @@ describe('the DMS import button', () => {
   it('starts the import for the account the page is viewing, and watches that account', async () => {
     render(<DmsImportButton spec={{ label: 'Start Google DMS mail import', confirm: 'DMS' } as never} accountId={3} />)
     fireEvent.click(screen.getByTestId('action-dms_import'))
+    expect(screen.getByTestId('confirm-account')).toHaveTextContent('Runs for s.example → t.example')
     fireEvent.change(screen.getByRole('textbox'), { target: { value: 'DMS' } })
     fireEvent.click(screen.getByRole('button', { name: /run/i }))
     await waitFor(() => expect(client.runAction).toHaveBeenCalledWith('dms_import', 'DMS', 3))

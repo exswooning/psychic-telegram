@@ -327,8 +327,24 @@ def _set_earliest_date(page) -> bool:
 
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-METRICS_FILE = os.getenv("DMS_METRICS_FILE",
-                         os.path.join(HERE, "dms_metrics.json"))
+
+
+def metrics_path(account_id=None) -> str:
+    """Where this account's DMS counters are cached. One file per account: a single box-wide file meant a
+    refresh for account 2 overwrote the numbers account 3's page was showing (8 Nov 2026). The process knows
+    its account from its ledger path (data/accounts/<id>/migration.db); DMS_METRICS_FILE still wins when set."""
+    named = os.getenv("DMS_METRICS_FILE")
+    if named:
+        return named
+    if account_id is None:
+        m = re.search(r"accounts[\\/](\d+)[\\/]", os.getenv("MIGRATION_DB", ""))
+        account_id = int(m.group(1)) if m else None
+    if account_id is None:
+        return os.path.join(HERE, "dms_metrics.json")
+    return os.path.join(HERE, "logs", "dms", str(account_id), "metrics.json")
+
+
+METRICS_FILE = metrics_path()
 
 # The labelled counters Step 4 shows once an import is running or done.
 _METRIC_FIELDS = ("Discovered tasks", "Warning", "Failed", "Skipped",
@@ -400,7 +416,9 @@ def status(timeout: int, headful: bool) -> dict:
         if got.get("status") == "complete":
             _record_delivered()
         try:
-            with open(METRICS_FILE, "w", encoding="utf-8") as fh:
+            path = metrics_path()
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as fh:
                 json.dump(got, fh)
         except Exception:             # noqa: BLE001
             logging.getLogger(__name__).debug("ignored an error", exc_info=True)

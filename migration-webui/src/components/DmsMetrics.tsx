@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import {
-  Box, Button, Chip, Stack, Typography,
+  Box, Button, Chip, LinearProgress, Stack, Typography,
 } from '@mui/material'
 import { Refresh as RefreshIcon } from '@mui/icons-material'
 import { fetchDmsMetrics, runAction, DmsMetricsResponse } from '@/api/client'
@@ -44,11 +44,11 @@ const DmsMetrics: React.FC<{ accountId?: number | string }> = ({ accountId }) =>
 
   const load = useCallback(async () => {
     try {
-      setResp(await fetchDmsMetrics())
+      setResp(await fetchDmsMetrics(accountId))
     } catch {
       /* keep the last good values on a dropped poll */
     }
-  }, [])
+  }, [accountId])
 
   useEffect(() => {
     load()
@@ -112,6 +112,17 @@ const DmsMetrics: React.FC<{ accountId?: number | string }> = ({ accountId }) =>
           No metrics read yet — press Refresh to read the counters from the
           Admin console.
         </Typography>
+      )}
+
+      {data && has('Emails discovered') && has('Emails imported') && m['Emails discovered'] > 0 && (
+        <Box sx={{ mb: 1 }} data-testid="dms-progress">
+          <Typography variant="body2" sx={{ fontVariantNumeric: 'tabular-nums' }}>
+            {nf.format(m['Emails imported'])} of {nf.format(m['Emails discovered'])} emails imported
+            {has('Emails failed') && m['Emails failed'] > 0 ? ` · ${nf.format(m['Emails failed'])} failed` : ''}
+          </Typography>
+          <LinearProgress variant="determinate" sx={{ height: 8, borderRadius: 1, mt: 0.5 }}
+            value={Math.min(100, (100 * (m['Emails imported'] + (m['Emails skipped'] || 0))) / m['Emails discovered'])} />
+        </Box>
       )}
 
       {data && (

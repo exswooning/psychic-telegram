@@ -5,6 +5,7 @@ import {
 } from '@mui/material'
 import { PlayArrow as RunIcon } from '@mui/icons-material'
 import { runAction, fetchDmsStatus, ActionSpec } from '@/api/client'
+import { useAccountPair } from '@/hooks/useAccountPair'
 
 /**
  * Starts Google's Data Migration Service mail import and watches its own
@@ -22,6 +23,7 @@ import { runAction, fetchDmsStatus, ActionSpec } from '@/api/client'
    page already passed it. */
 const DmsImportButton: React.FC<{ spec: ActionSpec; accountId?: number | string }> = ({ spec, accountId }) => {
   const [open, setOpen] = useState(false)
+  const pair = useAccountPair(accountId)
   const [typed, setTyped] = useState('')
   const [running, setRunning] = useState(false)
   const [lines, setLines] = useState<string[]>([])
@@ -105,6 +107,7 @@ const DmsImportButton: React.FC<{ spec: ActionSpec; accountId?: number | string 
       <Dialog open={open} onClose={() => setOpen(false)}>
         <DialogTitle>Confirm: {spec.label}</DialogTitle>
         <DialogContent>
+          {pair && <Typography variant="body2" sx={{ mb: 1, fontWeight: 700 }} data-testid="confirm-account">Runs for {pair}</Typography>}
           <Typography variant="body2" sx={{ mb: 2 }}>{spec.blurb}</Typography>
           <Typography variant="body2" sx={{ mb: 1 }}>
             Type <strong>{spec.confirm}</strong> to run this.
