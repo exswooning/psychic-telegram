@@ -338,7 +338,14 @@ def watch_tenant_ready(ctx: Context) -> list[dict]:
                 r = ctx.readiness(aid, side) or {}
                 failed = [f"{c.get('name')}: {c.get('detail', '')}"[:200] for c in r.get("checks", [])
                           if c.get("ok") is False]
-                res = {"at": ctx.now.timestamp(), "ready": r.get("ready"), "failed": failed}
+                undecided = not r.get("ready") and not failed
+                if undecided and cached:
+                    # Nothing definite came back (Google unreachable, a check that could not be made): keep the
+                    # last definite answer. Read as "ready", it closed account 2's incidents at 08:49 during an
+                    # outage and they reopened an hour later (8 Nov 2026) -- only evidence closes one.
+                    res = dict(cached, at=ctx.now.timestamp())
+                else:
+                    res = {"at": ctx.now.timestamp(), "ready": r.get("ready"), "failed": failed}
                 last[key] = res
             if res.get("ready") is False and res.get("failed"):
                 out.append(finding("watch_tenant_ready", aid, side,

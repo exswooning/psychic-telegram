@@ -215,3 +215,19 @@ def test_sweep_opens_what_holds_and_closes_only_what_a_run_check_no_longer_finds
     holds["on"] = False
     O.sweep(ctx(db, tmp_path), **kw)
     assert resolved == [10]          # check_b never ran, so 11 stays; 12 is not ours
+
+
+def test_a_readiness_check_that_could_not_decide_keeps_the_last_definite_answer(db, tmp_path):
+    """8 Nov 2026: during an outage account 2's checks came back unknown, read as ready, closed its incidents,
+    and an hour later they reopened. Unknown is not evidence."""
+    answers = iter([{"ready": False, "checks": [{"name": "delegation", "ok": False, "detail": "18 of 18 refused"}]},
+                    {"ready": False, "checks": [{"name": "delegation", "ok": None, "detail": "unreachable"}]},
+                    {"ready": True, "checks": [{"name": "delegation", "ok": True}]}])
+    state = {}
+    active = lambda: [{"account_id": 3}]  # noqa: E731
+    later = lambda m: NOW + timedelta(minutes=m)  # noqa: E731
+    kw = dict(readiness=lambda aid, side: next(answers), state=state, active_jobs=active)
+    accounts = [{"id": 3, "source_domain": "s.example"}]
+    assert len(O.watch_tenant_ready(ctx(db, tmp_path, accounts=accounts, **kw))) == 1
+    assert len(O.watch_tenant_ready(ctx(db, tmp_path, accounts=accounts, now=later(61), **kw))) == 1   # unknown: still not ready
+    assert O.watch_tenant_ready(ctx(db, tmp_path, accounts=accounts, now=later(122), **kw)) == []    # definite: ready
