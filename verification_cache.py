@@ -11,7 +11,13 @@ import json
 
 from db import utc_now
 
-VERSION = 1
+VERSION = 2
+# What the comparison of one email means. Bump it when the rules that decide "identical" change -- not on every
+# edit to the verifier's code, which is what the cache used to fingerprint: every deploy of verify_sample.py, and
+# every Drive file copied for ANY user, emptied every user's cache, so no Gmail comparison was ever reused
+# ("new comparison context; full reads" for every user on account 3, 8 Nov 2026).
+MAIL_COMPARISON_VERSION = 1
+CHECKPOINT_EVERY = 2000
 
 
 def digest(value):
@@ -24,30 +30,20 @@ class MailCache:
     def __init__(self, verifier, source, target, label_maps):
         self.v = verifier
         self.user = verifier.src_user
-        from pathlib import Path
-        import verify_sample, verification_reads, mail_identity
-        comparison_code = digest({
-            module.__name__: hashlib.sha256(Path(module.__file__).read_bytes()).hexdigest()
-            for module in (verify_sample, verification_reads, mail_identity)
-        })
         self.context = digest(
             {
-                "version": VERSION, "comparisonCode":comparison_code,
+                "version": VERSION, "comparison": MAIL_COMPARISON_VERSION,
                 "targetUser": verifier.tgt_user,
                 "rewrite": getattr(verifier.settings, "rewrite_drive_links", False),
                 "labels": label_maps,
-                "rewrittenSourceIds": [row[0] for row in verifier.db.conn.execute(
-                    "SELECT item_id FROM audit_log WHERE source_user=? AND item_type='link_rewrite' AND status='SUCCESS' ORDER BY item_id",
-                    (self.user,),
-                )],
-                "mappings": [
-                    tuple(row)
-                    for row in verifier.db.conn.execute(
-                        "SELECT source_user,type,source_id,target_id FROM id_mapping WHERE type IN ('file','folder','shortcut','calendar','group') ORDER BY source_user,type,source_id"
-                    )
-                ],
             }
         )
+        # Per email, not per user: whether its links were rewritten, and (for a rewritten one) where the Drive
+        # files it links to map now. A copy made for someone else no longer touches this user's cache.
+        self.rewritten = {row[0] for row in verifier.db.conn.execute(
+            "SELECT item_id FROM audit_log WHERE source_user=? AND item_type='link_rewrite' AND status='SUCCESS'",
+            (self.user,))}
+        self._since_checkpoint = 0
         self.active = False
         self.rows, self.fresh = {}, {}
         self.changed = {"source": set(), "target": set()}
@@ -187,6 +183,10 @@ class MailCache:
                 raise RuntimeError("Repeated Gmail history page token")
             seen.add(token)
 
+    def _links_digest(self, link_ids):
+        lookup = self.v.db.target_for_source_id
+        return digest({i: lookup(i) for i in sorted(link_ids)})
+
     def get(self, source_id, target_id):
         row = self.rows.get(source_id)
         if not self.active or not row or row["target_id"] != target_id:
@@ -195,17 +195,34 @@ class MailCache:
             return None
         try:
             evidence = json.loads(row["payload"])
-            if not evidence.get("sourceSha256") or not evidence.get("targetSha256"):
+            # Content proven either by both bodies' hashes, or by the receipt the engine wrote when it compared
+            # the email byte for byte as it inserted it -- Gmail cannot change a stored email's content.
+            if not evidence.get("receipt") and not (evidence.get("sourceSha256") and evidence.get("targetSha256")):
                 return None
         except (ValueError, TypeError):
             return None
+        if bool(evidence.get("rewritten")) != (source_id in self.rewritten):
+            return None
+        if evidence.get("links") is not None and evidence.get("linksDigest") != self._links_digest(evidence["links"]):
+            return None          # a Drive file this email links to maps somewhere else now
         self.hits += 1
         self.fresh[source_id] = (target_id, evidence)
         return evidence
 
-    def put(self, source_id, target_id, evidence):
-        if self.active:
-            self.fresh[source_id] = (target_id, evidence)
+    def put(self, source_id, target_id, evidence, links=None):
+        """links: the Drive ids a rewritten email points at -- its expected content depends on their mapping."""
+        if not self.active:
+            return
+        evidence = dict(evidence, rewritten=source_id in self.rewritten)
+        if links is not None:
+            evidence["links"] = sorted(links)
+            evidence["linksDigest"] = self._links_digest(links)
+        self.fresh[source_id] = (target_id, evidence)
+        self._since_checkpoint += 1
+        if self._since_checkpoint >= CHECKPOINT_EVERY:
+            # A stopped check used to save nothing: info@'s were stopped twice in a day, hours each time.
+            self.finish()
+            self._since_checkpoint = 0
 
     def finish(self):
         if not self.active:

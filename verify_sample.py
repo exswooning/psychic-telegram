@@ -1635,8 +1635,10 @@ class Verifier:
             res["identical"] += 1
             mapped_msgids.add(cached.get("messageId", ""))
             self.evidence.append({"service":"gmail", "name":cached.get("messageId") or sid,
-                "how":"validated receipt reused after two-tenant history reconciliation",
-                "opened":False, "sha256":cached["sourceSha256"][:16]})
+                "how":("receipted when written; neither copy has changed since its last check (mailbox history)"
+                       if cached.get("receipt") else
+                       "validated comparison reused after two-tenant history reconciliation"),
+                "opened":False, "sha256":(cached.get("sourceSha256") or "")[:16]})
         receipts = self._receipts()
         receipted = [p for p in pending if receipts.get(p[0]) == p[1]]
         pending = [p for p in pending if receipts.get(p[0]) != p[1]]
@@ -1659,6 +1661,8 @@ class Verifier:
                     res["differences"].append({"item": msgid or sid, "source": sid, "target": tid, "diffs": diffs})
                 else:
                     res["identical"] += 1
+                    # Content was proven when it was written; labels and read state are what history watches.
+                    cache.put(sid, tid, {"messageId": msgid, "receipt": True, "comparison": "receipt"})
             self._report_progress("Gmail check receipted emails", min(offset + len(chunk), len(receipted)),
                                   len(receipted))
         res["receipted"] = len(receipted)
@@ -1676,11 +1680,16 @@ class Verifier:
                 source_headers = BytesHeaderParser().parsebytes(sraw)
                 msgid = (source_headers.get("Message-ID") or "").strip()
                 mapped_msgids.add(msgid)
-                expected = None
+                expected, linked = None, None
                 if sid in rewritten:
                     b64 = base64.urlsafe_b64encode(sraw).decode().rstrip("=")
                     # decoded parts too: a base64 or quoted-printable body hides the ids
-                    new_b64, _n = rewrite_raw(b64, copy_lookup(self.db, traw + normalise_message(traw)[1]))
+                    lookup, linked = copy_lookup(self.db, traw + normalise_message(traw)[1]), set()
+
+                    def recording(file_id, _lookup=lookup, _seen=linked):
+                        _seen.add(file_id)      # what this email's expected content depends on (the cache)
+                        return _lookup(file_id)
+                    new_b64, _n = rewrite_raw(b64, recording)
                     expected = base64.urlsafe_b64decode(new_b64 + "=" * (-len(new_b64) % 4))
                 verdict, notes = compare_message(sraw, traw, expected)
                 diffs = []
@@ -1696,7 +1705,7 @@ class Verifier:
                 else:
                     res["identical"] += 1
                     cache.put(sid, tid, {"messageId":msgid, "sourceSha256":sha256(sraw),
-                        "targetSha256":sha256(traw), "comparison":verdict})
+                        "targetSha256":sha256(traw), "comparison":verdict}, links=linked)
             completed = min(offset + len(chunk), total_messages)
             self._report_progress("Gmail compare mapped emails", completed, total_messages)
         for verdict, n in said.items():
