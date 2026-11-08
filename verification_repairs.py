@@ -10,6 +10,7 @@ import copy
 import hashlib
 import json
 import os
+import time
 
 from db import utc_now
 
@@ -165,6 +166,22 @@ def queued_repairable(db, user) -> dict:
         if isinstance(item, dict) and item.get("id"):
             out.setdefault(r["service"], []).append(item)
     return out
+
+
+DEPLOY_FLAG = os.getenv("BITPORT_DEPLOY_FLAG", os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                            "logs", "deploy_pending"))
+DEPLOY_FLAG_MAX_AGE = 6 * 3600
+
+
+def deploy_pending() -> bool:
+    """A deploy is waiting for the box to be idle (the deploy script touches this file while it waits and
+    removes it when done). The backlog dispatcher starts nothing new, and a running backlog job takes no
+    new user, while it exists -- batches left no idle minute for hours, so no deploy could land (oversight
+    watch_box_busy, account 3, 8 Nov 2026). A flag older than six hours is a deploy that died: ignored."""
+    try:
+        return time.time() - os.path.getmtime(DEPLOY_FLAG) < DEPLOY_FLAG_MAX_AGE
+    except OSError:
+        return False
 
 
 def services_to_check(db, user, services) -> tuple:

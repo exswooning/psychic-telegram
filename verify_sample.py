@@ -2253,6 +2253,15 @@ def _chat_attempted(db, user: str) -> bool:
     return False
 
 
+def repair_after_user_pending_deploy() -> bool:
+    """True only for the repair backlog (the flag it honours is VERIFY_YIELD_TO_DEPLOY=1, set by the
+    dispatcher); a person's One-to-one run is never cut short by a deploy flag."""
+    if os.getenv("VERIFY_YIELD_TO_DEPLOY", "") != "1":
+        return False
+    import verification_repairs
+    return verification_repairs.deploy_pending()
+
+
 def run(auth, db, settings, users: list[str] | None = None, services=ALL_SERVICES, retry=lambda f: f,
         progress=print, limit: int | None = None, on_user=None, on_service=None, services_for=None) -> dict:
     ident = {r["source_email"]: r["target_email"] for r in db.all_identities() if r["entity_type"] == "user"}
@@ -2440,6 +2449,11 @@ def run(auth, db, settings, users: list[str] | None = None, services=ALL_SERVICE
 
     def one(u: str) -> None:
         _stop_check()
+        if repair_after_user_pending_deploy():
+            # A deploy is waiting for an idle box: finish the users already under way, take no new one. This
+            # user stays due and is picked up by the next batch.
+            emit(f"verify: {u} not started: a deploy is waiting; it stays due for the next batch")
+            return
         with lock:
             started_users.add(u)
         emit_scheduler()

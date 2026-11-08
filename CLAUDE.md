@@ -251,6 +251,14 @@ incident, and one account's ledger or logs naming another account's domain. Depl
 against HEAD, the UI build against the last UI commit) needs git, so it is `monitor/watch.py --drift`
 on the operator's side, hourly in its loop, written to `monitor/INBOX.md` only when it changes.
 
+**A deploy can wait for the repair backlog, so the backlog yields to one** (`verification_repairs.deploy_pending`,
+the file `logs/deploy_pending`). A deploy script that has to wait for an idle box touches it each loop and
+removes it when done; while it is fresh (under six hours) the dispatcher starts no batch, and a backlog job
+(`VERIFY_YIELD_TO_DEPLOY=1`, set only by the dispatcher) takes no new user -- those it already has finish. A
+batch holds `VERIFY_BACKLOG_USERS` (12) users for `VERIFY_MAX_WORKERS` (4) workers, so a freed worker takes the
+next user. Before this, batches of four ran until the slowest finished and the next started within a minute: no
+60-second gap for hours (`watch_box_busy`). `sync_vps.sh` does not touch the flag yet.
+
 **Handling an incident.** Read the brief; reproduce from its evidence; fix on
 a **test sandbox tenant**, never a real one; add a test. **Do not deploy
 unattended**: `sync_vps.sh` restarts services and a webui-launched seed or a

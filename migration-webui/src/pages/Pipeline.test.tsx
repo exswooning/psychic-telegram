@@ -35,7 +35,7 @@ beforeEach(() => {
 describe('Pipeline', () => {
   it('draws every part, in sections, and says how many', async () => {
     view()
-    expect(await screen.findByText(/65 parts in 13 sections/)).toBeInTheDocument()
+    expect(await screen.findByText(/71 parts in 13 sections/)).toBeInTheDocument()
     for (const id of ['src', 'wizard', 'drive', 'gmail', 'lim_tgt', 'id_mapping', 'tgt', 'undo', 'mc'])
       expect(screen.getByTestId(`node-${id}`)).toBeInTheDocument()
     for (const f of ['setup', 'engines', 'ledger', 'verify']) expect(screen.getByTestId(`frame-${f}`)).toBeInTheDocument()

@@ -2417,6 +2417,8 @@ def _dispatch_verification_repairs():
     import verification_repairs
     if job_queue.waiting():
         return  # operator requests take priority over historical backfill
+    if verification_repairs.deploy_pending():
+        return  # a deploy is waiting for an idle box: start nothing that would hold it for hours
     for acct in accounts_auth.list_accounts():
         aid = acct.get("id") if isinstance(acct, dict) else acct
         path = _account_db_path(aid)
@@ -2432,7 +2434,10 @@ def _dispatch_verification_repairs():
                     globally_idle = conn.execute("SELECT 1 FROM active_jobs LIMIT 1").fetchone() is None
                 if globally_idle:
                     verification_repairs.reconcile_stopped_verification(d)
-            users = verification_repairs.due_users(d)[:4]
+            # More users than workers (VERIFY_MAX_WORKERS): each worker takes the next user the moment it
+            # frees up, so one big mailbox no longer holds three finished slots idle for hours (info@'s
+            # 40,000 messages kept the batch open 90 minutes after the other three users were done).
+            users = verification_repairs.due_users(d)[:BACKLOG_USERS]
         finally:
             d.close()
         if not users:
@@ -2445,7 +2450,8 @@ def _dispatch_verification_repairs():
         for user in users:
             argv += ["--user", user]
         try:
-            ok, detail = _start_admitted(argv, aid, "verify", dict(os.environ, VERIFY_WORKERS="auto"))
+            ok, detail = _start_admitted(argv, aid, "verify",
+                                         dict(os.environ, VERIFY_WORKERS="auto", VERIFY_YIELD_TO_DEPLOY="1"))
             if not ok:
                 job_admission.release(aid, "verify")
             log.info("verification repair backlog account %s: %s", aid, detail)
@@ -5614,6 +5620,7 @@ async def _owed_grants_loop() -> None:
 
 HOUSEKEEPING_SEC = 900
 OVERSIGHT_SEC = int(os.getenv("OVERSIGHT_SEC", "600"))
+BACKLOG_USERS = max(1, int(os.getenv("VERIFY_BACKLOG_USERS", "12") or 12))
 
 
 async def _oversight_loop() -> None:
