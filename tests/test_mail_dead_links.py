@@ -1,0 +1,41 @@
+"""Drive links in mail that cannot be repointed are listed -- with what the source answers for each --
+not only counted."""
+import mail_dead_links as M
+from tests.conftest import SRC_USER
+
+GONE = "1GoneFileIdGoneFileIdGoneFileId0001"
+MOVED = "1CopiedFileIdCopiedFileIdCopied0002"
+
+
+def _mail(tag, *ids):
+    body = "".join(f"see https://drive.google.com/file/d/{i}/view\r\n" for i in ids)
+    return (f"Message-ID: <{tag}@a.com>\r\nFrom: a@b.com\r\nTo: c@d.com\r\nSubject: s\r\n\r\n{body}").encode()
+
+
+def test_only_links_with_no_target_copy_are_listed_with_the_sources_answer(gmail_migrator, auth, db):
+    db.record_mapping(SRC_USER, MOVED, "t-copy", "file")                      # copied: the engine rewrites it
+    g = auth.source_gmail(SRC_USER)
+    g.add_message(_mail("one", GONE, MOVED), ["INBOX"])
+    g.add_message(_mail("two", GONE), ["INBOX"])
+    r = M.inventory_user(gmail_migrator, workers=2, say=lambda *_: None)
+    rep = M.report(db.conn)
+    rows = {x["fileId"]: x for x in rep["links"]}
+    assert MOVED not in rows                                                  # not a dead link
+    assert rows[GONE]["status"] == "NOT_FOUND" and rows[GONE]["emails"] == 2 and rows[GONE]["exampleMessage"]
+    assert r["links"] == 1 and rep["totals"]["NOT_FOUND"] == {"label": M.LABEL["NOT_FOUND"], "links": 1, "emails": 2}
+
+
+def test_a_second_run_replaces_the_users_rows_and_the_report_filters(gmail_migrator, auth, db):
+    auth.source_gmail(SRC_USER).add_message(_mail("one", GONE), ["INBOX"])
+    M.inventory_user(gmail_migrator, workers=1, say=lambda *_: None)
+    M.inventory_user(gmail_migrator, workers=1, say=lambda *_: None)
+    assert M.report(db.conn)["matched"] == 1
+    assert M.report(db.conn, status="NO_ACCESS")["matched"] == 0
+    assert M.report(db.conn, q=GONE[:8].lower())["matched"] == 1
+
+
+def test_what_the_source_answers_is_named():
+    assert M.classify("HTTP 404 (notFound): x", None, "s.x")[0] == "NOT_FOUND"
+    assert M.classify("HTTP 403 (insufficientFilePermissions)", None, "s.x")[0] == "NO_ACCESS"
+    assert M.classify(None, ["a@other.org"], "s.x") == ("NOT_MIGRATED", "owned by other.org")
+    assert M.classify("HTTP 500", None, "s.x")[0] == "OTHER"

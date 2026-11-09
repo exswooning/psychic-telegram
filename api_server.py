@@ -6311,6 +6311,47 @@ async def sharing(account_id: int | None = None, kind: str | None = None, q: str
     return data
 
 
+@app.get("/api/v2/mail-links")
+async def mail_links(account_id: int | None = None, status: str | None = None, q: str = "",
+                     limit: int = 200, offset: int = 0, format: str = "json",
+                     op: Operator = Depends(operator)):
+    """Drive links in this account's mail that could not be repointed (no copy on the target), with
+    what the source answers for each file -- the list behind the scan's "N links answer 404" count.
+    Written by mail_dead_links.py; read from the ledger only."""
+    require_login(op)
+    aid = account_id if account_id is not None else op.account_id
+    _require_account_access(aid, op)
+    if status is not None and status not in ("NOT_FOUND", "NO_ACCESS", "NOT_MIGRATED", "OTHER"):
+        raise HTTPException(400, "status must be NOT_FOUND, NO_ACCESS, NOT_MIGRATED or OTHER")
+    limit = max(1, min(int(limit), 1000))
+
+    def _read():
+        import csv
+        import io
+        import mail_dead_links
+        path = _ledger_path(aid)
+        if not os.path.isfile(path):
+            return None
+        with cpdb.ro(path) as conn:
+            if format != "csv":
+                return {"accountId": aid, **mail_dead_links.report(conn, status=status, q=q, limit=limit,
+                                                                    offset=max(0, int(offset)))}
+            out = io.StringIO()
+            w = csv.writer(out)
+            w.writerow(["user", "status", "emails", "fileId", "detail", "exampleMessage", "sourceUrl"])
+            for r in mail_dead_links.report(conn, status=status, q=q, limit=10 ** 9)["links"]:
+                w.writerow([r["user"], r["status"], r["emails"], r["fileId"], r["detail"],
+                            r["exampleMessage"], r["sourceUrl"]])
+            return out.getvalue()
+    data = await _off_loop(_read)
+    if data is None:
+        raise HTTPException(404, "this migration has no ledger yet")
+    if format == "csv":
+        return PlainTextResponse(data, media_type="text/csv", headers={
+            "Content-Disposition": f'attachment; filename="mail-links-{aid}.csv"'})
+    return data
+
+
 @app.get("/api/v2/owed-grants")
 async def owed_grants(op: Operator = Depends(operator)):
     """Shares waiting for a colleague's target account, per migration this caller may

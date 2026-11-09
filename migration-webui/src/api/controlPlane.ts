@@ -2437,3 +2437,20 @@ export const fetchSharing = (accountId: number, kind?: SharingKind | null, q = '
   cpFetch<SharingView>(`/api/v2/sharing?${sharingQuery(accountId, kind, q)}&offset=${offset}&limit=${limit}`)
 export const sharingCsvUrl = (accountId: number, kind?: SharingKind | null, q = '') =>
   `${getCpBase()}/api/v2/sharing?${sharingQuery(accountId, kind, q)}&format=csv`
+
+// ---- Mail links that cannot be repointed: what the source answers for each file (api_server /api/v2/mail-links)
+export type DeadLinkStatus = 'NOT_FOUND' | 'NO_ACCESS' | 'NOT_MIGRATED' | 'OTHER'
+export interface DeadLink {
+  user: string; fileId: string; status: DeadLinkStatus; detail: string; emails: number
+  exampleMessage: string; checkedAt: string; sourceUrl: string
+}
+export interface DeadLinksView {
+  accountId: number; totals: Record<DeadLinkStatus, { label: string; links: number; emails: number }> | Record<string, never>
+  matched: number; offset: number; limit: number; links: DeadLink[]
+}
+const deadLinksQuery = (accountId: number, status?: DeadLinkStatus | null, q = '') =>
+  `account_id=${accountId}${status ? `&status=${status}` : ''}${q ? `&q=${encodeURIComponent(q)}` : ''}`
+export const fetchDeadLinks = (accountId: number, status?: DeadLinkStatus | null, q = '', limit = 100) =>
+  cpFetch<DeadLinksView>(`/api/v2/mail-links?${deadLinksQuery(accountId, status, q)}&limit=${limit}`)
+export const deadLinksCsvUrl = (accountId: number, status?: DeadLinkStatus | null, q = '') =>
+  `${getCpBase()}/api/v2/mail-links?${deadLinksQuery(accountId, status, q)}&format=csv`

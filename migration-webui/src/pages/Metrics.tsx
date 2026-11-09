@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react'
 import { MailLinkScans } from '../components/MailLinkScans'
+import DeadLinksPanel from '../components/DeadLinksPanel'
 import { useParams } from 'react-router-dom'
 import {
   Alert, Box, Chip, CircularProgress, IconButton, Paper, Stack,
@@ -176,6 +177,7 @@ export const Metrics: React.FC = () => {
         </Typography>)}
       </Alert>}
       <MailLinkScans scans={m?.mailLinkScans} />
+      {(scoped ? id : m?.accountId) ? <DeadLinksPanel accountId={scoped ? id : m!.accountId} /> : null}
       {m?.error && (
         <Alert severity="info" sx={{ mb: 2 }} data-testid="metrics-empty">
           {m.error}
