@@ -25,7 +25,7 @@ TERMS = re.compile(
     r"|MOVE REFUSED|insufficient\w*Permissions|userRateLimitExceeded|rateLimitExceeded|quotaExceeded"
     r"|NOT ACCEPTED|failed \(exit|exited [1-9]|HASH-MISMATCH|COMPILE-FAIL|database is locked",
     re.IGNORECASE)
-QUIET = re.compile(r"native_api recovered|download_upload recovered|verdict=IDENTICAL;.* 0 incomplete/error|ignored an error|0 failed|failed': 0|Emails failed': 0|\"failed\": 0", re.IGNORECASE)
+QUIET = re.compile(r"acceptance: verify:|native_api recovered|download_upload recovered|verdict=IDENTICAL;.* 0 incomplete/error|ignored an error|0 failed|failed': 0|Emails failed': 0|\"failed\": 0", re.IGNORECASE)
 SECRET = re.compile(r"(password|secret|token|bp_session)\S*", re.IGNORECASE)
 SKIP_DIRS = {"reports", "quick"}
 
