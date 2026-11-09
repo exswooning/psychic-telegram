@@ -163,7 +163,8 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--account-id", type=int)
     ap.add_argument("--user", action="append", help="source user (repeat); default every mapped user")
-    ap.add_argument("--workers", type=int, default=8)
+    ap.add_argument("--workers", type=int, default=24, help="reads in flight per mailbox")
+    ap.add_argument("--parallel-users", type=int, default=4, help="mailboxes read at once")
     args = ap.parse_args(argv)
     from auth import AuthManager
     from config import Settings
@@ -178,10 +179,15 @@ def main(argv=None) -> int:
         print(f"REFUSED: not users of this account: {bad}")
         return 2
     t0, total, agg = time.time(), collections.Counter(), collections.Counter()
-    for u in users:
-        r = inventory_user(GmailMigrator(auth, db, st, u, ledger[u.lower()]), workers=args.workers)
-        total.update(r["byStatus"])
-        agg.update({k: r[k] for k in ("emails", "linkMessages", "searchMissed", "linkedFiles")})
+    # Each read waits ~4 s on Google while the line sits idle (9 Nov 2026: 8 workers, one mailbox at a
+    # time = 1.7 emails/s), so it is latency-bound: more reads in flight, and mailboxes side by side.
+    # Gmail allows ~50 full reads a second per mailbox (5 units of 250).
+    def one(u):
+        return inventory_user(GmailMigrator(auth, db, st, u, ledger[u.lower()]), workers=args.workers)
+    with futures.ThreadPoolExecutor(max_workers=max(1, args.parallel_users)) as pool:
+        for r in pool.map(one, users):
+            total.update(r["byStatus"])
+            agg.update({k: r[k] for k in ("emails", "linkMessages", "searchMissed", "linkedFiles")})
     rate = agg["searchMissed"] / agg["linkMessages"] if agg["linkMessages"] else 0
     print(f"done in {time.time() - t0:.0f}s: {agg['emails']} emails, {agg['linkMessages']} with a Drive link "
           f"({agg['linkedFiles']} file mentions); Gmail search missed {agg['searchMissed']} ({rate:.1%}); dead links: "
