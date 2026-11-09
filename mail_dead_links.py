@@ -82,7 +82,9 @@ def inventory_user(gm, workers: int = 8, say=print) -> dict:
 
     def read(mid: str) -> tuple[str, set]:
         gm.scan_limiter.acquire()
-        full = gm._retry(lambda: src.users().messages().get(userId="me", id=mid, format="full").execute(),
+        # gm.src, not the `src` above: AuthManager builds one client per thread, and httplib2 is not
+        # thread-safe (a shared client aborted fidelity_audit, 9 Nov 2026).
+        full = gm._retry(lambda: gm.src.users().messages().get(userId="me", id=mid, format="full").execute(),
                          label="gmail.dead_links.get")
         return mid, text_ids(full.get("payload") or {})
     with futures.ThreadPoolExecutor(max_workers=workers) as pool:
