@@ -21,7 +21,8 @@ import time
 import unicodedata
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-GMAIL_INSERT_LIMIT = 35 * 1024 * 1024        # users.messages.insert / import: Google's documented maximum
+GMAIL_INSERT_LIMIT = 150 * 1024 * 1024       # insert by resumable upload (the engine's path): Google's documented maximum.
+# 35 MB was wrong: info@ has 11 emails over it, and all 40,290 verified identical on the target (9 Nov 2026).
 ATTENDEE_LIMIT = 200
 
 # kind -> (what the engine does today, True when it is handled without a person)
@@ -29,7 +30,7 @@ WHAT_HAPPENS = {
     "access.failed": ("the pass for that service fails every call: fix the grant before the run", False),
     "drive.needs_copy": ("moved by a server-side copy (Forms are rebuilt); download_upload cannot carry it", True),
     "drive.cannot_download": ("the source refuses the bytes: recorded SKIPPED_NO_DOWNLOAD, not copied", True),
-    "gmail.too_large": ("the engine cannot insert it (over 35 MB): route to the DMS or it ends FAILED", False),
+    "gmail.too_large": ("over 150 MB, past Gmail's upload limit: the engine cannot insert it; route to the DMS or it ends FAILED", False),
     "gmail.no_message_id": ("adopted by the ledger identity only; the DMS match is by Message-ID", False),
     "gmail.label_collision": ("two source labels map to one target name: mail files under the first", False),
     "calendar.typed_event": ("carried as its type (out-of-office, focus, working location)", True),

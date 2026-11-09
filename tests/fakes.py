@@ -1267,6 +1267,9 @@ class _GmailMessages:
                 self._modify(i, body)
         return {}
 
+    def delete(self, **kw):
+        return _Call(self.s, "messages.delete", lambda id, **_: self.s.messages.pop(id, None) and {}, kw)
+
     def batchDelete(self, **kw):
         return _Call(self.s, "messages.batchDelete", lambda body, **_: [
             self.s.messages.pop(i, None) for i in body.get("ids", [])] and {}, kw)
