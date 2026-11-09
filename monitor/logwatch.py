@@ -20,6 +20,7 @@ import time
 
 TERMS = re.compile(
     r"\b(40[0-9]|429|5\d\d)\b.*(error|denied|forbidden|refused|exceeded|invalid|failed|unavailable)"
+    r"|HttpError|insufficient|PermanentAPIError|TransportExhausted|QuotaExhausted"
     r"|Traceback|\bERROR\b|\bCRITICAL\b|\bFAILED\b|Killed|Out of memory|MemoryError|NOT READY"
     r"|MOVE REFUSED|insufficient\w*Permissions|userRateLimitExceeded|rateLimitExceeded|quotaExceeded"
     r"|NOT ACCEPTED|failed \(exit|exited [1-9]|HASH-MISMATCH|COMPILE-FAIL|database is locked",
