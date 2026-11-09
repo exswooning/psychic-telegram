@@ -24,6 +24,8 @@ which keeps the record of what happened and why it stopped mattering.
 """
 from __future__ import annotations
 
+import os
+
 import copy
 import sys
 import logging
@@ -1170,6 +1172,27 @@ def restore_direct_grants(auth, db, settings, apply: bool = False,
     return out
 
 
+DRIVE_WRITERS = ("migrate", "ab-migrate", "delta", "mirror", "run-shard")
+
+
+def drive_writers_running(account_id) -> str:
+    """Another live job for this account that copies into staging drives, by name; "" when none.
+    This process and its parent (a shard's) do not count. Unknown = assume none: advisory."""
+    if account_id is None:
+        return ""
+    try:
+        import job_admission
+        me = {os.getpid(), os.getppid()}
+        for j in job_admission.list_active():
+            if (str(j.get("account_id")) == str(account_id) and j.get("pid") not in me
+                    and str(j.get("job_name") or "").split(":")[0] in DRIVE_WRITERS
+                    and job_admission.is_live(j)):
+                return f"{j['job_name']} (pid {j.get('pid')})"
+    except Exception:      # noqa: BLE001 - the table may not exist (CLI, tests)
+        return ""
+    return ""
+
+
 def clean_staging_drives(auth, db, settings, apply: bool = False) -> dict:
     """Leftover server-side staging drives on the TARGET: never shown on either tenant.
 
@@ -1186,6 +1209,14 @@ def clean_staging_drives(auth, db, settings, apply: bool = False) -> dict:
            "kept": [], "errors": []}
     if settings is None or not getattr(settings, "target_admin", None):
         return out                       # nothing configured to look at: nothing to do
+    busy = drive_writers_running(getattr(settings, "account_id", None))
+    if busy:
+        # "Only while the account is idle" was a promise nothing enforced: a test arm's end-of-run
+        # repair swept every user's staging drive while the account's full run was copying into
+        # them (9 Nov 2026: 35 drives lost their source member, 5 were deleted, every copy after
+        # that 404'd or fell back to download_upload).
+        out["skipped"] = f"another Drive-writing job is running for this account: {busy}"
+        return out
     prefix = f"{settings.staging_drive_prefix}-"
     src_domain = (settings.source_domain or "").lower()
     mine = {r["source_email"].split("@")[0].lower(): r for r in db.all_identities()

@@ -253,6 +253,10 @@ def one_mode(mode: str, settings: Settings, auth: AuthManager,
     # need not download it again (verify_sample.Verifier._receipts). An explicit value still wins.
     env.setdefault("FIRST_PASS_ACCEPTANCE", "false")
     env["BITPORT_JOB_NAME"] = "ab-migrate"     # its own job: never judged or reported as a migration
+    # No end-of-run repair: the arm's own 1:1 check is the judge, and a repair works off the arm's ledger
+    # copy -- every user of the account -- so its staging sweep emptied the full run's staging drives
+    # mid-copy (9 Nov 2026).
+    env["AUTO_REPAIR"] = "false"
     env.setdefault("MAIL_COMPLETION_CHECK", "full")
     env.setdefault("MIGRATION_CHECKS", "true")
     env["MIGRATE_CHAT"] = "true" if "chat" in ALL_SERVICES.split(",") else "false"

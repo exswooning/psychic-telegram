@@ -131,3 +131,28 @@ def test_a_duplicate_the_member_may_not_delete_goes_with_the_drive_after_source_
     out = repair.clean_staging_drives(auth, db, settings, apply=True)
     assert t.log == [("member-removed", "p-src"), ("drive-deleted", "MIGRATION-STAGING-ward4")]
     assert out["deleted_copies"] == 1 and not out["errors"]
+
+
+def test_the_sweep_waits_while_another_run_copies_into_staging_drives(db, settings, monkeypatch):
+    """Live, 9 Nov: a test arm's end-of-run repair swept every user's staging drive while the
+    account's full run was copying into them -- 35 lost their source member, 5 were deleted."""
+    import job_admission
+    settings.source_domain, settings.target_admin, settings.staging_drive_prefix = "dharan.example", "a@m", "MIGRATION-STAGING"
+    settings.account_id = 3
+    bulk_seed_identities(db, [("ward6@dharan.example", "ward6@mdharan.example")])
+    t = _Tgt()
+    t.drives_ = {"d": {"name": "MIGRATION-STAGING-ward6", "files": {},
+                       "perms": [{"id": "p", "emailAddress": "ward6@dharan.example"}]}}
+    monkeypatch.setattr(job_admission, "list_active", lambda: [{"account_id": 3, "job_name": "migrate", "pid": 999999}])
+    monkeypatch.setattr(job_admission, "is_live", lambda j: True)
+    out = repair.clean_staging_drives(type("A", (), {"target_drive": lambda self, u: t})(), db, settings, apply=True)
+    assert "migrate (pid 999999)" in out["skipped"] and t.log == [] and "d" in t.drives_
+    # another account's run does not hold this one back
+    monkeypatch.setattr(job_admission, "list_active", lambda: [{"account_id": 4, "job_name": "migrate", "pid": 999999}])
+    assert repair.clean_staging_drives(type("A", (), {"target_drive": lambda self, u: t})(), db, settings, apply=True)["deleted_drives"] == 1
+
+
+def test_an_arm_never_runs_the_end_of_run_repair():
+    import inspect
+    import ab_transfer
+    assert 'env["AUTO_REPAIR"] = "false"' in inspect.getsource(ab_transfer.one_mode)
