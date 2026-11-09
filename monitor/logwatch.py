@@ -3,7 +3,7 @@
 
 Costs no model tokens: it runs on the box, reads only what each file gained since the last
 second, and prints a line only for an error whose shape (numbers, ids, addresses stripped) it
-has not printed before. A repeat is counted, and the counts go out once a minute, so a burst of
+has not printed before. A repeat is counted, and the counts go out every ten minutes, so a burst of
 4,000 identical 403s is one line plus a tally -- not 4,000 notifications. Run it over SSH under a
 Monitor and every printed line reaches Claude within about a second of being written.
 
@@ -90,9 +90,9 @@ def main(argv=None) -> int:
                 seen[key] = 1
                 where = os.path.relpath(p, args.root)
                 print(f"NEW {where}: {SECRET.sub('<redacted>', raw.strip())[:300]}", flush=True)
-        if repeats and time.time() - last_tally >= 60:
+        if repeats and time.time() - last_tally >= 600:      # new kinds go out at once; repeats every 10 min
             top = ", ".join(f"{n}x {k[:60]}" for k, n in repeats.most_common(3))
-            print(f"REPEATS last minute: {sum(repeats.values())} ({top})", flush=True)
+            print(f"REPEATS last 10 min: {sum(repeats.values())} ({top})", flush=True)
             repeats.clear()
             last_tally = time.time()
         time.sleep(args.every)
