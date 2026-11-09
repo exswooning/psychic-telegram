@@ -8,7 +8,7 @@ import { Alert, Box, Chip, Link, Paper, Stack, Table, TableBody, TableCell, Tabl
 import { deadLinksCsvUrl, fetchDeadLinks } from '@/api/controlPlane'
 import type { DeadLinkStatus, DeadLinksView } from '@/api/controlPlane'
 
-const KINDS: DeadLinkStatus[] = ['NOT_FOUND', 'NO_ACCESS', 'NOT_MIGRATED', 'OTHER']
+const KINDS: DeadLinkStatus[] = ['NOT_FOUND', 'NO_ACCESS', 'OUTSIDE', 'NOT_MIGRATED', 'OTHER']
 
 export const DeadLinksPanel: React.FC<{ accountId: number }> = ({ accountId }) => {
   const [status, setStatus] = useState<DeadLinkStatus | null>(null)

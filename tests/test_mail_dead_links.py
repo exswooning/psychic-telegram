@@ -37,7 +37,9 @@ def test_a_second_run_replaces_the_users_rows_and_the_report_filters(gmail_migra
 def test_what_the_source_answers_is_named():
     assert M.classify("HTTP 404 (notFound): x", None, "s.x")[0] == "NOT_FOUND"
     assert M.classify("HTTP 403 (insufficientFilePermissions)", None, "s.x")[0] == "NO_ACCESS"
-    assert M.classify(None, ["a@other.org"], "s.x") == ("NOT_MIGRATED", "owned by other.org")
+    assert M.classify(None, ["a@other.org"], "s.x") == ("OUTSIDE", "owned by other.org")
+    assert M.classify(None, ["a@s.x"], "s.x") == ("NOT_MIGRATED", "owned by s.x")
+    assert M.classify(None, [], "s.x")[0] == "OUTSIDE"            # another organisation's shared drive
     assert M.classify("HTTP 500", None, "s.x")[0] == "OTHER"
 
 

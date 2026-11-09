@@ -3429,7 +3429,11 @@ class DriveMigrator:
         # Always put the time back after ANY step that may have written -- including one
         # that raised half way through.
         writes_applied = touched or (1 if failed else 0) or (1 if force_mtime_restore else 0)
-        self._restore_modified_time(target_id, item, writes_applied, late_bump=bool(commented))
+        # A Form's time is re-stamped by the Forms service a little after its rebuild, overwriting a
+        # restore that stuck when made (9 Nov 2026: rebuilt Forms read their last edit time while the
+        # restore had reported success) -- checked again after it settles, like a commented file.
+        late = bool(commented) or item.get("mimeType") == "application/vnd.google-apps.form"
+        self._restore_modified_time(target_id, item, writes_applied, late_bump=late)
         self._apply_lock(target_id, item)
         if shareable and sharing_ran:
             self.db.clear_acl_pending(self.source_user, item["id"])

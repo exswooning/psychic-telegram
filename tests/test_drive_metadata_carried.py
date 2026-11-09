@@ -155,3 +155,12 @@ def test_a_refused_setting_is_recorded_against_the_item_the_worker_is_on(db):
     drive_engine.with_carried_fallback(send, {"name": "x", "writersCanShare": False})
     row = db.get_audit("u@s.x", "f1", "carried")
     assert row["status"] == "CARRIED_DROPPED" and row["error_message"].startswith("writersCanShare:")
+
+
+def test_a_rebuilt_form_gets_its_time_checked_again_after_it_settles():
+    """9 Nov 2026: the restore after a Form rebuild stuck when made, then the Forms service re-stamped
+    the time; Forms now join the late check commented files get."""
+    import inspect
+    import drive_engine
+    src = inspect.getsource(drive_engine.DriveMigrator._finish_item)
+    assert 'item.get("mimeType") == "application/vnd.google-apps.form"' in src and "late_bump=late" in src

@@ -2439,7 +2439,7 @@ export const sharingCsvUrl = (accountId: number, kind?: SharingKind | null, q = 
   `${getCpBase()}/api/v2/sharing?${sharingQuery(accountId, kind, q)}&format=csv`
 
 // ---- Mail links that cannot be repointed: what the source answers for each file (api_server /api/v2/mail-links)
-export type DeadLinkStatus = 'NOT_FOUND' | 'NO_ACCESS' | 'NOT_MIGRATED' | 'OTHER'
+export type DeadLinkStatus = 'NOT_FOUND' | 'NO_ACCESS' | 'OUTSIDE' | 'NOT_MIGRATED' | 'OTHER'
 export interface DeadLink {
   user: string; fileId: string; status: DeadLinkStatus; detail: string; emails: number
   exampleMessage: string; checkedAt: string; sourceUrl: string

@@ -6321,8 +6321,8 @@ async def mail_links(account_id: int | None = None, status: str | None = None, q
     require_login(op)
     aid = account_id if account_id is not None else op.account_id
     _require_account_access(aid, op)
-    if status is not None and status not in ("NOT_FOUND", "NO_ACCESS", "NOT_MIGRATED", "OTHER"):
-        raise HTTPException(400, "status must be NOT_FOUND, NO_ACCESS, NOT_MIGRATED or OTHER")
+    if status is not None and status not in ("NOT_FOUND", "NO_ACCESS", "OUTSIDE", "NOT_MIGRATED", "OTHER"):
+        raise HTTPException(400, "status must be NOT_FOUND, NO_ACCESS, OUTSIDE, NOT_MIGRATED or OTHER")
     limit = max(1, min(int(limit), 1000))
 
     def _read():

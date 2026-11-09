@@ -24,9 +24,10 @@ import sys
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-STATUSES = ("NOT_FOUND", "NO_ACCESS", "NOT_MIGRATED", "OTHER")
+STATUSES = ("NOT_FOUND", "NO_ACCESS", "OUTSIDE", "NOT_MIGRATED", "OTHER")
 LABEL = {"NOT_FOUND": "Source file answers 404", "NO_ACCESS": "No access to the source file",
-         "NOT_MIGRATED": "Source file exists, no copy on the target", "OTHER": "Could not be checked"}
+         "OUTSIDE": "Owned outside the organisation (not migrated, by design)",
+         "NOT_MIGRATED": "Owned inside the organisation, no copy on the target", "OTHER": "Could not be checked"}
 
 LINK_SCHEMA = """CREATE TABLE IF NOT EXISTS mail_link_messages (
     source_user TEXT NOT NULL, message_id TEXT NOT NULL, file_ids TEXT NOT NULL, by_search INTEGER NOT NULL,
@@ -60,8 +61,12 @@ def text_ids(payload: dict) -> set:
 def classify(error_text: str | None, owners: list | None, own_domain: str) -> tuple[str, str]:
     """(status, detail) for what the source answered. `error_text` None = the file exists."""
     if error_text is None:
-        who = ", ".join(sorted({(o or "").rsplit("@", 1)[-1] for o in owners or [] if o})) or "unknown owner"
-        return "NOT_MIGRATED", f"owned by {who}"
+        domains = sorted({(o or "").rsplit("@", 1)[-1].lower() for o in owners or [] if o})
+        who = ", ".join(domains) or "a shared drive this organisation does not hold"
+        # 9 Nov 2026: all 181 of account 3's "exists, no copy" links were outsiders' files (gmail.com,
+        # other organisations' shared drives) -- not a gap, Bitport does not copy what it does not own.
+        inside = own_domain and own_domain.lower() in domains
+        return ("NOT_MIGRATED" if inside else "OUTSIDE"), f"owned by {who}"
     if "404" in error_text:
         return "NOT_FOUND", ""
     if "403" in error_text:
