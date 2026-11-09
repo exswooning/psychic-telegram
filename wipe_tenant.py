@@ -34,6 +34,7 @@ import logging
 
 import argparse
 import concurrent.futures as futures
+import time
 from typing import Callable, Optional
 
 from googleapiclient.errors import HttpError
@@ -59,6 +60,14 @@ _API = {"drive": ("drive", "v3"), "gmail": ("gmail", "v1"), "calendar": ("calend
 
 def _gone(exc: HttpError) -> bool:
     return getattr(getattr(exc, "resp", None), "status", None) in (404, 410)
+
+
+TRANSIENT = (429, 500, 502, 503, 504)
+TRIES = 4
+
+
+def _transient(exc: Exception) -> bool:
+    return isinstance(exc, HttpError) and getattr(getattr(exc, "resp", None), "status", None) in TRANSIENT
 
 
 # -- one service for one user --------------------------------------------------------
@@ -313,10 +322,18 @@ def wipe(users: list[str], clients: Callable[[str, str], object], admin: str,
     def one(user: str) -> tuple[str, dict, dict]:
         got, bad = {}, {}
         for s in services:
-            try:
-                got[s] = WIPERS[s](clients(s, user))
-            except Exception as exc:      # noqa: BLE001 - one service must not lose the rest
-                bad[s] = f"{type(exc).__name__}: {str(exc)[:120]}"
+            # A wiper only lists and deletes, so a transient 5xx/429 is retried by running it
+            # again: one Drive 500 used to end that user's wipe half done (ward14@, 9 Nov).
+            for attempt in range(TRIES):
+                try:
+                    got[s] = WIPERS[s](clients(s, user))
+                    bad.pop(s, None)
+                    break
+                except Exception as exc:      # noqa: BLE001 - one service must not lose the rest
+                    bad[s] = f"{type(exc).__name__}: {str(exc)[:120]}"
+                    if not _transient(exc) or attempt == TRIES - 1:
+                        break
+                    time.sleep(5 * 2 ** attempt)
         return user, got, bad
 
     out(f"  [0/{len(users)}] users wiped", flush=True)
@@ -347,15 +364,27 @@ def wipe(users: list[str], clients: Callable[[str, str], object], admin: str,
 
 
 def reset_ledger(db, emptied: list[str], shared_drives_gone: bool,
-                 groups_gone: bool = False, out=print) -> dict:
-    """Forget, in the ledger, what the wipe removed from the target -- by service, and
-    only the services emptied for every user."""
+                 groups_gone: bool = False, out=print, failed: Optional[dict] = None) -> dict:
+    """Forget, in the ledger, what the wipe removed from the target -- per user and service.
+
+    `failed` ({service: [target users it could not be emptied for]}) makes it per user: every
+    service the wipe ran is forgotten for each user it emptied, and kept only for the users it did
+    not. Without it, only services emptied for every user are forgotten -- and one user's Drive 500
+    kept EVERY user's Drive ledger, so the next run would have skipped Drive on an empty target."""
     import reset_drive_ledger as rdl
-    ledger_services = tuple(s for s in emptied if s in rdl.SERVICE_TYPES)
-    users = [r["source_email"] for r in db.all_identities() if r["entity_type"] == "user"]
-    for u in users:
-        if ledger_services:
-            rdl.reset_service_ledger(db, u, ledger_services)
+    tried = tuple(failed) if failed is not None else tuple(emptied)
+    ledger_services = tuple(s for s in tried if s in rdl.SERVICE_TYPES)
+    pairs = [(r["source_email"], (r["target_email"] or "").lower()) for r in db.all_identities()
+             if r["entity_type"] == "user"]
+    users = [u for u, _ in pairs]
+    kept: dict = {}
+    for u, tgt in pairs:
+        mine = tuple(s for s in ledger_services
+                     if failed is None or tgt not in {x.lower() for x in failed.get(s, [])})
+        for s in set(ledger_services) - set(mine):
+            kept.setdefault(s, []).append(u)
+        if mine:
+            rdl.reset_service_ledger(db, u, mine)
     rows = 0
     if groups_gone:
         from groups_engine import LEDGER_USER
@@ -365,10 +394,12 @@ def reset_ledger(db, emptied: list[str], shared_drives_gone: bool,
             rows += conn.execute("DELETE FROM id_mapping WHERE type='shared_drive'").rowcount
             rows += conn.execute("DELETE FROM audit_log WHERE item_type='shared_drive'").rowcount
     out(f"Ledger reset for {', '.join(ledger_services) or 'nothing'} on {len(users)} user(s)"
+        + "".join(f"; {s} KEPT for {len(v)} user(s) it could not empty: {', '.join(v[:5])}"
+                  for s, v in sorted(kept.items()))
         + (f"; {rows} shared drive row(s) forgotten" if shared_drives_gone else "")
         + ("; groups forgotten" if groups_gone else ""), flush=True)
     return {"users": len(users), "services": list(ledger_services), "shared_drive_rows": rows,
-            "groups": groups_gone}
+            "groups": groups_gone, "kept": kept}
 
 
 def _users(settings: Settings, side: str, db) -> list[str]:
@@ -438,7 +469,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         kept.append("shared drives")
     if args.side == "target":
         reset_ledger(db, result["emptied"], result["shared_drives"] is not None,
-                     groups_gone=result["groups"] is not None)
+                     groups_gone=result["groups"] is not None, failed=result["failed"])
     if kept:
         print(f"NOT WIPED -- still on {domain}: {', '.join(kept)}"
               + (" (their ledger is kept, so a re-run neither skips nor duplicates them)"
