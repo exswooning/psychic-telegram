@@ -699,6 +699,17 @@ class TestTheLedgerRemembersWhatARunProved:
         assert n == 1
         d.close()
 
+    def test_a_ceiling_older_than_its_ttl_is_not_evidence(self, tmp_path):
+        """Account 3, 9 Nov: 6.49/s saved on 1 Nov held a 45-user run to it all day."""
+        d = self._db(tmp_path)
+        d.save_rate_ceiling("target", 6.49)
+        assert d.load_rate_ceiling("target", max_age_hours=24) == pytest.approx(6.49)    # fresh: used
+        with d.write() as c:
+            c.execute("UPDATE rate_limiter_ceiling SET updated_at='2026-11-01T17:22:52Z'")
+        assert d.load_rate_ceiling("target", max_age_hours=24) is None                   # stale: ignored
+        assert d.load_rate_ceiling("target") == pytest.approx(6.49)                      # no TTL: as before
+        d.close()
+
 
 class TestAFreshRunStartsFromWhatALastOneProved:
     """_project_limiter(db=...): the wiring half. Without this, restarting the

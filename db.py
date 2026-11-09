@@ -1326,13 +1326,30 @@ class MigrationDB:
                 "SET ceiling=excluded.ceiling, updated_at=excluded.updated_at",
                 (tenant, ceiling, utc_now()))
 
-    def load_rate_ceiling(self, tenant: str) -> float | None:
+    def load_rate_ceiling(self, tenant: str, max_age_hours: float | None = None) -> float | None:
         """The last proven ceiling for this tenant, or None if nothing has ever
-        been measured (a fresh account, or a ledger from before this existed)."""
+        been measured (a fresh account, or a ledger from before this existed) --
+        or, with `max_age_hours`, if it was proven longer ago than that. Google
+        meters per minute: a refusal from days ago is not evidence of today's
+        limit, and a stale low value only ever went down (account 3: 6.49/s
+        saved 1 Nov by the compounding-penalise bug held a whole 45-user run
+        to it on 9 Nov)."""
         row = self.conn.execute(
-            "SELECT ceiling FROM rate_limiter_ceiling WHERE tenant=?",
+            "SELECT ceiling, updated_at FROM rate_limiter_ceiling WHERE tenant=?",
             (tenant,)).fetchone()
-        return row["ceiling"] if row else None
+        if not row:
+            return None
+        if max_age_hours is not None and row["updated_at"]:
+            from datetime import datetime, timedelta, timezone
+            try:
+                when = datetime.fromisoformat(row["updated_at"].replace("Z", "+00:00"))
+                if when.tzinfo is None:
+                    when = when.replace(tzinfo=timezone.utc)
+                if datetime.now(timezone.utc) - when > timedelta(hours=max_age_hours):
+                    return None
+            except ValueError:
+                return None      # unreadable age: not evidence either
+        return row["ceiling"]
 
     def mark_dms_delivered(self, verified_items=()) -> int:
         """Only exact items freshly checked by reconciliation may become delivered.

@@ -222,7 +222,8 @@ def _project_limiter(qps: float, tenant: str = "target", db=None):
             # never START above the configured safety guess, only below it.
             if db is not None:
                 try:
-                    learned = db.load_rate_ceiling(tenant)
+                    learned = db.load_rate_ceiling(
+                        tenant, float(os.getenv("RATE_CEILING_TTL_HOURS", "24")))
                     if learned is not None:
                         starting_ceiling = min(guess, learned)
                 except Exception as exc:      # noqa: BLE001 - advisory only
