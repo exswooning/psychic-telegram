@@ -152,6 +152,7 @@ def main(argv=None) -> int:
     ap.add_argument("--account-id", type=int, required=True)
     ap.add_argument("--log", help="the run's log (default logs/jobs/<id>/migrate.log)")
     ap.add_argument("--from-start", action="store_true", help="also check users finished before this started")
+    ap.add_argument("--since", default="", help="with --from-start: only lines at or after this time ('2026-11-10 20:00')")
     ap.add_argument("--workers", type=int, default=2)
     ap.add_argument("--once", action="store_true")
     ap.add_argument("--recheck", choices=("gmail", "drive", "all"),
@@ -188,6 +189,8 @@ def main(argv=None) -> int:
                     chunk = fh.read()
                 offset += len(chunk)
                 for line in chunk.decode("utf-8", "replace").splitlines():
+                    if args.since and line[:16] < args.since[:16]:
+                        continue            # an earlier run's line: not this run's user
                     m = FINISHED.search(line)
                     if m:
                         try:
