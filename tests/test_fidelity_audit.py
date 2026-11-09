@@ -41,3 +41,10 @@ def test_modified_time_and_settings_but_not_a_source_edited_after_the_copy():
     edited_later = _c([], [], sm={"modifiedTime": "2026-11-09T07:00:00.000Z"}, tm={"modifiedTime": "2026-11-09T06:00:00.000Z"})
     assert edited_later == []
     assert _c([], [], sm={"writersCanShare": False}, tm={"writersCanShare": True}) == [("setting.writersCanShare", "False -> True")]
+
+
+def test_each_thread_builds_its_own_clients():
+    """16 threads sharing one httplib2-backed client aborted the process (9 Nov 2026)."""
+    import inspect
+    src = inspect.getsource(F.audit_user)
+    assert "threading.local()" in src and "auth.source_drive(source)" in src.split("def clients")[1]

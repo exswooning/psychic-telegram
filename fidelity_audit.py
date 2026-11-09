@@ -18,6 +18,7 @@ import argparse
 import collections
 import concurrent.futures as futures
 import sys
+import threading
 import time
 
 FIELDS = "id,modifiedTime,copyRequiresWriterPermission,writersCanShare"
@@ -81,10 +82,18 @@ def audit_user(auth, db, settings, source: str, target: str, workers: int = 16, 
     from db import utc_now
     rows = db.conn.execute("SELECT source_id, target_id, created_at FROM id_mapping WHERE source_user=? "
                            "AND type='file' AND target_id IS NOT NULL AND source_id != target_id", (source,)).fetchall()
-    src, tgt = auth.source_drive(source), auth.target_drive(target)
+    local = threading.local()
+
+    def clients():
+        # One pair per thread: httplib2 is not thread-safe, and 16 threads sharing one client
+        # corrupted the C heap ("free(): corrupted unsorted chunks", 9 Nov 2026).
+        if not hasattr(local, "src"):
+            local.src, local.tgt = auth.source_drive(source), auth.target_drive(target)
+        return local.src, local.tgt
 
     def one(r):
         sid, tid, copied = r[0], r[1], r[2]
+        src, tgt = clients()
         try:
             sm = src.files().get(fileId=sid, fields=FIELDS, supportsAllDrives=True).execute()
             tm = tgt.files().get(fileId=tid, fields=FIELDS, supportsAllDrives=True).execute()
