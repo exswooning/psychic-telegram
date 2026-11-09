@@ -636,7 +636,11 @@ def main(argv: list[str] | None = None) -> int:
             fresh_target = f"{user.partition('@')[0]}-ab{tag}-{stamp}@" \
                            f"{target.partition('@')[2]}" if fresh else None
             st, au, ledger = settings, auth, None
-            if together:        # its own ledger copy and scratch, its own Google clients
+            # Its own ledger copy and scratch, its own Google clients -- for EVERY arm into a fresh
+            # account, not only side-by-side ones: one_mode clears the user's ledger rows, and the
+            # re-timed leader ran on the real ledger (live, 9 Nov: ward13@'s mappings to its own
+            # account were deleted and its map left pointing at ward13-ab3t).
+            if together or fresh:
                 ledger = ledger_copy(settings, os.path.join(HERE, "data", "ab", stamp, f"arm{tag}"))
                 st = copy.copy(settings)
                 st.db_path = ledger

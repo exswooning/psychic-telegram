@@ -289,6 +289,7 @@ def test_arms_run_side_by_side_on_their_own_ledgers_then_the_leader_is_re_timed_
     assert {c[0] for c in first[:3]} == {"server_side + engine", "server_side + split", "download_upload + split"}
     assert all(c[1] and c[2] for c in first[:3]) and len(set(c[1] for c in first[:3])) == 3
     assert first[3][0] == "server_side + engine" and first[3][2] is False       # the 0-error leader, alone
+    assert first[3][1] and first[3][1] not in {c[1] for c in first[:3]}         # ...on a ledger copy of its own
     assert "restore" not in calls                                               # the real ledger was never touched
     lead = next(r for r in out["runs"] if r["mailMode"] == "engine")
     assert lead["seconds"] == 40 and lead["contendedSeconds"] == 90 and lead["timing"] == "alone"
@@ -299,7 +300,8 @@ def test_sequential_is_the_old_way_and_include_slow_brings_the_slow_arm_back(mon
     runs = {k: [{"seconds": 5}] for k in ("server_side + engine", "download_upload + engine")}
     out, calls, ledgers = _main_with(monkeypatch, tmp_path, ["--mode", "server_side", "--mode", "download_upload",
                                                              "--mail-mode", "engine", "--sequential", "--include-slow"], runs)
-    assert ledgers == [] and [c[2] for c in calls if c != "restore"] == [False, False]
+    assert len(ledgers) == 2 and [c[2] for c in calls if c != "restore"] == [False, False]
+    assert all(c[1] for c in calls if c != "restore")       # fresh arms never run on the real ledger
     assert out["skipped"] == [] and calls[-1] == "restore" and len(out["runs"]) == 2
 
 
