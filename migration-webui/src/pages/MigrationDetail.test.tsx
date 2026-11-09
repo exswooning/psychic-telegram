@@ -9,6 +9,7 @@ const startMigration = vi.fn()
 vi.mock('@/components/QuickVerification', () => ({
   default: ({ accountId }: { accountId: number }) => <div data-testid="quick-panel">{accountId}</div>,
 }))
+vi.mock('@/components/SharingPanel', () => ({ default: () => null }))
 vi.mock('@/components/RunReports', () => ({
   default: ({ accountId }: { accountId?: number }) => <div data-testid="reports-panel">{accountId}</div>,
 }))

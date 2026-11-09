@@ -6270,6 +6270,40 @@ def _relinks(conn) -> list[dict]:
     return out
 
 
+@app.get("/api/v2/sharing")
+async def sharing(account_id: int | None = None, kind: str | None = None, q: str = "",
+                  limit: int = 200, offset: int = 0, format: str = "json",
+                  op: Operator = Depends(operator)):
+    """Every sharing grant the migration made for this account: inside the organisation, outside
+    it, or anyone with the link -- totals, the outside people and domains ranked by files, and a
+    page of grants (or all of them as CSV). The ledger only; no Google call."""
+    require_login(op)
+    aid = account_id if account_id is not None else op.account_id
+    _require_account_access(aid, op)
+    if kind is not None and kind not in ("external", "public", "internal", "domain"):
+        raise HTTPException(400, "kind must be external, public, internal or domain")
+    limit = max(1, min(int(limit), 1000))
+
+    def _read():
+        import sharing_report
+        own = [(accounts_auth.get_tenant_config(aid, side) or {}).get("domain") for side in ("source", "target")]
+        path = _ledger_path(aid)
+        if not os.path.isfile(path):
+            return None
+        with cpdb.ro(path) as conn:
+            if format == "csv":
+                return sharing_report.to_csv(conn, own, kind=kind, q=q)
+            return {"accountId": aid, "domains": [d for d in own if d],
+                    **sharing_report.report(conn, own, kind=kind, q=q, limit=limit, offset=max(0, int(offset)))}
+    data = await _off_loop(_read)
+    if data is None:
+        raise HTTPException(404, "this migration has no ledger yet")
+    if format == "csv":
+        return PlainTextResponse(data, media_type="text/csv", headers={
+            "Content-Disposition": f'attachment; filename="sharing-{aid}-{kind or "all"}.csv"'})
+    return data
+
+
 @app.get("/api/v2/owed-grants")
 async def owed_grants(op: Operator = Depends(operator)):
     """Shares waiting for a colleague's target account, per migration this caller may

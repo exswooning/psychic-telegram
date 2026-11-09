@@ -3286,7 +3286,10 @@ class DriveMigrator:
                 # 202 on the target. A number that alarming and that wrong
                 # is worse than no number, because it sends people to repair
                 # something that already worked.
-                self.db.log_audit(self.source_user, audit_key, "acl", "SUCCESS")
+                # The role rides in the detail: the Sharing view reports it, and nothing
+                # else in the ledger says what access a grantee was given.
+                self.db.log_audit(self.source_user, audit_key, "acl", "SUCCESS",
+                                  f"role={chunk[idx][0].get('role')}")
                 applied += 1
         return applied
 
@@ -3309,7 +3312,7 @@ class DriveMigrator:
                     supportsAllDrives=True, fields="id",
                 ).execute(), label="drive.permissions.create", max_retries=limit)
                 # Same upsert-clears-the-failure reasoning as the batch path.
-                self.db.log_audit(self.source_user, audit_key, "acl", "SUCCESS")
+                self.db.log_audit(self.source_user, audit_key, "acl", "SUCCESS", f"role={body.get('role')}")
                 return 1
             except (PermanentAPIError, RuntimeError) as exc:
                 grantee = body.get("emailAddress") or (audit_key or "").partition(":")[2]

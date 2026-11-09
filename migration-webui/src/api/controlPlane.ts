@@ -2417,3 +2417,23 @@ export const startCopySafety = (reason: string, user: string, perType: number, s
     method: 'POST',
     body: JSON.stringify({ reason, user, per_type: perType, settle_min: settleMin, account_id: accountId ?? null }),
   })
+
+// ---- Sharing: every grant the migration made, inside / outside / public (api_server /api/v2/sharing)
+export type SharingKind = 'external' | 'public' | 'internal' | 'domain'
+export interface SharingGrant {
+  kind: SharingKind; grantee: string; owner: string; file: string; role: string | null
+  sourceId: string; targetId: string | null; sourceUrl: string; targetUrl: string | null
+}
+export interface SharingView {
+  accountId: number; domains: string[]
+  totals: Record<SharingKind, { label: string; grants: number; files: number }>
+  roles: Record<string, number>; notGranted: Record<string, number>
+  externalPeople: { name: string; files: number }[]; externalDomains: { name: string; files: number }[]
+  matched: number; offset: number; limit: number; grants: SharingGrant[]
+}
+const sharingQuery = (accountId: number, kind?: SharingKind | null, q = '') =>
+  `account_id=${accountId}${kind ? `&kind=${kind}` : ''}${q ? `&q=${encodeURIComponent(q)}` : ''}`
+export const fetchSharing = (accountId: number, kind?: SharingKind | null, q = '', offset = 0, limit = 100) =>
+  cpFetch<SharingView>(`/api/v2/sharing?${sharingQuery(accountId, kind, q)}&offset=${offset}&limit=${limit}`)
+export const sharingCsvUrl = (accountId: number, kind?: SharingKind | null, q = '') =>
+  `${getCpBase()}/api/v2/sharing?${sharingQuery(accountId, kind, q)}&format=csv`

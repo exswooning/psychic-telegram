@@ -771,7 +771,7 @@ class TestAFreshRunStartsFromWhatALastOneProved:
         import drive_engine
 
         class Broken:
-            def load_rate_ceiling(self, tenant):
+            def load_rate_ceiling(self, tenant, max_age_hours=None):
                 raise RuntimeError("disk full")
         lim = drive_engine._project_limiter(40, "target", db=Broken())
         assert lim.ceiling >= 1000
@@ -780,7 +780,7 @@ class TestAFreshRunStartsFromWhatALastOneProved:
         import drive_engine
 
         class Broken:
-            def load_rate_ceiling(self, tenant):
+            def load_rate_ceiling(self, tenant, max_age_hours=None):
                 return None
 
             def save_rate_ceiling(self, tenant, ceiling):

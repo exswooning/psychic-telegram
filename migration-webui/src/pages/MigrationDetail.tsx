@@ -28,6 +28,7 @@ import ExperimentPanel from '@/components/ExperimentPanel'
 import RunReports from '@/components/RunReports'
 import QuickVerification from '@/components/QuickVerification'
 import OneToOneSummary from '@/components/OneToOneSummary'
+import SharingPanel from '@/components/SharingPanel'
 import CopySafetyCard from '@/components/CopySafetyCard'
 import { itemTypeLabel } from '@/utils/itemTypeLabel'
 import DmsMetrics from '@/components/DmsMetrics'
@@ -380,6 +381,7 @@ export const MigrationDetail: React.FC = () => {
               migration's single self-check above: this fills in continuously as each
               user's migration finishes. Hides itself until there is something to say. */}
           <OneToOneSummary accountId={Number(accountId)} />
+          {Number.isFinite(id) && id > 0 && <SharingPanel accountId={id} />}
 
           <CopySafetyCard accountId={Number(accountId)} users={(d?.users ?? []).map((u) => u.sourceUser)} />
 

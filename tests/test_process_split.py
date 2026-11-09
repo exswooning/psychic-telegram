@@ -124,7 +124,7 @@ def test_each_child_spends_its_share_of_the_project_rate(monkeypatch):
     class DB:
         saved = []
 
-        def load_rate_ceiling(self, t):
+        def load_rate_ceiling(self, t, max_age_hours=None):
             return 300.0
 
         def save_rate_ceiling(self, t, c):
