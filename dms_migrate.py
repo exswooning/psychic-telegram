@@ -1146,7 +1146,10 @@ def _main(argv: list[str] | None = None) -> int:
                      identities=identities, fresh=args.fresh_import)
 
     out = _run()
-    if args.apply and out.get("step") == "step1-pending":
+    # "Start import" still disabled after steps 1-3 is step 1 waiting too: the console lets steps 2-3
+    # proceed before the source admin has approved, and only the last button says so (9 Nov 2026: the
+    # connection was requested, never approved, and the run gave up at step 4).
+    if args.apply and out.get("step") in ("step1-pending", "step4-start"):
         # The one step that was a person's: approve as the source admin, then
         # look again at once rather than a watch interval later.
         for d in approve_as_source(args.timeout, args.headful):

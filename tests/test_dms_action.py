@@ -263,6 +263,22 @@ def test_a_pending_request_is_approved_then_looked_at_again(monkeypatch):
     assert approved == [1] and len(runs) == 2
 
 
+def test_start_import_still_disabled_means_step1_is_waiting_too(monkeypatch):
+    """9 Nov 2026: the console let steps 2-3 proceed before approval; the run stopped at step 4 with
+    the connection requested and never approved."""
+    import dms_migrate
+    monkeypatch.delenv("TARGET_DOMAIN", raising=False)
+    steps = iter(["step4-start", "started"])
+    runs = []
+    monkeypatch.setattr(dms_migrate, "start", lambda *a, **k: runs.append(1) or {
+        "ok": True, "step": next(steps), "detail": "", "did": [], "manual": ""})
+    approved = []
+    monkeypatch.setattr(dms_migrate, "approve_as_source",
+                        lambda *a: approved.append(1) or ["pressed 'Authorize'"])
+    dms_migrate.main(["--apply", "--identities", "none.csv"])
+    assert approved == [1] and len(runs) == 2
+
+
 def test_an_ab_arm_stops_at_googles_complete_without_a_whole_tenant_tally(monkeypatch):
     import subprocess
     import dms_migrate
