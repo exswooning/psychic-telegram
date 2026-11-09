@@ -12,6 +12,8 @@ CATCH = [
     '2026-11-09T07:12:38.000Z INCIDENT #37 error crashed account=3 job=migrate :: migrate exited with code 3',
     '2026-11-09 06:54:29,758 WARNING [verify-drive-file_1] verify_sample: drive comparison cache not written for 1j9Z: database is locked',
     'Traceback (most recent call last):',
+    '2026-11-10 20:40:00,000 ERROR   [parity] parity: ward7@s.x: drive: drive mtime x2',
+    '2026-11-10 23:00:00,000 INFO    [parity] parity: PARITY REACHED for all 45 users -- run the full tenant deep check',
 ]
 IGNORE = [
     "acceptance: verify: a@s | drive finished in 3.0s; completion=COMPLETE; verdict=IDENTICAL; 0 checked, 0 identical, 0 difference(s), 0 missing, 0 incomplete/error(s), 3 API",
@@ -20,6 +22,7 @@ IGNORE = [
     "2026-11-09 06:25:10,994 WARNING [drive-ward2_0 ] resilience: Google refused drive.files.move: HTTP 403 userRateLimitExceeded -- User rate limit exceeded.",
     "[dwd] import status: In progress {'Emails failed': 0}",
     "copied 403 files",
+    "2026-11-10 20:40:00,000 INFO    [parity] parity: ward7@s.x: drive: at parity",
 ]
 
 

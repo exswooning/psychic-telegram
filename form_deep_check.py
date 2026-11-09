@@ -143,6 +143,23 @@ def check_form(auth, db, source_user: str, target_user: str, sid: str, tid: str)
     return rep
 
 
+def check_user_forms(auth, db, user: str, target: str) -> list[dict]:
+    """Every mapped Form of one user, deep-checked (what main() prints, as data)."""
+    out = []
+    drive = auth.source_drive(user)
+    for sid, tid in db.conn.execute("SELECT source_id, target_id FROM id_mapping WHERE source_user=? "
+                                    "AND type='file'", (user,)).fetchall():
+        try:
+            if drive.files().get(fileId=sid, fields="mimeType", supportsAllDrives=True).execute().get("mimeType") != FORM:
+                continue
+            r = check_form(auth, db, user, target, sid, tid)
+        except Exception as exc:      # noqa: BLE001
+            r = {"source": sid, "target": tid, "error": str(exc)[:200], "parity": False}
+        r["user"] = user
+        out.append(r)
+    return out
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--account-id", type=int)
