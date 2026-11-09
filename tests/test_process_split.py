@@ -153,6 +153,14 @@ def test_the_launch_can_ask_for_write_time_receipts():
     assert A._tuning_env(A.StartMigration(reason="default"), None) is None      # unset: the server's own
 
 
+def test_the_launch_can_set_the_mail_rate_inside_one_mailbox():
+    import api_server as A
+    env = A._tuning_env(A.StartMigration(reason="info@ tail", mail_workers=8, per_user_qps=15), None)
+    assert env["MAIL_WORKERS"] == "8" and env["PER_USER_QPS"] == "15.0"
+    with pytest.raises(Exception):
+        A.StartMigration(reason="past Gmail's quota", per_user_qps=100)
+
+
 def test_the_launch_can_leave_the_checks_for_after_the_run():
     import api_server as A
     env = A._tuning_env(A.StartMigration(reason="memory", checks_after_run=True), None)

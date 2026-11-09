@@ -400,6 +400,11 @@ class StartMigration(WriteAction):
     # check as its own job afterwards. 45 users at once, each checked in-process as it finished,
     # filled 19 GB RAM + 5 GB swap (account 3, 9 Nov 2026) -- a native Sheet's compare reads it whole.
     checks_after_run: bool | None = None
+    # Mail inside ONE mailbox: workers and calls a second. The defaults (4 workers, 3/s) hold a mailbox to
+    # about 1 email a second -- 35 of Gmail's 250 quota units a second; info@ (40,180 emails) alone was
+    # an 11-hour tail on account 3 (9 Nov 2026). 15/s is about 5 emails a second, 175 units.
+    mail_workers: int | None = Field(default=None, ge=1, le=16)
+    per_user_qps: float | None = Field(default=None, ge=1, le=40)
     # Turn on every optional pass whose scopes are granted (fidelity.py): each
     # one off is data a whole-tenant run leaves behind. Checked per launch with
     # a token mint, because one ungranted scope fails every call in the run.
@@ -414,6 +419,8 @@ def _tuning_env(body: StartMigration, env: dict | None) -> dict | None:
         ("MAPPING_CACHE_USER_CAP", body.mapping_cache_user_cap),
         ("MIGRATE_PROCESSES", body.processes),
         ("MAIL_COMPLETION_CHECK", body.mail_completion_check),
+        ("MAIL_WORKERS", body.mail_workers),
+        ("PER_USER_QPS", body.per_user_qps),
         ("FIRST_PASS_ACCEPTANCE", "false" if body.checks_after_run else None),
         ("VERIFY_ON_COMPLETE", "false" if body.checks_after_run else None)) if val is not None}
     return {**(env or os.environ), **extra} if extra else env
