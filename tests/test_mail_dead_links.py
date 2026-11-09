@@ -39,3 +39,21 @@ def test_what_the_source_answers_is_named():
     assert M.classify("HTTP 403 (insufficientFilePermissions)", None, "s.x")[0] == "NO_ACCESS"
     assert M.classify(None, ["a@other.org"], "s.x") == ("NOT_MIGRATED", "owned by other.org")
     assert M.classify("HTTP 500", None, "s.x")[0] == "OTHER"
+
+
+def test_link_emails_are_recorded_with_whether_gmail_search_named_them(gmail_migrator, auth, db):
+    """The search's miss rate: emails a full read finds carrying a link, that the search did not name."""
+    g = auth.source_gmail(SRC_USER)
+    named = g.add_message(_mail("named", GONE), ["INBOX"])
+    hidden = g.add_message(_mail("hidden", MOVED), ["INBOX"])
+    g.chip_hits = {"has:drive": {named}}
+    import gmail_engine
+    gmail_engine_terms = gmail_engine.LINK_SEARCHES
+    try:
+        gmail_engine.LINK_SEARCHES = ("has:drive",)          # the quoted-URL term would find both
+        r = M.inventory_user(gmail_migrator, workers=1, say=lambda *_: None)
+    finally:
+        gmail_engine.LINK_SEARCHES = gmail_engine_terms
+    rows = dict(db.conn.execute("SELECT message_id, by_search FROM mail_link_messages").fetchall())
+    assert rows == {named: 1, hidden: 0}
+    assert (r["linkMessages"], r["searchMissed"]) == (2, 1)

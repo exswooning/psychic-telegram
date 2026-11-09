@@ -28,6 +28,10 @@ STATUSES = ("NOT_FOUND", "NO_ACCESS", "NOT_MIGRATED", "OTHER")
 LABEL = {"NOT_FOUND": "Source file answers 404", "NO_ACCESS": "No access to the source file",
          "NOT_MIGRATED": "Source file exists, no copy on the target", "OTHER": "Could not be checked"}
 
+LINK_SCHEMA = """CREATE TABLE IF NOT EXISTS mail_link_messages (
+    source_user TEXT NOT NULL, message_id TEXT NOT NULL, file_ids TEXT NOT NULL, by_search INTEGER NOT NULL,
+    checked_at TEXT NOT NULL, PRIMARY KEY (source_user, message_id))"""
+
 SCHEMA = """CREATE TABLE IF NOT EXISTS mail_dead_links (
     source_user TEXT NOT NULL, file_id TEXT NOT NULL, status TEXT NOT NULL, detail TEXT NOT NULL DEFAULT '',
     emails INTEGER NOT NULL, example_message TEXT NOT NULL DEFAULT '', checked_at TEXT NOT NULL,
@@ -79,6 +83,13 @@ def inventory_user(gm, workers: int = 8, say=print) -> dict:
             break
     mentions: collections.Counter = collections.Counter()
     example: dict = {}
+    linked: dict = {}                      # message id -> every Drive id in its text
+    # What Gmail's own search names as carrying a Drive link -- compared with what the full read
+    # finds, it is the search's miss rate (the split scan's search-first mode relies on it).
+    from gmail_engine import LINK_SEARCHES
+    by_search: set = set()
+    for term in LINK_SEARCHES:
+        by_search |= gm._list_ids(term)
 
     def read(mid: str) -> tuple[str, set]:
         gm.scan_limiter.acquire()
@@ -89,6 +100,8 @@ def inventory_user(gm, workers: int = 8, say=print) -> dict:
         return mid, text_ids(full.get("payload") or {})
     with futures.ThreadPoolExecutor(max_workers=workers) as pool:
         for mid, found in pool.map(read, ids):
+            if found:
+                linked[mid] = found
             for fid in found:
                 if not gm._drive_link_target(fid):          # a copy exists: the engine rewrites it
                     mentions[fid] += 1
@@ -104,14 +117,23 @@ def inventory_user(gm, workers: int = 8, say=print) -> dict:
         except Exception as exc:      # noqa: BLE001 - the answer is the finding
             status, detail = classify(str(exc), None, own)
         rows.append((gm.source_user, fid, status, detail, mentions[fid], example[fid], utc_now()))
+    now = utc_now()
     with gm.db.write() as c:
         c.execute(SCHEMA)
+        c.execute(LINK_SCHEMA)
         c.execute("DELETE FROM mail_dead_links WHERE source_user=?", (gm.source_user,))
         c.executemany("INSERT INTO mail_dead_links VALUES (?,?,?,?,?,?,?)", rows)
+        c.execute("DELETE FROM mail_link_messages WHERE source_user=?", (gm.source_user,))
+        c.executemany("INSERT INTO mail_link_messages VALUES (?,?,?,?,?)",
+                      [(gm.source_user, m, ",".join(sorted(f)), int(m in by_search), now) for m, f in linked.items()])
     by = collections.Counter(r[2] for r in rows)
-    say(f"{gm.source_user}: {len(ids)} emails read, {len(rows)} links with no target copy "
+    missed = sum(1 for m in linked if m not in by_search)
+    files = set().union(*linked.values()) if linked else set()
+    say(f"{gm.source_user}: {len(ids)} emails read, {len(linked)} carry a Drive link ({len(files)} files); "
+        f"search named {len(by_search)}, missed {missed}; {len(rows)} links with no target copy "
         + ", ".join(f"{n} {s}" for s, n in sorted(by.items())))
-    return {"emails": len(ids), "links": len(rows), "byStatus": dict(by)}
+    return {"emails": len(ids), "links": len(rows), "byStatus": dict(by), "linkMessages": len(linked),
+            "searchMissed": missed, "searchNamed": len(by_search), "linkedFiles": len(files)}
 
 
 def report(conn, status: str | None = None, q: str = "", limit: int = 200, offset: int = 0) -> dict:
@@ -155,11 +177,15 @@ def main(argv=None) -> int:
     if bad:
         print(f"REFUSED: not users of this account: {bad}")
         return 2
-    t0, total = time.time(), collections.Counter()
+    t0, total, agg = time.time(), collections.Counter(), collections.Counter()
     for u in users:
         r = inventory_user(GmailMigrator(auth, db, st, u, ledger[u.lower()]), workers=args.workers)
         total.update(r["byStatus"])
-    print(f"done in {time.time() - t0:.0f}s: " + (", ".join(f"{n} {s}" for s, n in sorted(total.items())) or "no such links"))
+        agg.update({k: r[k] for k in ("emails", "linkMessages", "searchMissed", "linkedFiles")})
+    rate = agg["searchMissed"] / agg["linkMessages"] if agg["linkMessages"] else 0
+    print(f"done in {time.time() - t0:.0f}s: {agg['emails']} emails, {agg['linkMessages']} with a Drive link "
+          f"({agg['linkedFiles']} file mentions); Gmail search missed {agg['searchMissed']} ({rate:.1%}); dead links: "
+          + (", ".join(f"{n} {s}" for s, n in sorted(total.items())) or "none"))
     return 0
 
 
