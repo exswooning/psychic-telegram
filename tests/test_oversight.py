@@ -303,3 +303,23 @@ def test_a_dropped_setting_is_named(db, tmp_path):
     _audit(db, "f1", "carried", "CARRIED_DROPPED", "writersCanShare,appProperties: HTTP 403 teamDrivesSharingRestrictionNotAllowed")
     [f] = O.watch_fallbacks(ctx(db, tmp_path))
     assert f["key"] == "carried" and "writersCanShare" in f["title"] and "appProperties" in f["title"]
+
+
+# -- warnings that keep coming back (plan item 6) -----------------------------------------------------
+def test_a_warning_on_two_days_still_happening_is_recurring(db, tmp_path):
+    """The Apps Script comment 404: 3 Nov and again 9 Nov, noticed only by a person reading logs."""
+    w = ("{d} 06:28:00,030 WARNING [drive-it.department_3] drive_engine: [it.department@s.example] comment thread "
+         "remains unresolved on 1I_T6ETrmaui5UNVMN9qRuVNQ1o0LX-n0tLSv9nsN_cHSLWwmON: HTTP 404 (notFound)\n")
+    _migrate_log(tmp_path, [w.format(d="2026-11-03"), w.format(d="2026-11-07"),
+                            "2026-11-07 06:00:00,000 WARNING [x] resilience: Google refused drive.files.copy: HTTP 403 userRateLimitExceeded\n",
+                            "2026-11-03 06:00:00,000 WARNING [x] resilience: Google refused drive.files.copy: HTTP 403 userRateLimitExceeded\n"])
+    [f] = O.watch_recurring(ctx(db, tmp_path))
+    assert f["title"].startswith("1 warning(s)") and "comment thread remains unresolved" in f["summary"]
+
+
+def test_one_day_or_long_gone_is_not(db, tmp_path):
+    w = "{d} 06:28:00,030 WARNING [x] drive_engine: [a@s.example] something odd 12345\n"
+    _migrate_log(tmp_path, [w.format(d="2026-11-07"), w.format(d="2026-11-07")])
+    assert O.watch_recurring(ctx(db, tmp_path)) == []
+    _migrate_log(tmp_path, [w.format(d="2026-10-01"), w.format(d="2026-10-02")])     # not seen lately
+    assert O.watch_recurring(ctx(db, tmp_path)) == []

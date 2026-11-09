@@ -153,6 +153,32 @@ def _metrics(conn) -> dict | None:
     }
 
 
+def _memory_peak(conn, started: str | None, finished: str | None) -> dict | None:
+    """The run's memory, from what every migrating process recorded (plan item 6): the largest one
+    process held, and the sum of each process's peak -- an upper bound for the run. 9 Nov 2026: four
+    mail processes filled 19 GB and nothing in the report said so."""
+    q, args = "SELECT recorded_at, payload FROM run_metrics", []
+    if started:
+        q += " WHERE recorded_at >= ?" + (" AND recorded_at <= ?" if finished else "")
+        args = [started] + ([finished] if finished else [])
+    peak: dict = {}
+    for r in conn.execute(q, args):
+        try:
+            m = json.loads(r["payload"])
+        except ValueError:
+            continue
+        pid, rss = m.get("pid"), m.get("rss_mb")
+        if pid is None or rss is None:
+            continue
+        if rss > peak.get(pid, (0, ""))[0]:
+            peak[pid] = (rss, r["recorded_at"])
+    if not peak:
+        return None
+    top_pid, (top, at) = max(peak.items(), key=lambda kv: kv[1][0])
+    return {"processes": len(peak), "largestProcessMb": round(top, 1), "largestAt": at,
+            "sumOfPeaksMb": round(sum(v[0] for v in peak.values()), 1)}
+
+
 def _ledger_span(conn) -> tuple[str | None, str | None]:
     # id order is chronological and O(1); MIN/MAX(timestamp) would scan a
     # ledger that can hold ten million rows.
@@ -392,6 +418,7 @@ def collect_facts(db, settings, *, kind: str = "migration", run: dict | None = N
     facts["run"] = _normalise_run(run, span, "ledger")
     run, source, duration = facts["run"], facts["run"]["timingSource"], facts["run"]["durationSec"]
     facts["fidelity"] = _fresh_fidelity(facts["fidelity"], run)
+    facts["memory"] = _guard(errors, "memory", lambda: _memory_peak(conn, run.get("startedAt"), run.get("finishedAt")), None)
     if not facts["fidelity"] or facts["fidelity"].get("stale"):
         ran = _guard(errors, "runUsersFidelity", lambda: _run_users_fidelity(conn, run), {})
         if ran:

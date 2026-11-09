@@ -513,9 +513,53 @@ def watch_fallbacks(ctx: Context) -> list[dict]:
     return out
 
 
+RECUR_NOISE = re.compile(r"userRateLimitExceeded|rateLimitExceeded|pacing refusals|recovered .* after|heartbeat |"
+                         r"acceptance: verify:|probing up|backing off|signal \d+ received|stopping mail migration early|"
+                         r"Still waiting for current services|Memory pressure|drain mode", re.IGNORECASE)
+RECUR_TAIL = int(os.getenv("OVERSIGHT_RECUR_TAIL_BYTES", str(32 << 20)))
+
+
+def _shape(text: str) -> str:
+    s = text.lower()
+    s = re.sub(r"\S+@\S+", "<addr>", s)
+    s = re.sub(r"\b(?=[\w-]*\d)[\w-]{12,}\b", "<id>", s)
+    s = re.sub(r"\d+", "#", s)
+    return s[:160]
+
+
+def watch_recurring(ctx: Context) -> list[dict]:
+    """The same warning or error, by shape, on two or more days and still happening: a problem that
+    comes back, even when each time is harmless (plan item 6). The Apps Script comment-resolve 404
+    showed on 3 Nov twice and again on 9 Nov, and only a person reading logs noticed."""
+    today = ctx.now.strftime("%Y-%m-%d")
+    yesterday = (ctx.now - timedelta(hours=24)).strftime("%Y-%m-%d")
+    out = []
+    for acct in ctx.accounts:
+        aid = acct["id"]
+        days: dict = collections.defaultdict(set)
+        example: dict = {}
+        for f in glob.glob(os.path.join(ctx.logs_root, str(aid), "*.log")):
+            for ln in _tail(f, RECUR_TAIL):
+                m = re.match(r"(\d{4}-\d{2}-\d{2}) [\d:,]+ +(WARNING|ERROR|CRITICAL) +\[[^\]]*\] +(.*)", ln)
+                if not m or RECUR_NOISE.search(m.group(3)):
+                    continue
+                key = _shape(re.sub(r"^[\w.]+: \[[^\]]*\] ", "", m.group(3)))
+                days[key].add(m.group(1))
+                example[key] = ln.strip()[:300]
+        recurring = sorted(((k, d) for k, d in days.items() if len(d) >= 2 and (today in d or yesterday in d)),
+                           key=lambda kd: -len(kd[1]))
+        if recurring:
+            ex = "\n".join(f"- on {len(d)} days ({min(d)} .. {max(d)}): {example[k][:220]}" for k, d in recurring[:10])
+            out.append(finding("watch_recurring", aid, "recurring",
+                               f"{len(recurring)} warning(s) keep coming back across runs",
+                               f"Each is the same message, ids and numbers aside, on two or more days and still "
+                               f"seen in the last day -- recurring, not fixed. Name it in known_issues, or fix it.\n\n{ex}"))
+    return out
+
+
 CHECKS = (watch_repair_loop, watch_slow_file, watch_verdict_flip, watch_unclassified, watch_source_changed,
           watch_box_busy, watch_tenant_ready, watch_google_status, watch_isolation, watch_limiter_low,
-          watch_fallbacks)
+          watch_fallbacks, watch_recurring)
 
 
 # -- the sweep ---------------------------------------------------------------------------------------
