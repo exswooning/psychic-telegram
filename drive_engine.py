@@ -2121,12 +2121,28 @@ class DriveMigrator:
         body = {}
         if item.get("modifiedTime"):
             body["modifiedTime"] = item["modifiedTime"]
-        # Set here, as the target user, in the move it already makes: no extra call.
-        body.update(carried_metadata(item))
-        return with_carried_fallback(lambda b: self._retry(lambda: self.tgt.files().update(
+        # Set here, as the target user, in the move it already makes: no extra call --
+        # except writersCanShare, which Drive judges while the file is still in the shared
+        # staging drive and refuses (403 teamDrivesSharingRestrictionNotAllowed; the fallback
+        # then dropped it AND appProperties, 9 Nov 2026). It is set once the file is in My Drive.
+        carried = carried_metadata(item)
+        after = {k: carried.pop(k) for k in ("writersCanShare",) if k in carried}
+        body.update(carried)
+        moved = with_carried_fallback(lambda b: self._retry(lambda: self.tgt.files().update(
             fileId=file_id, addParents=tgt_parent, removeParents=self._staging_drive_id,
             body=b or None, supportsAllDrives=True, fields="id,modifiedTime",
         ).execute(), label="drive.files.move"), body)
+        if after:
+            if item.get("modifiedTime"):
+                after["modifiedTime"] = item["modifiedTime"]
+            try:
+                moved = self._retry(lambda: self.tgt.files().update(
+                    fileId=file_id, body=after, supportsAllDrives=True, fields="id,modifiedTime",
+                ).execute(), label="drive.files.update.carried")
+            except (PermanentAPIError, RuntimeError) as exc:      # the file is in place; a setting is not worth it
+                log.warning("[%s] %s: could not set %s after the move: %s", self.source_user,
+                            item.get("name"), ",".join(after), exc)
+        return moved
 
     def _landed(self, item: dict, target_id: str, tgt_parent: str, moved: dict | None,
                 bytes_moved: int = 0, note: str = "", comments: bool = True) -> None:

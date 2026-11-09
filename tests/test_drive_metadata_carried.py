@@ -71,8 +71,13 @@ def test_server_side_sets_created_on_the_copy_and_the_rest_as_the_target(
     assert "starred" not in copy_body
     assert "writersCanShare" not in copy_body        # a shared drive refuses it (403); the move sets it
     move = next(c for c in tgt.calls_to("files.update") if c.get("removeParents"))
-    for k in ("starred", "properties", "copyRequiresWriterPermission", "writersCanShare"):
+    for k in ("starred", "properties", "copyRequiresWriterPermission"):
         assert move["body"][k] == EXTRA[k], k
+    # writersCanShare: refused while the file is still in the shared staging drive, so it is set
+    # once the move has put it in My Drive (9 Nov 2026)
+    assert "writersCanShare" not in move["body"]
+    after = [c for c in tgt.calls_to("files.update") if not c.get("removeParents") and "writersCanShare" in (c.get("body") or {})]
+    assert after and after[0]["body"]["writersCanShare"] == EXTRA["writersCanShare"]
 
 
 def test_a_locked_file_is_locked_last(auth, db, settings, identity, quota):
