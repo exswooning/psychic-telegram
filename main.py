@@ -1965,6 +1965,12 @@ def _run_pass_in_processes(settings, services, delta, delta_days, only, n: int) 
             argv += ["--user", u]
         env = {**os.environ, "MIGRATE_SHARD": f"{k}/{n}", "PROCESS_SHARE": str(n),
                "SHARD_PARENT": str(os.getpid())}
+        # glibc gives every thread its own 64 MB arena, and a mail pass allocates and frees ~2 MB
+        # message buffers on 8 threads: 45 arenas held 2.2 GB of one shard's 3.5 GB (account 3, 9 Nov
+        # 2026) and four shards filled 19 GB. Two arenas, and memory handed back when freed. It has
+        # to be in the child's environment: glibc reads it at process start.
+        env.setdefault("MALLOC_ARENA_MAX", "2")
+        env.setdefault("MALLOC_TRIM_THRESHOLD_", "262144")
         procs.append((subprocess.Popen(argv, env=env), out))
     log.info("pass %s split across %d processes", ",".join(sorted(services)), n)
     passed_on = False
