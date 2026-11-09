@@ -146,6 +146,13 @@ def test_the_launch_passes_the_process_count(monkeypatch):
         A.StartMigration(reason="too many", services=["drive"], processes=9)
 
 
+def test_the_launch_can_ask_for_write_time_receipts():
+    import api_server as A
+    body = A.StartMigration(reason="as the winning arm ran", mail_completion_check="full")
+    assert A._tuning_env(body, None)["MAIL_COMPLETION_CHECK"] == "full"
+    assert A._tuning_env(A.StartMigration(reason="default"), None) is None      # unset: the server's own
+
+
 @pytest.mark.parametrize('users,only,expected', [
     (['one@source.example'], None, 1),
     ([f'u{i}@source.example' for i in range(20)], ['u0@source.example'], 1),

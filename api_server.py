@@ -391,6 +391,11 @@ class StartMigration(WriteAction):
     # OS processes each pass is split across (MIGRATE_PROCESSES): past the
     # interpreter lock that holds one process to ~1.1 cores.
     processes: int | None = Field(default=None, ge=1, le=8)
+    # "full": every email the engine writes is read back and compared while its source is still in
+    # memory, and a receipt kept (migration_checks.verify_written_mail) -- so the later 1:1 check reads
+    # labels and headers only (info@: 40,290 emails in 165 s). The benchmark's winning arm ran this
+    # way. None = this server's MAIL_COMPLETION_CHECK ("counts").
+    mail_completion_check: Literal["counts", "full"] | None = None
     # Turn on every optional pass whose scopes are granted (fidelity.py): each
     # one off is data a whole-tenant run leaves behind. Checked per launch with
     # a token mint, because one ungranted scope fails every call in the run.
@@ -403,7 +408,8 @@ def _tuning_env(body: StartMigration, env: dict | None) -> dict | None:
         ("USER_WORKERS", body.user_workers),
         ("DRIVE_FILE_WORKERS", body.drive_file_workers),
         ("MAPPING_CACHE_USER_CAP", body.mapping_cache_user_cap),
-        ("MIGRATE_PROCESSES", body.processes)) if val is not None}
+        ("MIGRATE_PROCESSES", body.processes),
+        ("MAIL_COMPLETION_CHECK", body.mail_completion_check)) if val is not None}
     return {**(env or os.environ), **extra} if extra else env
 
 
