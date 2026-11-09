@@ -160,7 +160,7 @@ def test_orphaned_verification_is_interrupted_only_when_disabled_and_owner_dead(
         c.execute("UPDATE repair_runs SET started_at=(SELECT started_at FROM verification_repairs)")
     assert R.reconcile_stopped_verification(db) == 0  # current process lives
     monkeypatch.setattr(R, "_alive", lambda pid: False)
-    R.enable(db)
+    R.enable(db, operator=True)          # an explicit resume; an automatic one leaves the pause
     assert R.reconcile_stopped_verification(db) == 0
     R.pause(db)
     assert R.reconcile_stopped_verification(db) == 1

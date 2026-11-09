@@ -191,7 +191,7 @@ def test_interrupted_repair_closes_run_and_can_resume_after_explicit_launch(db, 
     assert R.due_users(db) == ['u@src']
     R.pause(db)
     assert R.due_users(db) == []
-    R.enable(db)
+    R.enable(db, operator=True)          # the explicit launch the test is about
     assert R.due_users(db) == ['u@src']
 
 

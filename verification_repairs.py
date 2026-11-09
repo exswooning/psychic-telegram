@@ -273,9 +273,17 @@ def services_to_check(db, user, services) -> tuple:
     return out
 
 
-def enable(db):
+def enable(db, operator: bool = False):
+    """Switch automatic repairs on. An automatic caller (a migration pass, a repair job, a run's
+    follow-on) never overrides an operator's pause -- each pass used to switch them back on, so a
+    pause lasted until the next pass and the repair loop started the moment the run stopped
+    (account 3, 9 Nov 2026). Only the operator's own switch (`operator=True`) resumes them; an
+    account nobody has set yet is switched on, as before."""
     ensure(db)
     with db.write() as conn:
+        row = conn.execute("SELECT enabled FROM verification_repair_policy WHERE id=1").fetchone()
+        if row is not None and not row[0] and not operator:
+            return
         conn.execute("INSERT OR REPLACE INTO verification_repair_policy VALUES(1,1)")
 
 

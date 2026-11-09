@@ -2769,7 +2769,7 @@ def _repair_policy(aid: int, enabled: bool | None = None) -> bool:
     d = MigrationDB(path)
     try:
         if enabled is True:
-            verification_repairs.enable(d)
+            verification_repairs.enable(d, operator=True)      # the operator's switch: overrides a pause
         elif enabled is False:
             verification_repairs.pause(d)
         return verification_repairs.enabled(d)
