@@ -2912,9 +2912,30 @@ class DriveMigrator:
             self._bump("comments",written)
             return written
         except Exception as exc:
+            if "404" in str(exc) and self._has_no_comments_api(source_id):
+                # Apps Script projects and Forms have no Drive comments: the API answers 404 for
+                # them. A failure that can never succeed recurred on every run (since 3 Nov 2026,
+                # oversight's watch_recurring, incident #41) -- it is a fact about the type.
+                self.db.log_audit(self.source_user, source_id, "comment", "SKIPPED_NO_COMMENTS_API",
+                                  "this file type has no Drive comments")
+                return 0
             self.db.log_audit(self.source_user,source_id,"comment","FAILED",str(exc))
             log.warning("[%s] comment thread remains unresolved on %s: %s",self.source_user,source_id,exc)
             return 0
+
+    NO_COMMENTS_API = ("application/vnd.google-apps.script", "application/vnd.google-apps.form",
+                       "application/vnd.google-apps.site", "application/vnd.google-apps.map",
+                       "application/vnd.google-apps.jam", "application/vnd.google-apps.folder",
+                       "application/vnd.google-apps.shortcut")
+
+    def _has_no_comments_api(self, source_id: str) -> bool:
+        try:
+            mime = self._retry(lambda: self.src.files().get(
+                fileId=source_id, fields="mimeType", supportsAllDrives=True).execute(),
+                write=False, tenant="source").get("mimeType")
+        except Exception:      # noqa: BLE001 - unknown: keep it a failure
+            return False
+        return mime in self.NO_COMMENTS_API
 
     # -- ACL translation -----------------------------------------------------------
     def _sync_acls(self, source_id: str, target_id: str,
