@@ -1072,6 +1072,7 @@ class GmailMigrator:
         if self.settings.migrate_gmail_settings:
             self._migrate_filters()
             self._migrate_signatures()
+            self._migrate_language()
             self._migrate_vacation()
             self._migrate_imap_pop()
             self._migrate_forwarding()
@@ -1102,6 +1103,25 @@ class GmailMigrator:
         """
         settings = svc.users().settings()
         return all(hasattr(settings, n) for n in names)
+
+    def _migrate_language(self) -> None:
+        """Gmail's display language (settings.language, gmail.settings.basic). Not carried before
+        9 Nov 2026, so a Nepali-language user met an English Gmail on cutover morning."""
+        if not self._settings_has(self.src, "getLanguage") or not self._settings_has(self.tgt, "updateLanguage"):
+            return
+        try:
+            lang = self._retry(lambda: self.src.users().settings().getLanguage(userId="me").execute())
+            want = (lang or {}).get("displayLanguage")
+            if not want:
+                return
+            have = self._retry(lambda: self.tgt.users().settings().getLanguage(userId="me").execute())
+            if (have or {}).get("displayLanguage") == want or self.settings.dry_run:
+                return
+            self._retry(lambda: self.tgt.users().settings().updateLanguage(
+                userId="me", body={"displayLanguage": want}).execute())
+            self.stats["language_migrated"] = 1
+        except OPTIONAL_PASS_ERRORS as exc:
+            log.warning("[%s] Gmail display language not migrated: %s", self.source_user, exc)
 
     def _migrate_vacation(self) -> None:
         """The out-of-office responder, including its schedule."""
@@ -1363,6 +1383,13 @@ class GmailMigrator:
                 continue
 
             rewritten = self._rewrite_identities(signature)
+            # Drive links too: a signature logo hosted on Drive (`docs.google.com/uc?id=...`, found in
+            # hundreds of account 3's emails, 9 Nov 2026) would otherwise point at the source for good.
+            if self.settings.rewrite_drive_links:
+                from link_rewrite import rewrite_text
+                rewritten, moved = rewrite_text(rewritten, self._drive_link_target)
+                if moved:
+                    self.stats["signature_links_rewritten"] = self.stats.get("signature_links_rewritten", 0) + moved
 
             if self.settings.dry_run:
                 log.info("[DRY RUN] would set signature on %s", target_email)

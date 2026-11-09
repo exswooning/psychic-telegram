@@ -1718,6 +1718,11 @@ def _ensure_target_accounts(auth: AuthManager, settings: Settings,
     db = db or MigrationDB(settings.db_path)
     result = user_profiles.sync_profiles(auth, db, settings, pairs, apply=True,
                                         create_missing=True, progress=log.info)
+    try:
+        # Advisory, like the profile itself: a photo is never worth holding a user's data.
+        user_profiles.sync_photos(auth, db, settings, pairs, apply=True, progress=log.info)
+    except Exception as exc:      # noqa: BLE001
+        log.warning("profile photos not copied: %s", exc)
     created = [e for e, _ in result["created"]]
     if created:
         log.info("auto-provisioned %d source-backed target profiles", len(created))
