@@ -1366,6 +1366,16 @@ def run_all(db, auth, settings, apply: bool = False,
     worse than no repair pass.
     """
     out = {"survey": {}, "resolved": 0, "reconciled": 0, "errors": []}
+    if apply:
+        # Every repair writes to the target -- duplicates deleted, files moved, sharing changed,
+        # staging drives swept. Run beside another job that writes Drive for this account, it
+        # works against that job's state: a test arm's end-of-run repair emptied the full run's
+        # staging drives mid-copy (9 Nov 2026). One guard here covers every caller.
+        busy = drive_writers_running(getattr(settings, "account_id", None))
+        if busy:
+            out["skipped"] = f"another Drive-writing job is running for this account: {busy}"
+            log.warning("repair skipped: %s", out["skipped"])
+            return out
 
     def step(name):      # (index, total, name) to whoever shows this run's progress
         if progress:
