@@ -231,3 +231,42 @@ def test_a_readiness_check_that_could_not_decide_keeps_the_last_definite_answer(
     assert len(O.watch_tenant_ready(ctx(db, tmp_path, accounts=accounts, **kw))) == 1
     assert len(O.watch_tenant_ready(ctx(db, tmp_path, accounts=accounts, now=later(61), **kw))) == 1   # unknown: still not ready
     assert O.watch_tenant_ready(ctx(db, tmp_path, accounts=accounts, now=later(122), **kw)) == []    # definite: ready
+
+
+# -- the migration's own heartbeat (progress.py) -------------------------------------------------------
+def _migrate_log(tmp_path, lines):
+    d = tmp_path / "jobs" / "3"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "migrate.log").write_text("".join(lines))
+
+
+def _beat(minute, rate, user="ward12@s.example", stalled=30):
+    import progress
+    progress._reset()
+    progress.start(user, "drive", now=0)
+    line = progress.heartbeat_lines({"driveTargetRate": rate}, now=stalled)[0]
+    return f"2026-11-09 11:{minute:02d}:00,000 INFO    [heartbeat] migrate: {line}\n"
+
+
+def test_a_limiter_held_low_for_ten_minutes_is_an_incident(db, tmp_path):
+    """Account 3, 9 Nov 2026: 6.49/s held the whole run for hours, and nothing said so."""
+    _migrate_log(tmp_path, [_beat(m, 6.49) for m in range(0, 12)])
+    c = ctx(db, tmp_path, active_jobs=lambda: [{"account_id": 3, "job_name": "migrate"}])
+    [f] = O.watch_limiter_low(c)
+    assert f["kind"] == "watch_limiter_low" and "driveTargetRate" in f["title"] and f["severity"] == "error"
+
+
+def test_a_short_dip_or_a_healthy_rate_is_not(db, tmp_path):
+    c = ctx(db, tmp_path, active_jobs=lambda: [{"account_id": 3, "job_name": "migrate"}])
+    _migrate_log(tmp_path, [_beat(m, 6.0) for m in range(0, 4)])                  # 3 minutes
+    assert O.watch_limiter_low(c) == []
+    _migrate_log(tmp_path, [_beat(m, 280.0) for m in range(0, 12)])
+    assert O.watch_limiter_low(c) == []
+
+
+def test_a_migrating_user_with_no_progress_is_caught_by_the_existing_stall_check(db, tmp_path):
+    """The migration logs heartbeats in the verify check's shape, so watch_slow_file covers it."""
+    _migrate_log(tmp_path, [_beat(0, 280.0, stalled=700)])
+    c = ctx(db, tmp_path, active_jobs=lambda: [{"account_id": 3, "job_name": "migrate"}])
+    [f] = O.watch_slow_file(c)
+    assert "no progress for 700s on ward12@s.example" in f["title"]

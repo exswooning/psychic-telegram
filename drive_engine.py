@@ -1268,6 +1268,8 @@ class DriveMigrator:
         """The only writer to `stats`. See _stats_lock in __init__."""
         with self._stats_lock:
             self.stats[key] = self.stats.get(key, 0) + n
+        import progress
+        progress.tick(self.source_user, "drive", n)      # the heartbeat oversight's stall check reads
 
     def _walk(self, src_parent: str, tgt_parent: str, depth: int) -> None:
         if depth > self.settings.max_recursion_depth:

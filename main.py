@@ -58,6 +58,7 @@ from calendar_engine import CalendarMigrator
 from chat_engine import ChatMigrator
 from contacts_engine import ContactsMigrator
 import memtrace
+import progress
 import user_claims
 import config
 from config import Settings
@@ -1038,6 +1039,7 @@ def run_batch(auth: AuthManager, db: MigrationDB, settings: Settings,
                 # leak from ordinary concurrency cost: per-user state should
                 # be gone by now, so anything still held is held wrongly.
                 memtrace.user_finished(src)
+                progress.finish(src)
 
         claimed, why = user_claims.acquire(account_id, src, services=svc_label)
         if not claimed:
@@ -1052,10 +1054,12 @@ def run_batch(auth: AuthManager, db: MigrationDB, settings: Settings,
         try:
             out = migrate_user(auth, db, settings, src, tgt,
                                services, delta, delta_days)
+            progress.finish(src)
             user_claims.finish(account_id, src, status="DONE")
             memtrace.user_finished(src)
             return out
         except BaseException as exc:
+            progress.finish(src)
             # Record the failure against the claim before re-raising, so the
             # user shows as FAILED rather than sitting CLAIMED until the
             # lease lapses and looking like a live node still working on it.
@@ -1357,6 +1361,7 @@ def _run_with_memory_pause(auth, db, settings, services, delta, delta_days,
         kwargs={"run": _run_label(settings, "delta" if delta else "migrate")},
         name="metrics", daemon=True)
     flusher.start()
+    threading.Thread(target=_heartbeat, args=(stop,), name="heartbeat", daemon=True).start()
     try:
         # BITPORT_JOB_NAME: a benchmark arm (ab_transfer) is not a migration of the account, and
         # judged as one it opened "users_failed" incidents for its test users (#2, #6, #7).
@@ -1558,6 +1563,29 @@ def _run_label(settings, kind: str) -> dict:
     return {"kind": kind, "pid": os.getpid(), "started_at": _RUN_STARTED,
             "source_domain": getattr(settings, "source_domain", None),
             "target_domain": getattr(settings, "target_domain", None)}
+
+
+HEARTBEAT_SEC = float(os.getenv("MIGRATE_HEARTBEAT_SEC", "60"))
+
+
+def _heartbeat(stop_event: threading.Event, interval: float = HEARTBEAT_SEC) -> None:
+    """One line per active user a minute, in the 1:1 check's heartbeat shape, with the Drive rate
+    limiters' current rates -- what oversight's stall check reads and the limiter sentinel judges.
+    Daemon; never raises."""
+    import progress
+    while not stop_event.wait(interval):
+        try:
+            rates = {}
+            try:
+                import drive_engine
+                for tenant, lim in list(drive_engine._PROJECT_LIMITERS.items()):
+                    rates[f"drive{tenant.capitalize()}Rate"] = float(lim.rate)
+            except Exception:      # noqa: BLE001
+                pass
+            for line in progress.heartbeat_lines(rates):
+                log.info(line)
+        except Exception:      # noqa: BLE001 - a missing heartbeat must never stop the work
+            logging.getLogger(__name__).debug("ignored an error", exc_info=True)
 
 
 def _metrics_flusher(stop_event: threading.Event, db,

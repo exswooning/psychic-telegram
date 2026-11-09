@@ -425,8 +425,57 @@ def watch_isolation(ctx: Context) -> list[dict]:
     return out
 
 
+LIMITER_FLOOR = float(os.getenv("OVERSIGHT_LIMITER_FLOOR", "25"))
+LIMITER_LOW_SEC = int(os.getenv("OVERSIGHT_LIMITER_LOW_SEC", "600"))
+
+
+def watch_limiter_low(ctx: Context) -> list[dict]:
+    """A Drive rate limiter held under a sane floor for 10 minutes, from the migration's heartbeats.
+
+    Account 3, 9 Nov 2026: a learned ceiling of 6.49/s, saved a week earlier by a since-fixed bug, held a
+    45-user run to it for hours; 8 users sat waiting to create sharing grants and nothing said so."""
+    out = []
+    for job in ctx.active_jobs():
+        aid, name = job.get("account_id"), (job.get("job_name") or "").split(":")[0].strip()
+        if not name:
+            continue
+        lines = _tail(os.path.join(ctx.logs_root, "_none" if aid is None else str(aid), f"{name}.log"), 262144)
+        seen: dict = {}            # limiter -> [(time, rate)]
+        for ln in lines:
+            if "heartbeat " not in ln:
+                continue
+            when = _line_time(ln)
+            for lim, rate in re.findall(r"\b(drive\w+Rate)=([0-9.]+)/s", ln):
+                if when is not None:
+                    seen.setdefault(lim, []).append((when, float(rate)))
+        for lim, pts in seen.items():
+            pts.sort()
+            last = pts[-1][0]
+            window = [r for t, r in pts if (last - t).total_seconds() <= LIMITER_LOW_SEC]
+            span = (last - min(t for t, _ in pts if (last - t).total_seconds() <= LIMITER_LOW_SEC)).total_seconds()
+            if window and span >= LIMITER_LOW_SEC * 0.9 and max(window) < LIMITER_FLOOR:
+                out.append(finding("watch_limiter_low", aid, f"{name}:{lim}",
+                                   f"{name}: {lim} held under {LIMITER_FLOOR:g}/s for {int(span // 60)} min",
+                                   f"The {lim} limiter stayed between {min(window):.1f} and {max(window):.1f} calls/s for "
+                                   f"{int(span)}s. Every user of this run shares it. A low learned ceiling (rate_limiter_ceiling "
+                                   f"in the account's ledger, expired after RATE_CEILING_TTL_HOURS) or real Google pushback; "
+                                   f"the run's log names which.", "error"))
+    return out
+
+
+def _line_time(line: str):
+    from datetime import datetime
+    m = re.match(r"(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2})", line)
+    if not m:
+        return None
+    try:
+        return datetime.strptime(f"{m.group(1)} {m.group(2)}", "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return None
+
+
 CHECKS = (watch_repair_loop, watch_slow_file, watch_verdict_flip, watch_unclassified, watch_source_changed,
-          watch_box_busy, watch_tenant_ready, watch_google_status, watch_isolation)
+          watch_box_busy, watch_tenant_ready, watch_google_status, watch_isolation, watch_limiter_low)
 
 
 # -- the sweep ---------------------------------------------------------------------------------------

@@ -184,6 +184,8 @@ class GmailMigrator:
     def _bump(self, key: str, n: int = 1) -> None:
         with self._stats_lock:
             self.stats[key] += n
+        import progress
+        progress.tick(self.source_user, "gmail", n)      # the heartbeat oversight's stall check reads
 
     def _retry(self, fn, before_retry=None, label=None):
         return retry_on_google_error(
