@@ -118,7 +118,8 @@ def with_carried_fallback(send, body: dict):
         return send(body)
     except PermanentAPIError as exc:
         extra = [k for k in CARRIED_KEYS if k in body]
-        if not extra or not re.search(r"(?:HTTP|HttpError)\s+400\b",str(exc)):
+        if not extra or not (re.search(r"(?:HTTP|HttpError)\s+400\b", str(exc))
+                             or "teamDrivesSharingRestrictionNotAllowed" in str(exc)):
             raise
         log.warning("Drive refused a write carrying %s (%s); retrying without them",
                     ",".join(extra), exc)
@@ -1966,8 +1967,11 @@ class DriveMigrator:
 
         body = {"name": item["name"], "parents": [self._staging_drive_id]}
         # This call is made as the SOURCE user: starred is per user, so it would star the
-        # copy for them. It is set as the target in the move (_out_of_staging).
-        body.update({k: v for k, v in carried_metadata(item).items() if k != "starred"})
+        # copy for them. It is set as the target in the move (_out_of_staging). So is
+        # writersCanShare: the copy lands in a SHARED drive, which refuses it (403
+        # teamDrivesSharingRestrictionNotAllowed -- finance@, 9 Nov 2026: the whole copy failed and
+        # the file went the slow way).
+        body.update({k: v for k, v in carried_metadata(item).items() if k not in ("starred", "writersCanShare")})
         # copy() does not carry modifiedTime across on its own.
         if item.get("modifiedTime"):
             body["modifiedTime"] = item["modifiedTime"]

@@ -69,6 +69,7 @@ def test_server_side_sets_created_on_the_copy_and_the_rest_as_the_target(
     copy_body = src.calls_to("files.copy")[-1]["body"]
     assert copy_body["createdTime"] == EXTRA["createdTime"]
     assert "starred" not in copy_body
+    assert "writersCanShare" not in copy_body        # a shared drive refuses it (403); the move sets it
     move = next(c for c in tgt.calls_to("files.update") if c.get("removeParents"))
     for k in ("starred", "properties", "copyRequiresWriterPermission", "writersCanShare"):
         assert move["body"][k] == EXTRA[k], k
@@ -116,3 +117,19 @@ def test_a_refusal_with_nothing_carried_is_not_retried():
     with pytest.raises(PermanentAPIError):
         drive_engine.with_carried_fallback(send, {"name": "x"})
     assert len(calls) == 1
+
+
+def test_a_shared_drive_sharing_refusal_retries_without_the_carried_settings():
+    """finance@, 9 Nov 2026: 403 teamDrivesSharingRestrictionNotAllowed failed the whole copy."""
+    import drive_engine
+    from resilience import PermanentAPIError
+    calls = []
+
+    def send(b):
+        calls.append(b)
+        if "writersCanShare" in b:
+            raise PermanentAPIError("HTTP 403 (teamDrivesSharingRestrictionNotAllowed): x")
+        return {"id": "ok"}
+
+    assert drive_engine.with_carried_fallback(send, {"name": "x", "writersCanShare": False}) == {"id": "ok"}
+    assert len(calls) == 2 and "writersCanShare" not in calls[1]
