@@ -21,6 +21,7 @@ fixup pass that runs after the rest of the tree has been mirrored.
 from __future__ import annotations
 
 import concurrent.futures as futures
+import contextvars
 import json
 import logging
 import os
@@ -110,6 +111,25 @@ def carried_metadata(item: dict) -> dict:
 CARRIED_KEYS = tuple(_CARRIED_DEFAULTS) + ("properties", "folderColorRgb", "createdTime", "appProperties")
 
 
+# The item a Drive worker thread is on, so a dropped setting is recorded against it (each thread has
+# its own context). Set by DriveMigrator at the start of every file and folder.
+_CURRENT_ITEM: contextvars.ContextVar = contextvars.ContextVar("bitport_current_item", default=None)
+
+
+def _record_dropped(keys: list, exc) -> None:
+    """A setting the target refused is recorded, not only logged: ss@'s move dropped writersCanShare
+    and appProperties silently on 9 Nov 2026, found only by reading the log."""
+    cur = _CURRENT_ITEM.get()
+    if not cur:
+        return
+    migrator, item = cur
+    try:
+        migrator.db.log_audit(migrator.source_user, item["id"], "carried", "CARRIED_DROPPED",
+                              f"{','.join(keys)}: {str(exc)[:200]}")
+    except Exception:      # noqa: BLE001 - the record must never cost the file
+        log.debug("could not record dropped settings", exc_info=True)
+
+
 def with_carried_fallback(send, body: dict):
     """send(body); if Drive refuses it while the body carries metadata beyond what
     was always sent, once more without that metadata. Carrying a star or a
@@ -123,6 +143,7 @@ def with_carried_fallback(send, body: dict):
             raise
         log.warning("Drive refused a write carrying %s (%s); retrying without them",
                     ",".join(extra), exc)
+        _record_dropped(extra, exc)
         return send({k: v for k, v in body.items() if k not in extra})
 
 
@@ -1444,6 +1465,7 @@ class DriveMigrator:
     # -- folders ---------------------------------------------------------------
     def _sync_folder(self, item: dict, tgt_parent: str) -> str | None:
         item = {**item, "_bitport_source_user": self.source_user}
+        _CURRENT_ITEM.set((self, item))
         existing = self.db.get_target_id(self.source_user, item["id"], "folder")
         if existing:
             if self.db.acl_pending(self.source_user, item["id"]) and not self.settings.dry_run:
@@ -1798,6 +1820,7 @@ class DriveMigrator:
         because a file that arrived is not a failure, and leaving it counted
         as one is how a failure list stops being read.
         """
+        _CURRENT_ITEM.set((self, item))
         attempts: list[str] = []
         # Count THIS file's failures locally, from its own audit rows.
         #
@@ -1860,6 +1883,10 @@ class DriveMigrator:
                     if local_failures:
                         self._bump("failed", -local_failures)
                     self._bump("recovered_by_fallback")
+                    # Its own row, with WHY the first route failed: a fallback is a fault the
+                    # file survived (the staging sweep of 9 Nov 2026 showed only as INFO lines).
+                    self.db.log_audit(self.source_user, item["id"], "fallback", "FALLBACK",
+                                      f"{attempts[0]} -> {name}: {(last_error or '')[:200]}")
                     self.db.log_audit(
                         self.source_user, item["id"], "file", "SUCCESS",
                         f"copied by {name} after {', '.join(attempts[:-1])} "

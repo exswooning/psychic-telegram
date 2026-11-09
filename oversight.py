@@ -26,6 +26,7 @@ Deploy drift needs git, so it lives in monitor/watch.py (the operator's side), n
 """
 from __future__ import annotations
 
+import collections
 import glob
 import json
 import logging
@@ -474,8 +475,47 @@ def _line_time(line: str):
         return None
 
 
+FALLBACK_SHARE = float(os.getenv("OVERSIGHT_FALLBACK_SHARE", "0.01"))
+FALLBACK_MIN = int(os.getenv("OVERSIGHT_FALLBACK_MIN", "5"))
+
+
+def watch_fallbacks(ctx: Context) -> list[dict]:
+    """Files that arrived only by a second route, and settings the target refused -- faults a run
+    survives, so nothing failed and nothing said so. 9 Nov 2026: a test arm's sweep emptied the run's
+    staging drives and every copy fell back to download-and-upload for minutes; ss@'s move dropped
+    writersCanShare and appProperties. Both were found by reading the log."""
+    since = _iso(ctx.now - timedelta(minutes=10))
+    day = _iso(ctx.now - timedelta(hours=24))
+    out = []
+    for aid, path in ctx.ledgers():
+        with _ro(path) as c:
+            fb = c.execute("SELECT error_message FROM audit_log WHERE item_type='fallback' AND status='FALLBACK' "
+                           "AND timestamp >= ?", (since,)).fetchall()
+            routes = c.execute("SELECT COUNT(*) FROM audit_log WHERE item_type='transfer_route' "
+                               "AND timestamp >= ?", (since,)).fetchone()[0]
+            dropped = c.execute("SELECT source_user, item_id, error_message FROM audit_log WHERE "
+                                "item_type='carried' AND status='CARRIED_DROPPED' AND timestamp >= ? LIMIT 200",
+                                (day,)).fetchall()
+        if len(fb) >= FALLBACK_MIN and len(fb) > FALLBACK_SHARE * max(routes, 1):
+            causes = collections.Counter(re.sub(r"\b(?=[\w-]*\d)[\w-]{12,}\b", "<id>", (r[0] or ""))[:120] for r in fb)
+            ex = "\n".join(f"- {n} x {k}" for k, n in causes.most_common(5))
+            out.append(finding("watch_fallbacks", aid, "rate",
+                               f"{len(fb)} of {routes} files in 10 min arrived only by a fallback route",
+                               f"Every one arrived, so nothing failed -- but the first route is broken for them, and "
+                               f"the fallback is slower (download-and-upload sends the bytes through this box).\n\n{ex}",
+                               "error"))
+        if dropped:
+            keys = collections.Counter(k for r in dropped for k in (r[2] or "").split(":")[0].split(",") if k)
+            ex = "\n".join(f"- {r[0]} {r[1]}: {(r[2] or '')[:140]}" for r in dropped[:8])
+            out.append(finding("watch_fallbacks", aid, "carried",
+                               f"{len(dropped)} item(s) lost a setting the target refused ({', '.join(keys)})",
+                               f"The file arrived without these settings in the last 24 h.\n\n{ex}", "warn"))
+    return out
+
+
 CHECKS = (watch_repair_loop, watch_slow_file, watch_verdict_flip, watch_unclassified, watch_source_changed,
-          watch_box_busy, watch_tenant_ready, watch_google_status, watch_isolation, watch_limiter_low)
+          watch_box_busy, watch_tenant_ready, watch_google_status, watch_isolation, watch_limiter_low,
+          watch_fallbacks)
 
 
 # -- the sweep ---------------------------------------------------------------------------------------

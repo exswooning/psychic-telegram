@@ -270,3 +270,36 @@ def test_a_migrating_user_with_no_progress_is_caught_by_the_existing_stall_check
     c = ctx(db, tmp_path, active_jobs=lambda: [{"account_id": 3, "job_name": "migrate"}])
     [f] = O.watch_slow_file(c)
     assert "no progress for 700s on ward12@s.example" in f["title"]
+
+
+# -- faults a run survives: fallbacks and dropped settings ---------------------------------------------
+def _audit(db, item, kind, status, detail, minutes_ago=2):
+    at = (NOW - timedelta(minutes=minutes_ago)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    with db.write() as c:
+        c.execute("INSERT INTO audit_log (source_user, item_id, item_type, status, error_message, timestamp) "
+                  "VALUES (?,?,?,?,?,?)", ("u@s.example", item, kind, status, detail, at))
+
+
+def test_a_burst_of_fallbacks_is_an_incident_naming_the_cause(db, tmp_path):
+    """9 Nov 2026: a sweep emptied the staging drives and copies fell back for minutes, silently."""
+    for i in range(8):
+        _audit(db, f"f{i}", "transfer_route", "SUCCESS", "{}")
+        _audit(db, f"f{i}", "fallback", "FALLBACK", f"server_side -> download_upload: HTTP 404 File not found: 0AHFQbIBH5enCUk9PV{i}")
+    for i in range(8, 100):
+        _audit(db, f"f{i}", "transfer_route", "SUCCESS", "{}")
+    [f] = O.watch_fallbacks(ctx(db, tmp_path))
+    assert f["key"] == "rate" and "8 of 100 files" in f["title"] and "8 x server_side -> download_upload: HTTP 404" in f["summary"]
+
+
+def test_a_few_fallbacks_in_many_copies_or_old_ones_are_not(db, tmp_path):
+    for i in range(3):
+        _audit(db, f"f{i}", "fallback", "FALLBACK", "x")
+    for i in range(6):
+        _audit(db, f"g{i}", "fallback", "FALLBACK", "x", minutes_ago=30)          # outside the window
+    assert O.watch_fallbacks(ctx(db, tmp_path)) == []
+
+
+def test_a_dropped_setting_is_named(db, tmp_path):
+    _audit(db, "f1", "carried", "CARRIED_DROPPED", "writersCanShare,appProperties: HTTP 403 teamDrivesSharingRestrictionNotAllowed")
+    [f] = O.watch_fallbacks(ctx(db, tmp_path))
+    assert f["key"] == "carried" and "writersCanShare" in f["title"] and "appProperties" in f["title"]

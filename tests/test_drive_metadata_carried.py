@@ -138,3 +138,20 @@ def test_a_shared_drive_sharing_refusal_retries_without_the_carried_settings():
 
     assert drive_engine.with_carried_fallback(send, {"name": "x", "writersCanShare": False}) == {"id": "ok"}
     assert len(calls) == 2 and "writersCanShare" not in calls[1]
+
+
+def test_a_refused_setting_is_recorded_against_the_item_the_worker_is_on(db):
+    """ss@, 9 Nov 2026: writersCanShare and appProperties were dropped and only a log line said so."""
+    import types
+    import drive_engine
+    from resilience import PermanentAPIError
+    me = types.SimpleNamespace(db=db, source_user="u@s.x")
+    drive_engine._CURRENT_ITEM.set((me, {"id": "f1"}))
+
+    def send(b):
+        if "writersCanShare" in b:
+            raise PermanentAPIError("HTTP 403 (teamDrivesSharingRestrictionNotAllowed): x")
+        return {"id": "ok"}
+    drive_engine.with_carried_fallback(send, {"name": "x", "writersCanShare": False})
+    row = db.get_audit("u@s.x", "f1", "carried")
+    assert row["status"] == "CARRIED_DROPPED" and row["error_message"].startswith("writersCanShare:")
