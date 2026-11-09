@@ -43,7 +43,9 @@ from config import Settings
 SERVICES = ("drive", "gmail", "calendar", "contacts", "tasks", "chat")
 SCOPES = {
     "drive": ["https://www.googleapis.com/auth/drive"],
-    "gmail": ["https://www.googleapis.com/auth/gmail.modify"],
+    # Permanent delete needs the full-mail scope. Without it the wipe of mail fails and keeps its
+    # ledger (named, as for any ungranted service) -- never a fallback to the bin: see wipe_gmail.
+    "gmail": ["https://mail.google.com/"],
     "calendar": ["https://www.googleapis.com/auth/calendar"],
     "contacts": ["https://www.googleapis.com/auth/contacts"],
     "tasks": ["https://www.googleapis.com/auth/tasks"],
@@ -89,16 +91,20 @@ def wipe_drive(drive) -> int:
 
 
 def wipe_gmail(gmail) -> int:
-    """Every message to the bin, a thousand per call; drafts and user labels deleted."""
+    """Every message deleted for good, bin and spam included; drafts and user labels deleted.
+
+    Never to the bin: a binned copy keeps its Message-ID, the engine's adopt path searches the bin
+    (includeSpamTrash), and a re-migration then "adopts" the binned copy -- reported as delivered,
+    left in Trash -- while the DMS collapses its import against it. A wipe before a fresh run must
+    leave no copy to find."""
     n = 0
     users = gmail.users()
     while True:
         ids = [m["id"] for m in users.messages().list(
-            userId="me", maxResults=500).execute().get("messages", [])]
+            userId="me", maxResults=500, includeSpamTrash=True).execute().get("messages", [])]
         if not ids:
             break
-        users.messages().batchModify(userId="me", body={
-            "ids": ids, "addLabelIds": ["TRASH"], "removeLabelIds": ["INBOX"]}).execute()
+        users.messages().batchDelete(userId="me", body={"ids": ids}).execute()
         n += len(ids)
     token = None
     while True:

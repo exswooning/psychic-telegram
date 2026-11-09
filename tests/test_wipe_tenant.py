@@ -76,7 +76,7 @@ def test_everything_goes(auth, tenant):
     assert out["emptied"] == list(wt.SERVICES)
     assert auth.target_drive(TGT_USER).count() == 0
     g = auth.target_gmail(TGT_USER)
-    assert all("TRASH" in m["labelIds"] for m in g.messages.values())      # to the bin
+    assert g.messages == {}         # deleted for good: a binned copy is "adopted" by the next run
     assert g.drafts == {} and not [l for l in g.labels if l["type"] == "user"]
     c = auth.target_calendar(TGT_USER)
     assert c.calendar_store == {} and all(e["status"] == "cancelled" for e in c.store.values())
@@ -141,3 +141,13 @@ def test_reset_targets_chat_check_is_really_made(monkeypatch):
     asked = []
     monkeypatch.setattr(wt, "granted", lambda key, admin, s: asked.append((admin, s)) or True)
     assert wt.granted("k", "admin@x", "chat") is True and asked == [("admin@x", "chat")]
+
+
+def test_mail_already_in_the_bin_goes_too_so_a_rerun_has_nothing_to_adopt(auth, tenant):
+    """A re-migration's adopt path searches the bin by Message-ID; a binned copy left by a
+    wipe or a repair would be adopted -- delivered on paper, sitting in Trash."""
+    g = auth.target_gmail(TGT_USER)
+    g.add_message(RAW.replace(b"<w@", b"<binned@"), ["TRASH"])
+    wt.wipe([TGT_USER], tenant["clients"], ADMIN, groups_domain="tenantb.com", out=quiet)
+    assert g.messages == {}
+    assert wt.SCOPES["gmail"] == ["https://mail.google.com/"]

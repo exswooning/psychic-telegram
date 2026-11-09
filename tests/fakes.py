@@ -1267,6 +1267,10 @@ class _GmailMessages:
                 self._modify(i, body)
         return {}
 
+    def batchDelete(self, **kw):
+        return _Call(self.s, "messages.batchDelete", lambda body, **_: [
+            self.s.messages.pop(i, None) for i in body.get("ids", [])] and {}, kw)
+
     def untrash(self, **kw):
         return _Call(self.s, "messages.untrash", lambda id, **_: self._modify(
             id, {"removeLabelIds": ["TRASH"], "addLabelIds": ["INBOX"]}), kw)
