@@ -90,8 +90,17 @@ def audit_user(auth, db, settings, source: str, target: str, workers: int = 16, 
             tm = tgt.files().get(fileId=tid, fields=FIELDS, supportsAllDrives=True).execute()
             sp = src.permissions().list(fileId=sid, fields=PERM_FIELDS, supportsAllDrives=True).execute().get("permissions", [])
             tp = tgt.permissions().list(fileId=tid, fields=PERM_FIELDS, supportsAllDrives=True).execute().get("permissions", [])
-        except Exception as exc:      # noqa: BLE001 - an unreadable file is itself a finding
-            return sid, tid, [("unreadable", str(exc)[:200])]
+        except Exception as first:      # noqa: BLE001
+            # Re-read before reporting (plan item 5): a transient error, or a check's own mistake,
+            # must not reach the findings as "unreadable". Say which side and why.
+            try:
+                time.sleep(2)
+                sm = src.files().get(fileId=sid, fields=FIELDS, supportsAllDrives=True).execute()
+                tm = tgt.files().get(fileId=tid, fields=FIELDS, supportsAllDrives=True).execute()
+                sp = src.permissions().list(fileId=sid, fields=PERM_FIELDS, supportsAllDrives=True).execute().get("permissions", [])
+                tp = tgt.permissions().list(fileId=tid, fields=PERM_FIELDS, supportsAllDrives=True).execute().get("permissions", [])
+            except Exception as exc:      # noqa: BLE001 - unreadable twice: a finding, with the reason
+                return sid, tid, [("unreadable", f"{str(exc)[:160]} (first: {str(first)[:60]})")]
         return sid, tid, compare(sm, tm, sp, tp, db.resolve_identity, settings.source_domain,
                                  settings.target_domain, copied)
     found, when = [], utc_now()

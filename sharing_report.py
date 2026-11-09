@@ -39,10 +39,12 @@ def _rows(conn, own: set):
         names[sid] = (tid, name)
     for owner, item, status, detail in conn.execute(
             "SELECT source_user, item_id, status, error_message FROM audit_log WHERE item_type='acl'"):
-        fid, _, grantee = (item or "").partition(":")
-        if not grantee or grantee.startswith("("):     # (list-failed), (no-email): not a grant
+        from ledger_keys import parse_grant
+        g = parse_grant(item)
+        if g.kind in ("no-email", "list-failed") or not g.file_id:      # markers, not grants
             continue
-        kind, who = classify(grantee, own)
+        fid = g.file_id
+        kind, who = classify("anyone" if g.kind == "anyone" else (f"domain:{g.who}" if g.kind == "domain" else g.who), own)
         tid, name = names.get(fid, (None, None))
         role = (detail or "")[5:] if (detail or "").startswith("role=") else None
         yield {"kind": kind, "grantee": who, "owner": owner, "file": name or "(not mapped)",
