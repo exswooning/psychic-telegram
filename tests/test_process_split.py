@@ -153,6 +153,12 @@ def test_the_launch_can_ask_for_write_time_receipts():
     assert A._tuning_env(A.StartMigration(reason="default"), None) is None      # unset: the server's own
 
 
+def test_the_launch_can_leave_the_checks_for_after_the_run():
+    import api_server as A
+    env = A._tuning_env(A.StartMigration(reason="memory", checks_after_run=True), None)
+    assert env["FIRST_PASS_ACCEPTANCE"] == "false" and env["VERIFY_ON_COMPLETE"] == "false"
+
+
 @pytest.mark.parametrize('users,only,expected', [
     (['one@source.example'], None, 1),
     ([f'u{i}@source.example' for i in range(20)], ['u0@source.example'], 1),

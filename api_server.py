@@ -396,6 +396,10 @@ class StartMigration(WriteAction):
     # labels and headers only (info@: 40,290 emails in 165 s). The benchmark's winning arm ran this
     # way. None = this server's MAIL_COMPLETION_CHECK ("counts").
     mail_completion_check: Literal["counts", "full"] | None = None
+    # True: no 1:1 check inside the run (FIRST_PASS_ACCEPTANCE and VERIFY_ON_COMPLETE off); run the
+    # check as its own job afterwards. 45 users at once, each checked in-process as it finished,
+    # filled 19 GB RAM + 5 GB swap (account 3, 9 Nov 2026) -- a native Sheet's compare reads it whole.
+    checks_after_run: bool | None = None
     # Turn on every optional pass whose scopes are granted (fidelity.py): each
     # one off is data a whole-tenant run leaves behind. Checked per launch with
     # a token mint, because one ungranted scope fails every call in the run.
@@ -409,7 +413,9 @@ def _tuning_env(body: StartMigration, env: dict | None) -> dict | None:
         ("DRIVE_FILE_WORKERS", body.drive_file_workers),
         ("MAPPING_CACHE_USER_CAP", body.mapping_cache_user_cap),
         ("MIGRATE_PROCESSES", body.processes),
-        ("MAIL_COMPLETION_CHECK", body.mail_completion_check)) if val is not None}
+        ("MAIL_COMPLETION_CHECK", body.mail_completion_check),
+        ("FIRST_PASS_ACCEPTANCE", "false" if body.checks_after_run else None),
+        ("VERIFY_ON_COMPLETE", "false" if body.checks_after_run else None)) if val is not None}
     return {**(env or os.environ), **extra} if extra else env
 
 
