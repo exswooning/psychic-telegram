@@ -117,6 +117,58 @@ def act(a: dict, state: dict, account: int) -> str:
     return ""
 
 
+REPORT = os.path.join(DIR, "REPORT.md")
+
+
+def record(state: dict, kind: str, who: str = "", detail: str = "") -> None:
+    """One compact event for the report; the list stays short."""
+    ev = state.setdefault("events", [])
+    ev.append({"t": time.strftime("%m-%d %H:%MZ", time.gmtime()), "k": kind, "who": who.split("@")[0], "d": detail[:90]})
+    del ev[:-200]
+
+
+def build_report(state: dict, parity: dict | None = None, bad: list | None = None, run: str = "") -> str:
+    """The whole report in about 15 lines: what ran, what it fixed, what waits for Claude."""
+    ev = state.get("events", [])
+    fixed: dict = {}
+    for e in ev:
+        if e["k"] in ("fix_mtime", "resume", "parity_restart"):
+            fixed.setdefault(e["k"], []).append(e["who"] or "run")
+    waiting = {}
+    for e in ev:
+        if e["k"] == "needs_claude":
+            waiting[(e["who"], e["d"])] = e["t"]
+    lines = [f"autopilot report {time.strftime('%m-%d %H:%MZ', time.gmtime())} | run: {run or '?'} | "
+             f"held: {state.get('held', 'no')} | resumes today: "
+             f"{sum(1 for d in state.get('resumes', []) if d.startswith(time.strftime('%Y-%m-%d', time.gmtime())))}"]
+    if parity:
+        lines.append("parity: " + "; ".join(f"{st} " + "/".join(f"{n} {v.replace('NOT_AT_PARITY', 'BAD').replace('PARITY', 'ok')}"
+                                                              for v, n in sorted(vs.items())) for st, vs in sorted(parity.items())))
+    if bad:
+        lines.append("not at parity: " + ", ".join(u.split("@")[0] for u in bad[:12]) + (f" +{len(bad) - 12}" if len(bad) > 12 else ""))
+    lines.append("fixed by itself: " + ("; ".join(f"{k} x{len(v)} ({', '.join(sorted(set(v))[:6])})" for k, v in fixed.items()) or "nothing yet"))
+    lines.append(f"waiting for Claude ({len(waiting)}):" if waiting else "waiting for Claude: nothing")
+    for (who, d), t in list(waiting.items())[-8:]:
+        lines.append(f"- {t} {who}: {d}")
+    return "\n".join(lines) + "\n"
+
+
+def write_report(state: dict, account: int) -> None:
+    parity, bad = None, []
+    try:
+        import sqlite3
+        c = sqlite3.connect(f"file:{HERE}/data/accounts/{account}/migration.db?mode=ro", uri=True)
+        parity = {}
+        for st, v, n in c.execute("SELECT stage, verdict, COUNT(*) FROM parity_user GROUP BY 1, 2"):
+            parity.setdefault(st, {})[v] = n
+        bad = [u for (u,) in c.execute("SELECT DISTINCT source_user FROM parity_user WHERE verdict!='PARITY'")]
+    except Exception:      # noqa: BLE001 - no ledger yet: the rest of the report still stands
+        pass
+    run = subprocess.run(["pgrep", "-f", f"main.py --account-id {account} migrate"], capture_output=True, text=True).stdout.split()
+    with open(REPORT, "w", encoding="utf-8") as fh:
+        fh.write(build_report(state, parity, bad, run[0] if run else "stopped"))
+
+
 def _note(text: str) -> None:
     os.makedirs(DIR, exist_ok=True)
     with open(INBOX, "a", encoding="utf-8") as fh:
@@ -135,8 +187,12 @@ def main(argv=None) -> int:
     import argparse
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--account-id", type=int, required=True)
+    ap.add_argument("--report", action="store_true", help="print the current report and exit")
     args = ap.parse_args(argv)
     os.makedirs(DIR, exist_ok=True)
+    if args.report:
+        print(open(REPORT, encoding="utf-8").read() if os.path.exists(REPORT) else "no report yet")
+        return 0
     state = json.load(open(STATE)) if os.path.exists(STATE) else {}
     feeds = {"feed": os.path.join(HERE, "logs", "incidents", "feed.log"),
              "parity": os.path.join(HERE, "logs", "jobs", str(args.account_id), "parity.log")}
@@ -157,12 +213,14 @@ def main(argv=None) -> int:
                 if not a:
                     continue
                 if a["do"] == "needs_claude":
+                    record(state, "needs_claude", (a["why"].split(": ")[0] if "@" in a["why"][:60] else ""), a["why"].split(": ", 1)[-1])
                     s = summarise(a["why"])
                     _note(f"NEEDS CLAUDE: {a['why'][:300]}" + (f"\n  local model: {s[:400]}" if s else ""))
                     _say("ERROR", f"needs Claude: {a['why'][:200]}")
                     continue
                 try:
                     out = act(a, state, args.account_id)
+                    record(state, a["do"], a.get("user", a.get("by", "")), out[:90])
                     _note(f"{a['do']}: {json.dumps({x: y for x, y in a.items() if x != 'do'})} -> {out}")
                     _say("INFO", f"{a['do']} done: {out[:160]}")
                 except Exception as exc:      # noqa: BLE001
@@ -178,8 +236,13 @@ def main(argv=None) -> int:
                             f"--since '{state['parity_since']}' --workers 2 >> logs/jobs/{args.account_id}/parity.log 2>&1"],
                            capture_output=True)
             _note("restarted the parity loop")
+            record(state, "parity_restart")
         with open(STATE, "w") as fh:
             json.dump(state, fh, indent=1)
+        try:
+            write_report(state, args.account_id)
+        except Exception:      # noqa: BLE001 - a report must never stop the autopilot
+            pass
         time.sleep(60)
 
 

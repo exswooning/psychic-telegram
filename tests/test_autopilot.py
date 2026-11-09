@@ -38,3 +38,14 @@ def test_another_accounts_run_is_not_ours():
 def test_the_model_only_summarises_and_its_absence_is_fine():
     assert A.summarise("x", ask=lambda p: "It failed because y.") == "It failed because y."
     assert A.summarise("x", ask=lambda p: (_ for _ in ()).throw(OSError("no model"))) == ""
+
+
+def test_the_report_is_short_and_says_what_it_fixed_and_what_waits():
+    st = {"held": "no", "resumes": []}
+    A.record(st, "fix_mtime", "ward7@s.x", '{"fixed": 1}')
+    A.record(st, "fix_mtime", "ward9@s.x", '{"fixed": 2}')
+    A.record(st, "needs_claude", "suchanaadhikari@s.x", "drive: form 'x': changed 2")
+    A.record(st, "needs_claude", "suchanaadhikari@s.x", "drive: form 'x': changed 2")          # the same, once
+    r = A.build_report(st, {"drive": {"PARITY": 27, "NOT_AT_PARITY": 3}}, ["suchanaadhikari@s.x"], "3107777")
+    assert "fix_mtime x2 (ward7, ward9)" in r and "waiting for Claude (1):" in r and "drive 3 BAD/27 ok" in r
+    assert len(r.splitlines()) <= 15 and "suchanaadhikari: drive: form 'x': changed 2" in r
