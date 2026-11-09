@@ -1752,7 +1752,10 @@ class DriveMigrator:
         self._bump("files")
         self._bump("degraded_format")
         log.info("[%s] %s %s", self.source_user, item.get("name"), note)
-        self._finish_item(item, tgt_id, comments=False)
+        # A rebuild is always a brand-new file stamped with the rebuild's time; nothing in the create
+        # carries the source's. Restored whether or not a later write happens (esc.mrc@, 9 Nov 2026:
+        # two unshared Forms kept today's date).
+        self._finish_item(item, tgt_id, comments=False, force_mtime_restore=True)
 
     # Skips another strategy CAN legitimately overturn: both mean "this
     # path cannot carry this file", not "this file must not be carried".
