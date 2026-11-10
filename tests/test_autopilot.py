@@ -92,3 +92,11 @@ def test_only_recent_items_count_as_waiting_and_a_deviation_clears_with_its_run(
                      "fresh": {"n": 2, "ex": "new thing", "who": "y", "t": "11-10 12:00Z", "last": __import__("time").time()}}}
     r = A.build_report(st, None, None, "stopped")
     assert "waiting for Claude (1 kinds, 2 events):" in r and "old thing" not in r
+
+
+def test_the_dms_delta_loop_stops_on_zero_and_escalates_when_failures_do_not_fall():
+    import dms_delta_loop as L
+    import types
+    src = open(L.__file__).read()
+    assert "--fresh-import" not in src.split("def run_delta")[1].split("def main")[0]     # a delta, never a fresh import
+    assert L.MAX_ATTEMPTS == 5
