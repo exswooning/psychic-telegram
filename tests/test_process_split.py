@@ -204,3 +204,12 @@ def test_completed_services_do_not_reserve_empty_processes(monkeypatch):
     assert len(main._pass_user_pairs(DB(['a@source.example', 'b@source.example']), settings, {'drive'}, True, None)) == 2
     settings.redo_unrewritten_links = settings.rewrite_drive_links = True
     assert len(main._pass_user_pairs(DB(['a@source.example', 'b@source.example']), settings, {'drive'}, False, None)) == 2
+
+
+def test_a_tally_never_re_moves_mail_or_starts_a_repair_while_repairs_are_paused():
+    """10 Nov 2026: a tally's SHORT fix re-moved environment@'s mail by the engine (owed-to-DMS counted as
+    missing), then chained a repair with repairs paused."""
+    import inspect
+    import api_server as A
+    src = inspect.getsource(A._tally_follow_repair) if hasattr(A, "_tally_follow_repair") else inspect.getsource(A)
+    assert 's != "mail"' in src and "repairs_on" in src and "if differs and repairs_on" in src

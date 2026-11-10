@@ -2312,8 +2312,11 @@ def _fix_after_tally(account_id: int | None, users: list[str] | None = None) -> 
             if u["verdict"] not in ("SHORT", "DIFFERS") or db.autofixed_since(who, AUTOFIX_EVERY_HOURS):
                 continue
             if u["verdict"] == "SHORT":
+                # Mail is never re-moved here: a tally counts mail owed to the DMS as missing, and an
+                # engine re-run of it is the mode the operator chose against (10 Nov 2026: environment@
+                # was re-migrated by the engine automatically). Mail gaps are reported, not auto-fixed.
                 gaps = {TALLY_FIXES_WITH[s] for s, v in (u.get("services") or {}).items()
-                        if s in TALLY_FIXES_WITH and isinstance(v, dict)
+                        if s in TALLY_FIXES_WITH and s != "mail" and isinstance(v, dict)
                         and v.get("expected") is not None and v.get("target") is not None
                         and v["target"] < v["expected"]}
                 if gaps:
@@ -2326,6 +2329,9 @@ def _fix_after_tally(account_id: int | None, users: list[str] | None = None) -> 
     finally:
         db.close()
     did = []
+    # An operator's pause of automatic repairs holds for every automatic follow-on, not only the
+    # backlog dispatcher (10 Nov 2026: a tally's follow-on started a repair with repairs paused).
+    repairs_on = _repair_policy(account_id)
     if short:
         services = sorted(set().union(*short.values()))
         svc, env, ordered = _mail_plan(services, "engine")
@@ -2335,9 +2341,9 @@ def _fix_after_tally(account_id: int | None, users: list[str] | None = None) -> 
         for who in sorted(short):
             argv += ["--user", who]
         ok, detail = _run_admitted(argv, account_id, "migrate", **({"env": env} if env else {}),
-                                   then=["repair", _tally_follow("tally", sorted(short))])
+                                   then=(["repair"] if repairs_on else []) + [_tally_follow("tally", sorted(short))])
         did.append(f"{len(short)} short user(s) migrated again for {', '.join(services)}: {detail}")
-    if differs:
+    if differs and repairs_on:
         _start_repair(account_id, why=f"started automatically: the tally found {len(differs)} "
                                       "user(s) whose items differ from the source")
         _start_tally_after_repair(account_id, differs)
