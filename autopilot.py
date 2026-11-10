@@ -176,6 +176,7 @@ def first_of_shape(state: dict, why: str, who: str = "") -> bool:
     sh = state.setdefault("shapes", {})
     e = sh.setdefault(shape(why), {"n": 0, "ex": why[:120], "who": who.split("@")[0], "t": time.strftime("%m-%d %H:%MZ", time.gmtime())})
     e["n"] += 1
+    e["last"] = time.time()
     return e["n"] == 1
 
 
@@ -206,7 +207,8 @@ def build_report(state: dict, parity: dict | None = None, bad: list | None = Non
         if e["k"] in ("fix_mtime", "resume", "parity_restart"):
             fixed.setdefault(e["k"], []).append(e["who"] or "run")
     shapes = state.get("shapes", {})
-    waiting = {k: v for k, v in shapes.items() if v.get("open", True)}
+    # Open means seen in the last six hours: an old repeat is not something waiting for Claude.
+    waiting = {k: v for k, v in shapes.items() if v.get("open", True) and time.time() - v.get("last", 0) < 6 * 3600}
     lines = [f"autopilot report {time.strftime('%m-%d %H:%MZ', time.gmtime())} | run: {run or '?'} | "
              f"held: {state.get('held', 'no')} | resumes today: "
              f"{sum(1 for d in state.get('resumes', []) if d.startswith(time.strftime('%Y-%m-%d', time.gmtime())))}"]
@@ -301,6 +303,10 @@ def main(argv=None) -> int:
         pids = subprocess.run(["pgrep", "-f", f"main.py --account-id {args.account_id} migrate"],
                               capture_output=True, text=True).stdout.split()
         running = bool(pids)
+        if not running:
+            # A deviation describes a live run: once no run is live, it is no longer open.
+            for k in [k for k in state.get("shapes", {}) if k.startswith("run deviates")]:
+                state["shapes"].pop(k, None)
         # A hold set by a stop lifts once an operator's own launch follows it (checked each minute: the
         # stop line itself is read once, so nothing else would clear it).
         if state.get("held") and operator_launched_after(state["held"]):

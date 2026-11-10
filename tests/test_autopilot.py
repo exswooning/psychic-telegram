@@ -85,3 +85,10 @@ def test_a_dns_failure_and_a_user_stopped_partway_are_escalated_from_the_run_log
 def test_the_repair_action_refuses_while_the_operator_has_paused_repairs(tmp_path, monkeypatch):
     monkeypatch.setattr(A, "repairs_enabled", lambda account: False)
     assert A.act({"do": "fix_mtime", "user": "u@s"}, {}, 3).startswith("skipped: automatic repairs are paused")
+
+
+def test_only_recent_items_count_as_waiting_and_a_deviation_clears_with_its_run():
+    st = {"shapes": {"old": {"n": 73, "ex": "old thing", "who": "x", "t": "11-10 09:12Z", "last": 0},
+                     "fresh": {"n": 2, "ex": "new thing", "who": "y", "t": "11-10 12:00Z", "last": __import__("time").time()}}}
+    r = A.build_report(st, None, None, "stopped")
+    assert "waiting for Claude (1 kinds, 2 events):" in r and "old thing" not in r
