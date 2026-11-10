@@ -1497,6 +1497,18 @@ class GmailMigrator:
             self.stats["drafts_inserted"] += 1
 
     # -- filters -------------------------------------------------------------
+    def _existing_filter(self, body: dict) -> str | None:
+        """The target's filter with these criteria and actions, if there is one."""
+        def norm(b: dict) -> str:
+            return json.dumps({"criteria": b.get("criteria") or {}, "action": {
+                k: sorted(v) if isinstance(v, list) else v for k, v in (b.get("action") or {}).items()}}, sort_keys=True)
+        try:
+            have = self._retry(lambda: self.tgt.users().settings().filters().list(userId="me").execute()).get("filter", [])
+        except (PermanentAPIError, RuntimeError):
+            return None
+        want = norm(body)
+        return next((f["id"] for f in have if norm(f) == want), None)
+
     # Criteria (from/to/subject/query/...) are copied verbatim, not identity-
     # mapped: a criteria string can combine multiple conditions in ways that
     # aren't safe to pattern-match and rewrite. Only the add/remove label
@@ -1542,6 +1554,15 @@ class GmailMigrator:
                     userId="me", body=b,
                 ).execute())
             except (PermanentAPIError, RuntimeError) as exc:
+                # "Filter already exists" (400 failedPrecondition): a wipe empties mail and labels
+                # but not a mailbox's filters, so a re-migration meets them (10 Nov 2026: 17 failures
+                # on 6 users). The filter is there: map it and count it as done.
+                existing = self._existing_filter(body) if "already exists" in str(exc) else None
+                if existing:
+                    self.db.record_mapping(self.source_user, fid, existing, "filter")
+                    self.db.log_audit(self.source_user, fid, "filter", "SUCCESS", "already on the target; adopted")
+                    self.stats["filters_skipped"] += 1
+                    continue
                 self.db.log_audit(self.source_user, fid, "filter", "FAILED", str(exc))
                 self.stats["filters_failed"] += 1
                 continue

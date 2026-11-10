@@ -878,3 +878,28 @@ def test_the_gmail_display_language_is_carried():
     gm.stats, gm.source_user = {}, "u@s"
     gm._migrate_language()
     assert tgt.updated == "ne" and gm.stats["language_migrated"] == 1
+
+
+def test_a_filter_already_on_the_target_is_adopted_not_failed(gmail_migrator, auth, settings, db):
+    """10 Nov 2026: a wipe leaves a mailbox's filters; the re-migration got 'Filter already exists' x17."""
+    import types
+    from resilience import PermanentAPIError
+    settings.migrate_gmail_settings = True
+    body = {"criteria": {"from": "boss@x.com"}, "action": {"addLabelIds": ["STARRED"]}}
+    src_f = {"id": "f1", **body}
+    tgt_f = {"id": "t9", **body}
+
+    class Filters:
+        def __init__(self, items, fail): self.items, self.fail = items, fail
+        def list(self, userId): return types.SimpleNamespace(execute=lambda: {"filter": self.items})
+        def create(self, userId, body):
+            def go():
+                if self.fail:
+                    raise PermanentAPIError("HTTP 400 (failedPrecondition): Filter already exists")
+                return {"id": "new"}
+            return types.SimpleNamespace(execute=go)
+    svc = lambda f: types.SimpleNamespace(users=lambda: types.SimpleNamespace(settings=lambda: types.SimpleNamespace(filters=lambda: f)))  # noqa: E731
+    gmail_migrator.src, gmail_migrator.tgt = svc(Filters([src_f], False)), svc(Filters([tgt_f], True))
+    gmail_migrator._migrate_filters()
+    assert db.get_target_id(gmail_migrator.source_user, "f1", "filter") == "t9"
+    assert gmail_migrator.stats.get("filters_failed", 0) == 0

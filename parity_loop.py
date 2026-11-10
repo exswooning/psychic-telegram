@@ -85,12 +85,20 @@ def check_mail(db, user: str) -> tuple[list[str], dict]:
     return reasons, {"delivered": mapped, "receipts": receipts, "linkEmailsInScan": links, "owedToDms": owed}
 
 
-def check_counts(auth, db, st, user: str, target: str) -> tuple[list[str], dict]:
+def check_counts(auth, db, st, user: str, target: str, svc: str = "") -> tuple[list[str], dict]:
+    """The user's tally, judged on the ONE service that just finished. The tally's overall countParity
+    includes mail, which split mode leaves to the DMS on purpose: every other service read 0.04 (10 Nov
+    2026) and 125 false alarms went to the report."""
     import tally
     p = tally.tally_user_and_save(auth, db, st, user, target) or {}
-    par = p.get("countParity")
-    reasons = [] if par is not None and par >= 0.999 else [f"count parity {par}"]
-    return reasons, {"countParity": par, "services": p.get("services")}
+    svcs = p.get("services") or {}
+    key = {"gmail": "mail"}.get(svc, svc)
+    mine = svcs.get(key) or {}
+    par = mine.get("parity")
+    metrics = {"countParity": par, "source": mine.get("source"), "target": mine.get("target"), "expected": mine.get("expected")}
+    if par is None:
+        return ([] if not mine.get("expected") else [f"{svc} count unknown (source {mine.get('source')})"]), metrics
+    return ([] if par >= 0.999 else [f"{svc} count {mine.get('target')} of {mine.get('expected')}"]), metrics
 
 
 def _write(db, user, stage, verdict, reasons, metrics):
@@ -122,7 +130,7 @@ def handle(auth, db, st, ledger: dict, user: str, elapsed: float, services: dict
             else:
                 reasons = []
             if svc in ("gmail", "calendar", "contacts", "tasks"):
-                more, extra = check_counts(auth, db, st, user, target)
+                more, extra = check_counts(auth, db, st, user, target, svc)
                 metrics.update(extra)
                 # Mail owed to the DMS is not missing yet: it waits for the import.
                 if more and metrics.get("owedToDms"):
