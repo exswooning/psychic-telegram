@@ -235,9 +235,27 @@ def write_report(state: dict, account: int) -> None:
         bad = [u for (u,) in c.execute("SELECT DISTINCT source_user FROM parity_user WHERE verdict!='PARITY'")]
     except Exception:      # noqa: BLE001 - no ledger yet: the rest of the report still stands
         pass
+    # Overall parity: every user's latest verdict per service (verify), so a user is named with WHICH service
+    # is not at parity and why. This is the list the operator asked to see.
+    overall = []
+    try:
+        import sqlite3
+        c = sqlite3.connect(f"file:{HERE}/data/accounts/{account}/migration.db?mode=ro", uri=True)
+        rows = c.execute("SELECT u.source_user, u.service, u.verdict FROM user_verification u JOIN (SELECT source_user, service, MAX(rowid) m "
+                         "FROM user_verification GROUP BY 1,2) l ON u.rowid = l.m").fetchall()
+        bad: dict = {}
+        for user, svc, verdict in rows:
+            if verdict != "IDENTICAL":
+                bad.setdefault(user, []).append(f"{svc} {verdict.lower()}")
+        overall = [f"- {u.split('@')[0]}: " + ", ".join(v) for u, v in sorted(bad.items())]
+    except Exception:      # noqa: BLE001
+        pass
     run = subprocess.run(["pgrep", "-f", f"main.py --account-id {account} migrate"], capture_output=True, text=True).stdout.split()
     with open(REPORT, "w", encoding="utf-8") as fh:
-        fh.write(build_report(state, parity, bad, run[0] if run else "stopped"))
+        text = build_report(state, parity, bad, run[0] if run else "stopped")
+        if overall:
+            text += f"overall not at parity ({len(overall)} users):\n" + "\n".join(overall[:15]) + "\n"
+        fh.write(text)
 
 
 def _note(text: str) -> None:
