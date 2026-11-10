@@ -63,3 +63,13 @@ def test_a_run_started_from_the_ui_with_other_settings_is_flagged():
     assert A.deviations({"MAIL_ONLY_WITH_LINKS": "true", "MIGRATE_PROCESSES": "4"}, launch) == []
     d = A.deviations({"MIGRATE_PROCESSES": "8"}, launch)
     assert len(d) == 2 and "mail mode" in d[0] and "processes: wanted 4, running 8" in d[1]
+
+
+def test_a_stop_that_an_operator_launch_followed_is_not_a_hold():
+    stop = "2026-11-10T06:33:36Z STOPPED account=3 job=migrate rc=-9 by Administrator <a@b> report=r"
+    after = lambda: [{"action": "migrate.start", "actor": "Administrator <admin@bitport.local>", "started_at": "2026-11-10T06:33:50.1Z"}]
+    before = lambda: [{"action": "migrate.start", "actor": "Administrator <admin@bitport.local>", "started_at": "2026-11-10T06:00:00Z"}]
+    assert A.operator_launched_after("2026-11-10T06:33:36Z", fetch=after) is True
+    assert A.operator_launched_after("2026-11-10T06:33:36Z", fetch=before) is False
+    assert A.decide(stop, {}, 3) is not None and A.decide(stop, {}, 3)["do"] == "hold"        # no fetch in unit path: real API
+    assert A.operator_launched_after("2026-11-10T06:33:36Z", fetch=lambda: (_ for _ in ()).throw(OSError())) is False

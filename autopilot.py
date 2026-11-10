@@ -52,6 +52,9 @@ def decide(line: str, state: dict, account: int) -> dict | None:
         return {"do": "resume", "fewer_processes": m.group(2) == "3", "code": int(m.group(2))}
     m = STOPPED.search(line)
     if m and int(m.group(1)) == account:
+        stamp = line[:20]                            # the feed's own time, e.g. 2026-11-10T06:33:36Z
+        if operator_launched_after(stamp, fetch=fetch_actions):
+            return None                              # the operator stopped it to restart it: not a hold
         return {"do": "hold", "by": m.group(2).strip(), "why": "a stop is a person's decision"}
     m = PARITY.search(line)
     if m and " ERROR " in line:
@@ -64,6 +67,28 @@ def decide(line: str, state: dict, account: int) -> dict | None:
     if " ERROR " in line or "INCIDENT" in line and " error " in line:
         return {"do": "needs_claude", "why": line.strip()[:300]}
     return None
+
+
+def fetch_actions(limit: int = 60) -> list:
+    """The API's audit log of operator actions, newest first."""
+    sess = open("/root/.bp_session").read().strip()
+    out = subprocess.run(["curl", "-s", "-m", "30", "-H", f"Cookie: bp_session={sess}",
+                          f"http://localhost:8090/api/v2/actions?limit={limit}"], capture_output=True, text=True)
+    return json.loads(out.stdout or "[]")
+
+
+def operator_launched_after(stamp: str, fetch=fetch_actions) -> bool:
+    """Did an operator's own migrate.start follow this stop? Then the stop was the operator restarting
+    the run (10-11 Nov 2026: a restart re-held the run, so a crash would not have been resumed)."""
+    try:
+        rows = fetch()
+    except Exception:      # noqa: BLE001 - cannot tell: keep the hold (the safe side)
+        return False
+    for a in rows:
+        if a.get("action") == "migrate.start" and str(a.get("actor", "")).startswith("Administrator") \
+                and str(a.get("started_at", ""))[:19] > stamp[:19]:
+            return True
+    return False
 
 
 def summarise(text: str, ask=None) -> str:
