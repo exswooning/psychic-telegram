@@ -48,3 +48,9 @@ def test_a_duplicated_image_counts_as_one_but_a_question_never_merges():
     assert F.compare_items([img, q("Name", "textQuestion")], [img, dup, q("Name", "textQuestion")])["missing"] == []
     two_q = [q("Name", "textQuestion"), q("Name", "textQuestion")]
     assert F.compare_items(two_q, [two_q[0]])["missing"] != []
+
+
+def test_an_accepted_known_difference_is_not_a_failure():
+    img = {"itemId": "a", "title": "Logo", "imageItem": {"image": {"sourceUri": "x"}}}
+    assert F.compare_items([img, q("Name", "textQuestion")], [q("Name", "textQuestion")], {"Logo"})["missing"] == []
+    assert F.compare_items([img, q("Name", "textQuestion")], [q("Name", "textQuestion")])["missing"] != []

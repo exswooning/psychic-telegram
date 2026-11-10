@@ -72,8 +72,21 @@ def _one_per_image(items: list) -> list:
     return out
 
 
-def compare_items(src_items: list, tgt_items: list) -> dict:
-    """Missing, extra and changed items, aligned by content."""
+def accepted_for(user: str, form_title: str) -> set:
+    """Items the operator has accepted as known differences for this user's Form (known_differences.json)."""
+    import json as _json, os as _os
+    p = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "known_differences.json")
+    try:
+        rows = _json.load(open(p, encoding="utf-8")).get("accepted", [])
+    except (OSError, ValueError):
+        return set()
+    return {r["item"] for r in rows if r.get("sourceUser", "").lower() == user.lower()
+            and (form_title or "").startswith(r.get("formTitleStartsWith", "\x00"))}
+
+
+def compare_items(src_items: list, tgt_items: list, accepted: set = frozenset()) -> dict:
+    """Missing, extra and changed items, aligned by content. `accepted` names items the operator has
+    accepted as known differences: they are reported, but not counted as missing."""
     tgt_items = _one_per_image(tgt_items)
     a, b = [_sig(i) for i in src_items], [_sig(i) for i in tgt_items]
     missing, extra, changed = [], [], []
@@ -92,6 +105,7 @@ def compare_items(src_items: list, tgt_items: list) -> dict:
             missing += [f"{(i.get('title') or 'untitled')[:60]} ({_kind(i)})" for i in src_items[i1:i2]]
         elif op == "insert":
             extra += [f"{(i.get('title') or 'untitled')[:60]} ({_kind(i)})" for i in tgt_items[j1:j2]]
+    missing = [m for m in missing if m.split(" (")[0] not in accepted]
     return {"source": len(src_items), "target": len(tgt_items), "missing": missing, "extra": extra, "changed": changed}
 
 
@@ -114,7 +128,9 @@ def check_form(auth, db, source_user: str, target_user: str, sid: str, tid: str)
     rep["info"] = _field_diffs({k: (s.get("info") or {}).get(k) for k in ("title", "description")},
                                {k: (t.get("info") or {}).get(k) for k in ("title", "description")})
     rep["settings"] = _field_diffs(_clean(s.get("settings") or {}), _clean(t.get("settings") or {}))
-    rep["items"] = compare_items(s.get("items") or [], t.get("items") or [])
+    acc = accepted_for(source_user, (s.get("info") or {}).get("title", ""))
+    rep["items"] = compare_items(s.get("items") or [], t.get("items") or [], acc)
+    rep["accepted"] = sorted(acc)
     for side, svc, fid in (("sourceResponses", sf, sid), ("targetResponses", tf, tid)):
         try:
             n, tok = 0, None
