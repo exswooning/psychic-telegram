@@ -32,8 +32,14 @@ def running_verifies():
 
 
 def dispatch(user, n):
+    """Reconcile this user's DMS deliveries into the ledger (match by Message-ID), then verify and repair it.
+    Without the reconcile the ledger has no mapping for DMS mail, and every DMS message reads as 'extra'
+    (10 Nov 2026: admin@ read INCOMPLETE with 29 of 29 Message-IDs on the target, all matching the source)."""
     unit = f"bitport-verify-{n}"
-    cmd = (f"{ROOT}/.venv/bin/python -u verify_sample.py --account-id 3 --repair-after-user --scope-to-findings "
+    recon = (f"{ROOT}/.venv/bin/python -c \"import sys;sys.path.insert(0,'{ROOT}');import split_mail,"
+             f"auth,config,db;st=config.Settings(account_id=3);d=db.MigrationDB(st.db_path);"
+             f"split_mail.reconcile_dms(auth.AuthManager(st),d,st,users=['{user}'])\" >> {LOG} 2>&1")
+    cmd = (f"{recon}; {ROOT}/.venv/bin/python -u verify_sample.py --account-id 3 --repair-after-user --scope-to-findings "
            f"--user {user} --services gmail >> {LOG} 2>&1")
     subprocess.run(["systemctl", "reset-failed", unit], capture_output=True)
     subprocess.run(["systemd-run", f"--unit={unit}", f"--working-directory={ROOT}", "/bin/sh", "-c", cmd],
