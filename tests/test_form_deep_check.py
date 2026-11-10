@@ -20,3 +20,23 @@ def test_a_changed_option_is_named_field_by_field_and_ids_are_ignored():
     [c] = F.compare_items([a], [b])["changed"]
     assert c["item"] == "Ward" and any("options" in d for d in c["diffs"])
     assert F.compare_items([a], [dict(a, itemId="other")])["changed"] == []
+
+
+def test_a_read_that_times_out_is_retried_once_not_reported_as_a_difference(monkeypatch, db):
+    """10 Nov 2026: 4 'The read operation timed out' reached the report as Form findings."""
+    import types
+    calls = []
+
+    def flaky(*a, **k):
+        calls.append(1)
+        if len(calls) == 1:
+            raise TimeoutError("The read operation timed out")
+        return {"parity": True, "title": "x"}
+    monkeypatch.setattr(F, "check_form", flaky)
+    monkeypatch.setattr("time.sleep", lambda s: None)
+    db.record_mapping("u@s.x", "src1", "tgt1", "file")
+    drive = types.SimpleNamespace(files=lambda: types.SimpleNamespace(get=lambda **k: types.SimpleNamespace(
+        execute=lambda: {"mimeType": F.FORM})))
+    auth = types.SimpleNamespace(source_drive=lambda u: drive)
+    out = F.check_user_forms(auth, db, "u@s.x", "u@t.x")
+    assert len(calls) == 2 and out[0]["parity"] is True

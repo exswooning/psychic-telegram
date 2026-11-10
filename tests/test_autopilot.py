@@ -44,8 +44,22 @@ def test_the_report_is_short_and_says_what_it_fixed_and_what_waits():
     st = {"held": "no", "resumes": []}
     A.record(st, "fix_mtime", "ward7@s.x", '{"fixed": 1}')
     A.record(st, "fix_mtime", "ward9@s.x", '{"fixed": 2}')
+    assert A.first_of_shape(st, "drive: form 'x': changed 2", "suchanaadhikari@s.x")
     A.record(st, "needs_claude", "suchanaadhikari@s.x", "drive: form 'x': changed 2")
-    A.record(st, "needs_claude", "suchanaadhikari@s.x", "drive: form 'x': changed 2")          # the same, once
     r = A.build_report(st, {"drive": {"PARITY": 27, "NOT_AT_PARITY": 3}}, ["suchanaadhikari@s.x"], "3107777")
-    assert "fix_mtime x2 (ward7, ward9)" in r and "waiting for Claude (1):" in r and "drive 3 BAD/27 ok" in r
-    assert len(r.splitlines()) <= 15 and "suchanaadhikari: drive: form 'x': changed 2" in r
+    assert "fix_mtime x2 (ward7, ward9)" in r and "waiting for Claude (1 kinds, 1 events):" in r and "drive 3 BAD/27 ok" in r
+    assert len(r.splitlines()) <= 15 and "x1" in r and "suchanaadhikari: drive: form 'x': changed 2" in r
+
+
+def test_one_problem_on_37_users_is_one_escalation_counted_37_times():
+    """10 Nov 2026: 130 escalations were 6 shapes; 111 were one false alarm across 37 users."""
+    st = {}
+    firsts = [A.first_of_shape(st, f"calendar: count parity 0.0{i}", f"u{i}@s.x") for i in range(37)]
+    assert firsts[0] is True and not any(firsts[1:]) and list(st["shapes"].values())[0]["n"] == 37
+
+
+def test_a_run_started_from_the_ui_with_other_settings_is_flagged():
+    launch = {"mail_mode": "split", "processes": 4}
+    assert A.deviations({"MAIL_ONLY_WITH_LINKS": "true", "MIGRATE_PROCESSES": "4"}, launch) == []
+    d = A.deviations({"MIGRATE_PROCESSES": "8"}, launch)
+    assert len(d) == 2 and "mail mode" in d[0] and "processes: wanted 4, running 8" in d[1]

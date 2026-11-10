@@ -120,6 +120,34 @@ def act(a: dict, state: dict, account: int) -> str:
 REPORT = os.path.join(DIR, "REPORT.md")
 
 
+def shape(text: str) -> str:
+    """A message with addresses, ids and numbers taken out: the same problem on 37 users is one shape."""
+    t = re.sub(r"\S+@\S+", "<u>", text.lower())
+    t = re.sub(r"\b(?=[\w-]*\d)[\w-]{12,}\b", "<id>", t)
+    return re.sub(r"\d+", "#", t)[:110]
+
+
+def first_of_shape(state: dict, why: str, who: str = "") -> bool:
+    """True the first time a shape is seen (escalate it); later ones only count (xN in the report).
+    10 Nov 2026: 130 escalations were 6 shapes -- 111 were one false alarm across 37 users."""
+    sh = state.setdefault("shapes", {})
+    e = sh.setdefault(shape(why), {"n": 0, "ex": why[:120], "who": who.split("@")[0], "t": time.strftime("%m-%d %H:%MZ", time.gmtime())})
+    e["n"] += 1
+    return e["n"] == 1
+
+
+def deviations(env: dict, launch: dict) -> list[str]:
+    """How a RUNNING migration differs from the launch the operator chose -- e.g. one started from the
+    web UI with its own defaults (10 Nov 2026: 8 processes, mail moved whole by the engine)."""
+    out = []
+    want_split = launch.get("mail_mode") == "split"
+    if want_split != (env.get("MAIL_ONLY_WITH_LINKS", "").lower() == "true"):
+        out.append(f"mail mode: wanted {launch.get('mail_mode')}, MAIL_ONLY_WITH_LINKS={env.get('MAIL_ONLY_WITH_LINKS', '')!r}")
+    if launch.get("processes") and env.get("MIGRATE_PROCESSES") not in (None, str(launch["processes"])):
+        out.append(f"processes: wanted {launch['processes']}, running {env.get('MIGRATE_PROCESSES')}")
+    return out
+
+
 def record(state: dict, kind: str, who: str = "", detail: str = "") -> None:
     """One compact event for the report; the list stays short."""
     ev = state.setdefault("events", [])
@@ -134,10 +162,8 @@ def build_report(state: dict, parity: dict | None = None, bad: list | None = Non
     for e in ev:
         if e["k"] in ("fix_mtime", "resume", "parity_restart"):
             fixed.setdefault(e["k"], []).append(e["who"] or "run")
-    waiting = {}
-    for e in ev:
-        if e["k"] == "needs_claude":
-            waiting[(e["who"], e["d"])] = e["t"]
+    shapes = state.get("shapes", {})
+    waiting = {k: v for k, v in shapes.items() if v.get("open", True)}
     lines = [f"autopilot report {time.strftime('%m-%d %H:%MZ', time.gmtime())} | run: {run or '?'} | "
              f"held: {state.get('held', 'no')} | resumes today: "
              f"{sum(1 for d in state.get('resumes', []) if d.startswith(time.strftime('%Y-%m-%d', time.gmtime())))}"]
@@ -147,9 +173,9 @@ def build_report(state: dict, parity: dict | None = None, bad: list | None = Non
     if bad:
         lines.append("not at parity: " + ", ".join(u.split("@")[0] for u in bad[:12]) + (f" +{len(bad) - 12}" if len(bad) > 12 else ""))
     lines.append("fixed by itself: " + ("; ".join(f"{k} x{len(v)} ({', '.join(sorted(set(v))[:6])})" for k, v in fixed.items()) or "nothing yet"))
-    lines.append(f"waiting for Claude ({len(waiting)}):" if waiting else "waiting for Claude: nothing")
-    for (who, d), t in list(waiting.items())[-8:]:
-        lines.append(f"- {t} {who}: {d}")
+    lines.append(f"waiting for Claude ({len(waiting)} kinds, {sum(v['n'] for v in waiting.values())} events):" if waiting else "waiting for Claude: nothing")
+    for k, v in sorted(waiting.items(), key=lambda kv: -kv[1]["n"])[:8]:
+        lines.append(f"- x{v['n']} {v['t']} {v['who']}: {v['ex']}")
     return "\n".join(lines) + "\n"
 
 
@@ -213,6 +239,8 @@ def main(argv=None) -> int:
                 if not a:
                     continue
                 if a["do"] == "needs_claude":
+                    if not first_of_shape(state, a["why"].split(": ", 1)[-1], a["why"].split(": ")[0] if "@" in a["why"][:60] else ""):
+                        continue                     # the same problem again: counted, not repeated
                     record(state, "needs_claude", (a["why"].split(": ")[0] if "@" in a["why"][:60] else ""), a["why"].split(": ", 1)[-1])
                     s = summarise(a["why"])
                     _note(f"NEEDS CLAUDE: {a['why'][:300]}" + (f"\n  local model: {s[:400]}" if s else ""))
@@ -226,8 +254,18 @@ def main(argv=None) -> int:
                 except Exception as exc:      # noqa: BLE001
                     _note(f"{a['do']} FAILED: {exc}")
                     _say("ERROR", f"needs Claude: {a['do']} failed: {str(exc)[:200]}")
-        running = subprocess.run(["pgrep", "-f", f"main.py --account-id {args.account_id} migrate"],
-                                 capture_output=True).returncode == 0
+        pids = subprocess.run(["pgrep", "-f", f"main.py --account-id {args.account_id} migrate"],
+                              capture_output=True, text=True).stdout.split()
+        running = bool(pids)
+        if running and state.get("launch"):
+            try:
+                env = dict(kv.split("=", 1) for kv in open(f"/proc/{pids[0]}/environ").read().split("\0") if "=" in kv)
+                dev = deviations(env, state["launch"])
+                if dev and first_of_shape(state, "run deviates from the chosen launch: " + "; ".join(dev)):
+                    _note("NEEDS CLAUDE: run deviates: " + "; ".join(dev))
+                    _say("ERROR", "needs Claude: run deviates from the chosen launch: " + "; ".join(dev))
+            except OSError:
+                pass
         if running and not _unit_active("bitport-parity") and state.get("parity_since"):
             subprocess.run(["systemctl", "reset-failed", "bitport-parity"], capture_output=True)
             subprocess.run(["systemd-run", "--unit=bitport-parity", "--working-directory=" + HERE,

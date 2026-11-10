@@ -152,7 +152,14 @@ def check_user_forms(auth, db, user: str, target: str) -> list[dict]:
         try:
             if drive.files().get(fileId=sid, fields="mimeType", supportsAllDrives=True).execute().get("mimeType") != FORM:
                 continue
-            r = check_form(auth, db, user, target, sid, tid)
+            try:
+                r = check_form(auth, db, user, target, sid, tid)
+            except Exception as first:      # noqa: BLE001
+                if "timed out" not in str(first).lower():
+                    raise
+                import time
+                time.sleep(5)               # a read that timed out is the network's, not a finding: once more
+                r = check_form(auth, db, user, target, sid, tid)
         except Exception as exc:      # noqa: BLE001
             r = {"source": sid, "target": tid, "error": str(exc)[:200], "parity": False}
         r["user"] = user
