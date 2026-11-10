@@ -100,3 +100,11 @@ def test_the_dms_delta_loop_stops_on_zero_and_escalates_when_failures_do_not_fal
     src = open(L.__file__).read()
     assert "--fresh-import" not in src.split("def run_delta")[1].split("def main")[0]     # a delta, never a fresh import
     assert L.MAX_ATTEMPTS == 5
+
+
+def test_a_mailbox_has_landed_only_when_nearly_full_and_not_moving():
+    import dms_user_verify as V
+    assert V.landed(None, 1000, 1000, 1000) is False          # first poll: not yet stable
+    assert V.landed(1000, 1000, 1000, 1000) is True
+    assert V.landed(999, 1000, 1000, 1000) is False           # still moving
+    assert V.landed(1000, 500, 1000, 500) is False            # half the mail: not landed
