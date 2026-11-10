@@ -10,11 +10,55 @@ On account-3 migration runs every error STOPS the run, is fixed (opus allowed), 
 
 `monitor/watch.py` reads the box's incident feed (`logs/incidents/feed.log`) and spends model tokens only on news: repeats and kinds `known_issues` fixes on its own cost nothing; the rest goes to a cheap model (`MONITOR_TRIAGE_MODEL`, haiku), and only an "escalate" reaches the strong one (`MONITOR_FIX_MODEL`, opus), which works in its own worktree on `monitor/incident-<id>` and never deploys. One lane per running job (`account:job`). Its memory is `monitor/state.json`; its standing orders are `monitor/CHARTER.md`; its results land in `monitor/INBOX.md` for the operator. A SessionStart hook prints `watch.py --brief`, so a context reset keeps the duty. Caps: `MONITOR_MAX_USD_DAY` ($5), `MONITOR_MAX_ESCALATIONS_DAY` (6), `MONITOR_MAX_ATTEMPTS` (2 per fingerprint). Check it first with `python3 monitor/watch.py --dry-run`; run it with `nohup python3 monitor/watch.py &`.
 
-## Newest handoff — 10 November 2026
+## Newest handoff — 10–11 November 2026 (account 3, to overall parity)
 
-Read [docs/claude-handoff-2026-11-10.md](docs/claude-handoff-2026-11-10.md) first: account 3's run to full parity, the box's units
-(parity loop, autopilot), the errors met with causes and fixes, and how well the autopilot did. It supersedes the 30 October one
-where they differ (bulk mail by DMS; link emails by the engine before it).
+Read [docs/claude-handoff-2026-11-10.md](docs/claude-handoff-2026-11-10.md) first: the errors met (causes, fixes, status),
+the box's units, and the autopilot's efficacy. This section is the rules and state that must survive a context reset.
+
+**Operator's definitions and rules (binding):**
+- **Parity means overall parity across every service, for every user:** Drive (files, folders, grants, modified times, carried
+  settings, Forms with their responses and Sheets), mail (every message, including what the DMS delivered, labels, extras),
+  calendar, contacts, tasks. Chat is off by default and not part of parity. A user is not "done" until every service passes.
+- **Verify every user**, and when something extra was delivered, find out what it is. Dig into every not-at-parity user;
+  do not accept a count without its cause.
+- **Mail: split/hybrid by default.** The engine moves only mail carrying a Drive link (rewritten, before the DMS); the DMS moves
+  the rest. Never move bulk mail by the engine. Any run that moved mail another way must be reported.
+- **Drive: server-side copy.** Binary files must not fall back to download-and-upload; Apps Script projects are the only
+  expected download-and-upload files.
+- **DMS:** started from the command line for full scope (the web UI limits a fresh import to 5 users). Re-run as a delta until
+  failures are zero (`dms_delta_loop.py`). Verify each user as its mail lands (`dms_user_verify.py`).
+- **Repairs:** ON for verify-and-repair (the operator now wants repair per user, in parallel, after each user's verify). An
+  operator's pause holds against automatic follow-ons. Tally follow-ons never re-move mail automatically.
+- **Never notify external people** about changed links or moved files. An internal notice is an option, off by default.
+- **Approval and teardown** of a migration are an operator's click or word only, never a timer. Teardown of the sandbox: show a
+  dry run first, then clean staging shared drives, the Cloud project and the DWD grant, and verify the old key fails.
+- **Deletes and wipes** are sandbox-only and need the typed confirmation. Before deleting, look at the target.
+- **Token budget is limited:** react to the autopilot's REPORT.md and INBOX, do not poll, keep reports short.
+- **Passwords:** do not store or echo credentials in the repo, memory or logs. The box holds its own (`/etc/bitport/dwd.env`,
+  root-only). The operator shared the source admin password in chat on 10 Nov; recommend rotating it.
+
+**Box and tools:**
+- Box `l3novo@100.79.158.38`, clock UTC (operator is Nepal, +5:45). Root by the operator's SSH password (held by the operator);
+  read-only access via `monitor/box.sh`. Deploy = hash-checked copy to `/tmp/py11`, copy in, `py_compile`, restart only what loads
+  the file, and never while a run is live (a `bitport-api` restart can kill an API-started run).
+- Units: `bitport-parity` (`parity_loop.py`, checks each user as its pass finishes), `bitport-autopilot` (`autopilot.py`: playbook,
+  REPORT.md, INBOX.md), `bitport-dms-fresh` / `bitport-dms-delta-loop` / `bitport-dms-user-verify`, `bitport-post-dms`,
+  Ollama (snap, capped 7 GB / 2 cores; model `qwen2.5-coder:7b`, summaries only, never actions).
+- Checks: `fidelity_audit.py` (every file's grants, modified time, settings), `form_deep_check.py` (Forms, responses, Sheets;
+  `known_differences.json` lists operator-accepted differences), `mail_dead_links.py` (full mail read: link emails, search miss
+  rate, dead links), `dms_link_rewrite.py`, `sharing_report.py` + Sharing panel, `tally.py` (per-service counts).
+- Known limits: Gmail search misses ~79% of link emails (use the full read); the Forms API cannot copy an image it cannot fetch;
+  the box is on Wi-Fi (a wired port `enp1s0` has no link yet); the DMS console reports only totals, so per-user landing is inferred.
+
+**State at the end of 11 Nov (UTC):**
+- Account 3 (s.sarafgloabalexim.com -> t.sarafgloabalexim.com, 45 users) was wiped and remigrated in split mode. Drive is complete:
+  38,513 files and 2,388 folders. The DMS fresh import (45 users) is running; its delta loop waits for it to finish.
+- Verified so far: audit@ and buildingpermit@ identical (mail). Not at parity: admin@ (10 extra messages on the target), it.department@
+  (9 DNS-failed emails), ward10@ and ward11@ (one missing), suchanaadhikari@ (a CATEGORY_PERSONAL label), administration@ and info@
+  (still importing). Mailbox counts for many users read about 100%, but are not yet verified.
+- Parity table caveat: its "gmail count" check counts only what the engine wrote, so it reads 0 for mailboxes that have their mail.
+  Do not trust that line; use mailbox counts and verify results until the check is fixed.
+- Open: the suchanaadhikari Form image (accepted as a known difference); the wired cable; the source admin password rotation.
 
 ## Latest operator handoff — 30 October 2026
 
