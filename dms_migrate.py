@@ -381,6 +381,35 @@ def read_metrics(page) -> dict:
             "read_at": int(time.time())}
 
 
+def cache_metrics(got: dict, path: str) -> dict:
+    """Keep the current observation separate from older timestamped counters.
+
+    Empty console reads must not erase progress history or manufacture completion.
+    Never merge partial counters from different observations into one snapshot.
+    """
+    import tempfile
+    snapshot = dict(got)
+    try:
+        with open(path, encoding="utf-8") as fh:
+            prior = json.load(fh)
+        last = prior if prior.get("metrics") else prior.get("lastCounters")
+    except (OSError, ValueError, AttributeError):
+        last = None
+    if not snapshot.get("metrics") and isinstance(last, dict) and last.get("metrics"):
+        snapshot["lastCounters"] = {k: last[k] for k in ("status", "metrics", "read_at") if k in last}
+    parent = os.path.dirname(os.path.abspath(path))
+    os.makedirs(parent, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=".metrics-", dir=parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(snapshot, fh)
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+    return snapshot
+
+
 def _record_delivered() -> None:
     """Record only previously verified destination receipts. Console completion
     is not evidence for individual items. Status refresh never performs repairs."""
@@ -416,10 +445,7 @@ def status(timeout: int, headful: bool) -> dict:
         if got.get("status") == "complete":
             _record_delivered()
         try:
-            path = metrics_path()
-            os.makedirs(os.path.dirname(path), exist_ok=True)
-            with open(path, "w", encoding="utf-8") as fh:
-                json.dump(got, fh)
+            out.update(cache_metrics(got, metrics_path()))
         except Exception:             # noqa: BLE001
             logging.getLogger(__name__).debug("ignored an error", exc_info=True)
         return out

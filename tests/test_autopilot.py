@@ -35,11 +35,6 @@ def test_another_accounts_run_is_not_ours():
     assert A.decide(CRASH.replace("account=3", "account=2"), {}, 3) is None
 
 
-def test_the_model_only_summarises_and_its_absence_is_fine():
-    assert A.summarise("x", ask=lambda p: "It failed because y.") == "It failed because y."
-    assert A.summarise("x", ask=lambda p: (_ for _ in ()).throw(OSError("no model"))) == ""
-
-
 def test_the_report_is_short_and_says_what_it_fixed_and_what_waits():
     st = {"held": "no", "resumes": []}
     A.record(st, "fix_mtime", "ward7@s.x", '{"fixed": 1}')

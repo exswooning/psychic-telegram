@@ -16,7 +16,7 @@ VERSION = 2
 # edit to the verifier's code, which is what the cache used to fingerprint: every deploy of verify_sample.py, and
 # every Drive file copied for ANY user, emptied every user's cache, so no Gmail comparison was ever reused
 # ("new comparison context; full reads" for every user on account 3, 8 Nov 2026).
-MAIL_COMPARISON_VERSION = 1
+MAIL_COMPARISON_VERSION = 2  # Google-added X-Forwarded-Encrypted is non-user content.
 CHECKPOINT_EVERY = 2000
 
 

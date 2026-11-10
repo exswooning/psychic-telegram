@@ -71,3 +71,26 @@ def test_a_lost_item_and_an_uncarried_file_upload_are_named():
     got = NF.compare_form(_Forms(src), _Forms(t), "s", "t")
     assert "1 file-upload question(s) not carried: no API can create one" in got
     assert "Form has 3 item(s) on the target, 4 expected" in got
+
+
+def test_one_missing_image_does_not_make_later_questions_differ():
+    src = copy.deepcopy(FORM)
+    src['items'].insert(1, src['items'].pop())
+    t = _rebuilt(src)
+    t['items'].pop(1)
+    got = NF.compare_form(_Forms(src), _Forms(t), 's', 't')
+    assert any('Logo' in d and 'missing' in d for d in got)
+    assert not any('differs' in d for d in got)
+
+
+def test_duplicate_image_is_not_silently_ignored():
+    t = _rebuilt(FORM)
+    t['items'].append(copy.deepcopy(t['items'][-1]))
+    got = NF.compare_form(_Forms(FORM), _Forms(t), 's', 't')
+    assert any('extra' in d and 'Logo' in d for d in got)
+
+
+def test_reordered_questions_are_still_differences():
+    t = _rebuilt(FORM)
+    t['items'][0], t['items'][2] = t['items'][2], t['items'][0]
+    assert NF.compare_form(_Forms(FORM), _Forms(t), 's', 't')

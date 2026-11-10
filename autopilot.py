@@ -1,4 +1,4 @@
-"""Keep a migration moving when nobody is watching: a fixed playbook, a local model only to summarise.
+"""Keep a migration moving when nobody is watching: a fixed playbook, bounded local-model triage.
 
 Runs on the box (unit `bitport-autopilot`). Reads new lines of the incident feed and the parity loop's log
 once a minute and decides with `decide()` -- a fixed list of actions, each guarded:
@@ -11,10 +11,10 @@ once a minute and decides with `decide()` -- a fixed list of actions, each guard
                                                          beside another Drive job)
   the parity loop is not running while a run is          restart it from the run's start
   anything else                                          needs Claude: a local model (Ollama, if present)
-                                                         writes a short summary; nothing is executed
+                                                         queues a grounded diagnosis; nothing is executed
 
 Every decision goes to logs/autopilot/INBOX.md and, for anything not handled, an `ERROR [autopilot]
-needs Claude:` line logwatch picks up. The model never chooses an action: it only summarises.
+needs Claude:` line logwatch picks up. The model never chooses an action. Diagnostics wait for idle resources and are saved for review.
 """
 from __future__ import annotations
 
@@ -24,7 +24,6 @@ import re
 import subprocess
 import sys
 import time
-import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DIR = os.path.join(HERE, "logs", "autopilot")
@@ -93,22 +92,6 @@ def operator_launched_after(stamp: str, fetch=fetch_actions) -> bool:
                 and str(a.get("started_at", ""))[:19] > stamp[:19]:
             return True
     return False
-
-
-def summarise(text: str, ask=None) -> str:
-    """A short plain summary from the local model, or '' when it is not there. Never an action."""
-    prompt = ("You summarise one error from a Google Workspace migration tool for an engineer. In two "
-              "sentences: what failed and the most likely cause. Do not suggest commands.\n\n" + text[:3000])
-    try:
-        if ask:
-            return ask(prompt)
-        req = urllib.request.Request(f"{OLLAMA}/api/generate", data=json.dumps(
-            {"model": MODEL, "prompt": prompt, "stream": False, "options": {"num_predict": 120}}).encode(),
-            headers={"Content-Type": "application/json"})
-        with urllib.request.urlopen(req, timeout=300) as r:
-            return (json.loads(r.read()).get("response") or "").strip()
-    except Exception:      # noqa: BLE001 - no model is fine: Claude reads the raw line
-        return ""
 
 
 def _api(path: str, body: dict) -> str:
@@ -272,6 +255,21 @@ def _unit_active(name: str) -> bool:
     return subprocess.run(["systemctl", "is-active", "--quiet", name]).returncode == 0
 
 
+def _save_state(state):
+    """Reserve diagnostic attempts durably before loading the model."""
+    import tempfile
+    fd, name = tempfile.mkstemp(prefix="state-", dir=DIR)
+    try:
+        with os.fdopen(fd, "w") as fh:
+            json.dump(state, fh, indent=1)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(name, STATE)
+    finally:
+        if os.path.exists(name):
+            os.unlink(name)
+
+
 def main(argv=None) -> int:
     import argparse
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -283,6 +281,9 @@ def main(argv=None) -> int:
         print(open(REPORT, encoding="utf-8").read() if os.path.exists(REPORT) else "no report yet")
         return 0
     state = json.load(open(STATE)) if os.path.exists(STATE) else {}
+    for case in state.get("local_diagnostics", {}).values():
+        if case.get("status") == "analysing":
+            case.update(status="unavailable", error="Interrupted; manual review required")
     feeds = {"feed": os.path.join(HERE, "logs", "incidents", "feed.log"),
              "parity": os.path.join(HERE, "logs", "jobs", str(args.account_id), "parity.log"),
              "run": os.path.join(HERE, "logs", "jobs", str(args.account_id), "migrate.log")}
@@ -306,8 +307,10 @@ def main(argv=None) -> int:
                     if not first_of_shape(state, a["why"].split(": ", 1)[-1], a["why"].split(": ")[0] if "@" in a["why"][:60] else ""):
                         continue                     # the same problem again: counted, not repeated
                     record(state, "needs_claude", (a["why"].split(": ")[0] if "@" in a["why"][:60] else ""), a["why"].split(": ", 1)[-1])
-                    s = summarise(a["why"])
-                    _note(f"NEEDS CLAUDE: {a['why'][:300]}" + (f"\n  local model: {s[:400]}" if s else ""))
+                    from local_diagnostics import enqueue
+                    enqueue(state, a["why"], account=args.account_id, source=p,
+                            observed_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
+                    _note(f"NEEDS CLAUDE: {a['why'][:300]}")
                     _say("ERROR", f"needs Claude: {a['why'][:200]}")
                     continue
                 try:
@@ -348,8 +351,11 @@ def main(argv=None) -> int:
                            capture_output=True)
             _note("restarted the parity loop")
             record(state, "parity_restart")
-        with open(STATE, "w") as fh:
-            json.dump(state, fh, indent=1)
+        from local_diagnostics import drain_one, render
+        diagnostic = drain_one(state, endpoint=OLLAMA, model=MODEL, checkpoint=lambda: _save_state(state))
+        if diagnostic:
+            _note(render(diagnostic))
+        _save_state(state)
         try:
             write_report(state, args.account_id)
         except Exception:      # noqa: BLE001 - a report must never stop the autopilot

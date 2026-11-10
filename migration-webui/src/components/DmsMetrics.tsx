@@ -73,7 +73,8 @@ const DmsMetrics: React.FC<{ accountId?: number | string }> = ({ accountId }) =>
   }
 
   const data = resp?.data
-  const m = data?.metrics || {}
+  const previous = data && Object.keys(data.metrics || {}).length === 0 ? data.lastCounters : undefined
+  const m = previous?.metrics || data?.metrics || {}
   const has = (k: string) => Object.prototype.hasOwnProperty.call(m, k)
 
   const Cell: React.FC<{ label: string }> = ({ label }) => (
@@ -111,6 +112,13 @@ const DmsMetrics: React.FC<{ accountId?: number | string }> = ({ accountId }) =>
         <Typography variant="body2" color="text.secondary">
           No metrics read yet — press Refresh to read the counters from the
           Admin console.
+        </Typography>
+      )}
+
+      {previous && (
+        <Typography variant="body2" color="warning.main" sx={{ mb: 1 }}>
+          The latest console read had no counters. Showing the last observed counts from{' '}
+          {new Date(previous.read_at * 1000).toLocaleString()}; these do not confirm the current status.
         </Typography>
       )}
 

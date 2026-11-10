@@ -213,6 +213,7 @@ export interface DmsMetrics {
   status: string
   metrics: Record<string, number>
   read_at: number
+  lastCounters?: { status: string; metrics: Record<string, number>; read_at: number }
 }
 export interface DmsMetricsResponse {
   data: DmsMetrics | null

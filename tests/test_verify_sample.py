@@ -63,6 +63,19 @@ class TestCompareMessage:
         verdict, notes = V.compare_message(self.RAW, added)
         assert verdict == "equivalent" and "Received" in notes[0]
 
+    def test_gmail_storage_stamp_on_the_target_is_not_a_difference(self):
+        # it.department 10 Nov: 9 identical messages refused as "different content" over this one header
+        stamped = self.RAW.replace(b"\r\n", b"\r\nX-Forwarded-Encrypted: i=1; AL+x==@t.example\r\n", 1)
+        assert V.compare_message(self.RAW, stamped)[0] == "equivalent"
+
+    def test_changed_storage_stamp_is_named_without_disclosing_its_value(self):
+        src = b"X-Forwarded-Encrypted: source-stamp\r\n" + self.RAW
+        tgt = b"X-Forwarded-Encrypted: target-stamp\r\n" + self.RAW
+        verdict, notes = V.compare_message(src, tgt)
+        assert verdict == "equivalent"
+        assert "X-Forwarded-Encrypted" in " ".join(notes)
+        assert "source-stamp" not in " ".join(notes) and "target-stamp" not in " ".join(notes)
+
     def test_an_altered_body_is_different(self):
         verdict, notes = V.compare_message(self.RAW, self.RAW.replace(b"body 1", b"body 2"))
         assert verdict == "different" and any("body differs" in n for n in notes)
@@ -108,7 +121,7 @@ class TestTheVerdict:
     def test_identical_only_when_nothing_is_off(self):
         assert V.verdict_of({"u": {"drive": self._r()}}, ("drive",))[0] == "IDENTICAL"
 
-    @pytest.mark.parametrize("label", ["differences", "missing", "duplicates", "notCopied"])
+    @pytest.mark.parametrize("label", ["differences", "missing", "duplicates", "notCopied", "extras"])
     def test_each_real_problem_makes_it_differences(self, label):
         assert V.verdict_of({"u": {"drive": self._r(**{label: [{}]})}}, ("drive",))[0] == "DIFFERENCES"
 
@@ -118,9 +131,12 @@ class TestTheVerdict:
     def test_a_service_that_was_never_checked_is_incomplete(self):
         assert V.verdict_of({"u": {}}, ("drive",))[0] == "INCOMPLETE"
 
-    def test_strays_alone_are_informational(self):
-        """A new mailbox arrives with welcome messages nobody migrated."""
-        assert V.verdict_of({"u": {"gmail": self._r(extras=[{}])}}, ("gmail",))[0] == "IDENTICAL"
+    def test_unexplained_mail_extras_prevent_parity(self):
+        # DMS deliveries missing from the ledger still need reconciliation. Do not call
+        # them identical or delete them. Known welcome messages are filtered upstream.
+        verdict, reasons = V.verdict_of({"u": {"gmail": self._r(extras=[{}])}}, ("gmail",))
+        assert verdict == "DIFFERENCES"
+        assert "u: gmail has 1 extras" in reasons
 
     def test_differences_outrank_incomplete(self):
         assert V.verdict_of({"u": {"drive": self._r(errors=["x"], differences=[{}])}}, ("drive",))[0] == "DIFFERENCES"
@@ -304,11 +320,11 @@ class TestEveryKindOfDamageIsFound:
         r = verify(migrated)
         assert any("folder path" in x for d in r["users"][SRC_USER]["drive"]["differences"] for x in d["diffs"])
 
-    def test_a_stray_file_is_reported_but_is_not_a_failure(self, migrated):
+    def test_an_unexplained_stray_file_prevents_parity(self, migrated):
         tgt = migrated.auth.target_drive(TGT_USER)
         tgt.add_binary("welcome.txt", data=b"hello", mime="text/plain")
         r = verify(migrated)
-        assert r["users"][SRC_USER]["drive"]["extras"][0]["name"] == "welcome.txt" and r["verdict"] == "IDENTICAL"
+        assert r["users"][SRC_USER]["drive"]["extras"][0]["name"] == "welcome.txt" and r["verdict"] == "DIFFERENCES"
 
     def test_a_migrated_shortcut_is_not_a_stray(self, migrated):
         """Live: fiona's one copied shortcut read as an extra on the target -- the

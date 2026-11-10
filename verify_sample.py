@@ -41,6 +41,7 @@ import sys
 import threading
 import time
 import unicodedata
+from contextlib import contextmanager
 from collections.abc import Iterator
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
@@ -65,6 +66,22 @@ def _stop_check():
 HERE = os.path.dirname(os.path.abspath(__file__))
 FOLDER = "application/vnd.google-apps.folder"
 DRIVE_METADATA_BATCH_SIZE = 25
+
+# Metadata can run in parallel, but each content read may materialise a large
+# native document plus canonical copies and embedded images. Share this slot
+# across ALL user workers, including the separate native-link read path.
+_CONTENT_SLOT = threading.BoundedSemaphore(1)
+
+
+@contextmanager
+def _content_slot():
+    while not _CONTENT_SLOT.acquire(timeout=0.25):
+        _stop_check()
+    try:
+        _stop_check()
+        yield
+    finally:
+        _CONTENT_SLOT.release()
 
 
 def _drive_file_workers() -> int:
@@ -92,6 +109,7 @@ NATIVE_EXPORT = {
 # never silently.
 VOLATILE_HEADERS = {"received", "x-received", "x-gm-message-state", "x-google-smtp-source",
                     "return-path", "delivered-to", "authentication-results", "received-spf",
+                    "x-forwarded-encrypted",  # stamped by Gmail on storage in the target mailbox, never by the source
                     "arc-seal", "arc-message-signature", "arc-authentication-results"}
 PERSON_FIELDS = "names,emailAddresses,phoneNumbers,organizations,addresses,birthdays,biographies,urls,nicknames"
 PEOPLE_BATCH_SIZE = 200  # People API getBatchGet limit; halves calls for every 200 contacts per tenant.
@@ -174,8 +192,12 @@ def compare_message(src_raw: bytes, tgt_raw: bytes, expected_after_rewrite: byte
     if sh == th and sb == tb:
         if assigned_id:
             return "equivalent", ["Gmail assigned a Message-ID absent from the source; other compared headers and payload match"]
-        added = sorted(set(BytesHeaderParser().parsebytes(tgt_raw).keys()) - set(BytesHeaderParser().parsebytes(want).keys()))
-        return "equivalent", [f"same message; headers added on the target: {', '.join(added) or 'none named'}"]
+        source_headers, target_headers = BytesHeaderParser().parsebytes(want), BytesHeaderParser().parsebytes(tgt_raw)
+        names = {k.lower(): k for h in (source_headers, target_headers) for k in h.keys()}
+        ignored = [names[k] for k in sorted(names) if k in VOLATILE_HEADERS
+                   and source_headers.get_all(k) != target_headers.get_all(k)]
+        return "equivalent", ["same message; ignored storage-header differences: " +
+                              (", ".join(ignored) or "none; equivalent decoded payload and normalised headers")]
     notes = []
     for k in sorted(set(sh) | set(th)):
         if sh.get(k) != th.get(k):
@@ -1231,7 +1253,7 @@ class Verifier:
         return budget()
 
     def _content(self, src, tgt, sid, tid, sm, tm, ev) -> list[str]:
-        with self._doc_budget():
+        with _content_slot(), self._doc_budget():
             return self._content_unbounded(src, tgt, sid, tid, sm, tm, ev)
 
     def _content_unbounded(self, src, tgt, sid, tid, sm, tm, ev) -> list[str]:
@@ -1319,7 +1341,7 @@ class Verifier:
             return []
 
     def _native_links(self, tid, sm) -> list[str]:
-        with self._doc_budget():
+        with _content_slot(), self._doc_budget():
             return self._native_links_unbounded(tid, sm)
 
     def _native_links_unbounded(self, tid, sm) -> list[str]:
@@ -1697,7 +1719,8 @@ class Verifier:
                     diffs += [f"message differs: {n}" for n in notes] or ["message differs"]
                 diffs += self._mail_state_diffs(sm, tm, sl, tl, source_headers.get("Date"))
                 self.evidence.append({"service": "gmail", "name": msgid or sid, "how": verdict, "bytes": len(sraw),
-                                      "sha256": sha256(sraw)[:16], "opened": True})
+                                      "sha256": sha256(sraw)[:16], "opened": True,
+                                      **({"comparisonNotes": notes} if verdict == "equivalent" else {})})
                 if verdict in ("identical after rewrite", "equivalent"):
                     said[verdict] = said.get(verdict, 0) + 1
                 if diffs:
@@ -2241,7 +2264,7 @@ def verdict_of(users: dict, services: tuple[str, ...]) -> tuple[str, list[str]]:
             elif r["checked"] == 0 and not r.get("emptySource"):
                 incomplete = True
                 reasons.append(f"{user}: {svc} checked no items and the source was not confirmed empty")
-            for label in ("differences", "missing", "duplicates", "notCopied"):
+            for label in ("differences", "missing", "duplicates", "notCopied", "extras"):
                 if r[label]:
                     bad = True
                     reasons.append(f"{user}: {svc} has {len(r[label])} {label}")
@@ -2661,7 +2684,7 @@ def to_markdown(report: dict) -> str:
                      f"{len(r['duplicates'])} | {len(r['extras'])} | {len(r['notCopied'])} | {len(r['errors'])} |")
         L.append("")
         for svc, r in per.items():
-            for label in ("differences", "missing", "duplicates", "notCopied", "errors"):
+            for label in ("differences", "missing", "duplicates", "notCopied", "extras", "errors"):
                 for item in r[label][:25]:
                     L.append(f"- **{svc} / {label}**: {json.dumps(item, default=str)[:400]}")
             for n in r["notes"][:10]:

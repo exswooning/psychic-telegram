@@ -6,8 +6,8 @@ text/format/layout fields remain present. This does not certify revision history
 
 from __future__ import annotations
 
-import copy
 import os
+import difflib
 from link_rewrite import rewrite_text
 
 ID_FIELDS = {
@@ -41,7 +41,8 @@ ROOT_VOLATILE = {"documentId", "presentationId", "revisionId", "suggestionsViewM
 
 
 def canonical_native(document, lookup=lambda _: None):
-    doc = copy.deepcopy(document)
+    # visit builds every list/dict anew and never mutates the input. A preliminary
+    # deepcopy kept a second full document resident for no comparison benefit.
     ids = {}
 
     def identity(value):
@@ -84,7 +85,7 @@ def canonical_native(document, lookup=lambda _: None):
                 out[key] = visit(item, path + (key,))
         return out
 
-    return visit(doc)
+    return visit(document)
 
 
 IMAGE_KEYS = ("contentUri", "contentUrl")
@@ -244,7 +245,24 @@ def compare_form(src_forms, tgt_forms, source_id: str, target_id: str) -> list[s
     wanted = [i for i in a["items"] if i not in uncarried]
     if len(wanted) != len(b["items"]):
         diffs.append(f"Form has {len(b['items'])} item(s) on the target, {len(wanted)} expected")
-    for n, (x, y) in enumerate(zip(wanted, b["items"]), 1):
-        if x != y:
-            diffs.append(f"Form item {n} ({x.get('title') or 'untitled'}) differs")
+    # Align by title and kind; compare the full canonical content afterward.
+    # A missing image must not make every following question look changed.
+    # Never collapse duplicates or broaden the operator's accepted exceptions.
+    def signature(item):
+        kind = next((k for k in item if k.endswith("Item")), "unknown")
+        return (item.get("title") or "", kind)
+
+    target = b["items"]
+    matcher = difflib.SequenceMatcher(a=[signature(i) for i in wanted],
+                                     b=[signature(i) for i in target], autojunk=False)
+    for op, i1, i2, j1, j2 in matcher.get_opcodes():
+        paired = min(i2 - i1, j2 - j1) if op in ("equal", "replace") else 0
+        for offset in range(paired):
+            x, y = wanted[i1 + offset], target[j1 + offset]
+            if x != y:
+                diffs.append(f"Form item {i1 + offset + 1} ({x.get('title') or 'untitled'}) differs")
+        for index in range(i1 + paired, i2):
+            diffs.append(f"Form item {index + 1} ({wanted[index].get('title') or 'untitled'}) missing")
+        for index in range(j1 + paired, j2):
+            diffs.append(f"Form target item {index + 1} ({target[index].get('title') or 'untitled'}) extra")
     return diffs

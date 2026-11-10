@@ -239,10 +239,12 @@ def watch_verdict_flip(ctx: Context) -> list[dict]:
         for key, f in acct.items():
             user, service = key.split("|", 1)
             out.append(finding("watch_verdict_flip", int(aid), key,
-                               f"{user} {service}: {f['from']} -> {f['to']} with nothing run in between",
+                               f"{user} {service}: {f['from']} -> {f['to']} without a recorded intervening run",
                                f"Checked at {f['was']} as {f['from']} and at {f['now']} as {f['to']}, with no "
-                               f"migration, repair or mirror run for this account in between. A verdict that "
-                               f"moves on its own means the checker read something stale or inconsistent."))
+                               f"migration, repair or mirror run recorded for this account in between. "
+                               f"Cause unconfirmed: compare the two reports, coverage and mailbox history. "
+                               f"External DMS deliveries or user edits may not appear in these run records; "
+                               f"this alert alone does not prove an unstable comparer."))
     return out
 
 
