@@ -73,3 +73,15 @@ def test_a_stop_that_an_operator_launch_followed_is_not_a_hold():
     assert A.operator_launched_after("2026-11-10T06:33:36Z", fetch=before) is False
     assert A.decide(stop, {}, 3) is not None and A.decide(stop, {}, 3)["do"] == "hold"        # no fetch in unit path: real API
     assert A.operator_launched_after("2026-11-10T06:33:36Z", fetch=lambda: (_ for _ in ()).throw(OSError())) is False
+
+
+def test_a_dns_failure_and_a_user_stopped_partway_are_escalated_from_the_run_log():
+    dns = "2026-11-10 08:59:01,000 WARNING [it.department] gmail_engine: [it.department@s] Gmail raw read 19da9: Unable to find the server at gmail.googleapis.com"
+    assert A.decide(dns, {}, 3)["do"] == "needs_claude" and A.decide(dns, {}, 3)["why"].startswith("dns: ")
+    stop = "2026-11-10 10:24:23,552 WARNING [environment   ] gmail_engine: [environment@s] stopping mail migration early -- signal received"
+    assert A.decide(stop, {}, 3)["do"] == "needs_claude"
+
+
+def test_the_repair_action_refuses_while_the_operator_has_paused_repairs(tmp_path, monkeypatch):
+    monkeypatch.setattr(A, "repairs_enabled", lambda account: False)
+    assert A.act({"do": "fix_mtime", "user": "u@s"}, {}, 3).startswith("skipped: automatic repairs are paused")

@@ -64,6 +64,10 @@ def decide(line: str, state: dict, account: int) -> dict | None:
         return {"do": "needs_claude", "why": f"{user}: {stage}: {why}"}
     if "account=" in line and f"account={account} " not in line:
         return None                                  # another account's: not ours to act on or raise
+    if "Unable to find the server at gmail" in line or "Unable to find the server at" in line:
+        return {"do": "needs_claude", "why": "dns: " + line.split("] ", 1)[-1].strip()[:240]}
+    if "stopping mail migration early" in line:
+        return {"do": "needs_claude", "why": "a user stopped partway through its mail: " + line.split("] ", 1)[-1].strip()[:200]}
     if " ERROR " in line or "INCIDENT" in line and " error " in line:
         return {"do": "needs_claude", "why": line.strip()[:300]}
     return None
@@ -115,6 +119,18 @@ def _api(path: str, body: dict) -> str:
     return (out.stdout or out.stderr)[:300]
 
 
+def repairs_enabled(account: int) -> bool:
+    """The operator's repair switch, read from the ledger (read-only). Unreadable = not enabled (the safe side)."""
+    try:
+        import sqlite3
+        c = sqlite3.connect(f"file:{HERE}/data/accounts/{account}/migration.db?mode=ro", uri=True)
+        row = c.execute("SELECT enabled FROM verification_repair_policy WHERE id=1").fetchone()
+        c.close()
+        return bool(row and row[0])
+    except Exception:      # noqa: BLE001
+        return False
+
+
 def act(a: dict, state: dict, account: int) -> str:
     if a["do"] == "resume":
         body = dict(state.get("launch") or {})
@@ -132,6 +148,8 @@ def act(a: dict, state: dict, account: int) -> str:
         state["held"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         return f"held ({a.get('by', '')})"
     if a["do"] == "fix_mtime":
+        if not repairs_enabled(account):
+            return "skipped: automatic repairs are paused by the operator"
         import repair
         from auth import AuthManager
         from config import Settings
@@ -246,7 +264,8 @@ def main(argv=None) -> int:
         return 0
     state = json.load(open(STATE)) if os.path.exists(STATE) else {}
     feeds = {"feed": os.path.join(HERE, "logs", "incidents", "feed.log"),
-             "parity": os.path.join(HERE, "logs", "jobs", str(args.account_id), "parity.log")}
+             "parity": os.path.join(HERE, "logs", "jobs", str(args.account_id), "parity.log"),
+             "run": os.path.join(HERE, "logs", "jobs", str(args.account_id), "migrate.log")}
     offs = state.setdefault("offsets", {})
     for k, p in feeds.items():
         offs.setdefault(k, os.path.getsize(p) if os.path.exists(p) else 0)
