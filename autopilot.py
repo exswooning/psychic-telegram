@@ -282,6 +282,11 @@ def main(argv=None) -> int:
         pids = subprocess.run(["pgrep", "-f", f"main.py --account-id {args.account_id} migrate"],
                               capture_output=True, text=True).stdout.split()
         running = bool(pids)
+        # A hold set by a stop lifts once an operator's own launch follows it (checked each minute: the
+        # stop line itself is read once, so nothing else would clear it).
+        if state.get("held") and operator_launched_after(state["held"]):
+            _note(f"hold lifted: an operator's launch followed the stop at {state['held']}")
+            state.pop("held", None)
         if running and state.get("launch"):
             try:
                 env = dict(kv.split("=", 1) for kv in open(f"/proc/{pids[0]}/environ").read().split("\0") if "=" in kv)
