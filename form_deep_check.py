@@ -58,8 +58,23 @@ def _field_diffs(a: dict, b: dict, prefix: str = "") -> list[str]:
     return out
 
 
+def _one_per_image(items: list) -> list:
+    """A Form image re-added beside its copy (9-10 Nov 2026) is one image: image items with the same
+    title are counted once, in the order they first appear. Questions are never merged."""
+    seen, out = set(), []
+    for i in items:
+        if "imageItem" in i:
+            key = (i.get("title") or "").strip()
+            if key in seen:
+                continue
+            seen.add(key)
+        out.append(i)
+    return out
+
+
 def compare_items(src_items: list, tgt_items: list) -> dict:
     """Missing, extra and changed items, aligned by content."""
+    tgt_items = _one_per_image(tgt_items)
     a, b = [_sig(i) for i in src_items], [_sig(i) for i in tgt_items]
     missing, extra, changed = [], [], []
     for op, i1, i2, j1, j2 in difflib.SequenceMatcher(a=a, b=b, autojunk=False).get_opcodes():

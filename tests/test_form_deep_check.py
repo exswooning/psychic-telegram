@@ -40,3 +40,11 @@ def test_a_read_that_times_out_is_retried_once_not_reported_as_a_difference(monk
     auth = types.SimpleNamespace(source_drive=lambda u: drive)
     out = F.check_user_forms(auth, db, "u@s.x", "u@t.x")
     assert len(calls) == 2 and out[0]["parity"] is True
+
+
+def test_a_duplicated_image_counts_as_one_but_a_question_never_merges():
+    img = {"itemId": "a", "title": "Logo", "imageItem": {"image": {"sourceUri": "x"}}}
+    dup = dict(img, itemId="b")
+    assert F.compare_items([img, q("Name", "textQuestion")], [img, dup, q("Name", "textQuestion")])["missing"] == []
+    two_q = [q("Name", "textQuestion"), q("Name", "textQuestion")]
+    assert F.compare_items(two_q, [two_q[0]])["missing"] != []
