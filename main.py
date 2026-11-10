@@ -1384,6 +1384,13 @@ def _run_with_memory_pause(auth, db, settings, services, delta, delta_days,
             if whole_tenant and not delta:
                 _before_passes(db, auth, settings, everything)
             os.environ["DRIVE_FAILED_USERS"] = ""
+            # Split mode: the link-email inventory runs BESIDE the Drive pass, not after it. Its reads
+            # are mail only, so they do not share the Drive pass's quota or the box's line; by the time
+            # mail is delivered, the link list is already in the ledger (11 Nov 2026: a scan after Drive
+            # added hours to the run).
+            if ("drive" in everything and "gmail" in everything and getattr(settings, "mail_only_with_links", False)
+                    and not settings.dry_run and not getattr(settings, "sample_limit", None)):
+                _start_link_inventory(auth, db, settings, only)
             for i, one in enumerate(plan, 1):
                 if len(plan) > 1:
                     # Read back by the API to say which pass a live run is on. Carries
@@ -2111,6 +2118,30 @@ def _users_whose_drive_failed(results: list[dict]) -> list[str]:
     """Users a Drive pass attempted and failed: FAILED, with no Drive result."""
     return sorted({r["source"] for r in results
                    if r.get("status") == "FAILED" and "drive" not in (r.get("services") or {})})
+
+
+def _start_link_inventory(auth, db, settings, only) -> threading.Thread:
+    """Read every mailbox's text beside the Drive pass: which emails carry a Drive link, which file
+    each names, and whether Gmail search would have found it (mail_dead_links.inventory_user). A
+    daemon thread: it never raises into the run, and it stops when the run is stopped."""
+    import mail_dead_links
+    from gmail_engine import GmailMigrator
+    users = [(r["source_email"], r["target_email"]) for r in db.all_identities()
+             if r["entity_type"] == "user" and (not only or r["source_email"].lower() in only)]
+
+    def go() -> None:
+        for source, target in users:
+            if SHUTDOWN.is_set():
+                return
+            try:
+                mail_dead_links.inventory_user(GmailMigrator(auth, db, settings, source, target),
+                                               workers=8, say=log.info)
+            except Exception as exc:      # noqa: BLE001 - the mail pass re-reads anything missing
+                log.warning("link inventory for %s did not finish: %s", source, exc)
+    t = threading.Thread(target=go, name="link-inventory", daemon=True)
+    t.start()
+    log.info("link-email inventory started beside the Drive pass (%d mailboxes)", len(users))
+    return t
 
 
 def _repair_between_passes(db, auth, settings) -> None:
