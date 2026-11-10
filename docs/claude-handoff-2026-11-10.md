@@ -66,3 +66,11 @@ Read `CLAUDE.md` first, then this. Everything here was measured on the box; comm
   `dms_link_rewrite.py` for link emails the engine missed, then a full deep check, then the sandbox cleanup test.
 - Open: suchanaadhikari@'s Form (one question missing: reproduce with `form_deep_check.py`), the one link email that blocked the
   DMS handoff, linked-files-first + mail waves (designed, not built), the optional internal notice, the wired cable.
+
+## Addendum (11 Nov, 06:35 UTC): link-email search beside Drive
+- Split mode now starts the link-email inventory (`main._start_link_inventory`, a daemon thread) **before** the Drive pass,
+  so the link list is in the ledger before mail is delivered. Verified in the live run: started in the same second as
+  `pass drive split across 4 processes`.
+- Known limit: the inventory re-reads each mailbox's text (the full read, about 40 min for 45 mailboxes), so it adds reads
+  alongside Drive; Drive still copies in its usual order (linked files first is NOT built yet).
+- Watch for `database is locked` from the inventory's writes while Drive shards write the same ledger.
