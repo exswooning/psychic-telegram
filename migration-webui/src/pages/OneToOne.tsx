@@ -67,6 +67,10 @@ const Findings: React.FC<{ s: OneToOneService }> = ({ s }) => {
         {s.completion === 'INCOMPLETE' ? ' · check incomplete' : ''} · {when(s.verifiedAt)}
       </Typography>
       <RetainedCopyResolutions rows={s.copyResolutions} />
+      {(s.diagnostics ?? []).map((diagnosis) => <Alert key={diagnosis.code} severity="info" sx={{ my: 1 }}>
+        <Typography variant="body2">{diagnosis.summary}</Typography>
+        <Typography variant="caption">Next step: {diagnosis.nextAction}</Typography>
+      </Alert>)}
       {rows.slice(0, 8).map((r, i) => (
         <Typography key={i} variant="body2" sx={{ fontFamily: 'ui-monospace, monospace', fontSize: 12, wordBreak: 'break-word' }}>{r}</Typography>
       ))}

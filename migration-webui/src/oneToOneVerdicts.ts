@@ -24,11 +24,12 @@ const WRONG: Array<[keyof NonNullable<OneToOneService['counts']>, string]> = [
  *  file missing when all 15 were there and one differed by a line break. */
 export const serviceSummary = (s: OneToOneService): string => {
   const completion = s.completion === 'INCOMPLETE' ? ['check incomplete'] : []
+  if (s.itemChecksPending) completion.push(`${s.itemChecksPending} item checks need recheck`)
   if (!s.checked) return [`${s.service}: nothing to compare`, ...completion].join(' · ')
   const of = s.sampledOf && s.sampledOf > s.checked ? ` of ${s.sampledOf.toLocaleString()}` : ''
   const wrong = WRONG.filter(([k]) => (s.counts?.[k] ?? 0) > 0)
     .map(([k, what]) => `${(s.counts?.[k] ?? 0).toLocaleString()} ${what}`)
-  const same = s.identical === s.checked && !wrong.length ? 'all identical' : `${s.identical.toLocaleString()} identical`
+  const same = s.identical === s.checked && !wrong.length && !s.itemChecksPending ? 'all identical' : `${s.identical.toLocaleString()} identical`
   return [`${s.service}: ${s.checked.toLocaleString()} checked${of}`, same, ...wrong, ...completion].join(' · ')
 }
 

@@ -61,6 +61,7 @@ const VerificationUserResults: React.FC<{ accountId?: number }> = ({ accountId }
               <TableCell><Chip size="small" color={verdict.color} label={verdict.label} />
                 {extras && <Typography variant="caption" display="block">Target-only items need review</Typography>}
                 {sample && <Typography variant="caption" display="block">Includes sampled checks</Typography>}
+                {u.fullCoverageConfirmed === false && <Typography variant="caption" display="block">Full coverage not established</Typography>}
               </TableCell>
               <TableCell><Typography variant="caption">{recorded.map(serviceSummary).join('; ')}</Typography></TableCell>
               <TableCell><Typography variant="caption">{u.verifiedAt ? new Date(u.verifiedAt).toLocaleString() : 'Unknown'}</Typography></TableCell>

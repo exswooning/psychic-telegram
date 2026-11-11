@@ -12,7 +12,7 @@ def test_unread_only_difference_is_eligible_but_content_damage_is_not(monkeypatc
         def __init__(self,labels):self.labels=labels
         def users(self):return self
         def messages(self):return self
-        def get(self,**kw):return SimpleNamespace(execute=lambda:{'labelIds':self.labels})
+        def get(self,**kw):return SimpleNamespace(execute=lambda:{'labelIds':self.labels,'raw':'TWVzc2FnZS1JRDogPG9uZUBleGFtcGxlPlxyXG5cclxuYm9keQ=='})
         def batchModify(self,**kw):
             def apply():
                 changed.append(kw['body']);self.labels=list((set(self.labels)|set(kw['body']['addLabelIds']))-set(kw['body']['removeLabelIds']))
@@ -21,6 +21,7 @@ def test_unread_only_difference_is_eligible_but_content_damage_is_not(monkeypatc
                        _retry=lambda fn,**kw:fn(),_map_label_ids=lambda labels:labels,
                        limiter=SimpleNamespace(acquire=lambda:None))
     monkeypatch.setattr(gmail_engine,'GmailMigrator',lambda *a:gm)
+    monkeypatch.setattr(repair,'_claim_label_attempt',lambda *a:True)
     import finding_repairs
     monkeypatch.setattr(finding_repairs,'record',lambda *a,**kw:None)
     db=SimpleNamespace(get_target_id=lambda *a:'tid',resolve_identity=lambda u:'u@target',get_label_map=lambda u:{})
@@ -97,6 +98,7 @@ def test_capability_upgrade_revisits_new_native_content_inspection(monkeypatch):
 
 
 def test_inspection_failure_is_error_instead_of_unsupported_noop(db,settings,monkeypatch):
+    R.enable(db, operator=True)
     import verify_sample as V
     r=V.Verifier._blank();r.update(checked=1)
     r['differences']=[{'source':'sid','target':'tid','diffs':['unread state differs']}]
@@ -105,3 +107,18 @@ def test_inspection_failure_is_error_instead_of_unsupported_noop(db,settings,mon
     R.finished_user(None,db,settings,'u@source',{'gmail':r},None,lambda f:f,lambda m:None)
     row=db.conn.execute('SELECT state,summary FROM verification_repairs').fetchone()
     assert row['state']=='ERROR' and 'API unavailable' in row['summary']
+
+
+def test_label_repair_holds_if_message_body_changed_since_verification(auth, db, settings, identity, monkeypatch):
+    import base64
+    from tests.conftest import SRC_USER, TGT_USER
+    original = b'Message-ID: <one@example>\r\n\r\nsource body'
+    changed = b'Message-ID: <one@example>\r\n\r\ntarget edit'
+    sid = auth.source_gmail(SRC_USER).add_message(original, ['UNREAD'])
+    tid = auth.target_gmail(TGT_USER).add_message(changed, [])
+    db.record_mapping(SRC_USER, sid, tid, 'message')
+    report = {'users': {SRC_USER: {'gmail': {'differences': [{'source': sid, 'target': tid,
+                'diffs': ['unread state differs']}]}}}}
+    result = repair.repair_verified_gmail_labels(auth, db, settings, report, apply=True)
+    assert result['changed'] == 0 and 'content differs' in str(result['errors'])
+    assert auth.target_gmail(TGT_USER).call_count('messages.batchModify') == 0

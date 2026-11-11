@@ -25,6 +25,7 @@ which keeps the record of what happened and why it stopped mattering.
 from __future__ import annotations
 
 import os
+import json
 
 import copy
 import sys
@@ -292,6 +293,27 @@ def repair_verified_missing_mail(auth, db, settings, report: dict, apply: bool =
     return out
 
 
+def _claim_label_attempt(db, user, source_id, fingerprint):
+    """One write attempt for unchanged evidence, including across restarts."""
+    from db import utc_now
+    with db.write() as conn:
+        conn.execute("""CREATE TABLE IF NOT EXISTS finding_repair_actions (
+            source_user TEXT, service TEXT, item_id TEXT, state TEXT, detail TEXT,
+            checked_at TEXT, PRIMARY KEY(source_user,service,item_id))""")
+        prior = conn.execute("SELECT state,detail FROM finding_repair_actions WHERE source_user=? "
+                             "AND service='gmail-labels' AND item_id=?", (user, source_id)).fetchone()
+        if prior:
+            try:
+                previous = json.loads(prior[1])
+            except (TypeError, ValueError):
+                return False
+            if previous.get("fingerprint") == fingerprint:
+                return False
+        conn.execute("INSERT OR REPLACE INTO finding_repair_actions VALUES(?,?,?,?,?,?)",
+                     (user, "gmail-labels", source_id, "RUNNING", json.dumps({"fingerprint":fingerprint}), utc_now()))
+    return True
+
+
 def repair_verified_gmail_labels(auth, db, settings, report: dict,
                                  apply: bool = False) -> dict:
     """Align labels on verified, mapped messages whose only difference is labels.
@@ -326,6 +348,7 @@ def repair_verified_gmail_labels(auth, db, settings, report: dict,
                 continue
             if not apply:
                 continue
+            fingerprint = None
             try:
                 gm = migrators.get(source_user)
                 if gm is None:
@@ -333,7 +356,6 @@ def repair_verified_gmail_labels(auth, db, settings, report: dict,
                     if not target_user:
                         raise RuntimeError("no target account mapping")
                     gm = GmailMigrator(auth, db, settings, source_user, target_user)
-                    gm.sync_labels()
                     migrators[source_user] = gm
                 source = gm._retry(lambda: gm.src.users().messages().get(
                     userId="me", id=source_id, format="metadata").execute(),
@@ -341,8 +363,31 @@ def repair_verified_gmail_labels(auth, db, settings, report: dict,
                 target = gm._retry(lambda: gm.tgt.users().messages().get(
                     userId="me", id=target_id, format="metadata").execute(),
                     label="repair.gmail.target-labels")
-                desired = set(gm._map_label_ids(source.get("labelIds") or []))
-                current = set(target.get("labelIds") or [])
+                # A stored label finding may outlive a target edit. Confirm content
+                # again immediately before changing its labels.
+                import base64
+                import verify_sample as V
+                from link_rewrite import rewrite_raw
+                source_raw = gm._retry(lambda: gm.src.users().messages().get(
+                    userId="me", id=source_id, format="raw").execute(), label="repair.gmail.source-content")
+                target_raw = gm._retry(lambda: gm.tgt.users().messages().get(
+                    userId="me", id=target_id, format="raw").execute(), label="repair.gmail.target-content")
+                decode = lambda value: base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+                expected = source_raw.get("raw")
+                actual = target_raw.get("raw")
+                if not isinstance(expected, str) or not isinstance(actual, str):
+                    raise RuntimeError("Fresh message content unavailable; label repair held")
+                expected = decode(expected)
+                if getattr(settings, "rewrite_drive_links", False):
+                    expected = rewrite_raw(expected, db.target_for_source_id)[0]
+                if V.compare_message(expected, decode(actual))[0] == "different":
+                    raise RuntimeError("Fresh message content differs; label repair held")
+                if db.get_target_id(source_user, source_id, "message") != target_id:
+                    raise RuntimeError("Verification mapping changed during inspection; label repair held")
+                gm.sync_labels()
+                desired = set(gm._map_label_ids(source_raw.get("labelIds") or []))
+                current = set(target_raw.get("labelIds") or [])
+                source = source_raw
                 user_labels = set(db.get_label_map(source_user).values())
                 manageable = (user_labels | (desired | current) & SYSTEM_LABELS) - immutable
                 add = sorted((desired - current) & manageable)
@@ -352,6 +397,17 @@ def repair_verified_gmail_labels(auth, db, settings, report: dict,
                     continue
                 if settings.dry_run:
                     continue
+                import hashlib
+                def content_key(raw):
+                    headers, body = V.normalise_message(raw)
+                    return hashlib.sha256(json.dumps(headers, sort_keys=True).encode() + b"\0" + body).hexdigest()
+                fingerprint = hashlib.sha256(json.dumps({"rule":1, "target":target_id,
+                    "desired":sorted(desired), "current":sorted(current),
+                    "expected":content_key(expected),
+                    "actual":content_key(decode(actual))}, sort_keys=True).encode()).hexdigest()
+                if not _claim_label_attempt(db, source_user, source_id, fingerprint):
+                    fingerprint = None
+                    raise RuntimeError("Unchanged label repair already attempted; investigation required before another write")
                 gm.limiter.acquire()
                 gm._retry(lambda ids=[target_id], a=add, r=remove:
                           gm.tgt.users().messages().batchModify(
@@ -364,16 +420,22 @@ def repair_verified_gmail_labels(auth, db, settings, report: dict,
                 fresh_source = gm._retry(lambda: gm.src.users().messages().get(
                     userId="me", id=source_id, format="metadata").execute(), label="repair.gmail.source-labels-readback")
                 if (set(after.get("labelIds") or []) & manageable) != (desired & manageable):
-                    raise RuntimeError("Target labels did not match after repair")
+                    raise RuntimeError("Target labels did not match after repair; still missing=" +
+                                       repr(sorted((desired - set(after.get("labelIds") or [])) & manageable)) +
+                                       "; still extra=" + repr(sorted((set(after.get("labelIds") or []) - desired) & manageable)))
                 if set(fresh_source.get("labelIds") or []) != set(source.get("labelIds") or []):
                     raise RuntimeError("Source labels changed during repair; a fresh check is required")
                 from finding_repairs import record
                 record(db, source_user, "gmail-labels", source_id, "VERIFIED", {"target": target_id,
-                    "scope": "labels only; body verified by preceding full comparison"})
+                    "scope": "labels only; content freshly compared before this attempt", "fingerprint": fingerprint})
                 out["changed"] += 1
                 out["labelsAdded"] += len(add)
                 out["labelsRemoved"] += len(remove)
             except Exception as exc:      # noqa: BLE001 - keep repairing other mapped messages
+                if fingerprint:
+                    from finding_repairs import record
+                    record(db, source_user, "gmail-labels", source_id, "ERROR", {
+                        "fingerprint": fingerprint, "target": target_id, "reason": str(exc)[:160]})
                 out["errors"].append(f"{source_user} {source_id}: {str(exc)[:160]}")
     return out
 

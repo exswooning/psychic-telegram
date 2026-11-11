@@ -1928,6 +1928,8 @@ export interface RetainedCopyResolution {
   note?: string
 }
 export interface OneToOneService {
+  itemChecksPending?: number
+  diagnostics?: Array<{ code: string; summary: string; nextAction: string }>
   service: string
   itemVerdict?: OneToOneVerdict
   scopeVersion?: number
@@ -1955,6 +1957,7 @@ export interface OneToOneService {
   notes?: string[]
 }
 export interface OneToOneUser {
+  fullCoverageConfirmed?: boolean
   user: string
   target: string | null
   status: string | null

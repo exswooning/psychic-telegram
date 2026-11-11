@@ -2574,7 +2574,7 @@ def run(auth, db, settings, users: list[str] | None = None, services=ALL_SERVICE
                 r["errors"].append(f"{svc} could not be verified: {type(exc).__name__}: {str(exc)[:160]}")
                 per[svc] = r
             per[svc]["provenance"] = provenance.for_service(
-                run_provenance, u, ident[u], svc, service_started_at)
+                {**run_provenance, "services": list(mine)}, u, ident[u], svc, service_started_at)
             elapsed = time.monotonic() - service_started
             with lock:
                 state = activity.pop(u, {})
@@ -2758,14 +2758,26 @@ def save_user_results(db, report: dict) -> None:
     user's row in a migration can say what was last found without reading a report file."""
     for user, per in report["users"].items():
         import verification_repairs
+        from parity_diagnostics import diagnose
         verification_repairs.enqueue_findings(db, user, per)
         for svc, r in per.items():
             verdict, _ = verdict_of({user: {svc: r}}, (svc,))
             if verdict == "IDENTICAL" and r["checked"] == 0 and not r.get("emptySource"):
                 verdict = "INCOMPLETE"          # nothing checked is not a pass (an empty source is)
+            if svc == "gmail" and verdict == "IDENTICAL" and service_complete(r) and not r.get("sampled") and r.get("sourceCoverage"):
+                started = (r.get("provenance") or {}).get("serviceStartedAt")
+                if started and hasattr(db, "write"):
+                    with db.write() as conn:
+                        if conn.execute("SELECT 1 FROM sqlite_master WHERE name='migration_item_receipts'").fetchone():
+                            conn.execute("UPDATE migration_item_receipts SET status='RECHECKED_BY_FULL_VERIFICATION' "
+                                         "WHERE source_user=? AND service='gmail' AND status='NEEDS_RECHECK' "
+                                         "AND verified_at<=? AND EXISTS (SELECT 1 FROM id_mapping m WHERE "
+                                         "m.source_user=migration_item_receipts.source_user AND m.source_id=migration_item_receipts.source_id "
+                                         "AND m.target_id=migration_item_receipts.target_id AND m.type='message')", (user, started))
             db.save_user_verification(user, svc, verdict, r["checked"], r["identical"],
                                       (r.get("sampled") or {}).get("of"), {
                 "completion": "COMPLETE" if service_complete(r) else "INCOMPLETE",
+                "diagnostics": diagnose(svc, r),
                 "counts": {k: len(r[k]) for k in ("differences", "missing", "duplicates", "extras", "notCopied", "errors")},
                 **{k: r[k][:25] for k in ("differences", "missing", "duplicates", "notCopied", "errors")},
                 "extras": r["extras"][:10], "notes": r["notes"][:10], "sampled": r.get("sampled"),

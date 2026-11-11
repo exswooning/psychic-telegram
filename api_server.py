@@ -2745,7 +2745,11 @@ def _verification_view(account_id: int | None) -> dict:
         except sqlite3.OperationalError:
             repairs = []
     verifications = db_module.parse_user_verification_rows(rows)
-    rollup = db_module.verification_rollup(users, verifications)
+    with cpdb.ro(path) as receipt_conn:
+        pending = db_module.pending_mail_checks(receipt_conn)
+        expected_services = db_module.expected_verification_services(receipt_conn)
+        pending_diagnostics = db_module.pending_mail_diagnostics(receipt_conn)
+    rollup = db_module.verification_rollup(users, verifications, pending_items=pending, expected_services=expected_services, pending_diagnostics=pending_diagnostics)
     latest_repairs = {}
     for r in repairs:
         latest_repairs.setdefault(r["source_user"], dict(r))

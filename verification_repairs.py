@@ -101,12 +101,14 @@ def enqueue_findings(db, user, per):
                     if r["finding_key"] not in seen]
                 _resolve(conn, gone, now)
             blocked = _blocking_ids(result)
-            if not result.get("sampled") and blocked is not None and (
+            if not result.get("itemScope") and not result.get("sampled") and blocked is not None and (
                     result.get("checked", 0) > 0 or result.get("emptySource")):
                 gone = [r for r in conn.execute(
-                    "SELECT source_user,service,finding_key,item_id,issue FROM verification_repair_queue "
+                    "SELECT source_user,service,finding_key,item_id,issue,last_seen FROM verification_repair_queue "
                     "WHERE source_user=? AND service=? AND state!='RESOLVED'", (user, service)).fetchall()
-                    if r["finding_key"] not in seen and r["item_id"] not in blocked]
+                    if r["finding_key"] not in seen and r["item_id"] not in blocked
+                    and (not (result.get("provenance") or {}).get("serviceStartedAt")
+                         or r["last_seen"] < result["provenance"]["serviceStartedAt"])]
                 _resolve(conn, gone, now)
     return count
 

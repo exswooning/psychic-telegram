@@ -284,7 +284,7 @@ def verify_written_mail(migrator, source_id, target_id, expected_raw, labels, al
     import hashlib
     import verify_sample as V
     result = V.Verifier._blank()
-    result.update(checked=1, sampled={"checked": 1, "of": max(2, migrator.stats.get("inserted", 0) + 1)})
+    result.update(checked=1, itemScope=True)
     receipt = {"target": target_id, "verifiedAt": utc_now(), "scope": "message content and labels"}
     decode = lambda raw: base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4))
     try:
@@ -324,6 +324,10 @@ def verify_written_mail(migrator, source_id, target_id, expected_raw, labels, al
             result["identical"] = 1
     except Exception as exc:
         result["errors"] = [f"inline verification {source_id}: {str(exc)[:180]}"]
+    from parity_diagnostics import diagnose
+    receipt["verificationKind"] = "item"
+    receipt["findings"] = {k: result[k] for k in ("differences", "errors")}
+    receipt["diagnostics"] = diagnose("gmail", result)
     receipt["status"] = "VERIFIED" if result["identical"] == 1 else "NEEDS_RECHECK"
     with migrator.db.write() as c:
         c.execute("""CREATE TABLE IF NOT EXISTS migration_item_receipts (
@@ -333,5 +337,6 @@ def verify_written_mail(migrator, source_id, target_id, expected_raw, labels, al
         c.execute("INSERT OR REPLACE INTO migration_item_receipts VALUES(?,?,?,?,?,?,?)",
                   (migrator.source_user, "gmail", source_id, target_id, receipt["verifiedAt"], receipt["status"], json.dumps(receipt)))
     if receipt["status"] != "VERIFIED":
-        V.save_user_results(migrator.db, {"users": {migrator.source_user: {"gmail": result}}})
+        import verification_repairs
+        verification_repairs.enqueue_findings(migrator.db, migrator.source_user, {"gmail": result})
     return receipt["status"] == "VERIFIED"

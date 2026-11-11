@@ -261,3 +261,15 @@ describe('what a service line says', () => {
     expect(serviceSummary({ ...s, identical: 15, counts: {} })).toBe('drive: 15 checked · all identical')
   })
 })
+
+it('shows an automatic diagnosis and its guarded next step', async () => {
+  cp.view.mockResolvedValue(view({ users: [{
+    user: 'u@a.com', target: 'u@b.com', status: 'DONE', verdict: 'DIFFERENCES', verifiedAt: '2026-11-11T00:00:00Z',
+    services: [svc('gmail', 'DIFFERENCES', { diagnostics: [{ code: 'MAIL_MAPPING_GAP',
+      summary: 'Destination coverage is not established.', nextAction: 'Reconcile DMS before inserting another message.' }] })],
+  }] }))
+  show()
+  fireEvent.click(await screen.findByLabelText('show u@a.com'))
+  expect(await screen.findByText('Destination coverage is not established.')).toBeInTheDocument()
+  expect(screen.getByText(/Next step: Reconcile DMS/)).toBeInTheDocument()
+})
