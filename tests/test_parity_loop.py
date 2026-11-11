@@ -22,7 +22,7 @@ def test_a_user_is_routed_to_the_checks_for_what_finished(db, settings, monkeypa
     monkeypatch.setattr(P, "_say", lambda lvl, msg: said.append((lvl, msg)))
     P.handle(object(), db, settings, {SRC_USER.lower(): "t@t.x"}, SRC_USER, 10.0, {"drive": {}, "gmail": {}})
     rows = dict((s, v) for s, v in db.conn.execute("SELECT stage, verdict FROM parity_user").fetchall())
-    assert rows == {"drive": "NOT_AT_PARITY", "gmail-awaiting-dms": "PARITY"}
+    assert rows == {"drive": "NOT_AT_PARITY", "gmail-awaiting-dms": "WAITING_DMS"}
     assert ("ERROR", f"{SRC_USER}: drive: drive mtime x1") in said and calls == ["drive", "mail", "count"]
 
 

@@ -7,6 +7,7 @@ agent to review; it never marks an incident fixed or changes tenant data.
 from __future__ import annotations
 
 import hashlib
+from contextlib import closing
 import ipaddress
 import json
 import os
@@ -19,7 +20,7 @@ import urllib.request
 
 from error_resolution import classify, redact
 
-VERSION = 1
+VERSION = 2
 MAX_CALLS_DAY = 12
 MAX_CASES = 50
 FIELDS = {"hypothesis", "uncertainty", "investigation", "proposed_fix", "regression_test", "evidence_ids"}
@@ -29,6 +30,9 @@ hypothesis, uncertainty, investigation, proposed_fix, regression_test (short str
 evidence_ids (a nonempty list drawn only from supplied evidence IDs).
 Distinguish observed error from possible cause. Describe a specific read-only check,
 a conditional code fix and a regression test. Say unknown when evidence is missing.
+A suffix like "mail failed x9" is a count of nine failures, not an error code.
+Delivery receipt counters do not prove that the remaining messages are absent.
+Do not infer authentication failure from a failure count alone.
 Do not claim parity, a completed repair, or a verified root cause. No commands,
 credentials, target/source writes, permissions changes or instructions to bypass holds.
 """
@@ -39,6 +43,14 @@ def enqueue(state, message, *, account, source, observed_at=None, run=None, vers
                 "account": account, "source": os.path.basename(source),
                 "observed_at": observed_at or "unknown", "run": run or "unknown",
                 "source_version": version or "unknown"}
+    failures = re.search(r"\bmail failed x(\d+)\b", message)
+    receipts = re.search(r"\bmail receipts (\d+) of (\d+) delivered\b", message)
+    if failures:
+        evidence["facts"] = {"failed_item_count": int(failures[1]), "root_cause": "unknown"}
+    elif receipts:
+        evidence["facts"] = {"confirmed_receipts": int(receipts[1]), "mapped_items": int(receipts[2]),
+                             "unconfirmed_receipts": max(0, int(receipts[2]) - int(receipts[1])),
+                             "missing_messages_proven": False}
     # Observation time varies on every poll; actual run/version and error matter.
     identity = {k: v for k, v in evidence.items() if k != "observed_at"}
     key = hashlib.sha256(json.dumps([VERSION, identity], sort_keys=True).encode()).hexdigest()
@@ -72,7 +84,7 @@ def resource_hold():
         # Repairs may be threads, not processes; an unreadable ledger is a hold.
         import sqlite3
         for db in Path(__file__).resolve().parent.glob("data/accounts/*/migration.db"):
-            with sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=2) as conn:
+            with closing(sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=2)) as conn:
                 if conn.execute("SELECT 1 FROM repair_runs WHERE finished_at IS NULL LIMIT 1").fetchone():
                     return "unfinished repair record"
     except Exception:
@@ -117,7 +129,7 @@ def request_model(evidence, endpoint, model):
     return {"text": result["response"], "usage": usage}
 
 
-def validate(raw):
+def validate(raw, evidence=None):
     result = json.loads(raw)
     if not isinstance(result, dict) or set(result) != FIELDS:
         raise ValueError("unexpected diagnostic fields")
@@ -127,6 +139,10 @@ def validate(raw):
         if not isinstance(result[key], str) or not result[key].strip() or len(result[key]) > 700:
             raise ValueError("invalid diagnostic text")
         result[key] = redact(result[key], identities=True)
+    if (evidence or {}).get("facts", {}).get("failed_item_count") is not None:
+        text = " ".join(result[k] for k in FIELDS - {"evidence_ids"})
+        if re.search(r"(?:error|status)\s+code\s*(?:[:=]\s*)?[`\"']?x\d+\b", text, re.I):
+            raise ValueError("failure count misrepresented as an error code")
     return result
 
 
@@ -157,7 +173,7 @@ def drain_one(state, *, endpoint, model, hold=resource_hold, ask=None, now=None,
         if isinstance(raw, dict):
             candidate["usage"] = raw["usage"]
             raw = raw["text"]
-        candidate["diagnosis"] = validate(raw)
+        candidate["diagnosis"] = validate(raw, candidate["evidence"])
         candidate["status"] = "advisory"
     except Exception as exc:
         candidate["status"] = "unavailable"

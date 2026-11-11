@@ -135,12 +135,14 @@ def classify_payload(message, lookup, fetch_text_attachment=None, unknown=None, 
     }
 
 
-def reconcile_dms(auth, db, settings, progress=print, users=None):
+def reconcile_dms(auth, db, settings, progress=None, users=None):
     """Inspect exact deferred IDs; Google completion counters alone prove nothing.
 
     Also recheck engine link copies after DMS to detect overwritten content,
     labels, or overlap. No tenant data is written by this function.
     """
+    if progress is None:
+        progress = lambda message: print(message, flush=True)
     from config import DEFERRED_TO_DMS, DELIVERED_BY_DMS
     from gmail_engine import GmailMigrator
     from migration_checks import verify_written_mail
@@ -183,6 +185,9 @@ def reconcile_dms(auth, db, settings, progress=print, users=None):
             "SELECT item_id,status FROM audit_log WHERE source_user=? AND item_type='message' AND status IN (?, ?, 'SUCCESS') ORDER BY item_id",
             (source, DEFERRED_TO_DMS, DELIVERED_BY_DMS),
         ).fetchall()
+
+        user_start = out["checked"]
+        progress(f"DMS reconciliation: {source} | starting {len(rows)} email checks")
 
         def inspect(item):
             _stop_check()
@@ -291,7 +296,7 @@ def reconcile_dms(auth, db, settings, progress=print, users=None):
                                     "error": error,
                                 }
                             ],
-                            "sampled": {"checked": 1, "of": max(2, len(rows))},
+                            "checked": 1, "itemScope": True,
                         }
                     },
                 )
@@ -321,8 +326,11 @@ def reconcile_dms(auth, db, settings, progress=print, users=None):
                     verified_items.append(verified)
                 if out["checked"] % 25 == 0:
                     progress(
-                        f"DMS reconciliation: {out['checked']} checked, {out['verified']} verified, {out['blocked']} unresolved"
+                        f"DMS reconciliation: {source} | items={out['checked'] - user_start}/{len(rows)} | "
+                        f"{out['checked']} checked, {out['verified']} verified, {out['blocked']} unresolved"
                     )
+        progress(f"DMS reconciliation: {source} | item checks finished {out['checked'] - user_start}/{len(rows)}; "
+                 "mailbox completion still requires coverage checks")
     out["recordedDelivered"] = db.mark_dms_delivered(verified_items)
     # The original migration remains AWAITING_DMS until fresh full source
     # coverage passes. New mail arriving during DMS cannot disappear here.

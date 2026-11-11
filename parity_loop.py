@@ -54,6 +54,9 @@ def check_drive(auth, db, st, user: str, target: str) -> list[str]:
     r = fidelity_audit.audit_user(auth, db, st, user, target, workers=8, say=lambda *_: None)
     reasons += [f"drive {k} x{n}" for k, n in sorted(r["byKind"].items())]
     for f in form_deep_check.check_user_forms(auth, db, user, target):
+        if f.get("error"):
+            reasons.append(f"form check incomplete: {str(f['error'])[:160]}")
+            continue
         if not f.get("parity"):
             it = f.get("items", {})
             reasons.append(f"form {f.get('title', f.get('error', '?'))[:40]!r}: "
@@ -96,9 +99,10 @@ def check_counts(auth, db, st, user: str, target: str, svc: str = "") -> tuple[l
     mine = svcs.get(key) or {}
     par = mine.get("parity")
     metrics = {"countParity": par, "source": mine.get("source"), "target": mine.get("target"), "expected": mine.get("expected")}
-    if par is None:
-        return ([] if not mine.get("expected") else [f"{svc} count unknown (source {mine.get('source')})"]), metrics
-    return ([] if par >= 0.999 else [f"{svc} count {mine.get('target')} of {mine.get('expected')}"]), metrics
+    expected, target_count = mine.get("expected"), mine.get("target")
+    if not mine or expected is None or target_count is None or mine.get("source") is None:
+        return [f"{svc} count unknown (source {mine.get('source')})"], metrics
+    return ([] if target_count == expected else [f"{svc} count {target_count} of {expected}"]), metrics
 
 
 def _write(db, user, stage, verdict, reasons, metrics):
@@ -133,12 +137,13 @@ def handle(auth, db, st, ledger: dict, user: str, elapsed: float, services: dict
                 more, extra = check_counts(auth, db, st, user, target, svc)
                 metrics.update(extra)
                 # Mail owed to the DMS is not missing yet: it waits for the import.
-                if more and metrics.get("owedToDms"):
-                    stage, more = "gmail-awaiting-dms", []
+                if svc == "gmail" and metrics.get("owedToDms"):
+                    stage = "gmail-awaiting-dms"
+                    more.append(f"mail awaiting DMS confirmation x{metrics['owedToDms']}")
                 reasons += more
         except Exception as exc:      # noqa: BLE001 - a check that cannot run is itself a finding
             reasons, metrics = [f"{svc} check could not run: {str(exc)[:160]}"], {}
-        verdict = "PARITY" if not reasons else "NOT_AT_PARITY"
+        verdict = "WAITING_DMS" if stage == "gmail-awaiting-dms" else ("PARITY" if not reasons else "NOT_AT_PARITY")
         _write(db, user, stage, verdict, reasons, metrics)
         if reasons:
             for r in reasons:
@@ -213,7 +218,7 @@ def main(argv=None) -> int:
                                                 "HAVING SUM(verdict!='PARITY')=0 AND SUM(stage='gmail')>0")}
             if not reached and len(at) == len(ledger) and ledger:
                 reached = True
-                _say("INFO", f"PARITY REACHED for all {len(ledger)} users -- run the full tenant deep check")
+                _say("INFO", f"Stage checks passed for all {len(ledger)} users; full content and tenant parity still unconfirmed")
             if args.once:
                 pool.shutdown(wait=True)
                 return 0

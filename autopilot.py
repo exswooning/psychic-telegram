@@ -19,6 +19,7 @@ needs Claude:` line logwatch picks up. The model never chooses an action. Diagno
 from __future__ import annotations
 
 import json
+from contextlib import closing
 import os
 import re
 import subprocess
@@ -106,9 +107,8 @@ def repairs_enabled(account: int) -> bool:
     """The operator's repair switch, read from the ledger (read-only). Unreadable = not enabled (the safe side)."""
     try:
         import sqlite3
-        c = sqlite3.connect(f"file:{HERE}/data/accounts/{account}/migration.db?mode=ro", uri=True)
-        row = c.execute("SELECT enabled FROM verification_repair_policy WHERE id=1").fetchone()
-        c.close()
+        with closing(sqlite3.connect(f"file:{HERE}/data/accounts/{account}/migration.db?mode=ro", uri=True)) as c:
+            row = c.execute("SELECT enabled FROM verification_repair_policy WHERE id=1").fetchone()
         return bool(row and row[0])
     except Exception:      # noqa: BLE001
         return False
@@ -138,7 +138,8 @@ def act(a: dict, state: dict, account: int) -> str:
         from config import Settings
         from db import MigrationDB
         st = Settings(account_id=account)
-        r = repair.fix_modified_times(AuthManager(st), MigrationDB(st.db_path), st, apply=True, users={a["user"]})
+        with closing(MigrationDB(st.db_path)) as ledger:
+            r = repair.fix_modified_times(AuthManager(st), ledger, st, apply=True, users={a["user"]})
         return json.dumps({k: v for k, v in r.items() if not isinstance(v, (list, dict))})
     return ""
 
@@ -187,11 +188,11 @@ def build_report(state: dict, parity: dict | None = None, bad: list | None = Non
     ev = state.get("events", [])
     fixed: dict = {}
     for e in ev:
-        if e["k"] in ("fix_mtime", "resume", "parity_restart"):
+        if e["k"] in ("fix_mtime", "resume", "parity_restart") and not e.get("d", "").startswith(("skipped:", "held")):
             fixed.setdefault(e["k"], []).append(e["who"] or "run")
     shapes = state.get("shapes", {})
-    # Open means seen in the last six hours: an old repeat is not something waiting for Claude.
-    waiting = {k: v for k, v in shapes.items() if v.get("open", True) and time.time() - v.get("last", 0) < 6 * 3600}
+    # Age is not resolution evidence. Keep old findings visible until explicitly resolved.
+    waiting = {k: v for k, v in shapes.items() if v.get("open", True)}
     lines = [f"autopilot report {time.strftime('%m-%d %H:%MZ', time.gmtime())} | run: {run or '?'} | "
              f"held: {state.get('held', 'no')} | resumes today: "
              f"{sum(1 for d in state.get('resumes', []) if d.startswith(time.strftime('%Y-%m-%d', time.gmtime())))}"]
@@ -199,7 +200,7 @@ def build_report(state: dict, parity: dict | None = None, bad: list | None = Non
         lines.append("parity: " + "; ".join(f"{st} " + "/".join(f"{n} {v.replace('NOT_AT_PARITY', 'BAD').replace('PARITY', 'ok')}"
                                                               for v, n in sorted(vs.items())) for st, vs in sorted(parity.items())))
     if bad:
-        lines.append("not at parity: " + ", ".join(u.split("@")[0] for u in bad[:12]) + (f" +{len(bad) - 12}" if len(bad) > 12 else ""))
+        lines.append("not at parity: " + ", ".join(u.split("@")[0] for u in list(bad)[:12]) + (f" +{len(bad) - 12}" if len(bad) > 12 else ""))
     lines.append("fixed by itself: " + ("; ".join(f"{k} x{len(v)} ({', '.join(sorted(set(v))[:6])})" for k, v in fixed.items()) or "nothing yet"))
     lines.append(f"waiting for Claude ({len(waiting)} kinds, {sum(v['n'] for v in waiting.values())} events):" if waiting else "waiting for Claude: nothing")
     for k, v in sorted(waiting.items(), key=lambda kv: -kv[1]["n"])[:8]:
@@ -208,37 +209,61 @@ def build_report(state: dict, parity: dict | None = None, bad: list | None = Non
 
 
 def write_report(state: dict, account: int) -> None:
-    parity, bad = None, []
+    """Read saved evidence without leaking connections or truncating the last good report."""
+    import sqlite3
+    import tempfile
+    parity, bad, overall, unavailable = {}, [], [], []
     try:
-        import sqlite3
-        c = sqlite3.connect(f"file:{HERE}/data/accounts/{account}/migration.db?mode=ro", uri=True)
-        parity = {}
-        for st, v, n in c.execute("SELECT stage, verdict, COUNT(*) FROM parity_user GROUP BY 1, 2"):
-            parity.setdefault(st, {})[v] = n
-        bad = [u for (u,) in c.execute("SELECT DISTINCT source_user FROM parity_user WHERE verdict!='PARITY'")]
-    except Exception:      # noqa: BLE001 - no ledger yet: the rest of the report still stands
-        pass
-    # Overall parity: every user's latest verdict per service (verify), so a user is named with WHICH service
-    # is not at parity and why. This is the list the operator asked to see.
-    overall = []
+        with closing(sqlite3.connect(
+                f"file:{HERE}/data/accounts/{account}/migration.db?mode=ro", uri=True, timeout=3)) as c:
+            c.row_factory = sqlite3.Row
+            try:
+                for st, v, n in c.execute("SELECT stage, verdict, COUNT(*) FROM parity_user GROUP BY 1, 2"):
+                    parity.setdefault(st, {})[v] = n
+                bad = [u for (u,) in c.execute("SELECT DISTINCT source_user FROM parity_user WHERE verdict!='PARITY'")]
+            except sqlite3.OperationalError:
+                unavailable.append("stage results unavailable")
+            try:
+                from db import (parse_user_verification_rows, verification_rollup,
+                                pending_mail_checks, expected_verification_services)
+                users = c.execute("SELECT * FROM identity_map WHERE entity_type='user'").fetchall()
+                rows = parse_user_verification_rows(c.execute("SELECT * FROM user_verification").fetchall())
+                summary = verification_rollup(users, rows, pending_items=pending_mail_checks(c),
+                                              expected_services=expected_verification_services(c))
+                for u in summary["users"]:
+                    reasons = [f"{r['service']} {r['verdict'].lower()}" for r in u["services"]
+                               if r["verdict"] not in ("IDENTICAL", "EMPTY")]
+                    if not u["fullCoverageConfirmed"]:
+                        reasons.append("full coverage not established")
+                    if reasons:
+                        overall.append(f"- {u['user'].split('@')[0]}: " + ", ".join(reasons))
+            except (sqlite3.OperationalError, ValueError, TypeError, KeyError):
+                unavailable.append("verification coverage unavailable; parity unconfirmed")
+    except sqlite3.Error:
+        unavailable.append("ledger unavailable; parity unconfirmed")
     try:
-        import sqlite3
-        c = sqlite3.connect(f"file:{HERE}/data/accounts/{account}/migration.db?mode=ro", uri=True)
-        rows = c.execute("SELECT u.source_user, u.service, u.verdict FROM user_verification u JOIN (SELECT source_user, service, MAX(rowid) m "
-                         "FROM user_verification GROUP BY 1,2) l ON u.rowid = l.m").fetchall()
-        bad: dict = {}
-        for user, svc, verdict in rows:
-            if verdict != "IDENTICAL":
-                bad.setdefault(user, []).append(f"{svc} {verdict.lower()}")
-        overall = [f"- {u.split('@')[0]}: " + ", ".join(v) for u, v in sorted(bad.items())]
-    except Exception:      # noqa: BLE001
-        pass
-    run = subprocess.run(["pgrep", "-f", f"main.py --account-id {account} migrate"], capture_output=True, text=True).stdout.split()
-    with open(REPORT, "w", encoding="utf-8") as fh:
-        text = build_report(state, parity, bad, run[0] if run else "stopped")
-        if overall:
-            text += f"overall not at parity ({len(overall)} users):\n" + "\n".join(overall[:15]) + "\n"
-        fh.write(text)
+        run = subprocess.run(["pgrep", "-f", f"main.py --account-id {account} migrate"],
+                             capture_output=True, text=True, timeout=5)
+        running = run.stdout.split()
+        run_label = running[0] if running else ("stopped" if run.returncode == 1 else "unknown")
+    except (OSError, subprocess.TimeoutExpired):
+        run_label = "unknown (process lookup failed)"
+    text = build_report(state, parity, bad, run_label)
+    if overall:
+        text += f"overall parity unconfirmed ({len(overall)} users):\n" + "\n".join(overall) + "\n"
+    if unavailable:
+        text += "Evidence warnings: " + "; ".join(unavailable) + "\n"
+    text += "Escalations are recorded for review; this is not confirmation of delivery to Claude.\n"
+    fd, name = tempfile.mkstemp(prefix="report-", dir=os.path.dirname(REPORT))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(name, REPORT)
+    finally:
+        if os.path.exists(name):
+            os.unlink(name)
 
 
 def _note(text: str) -> None:

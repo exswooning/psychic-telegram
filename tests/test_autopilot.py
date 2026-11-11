@@ -82,11 +82,11 @@ def test_the_repair_action_refuses_while_the_operator_has_paused_repairs(tmp_pat
     assert A.act({"do": "fix_mtime", "user": "u@s"}, {}, 3).startswith("skipped: automatic repairs are paused")
 
 
-def test_only_recent_items_count_as_waiting_and_a_deviation_clears_with_its_run():
+def test_old_unresolved_items_remain_visible_until_evidence_resolves_them():
     st = {"shapes": {"old": {"n": 73, "ex": "old thing", "who": "x", "t": "11-10 09:12Z", "last": 0},
                      "fresh": {"n": 2, "ex": "new thing", "who": "y", "t": "11-10 12:00Z", "last": __import__("time").time()}}}
     r = A.build_report(st, None, None, "stopped")
-    assert "waiting for Claude (1 kinds, 2 events):" in r and "old thing" not in r
+    assert "waiting for Claude (2 kinds, 75 events):" in r and "old thing" in r
 
 
 def test_the_dms_delta_loop_stops_on_zero_and_escalates_when_failures_do_not_fall():

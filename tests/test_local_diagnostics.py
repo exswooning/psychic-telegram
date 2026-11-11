@@ -141,3 +141,20 @@ def test_thread_tuning_is_explicit_and_bounded_by_available_cpu(monkeypatch):
     assert D.model_threads() == 4
     monkeypatch.setenv('AUTOPILOT_MODEL_THREADS', '99')
     assert D.model_threads() == 8
+
+
+def test_failure_count_is_not_an_error_code():
+    state = queued('it.department@example.com: gmail: mail failed x9')
+    evidence = next(iter(state['local_diagnostics'].values()))['evidence']
+    assert evidence['facts'] == {'failed_item_count': 9, 'root_cause': 'unknown'}
+    case = D.drain_one(state, endpoint='', model='fake', hold=lambda: '',
+                      ask=lambda e: answer(hypothesis='The mail failed with error code x9.'))
+    assert case['status'] == 'unavailable'
+    assert 'diagnosis' not in case
+
+
+def test_receipt_gap_is_not_declared_missing_mail():
+    state = queued('gmail: mail receipts 955 of 978 delivered')
+    facts = next(iter(state['local_diagnostics'].values()))['evidence']['facts']
+    assert facts['unconfirmed_receipts'] == 23
+    assert facts['missing_messages_proven'] is False

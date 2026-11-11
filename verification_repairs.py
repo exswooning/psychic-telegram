@@ -80,14 +80,15 @@ def enqueue_findings(db, user, per):
                     iid = (item.get("source") or item.get("id") or item.get("item")
                            or item.get("target")) if isinstance(item, dict) else None
                     conn.execute("""INSERT INTO verification_repair_queue
-                        (source_user,service,finding_key,category,item_id,state,detail,first_seen,last_seen,issue)
-                        VALUES(?,?,?,?,?,'QUEUED',?,?,?,?)
+                        (source_user,service,finding_key,category,item_id,state,detail,first_seen,last_seen,issue,issue_version)
+                        VALUES(?,?,?,?,?,'QUEUED',?,?,?,?,?)
                         ON CONFLICT(source_user,service,finding_key) DO UPDATE SET
-                        last_seen=excluded.last_seen,issue=excluded.issue,
+                        last_seen=excluded.last_seen,issue=excluded.issue,issue_version=excluded.issue_version,
                         state=CASE WHEN verification_repair_queue.state='RESOLVED' THEN 'QUEUED'
                                    ELSE verification_repair_queue.state END,resolved_at=NULL""",
                         (user, service, key, category, iid, detail, now, now,
-                         known_issues.classify(service, item if category != "notCopied" else {"notCopied": item})))
+                         known_issues.classify(service, item if category != "notCopied" else {"notCopied": item}),
+                         known_issues.CLASSIFIER_VERSION))
                     count += 1
             if result.get("sourceCoverage"):
                 # The source listing is exhaustive even when the comparison samples: an unmapped

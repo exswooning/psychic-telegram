@@ -258,24 +258,36 @@ def classify(service: str, item) -> str:
     return "unclassified"
 
 
+# Bump when classification rules change. Unknown is a result, not an instruction
+# to rescan every historical finding for every newly checked message.
+CLASSIFIER_VERSION = 1
+CLASSIFY_BATCH = 200
+
+
 def ensure(conn) -> None:
     conn.execute("""CREATE TABLE IF NOT EXISTS issue_fix_log (
         id INTEGER PRIMARY KEY AUTOINCREMENT, fixed_at TEXT NOT NULL, source_user TEXT NOT NULL,
         service TEXT NOT NULL, issue TEXT NOT NULL, item_id TEXT, how TEXT NOT NULL)""")
     cols = {r[1] for r in conn.execute("PRAGMA table_info(verification_repair_queue)")}
-    if cols and "issue" not in cols:
+    if not cols:
+        return
+    if "issue" not in cols:
         conn.execute("ALTER TABLE verification_repair_queue ADD COLUMN issue TEXT")
-    if cols:
-        # Rows queued before kinds existed, or before their kind was known: classified
-        # from their own stored detail (a kind added later names rows already open).
-        for r in conn.execute("SELECT rowid, service, category, detail FROM verification_repair_queue "
-                              "WHERE issue IS NULL OR issue='unclassified'").fetchall():
-            try:
-                item = json.loads(r[3])
-            except ValueError:
-                item = r[3]
-            conn.execute("UPDATE verification_repair_queue SET issue=? WHERE rowid=?",
-                         (classify(r[1], item if r[2] != "notCopied" else {"notCopied": item}), r[0]))
+    if "issue_version" not in cols:
+        conn.execute("ALTER TABLE verification_repair_queue ADD COLUMN issue_version INTEGER NOT NULL DEFAULT 0")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_finding_issue_version ON verification_repair_queue(issue_version)")
+    rows = conn.execute(
+        "SELECT rowid, service, category, detail FROM verification_repair_queue "
+        "WHERE issue_version < ? ORDER BY issue_version, rowid LIMIT ?",
+        (CLASSIFIER_VERSION, CLASSIFY_BATCH)).fetchall()
+    for r in rows:
+        try:
+            item = json.loads(r[3])
+        except ValueError:
+            item = r[3]
+        conn.execute("UPDATE verification_repair_queue SET issue=?,issue_version=? WHERE rowid=?",
+                     (classify(r[1], item if r[2] != "notCopied" else {"notCopied": item}),
+                      CLASSIFIER_VERSION, r[0]))
 
 
 def log_resolved(conn, rows, now: str) -> None:
