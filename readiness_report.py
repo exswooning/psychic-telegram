@@ -8,6 +8,9 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
+
+from verification_provenance import FILES
 
 SERVICES = ('drive', 'gmail', 'calendar', 'contacts', 'tasks', 'directory')
 ISSUES = ('differences', 'missing', 'duplicates', 'extras', 'notCopied', 'errors', 'unverified')
@@ -36,8 +39,11 @@ def assess(report, expected_users, services=SERVICES):
                 blockers.append('No saved check')
             else:
                 for category in ISSUES:
-                    if r.get(category):
-                        blockers.append(f'{category}: {len(r[category])}')
+                    items = r.get(category)
+                    if not isinstance(items, list):
+                        blockers.append(f'{category}: evidence missing or invalid')
+                    elif items:
+                        blockers.append(f'{category}: {len(items)}')
                 if r.get('coverageComplete') is not True:
                     blockers.append('Full feature coverage not established')
                 if type(r.get('checked')) is not int or r['checked'] < 0:
@@ -57,6 +63,8 @@ def assess(report, expected_users, services=SERVICES):
                 if not isinstance(hashes, dict) or not hashes:
                     blockers.append('Comparison manifest missing or invalid')
                 else:
+                    if set(hashes) != set(FILES) or any(not isinstance(v, str) or not re.fullmatch(r'[0-9a-f]{64}', v) for v in hashes.values()):
+                        blockers.append('Comparison manifest files or hashes incomplete')
                     digest = hashlib.sha256(json.dumps(hashes, sort_keys=True).encode()).hexdigest()
                     if digest != provenance.get('codeDigest'):
                         blockers.append('Comparison manifest digest mismatch')

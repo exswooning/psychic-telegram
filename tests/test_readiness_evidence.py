@@ -12,7 +12,7 @@ def complete(tmp_path):
     for name in P.FILES:
         (tmp_path / name).write_text('comparison code')
     p = P.begin(tmp_path, ['u@s'], R.SERVICES)
-    result = dict(checked=1, identical=1, coverageComplete=True)
+    result = dict(checked=1, identical=1, coverageComplete=True, **{k: [] for k in R.ISSUES})
     users = {'u@s': {svc: {**result, 'provenance': P.for_service(p, 'u@s', 'u@t', svc, p['startedAt'])}
                      for svc in R.SERVICES}}
     return {'users': users, 'coverage': {'completion': 'COMPLETE'}}, p
@@ -28,12 +28,14 @@ def test_full_evidence_is_not_a_production_or_full_fidelity_certificate(tmp_path
 
 @pytest.mark.parametrize('mutate', [
     lambda r: r['users']['u@s']['gmail'].update(extras=[{'id': 'extra'}]),
+    lambda r: r['users']['u@s']['gmail'].pop('errors'),
     lambda r: r['users']['u@s']['drive'].update(unverified=[{'state': 'timeout'}]),
     lambda r: r['users']['u@s']['drive'].pop('provenance'),
     lambda r: r.update(verifyLimit=25),
     lambda r: r['users']['u@s'].pop('tasks'),
     lambda r: r['users']['u@s']['gmail']['provenance'].update(sourceUser='other@s'),
     lambda r: r['users']['u@s']['gmail']['provenance'].update(codeDigest='different'),
+    lambda r: r['users']['u@s']['gmail']['provenance'].update(fileHashes=['not-a-manifest']),
     lambda r: r['users']['u@s']['gmail'].update(sampled={'of': 100, 'checked': 1}),
 ])
 def test_incomplete_or_contradictory_evidence_blocks_even_if_verdict_claims_identical(tmp_path, mutate):
