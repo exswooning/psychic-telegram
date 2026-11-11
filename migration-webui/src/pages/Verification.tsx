@@ -44,6 +44,7 @@ import { tint } from '@/theme'
 import { describeElapsed } from '@/hooks/useRunningJobs'
 import { verificationEstimate } from '@/components/RunningJobDetail.utils'
 import PairParityCard from '@/components/PairParityCard'
+import VerificationUserResults from '@/components/VerificationUserResults'
 import { plainRunDetail } from '@/utils/runDetail'
 
 const runWhen = (value: string | null): string => {
@@ -100,7 +101,8 @@ const VerificationRuns: React.FC = () => {
   const estimate = job?.running
     ? verificationEstimate(job.lines, job.elapsed) : null
 
-  return (
+  return (<>
+    <VerificationUserResults accountId={accountId} />
     <Card elevation={0} sx={{ borderRadius: 2, border: '1px solid', borderColor: 'divider', mb: 3 }}>
       <CardContent sx={{ p: 3 }}>
         <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 1 }}>
@@ -177,7 +179,7 @@ const VerificationRuns: React.FC = () => {
         </TableContainer>
       </CardContent>
     </Card>
-  )
+  </>)
 }
 
 /**
