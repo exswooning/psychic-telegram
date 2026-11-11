@@ -410,6 +410,9 @@ def _key(db, user, services=None):
 
 def _claim(db, user, key):
     with db.write() as conn:
+        policy = conn.execute("SELECT enabled FROM verification_repair_policy WHERE id=1").fetchone()
+        if not policy or not policy[0]:
+            return False
         prior = conn.execute("SELECT state,owner_pid FROM verification_repairs "
                              "WHERE source_user=? AND fingerprint=?", (user, key)).fetchone()
         if prior and (prior["state"] not in ("RUNNING", "INTERRUPTED") or
@@ -543,6 +546,9 @@ def finished_user(auth, db, settings, user, per, limit, retry, progress=print):
     import verify_sample as V
     initial = {"users": {user: per}}
     V.save_user_results(db, initial)
+    if not enabled(db):
+        progress(f"repair: {user} paused by operator; verification findings saved, no repair started")
+        return None
     closed = reconcile_mapped(db, user)
     if closed:
         progress(f"repair: {user} {closed} queued item(s) are mapped now; closed")
@@ -566,9 +572,17 @@ def finished_user(auth, db, settings, user, per, limit, retry, progress=print):
         have = {i.get("id") for i in work[service].get("notCopied", []) if isinstance(i, dict)}
         work[service].setdefault("notCopied", []).extend(i for i in items if i.get("id") not in have)
     ensure(db)
+    if not enabled(db):
+        progress(f"repair: {user} paused during inspection; no repair started")
+        return None
     key = _key(db, user, per)
     if not _claim(db, user, key):
         progress(f"repair: {user} unchanged findings already handled; see repair history")
+        return None
+    if not enabled(db):
+        _finish(db, user, [key], "INTERRUPTED", json.dumps({"user": user, "services": [],
+                  "reason": "Repair policy paused before execution; no target repair started"}))
+        progress(f"repair: {user} paused before execution; no repair started")
         return None
     run_id = db.repair_started()
     progress(f"repair: {user} started; scope=one-user")

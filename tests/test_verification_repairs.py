@@ -258,3 +258,35 @@ def test_which_held_mail_the_repair_may_deliver():
     # that link's owner is not migrated yet: delivering now would leave it pointing at the source
     assert not ok('Pre-delivery link scan: Unresolved Drive link mapping: abc')
     assert not repair.repairable_mail_item({'type': 'draft', 'id': 'd', 'error': 'Missing Message-ID'})
+
+
+def test_finished_user_preserves_pause_without_claim_or_target_inspection(db, settings, monkeypatch):
+    R.pause(db)
+    monkeypatch.setattr(R, 'reconcile_target_copies', lambda *a: pytest.fail('target read during paused repair'))
+    monkeypatch.setattr(R, '_claim', lambda *a: pytest.fail('paused repair claimed'))
+    monkeypatch.setattr(R, 'scoped_repair', lambda *a: pytest.fail('paused repair executed'))
+    messages = []
+    assert R.finished_user(None, db, settings, 'u@src', {'gmail': blank()}, None,
+                           lambda f: f, messages.append) is None
+    assert not R.enabled(db)
+    assert db.conn.execute('select count(*) from repair_runs').fetchone()[0] == 0
+    assert any('paused' in line for line in messages)
+
+
+def test_pause_during_readonly_inspection_prevents_claim(db, settings, monkeypatch):
+    R.enable(db, operator=True)
+    def inspect(*args):
+        R.pause(db)
+        return 0
+    monkeypatch.setattr(R, 'reconcile_target_copies', inspect)
+    monkeypatch.setattr(R, '_claim', lambda *a: pytest.fail('claimed after pause'))
+    assert R.finished_user(None, db, settings, 'u@src', {'gmail': blank()}, None,
+                           lambda f: f, lambda s: None) is None
+    assert db.conn.execute('select count(*) from repair_runs').fetchone()[0] == 0
+
+
+def test_claim_does_not_admit_a_paused_policy(db):
+    R.enable(db, operator=True)
+    R.pause(db)
+    assert R._claim(db, 'u@src', 'key') is False
+    assert db.conn.execute('select count(*) from verification_repairs').fetchone()[0] == 0

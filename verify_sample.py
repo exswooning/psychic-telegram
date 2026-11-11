@@ -2362,6 +2362,9 @@ def run(auth, db, settings, users: list[str] | None = None, services=ALL_SERVICE
               "sourceDomain": settings.source_domain, "targetDomain": settings.target_domain,
               "sampleLimit": getattr(settings, "sample_limit", None), "verifyLimit": limit, "services": list(services),
               "users": {}, "evidence": [], "notes": []}
+    import verification_provenance as provenance
+    run_provenance = provenance.begin(HERE, chosen, services, limit=limit)
+    report["provenance"] = run_provenance
     # Users side by side (VERIFY_WORKERS): a check is mostly waiting on Google, and
     # one user at a time made "verify everything" on 300 users a matter of days.
     # Each user is handed to on_user the moment it is done, so the page fills in
@@ -2554,6 +2557,7 @@ def run(auth, db, settings, users: list[str] | None = None, services=ALL_SERVICE
             emit(f"verify: {u} | service {service_index} of {len(mine)} {svc} started")
             v._report_progress(f"{svc} initialising", 0, None)
             service_started = time.monotonic()
+            service_started_at = provenance.utc()
             try:
                 per[svc] = getattr(v, svc)()
                 import verification_coverage as coverage
@@ -2569,6 +2573,8 @@ def run(auth, db, settings, users: list[str] | None = None, services=ALL_SERVICE
                 r = Verifier._blank()
                 r["errors"].append(f"{svc} could not be verified: {type(exc).__name__}: {str(exc)[:160]}")
                 per[svc] = r
+            per[svc]["provenance"] = provenance.for_service(
+                run_provenance, u, ident[u], svc, service_started_at)
             elapsed = time.monotonic() - service_started
             with lock:
                 state = activity.pop(u, {})
@@ -2627,6 +2633,7 @@ def run(auth, db, settings, users: list[str] | None = None, services=ALL_SERVICE
         "incompleteUsers": incomplete_users,
         "completion": "COMPLETE" if chosen and len(report["users"]) == len(chosen) and not incomplete_users else "INCOMPLETE",
     }
+    report["provenance"]["finishedAt"] = provenance.utc()
     report["verdict"], report["reasons"] = _verdict_by_user(report["users"], expected, services)
     for u, per in report["users"].items():
         for svc, r in per.items():
@@ -2714,17 +2721,23 @@ def quick_dir(account_id) -> str:
 def save(report: dict, base: str | None = None) -> tuple[str, str]:
     d = base or quick_dir(report.get("accountId"))
     os.makedirs(d, exist_ok=True)
-    stamp = report["generatedAt"].replace(":", "").replace("-", "")
+    from uuid import uuid4
+    stamp = report["generatedAt"].replace(":", "").replace("-", "") + "-" + uuid4().hex[:12]
     jp, mp = os.path.join(d, f"quick-{stamp}.json"), os.path.join(d, f"quick-{stamp}.md")
     with open(jp, "w", encoding="utf-8") as fh:
         json.dump(report, fh, indent=1, default=str)
     with open(mp, "w", encoding="utf-8") as fh:
         fh.write(to_markdown(report))
     for name, src in (("latest.json", jp), ("latest.md", mp)):
-        tmp = os.path.join(d, name + ".tmp")
-        with open(src, "rb") as a, open(tmp, "wb") as b:
-            b.write(a.read())
-        os.replace(tmp, os.path.join(d, name))
+        import tempfile
+        fd, tmp = tempfile.mkstemp(prefix=name + ".", suffix=".tmp", dir=d)
+        try:
+            with open(src, "rb") as a, os.fdopen(fd, "wb") as b:
+                b.write(a.read())
+            os.replace(tmp, os.path.join(d, name))
+        finally:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
     return jp, mp
 
 
@@ -2756,7 +2769,7 @@ def save_user_results(db, report: dict) -> None:
                 "counts": {k: len(r[k]) for k in ("differences", "missing", "duplicates", "extras", "notCopied", "errors")},
                 **{k: r[k][:25] for k in ("differences", "missing", "duplicates", "notCopied", "errors")},
                 "extras": r["extras"][:10], "notes": r["notes"][:10], "sampled": r.get("sampled"),
-                **{key: r.get(key) for key in ("scopeVersion", "coverageComplete", "checks", "sharing", "sourceInventory", "emptySource", "cache", "copyResolutions")}})
+                **{key: r.get(key) for key in ("scopeVersion", "coverageComplete", "checks", "sharing", "sourceInventory", "emptySource", "cache", "copyResolutions", "provenance")}})
 
 
 def verify_user(auth, db, settings, source_user: str, services, limit: int | None, retry=lambda f: f) -> str | None:

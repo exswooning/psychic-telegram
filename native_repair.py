@@ -78,7 +78,7 @@ def _a1(col, row):
 
 def canonical_sheet(document, lookup=lambda fid: None):
     """Compare entered values/formulas and native structures, not volatile recalculation results."""
-    doc = _rewrite(copy.deepcopy(document), lookup)
+    doc = _rewrite(document, lookup)
     sheets = doc.get("sheets", [])
     sheet_ids = {s["properties"]["sheetId"]: i for i, s in enumerate(sheets)}
     generated = {
@@ -115,13 +115,52 @@ def canonical_sheet(document, lookup=lambda fid: None):
     return clean(doc)
 
 
+def _sheet_differences(a, b, path="", limit=20):
+    """Bounded structural paths; never expose cell values/formulas in diagnostics."""
+    out = []
+    def walk(x, y, where):
+        if len(out) >= limit or x == y:
+            return
+        if isinstance(x, dict) and isinstance(y, dict):
+            for key in sorted(set(x) | set(y)):
+                if len(out) >= limit: break
+                p = f"{where}.{key}" if where else str(key)
+                if key not in x: out.append(f"{p}: extra on target")
+                elif key not in y: out.append(f"{p}: missing on target")
+                else: walk(x[key], y[key], p)
+        elif isinstance(x, list) and isinstance(y, list):
+            for i in range(min(len(x), len(y))):
+                if len(out) >= limit: break
+                walk(x[i], y[i], f"{where}[{i}]")
+            if len(out) < limit and len(x) != len(y):
+                out.append(f"{where}: length differs ({len(x)} source, {len(y)} target)")
+        else:
+            out.append(f"{where}: differs")
+    walk(a, b, path)
+    return out
+
+
 def compare_sheets(source, target, lookup):
     a, b = canonical_sheet(source, lookup), canonical_sheet(target)
-    return (
-        []
-        if a == b
-        else ["native Sheet entered values, formatting, or structures differ"]
-    )
+    if a == b:
+        return []
+    # Keep the existing summary for consumers; append bounded, content-free evidence.
+    out = ["native Sheet entered values, formatting, or structures differ"]
+    for index, (src, tgt) in enumerate(zip(a.get("sheets", []), b.get("sheets", []))):
+        label = f"tab {index + 1}"
+        # API windows have start offsets, so a difference at rowData[0] is not
+        # necessarily row 1. Report actual A1 addresses for matched windows.
+        for left, right in zip(src.get("data", []), tgt.get("data", [])):
+            if (left.get("startRow", 0), left.get("startColumn", 0)) != (right.get("startRow", 0), right.get("startColumn", 0)):
+                continue
+            for row, (sr, tr) in enumerate(zip(left.get("rowData", []), right.get("rowData", []))):
+                for col, (sc, tc) in enumerate(zip(sr.get("values", []), tr.get("values", []))):
+                    if sc != tc:
+                        cell = _a1(left.get("startColumn", 0) + col, left.get("startRow", 0) + row)
+                        out += _sheet_differences(sc, tc, f"{label}!{cell}", max(0, 20-len(out)))
+                    if len(out) >= 20: return out + ["Further differences omitted; full comparison still failed"]
+    out += _sheet_differences(a, b, limit=max(0, 20-len(out)))
+    return out
 
 
 def repair_sheet_cells(auth, db, settings, user, target, sid, tid, sm, tm, backup):
