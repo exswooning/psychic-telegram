@@ -1261,12 +1261,12 @@ class Verifier:
         mime = sm.get("mimeType") or ""
         try:
             if mime == "application/vnd.google-apps.spreadsheet":
-                from native_repair import read_sheet, compare_sheets
-                source_sheet = self._x(lambda: read_sheet(self.auth.api("source", "sheets", self.src_user), sid,
-                                                           pace=lambda: self._native_pace("sheets", "read")))
-                target_sheet = self._x(lambda: read_sheet(self.auth.api("target", "sheets", self.tgt_user), tid,
-                                                           pace=lambda: self._native_pace("sheets", "read")))
-                differences = compare_sheets(source_sheet, target_sheet, self.db.target_for_source_id)
+                from native_repair import compare_sheets_streamed
+                differences = compare_sheets_streamed(
+                    self.auth.api("source", "sheets", self.src_user),
+                    self.auth.api("target", "sheets", self.tgt_user), sid, tid,
+                    self.db.target_for_source_id, fetch=lambda request: self._x(request.execute),
+                    pace=lambda: self._native_pace("sheets", "read"))
                 if differences and self.db.conn.execute(
                         "SELECT 1 FROM audit_log WHERE item_type='form_link' AND status='RELINKED' "
                         "AND error_message LIKE ?", (f"%-> sheet {tid}",)).fetchone():
@@ -1755,19 +1755,11 @@ class Verifier:
                     userId="me", id=i, format="metadata", metadataHeaders=["Message-ID", "From"]).execute())
                 head = {h["name"].lower(): h["value"].strip() for h in hdr.get("payload", {}).get("headers", [])}
                 mid = head.get("message-id", "")
-                if "TRASH" in (hdr.get("labelIds") or []):
-                    trashed += 1        # deleted as far as the user can tell: not a copy that exists
-                    continue
-                if mid not in mapped_msgids and "@google.com" in head.get("from", "").lower():
-                    welcome += 1        # what Google puts in every new mailbox; nobody migrated it
-                    continue
-                (res["duplicates"] if mid in mapped_msgids else res["extras"]).append({"target": m["id"], "messageId": mid})
-            if trashed:
-                res["notes"].append(f"{trashed} email(s) in the target's trash -- what an earlier run left before a "
-                                    f"reset or a delete; they are not counted as copies or strays")
-            if welcome:
-                res["notes"].append(f"{welcome} email(s) from Google itself (new-mailbox welcome mail) sit on the "
-                                    f"target; they were never on the source and are not counted as strays")
+                # A sender domain or Trash label is not an accepted-difference
+                # record. Preserve and report unmatched destinations for review.
+                (res["duplicates"] if mid in mapped_msgids else res["extras"]).append({
+                    "target": m["id"], "messageId": mid, "labels": hdr.get("labelIds") or [],
+                    "classification": "UNMATCHED_DESTINATION"})
         except Exception as exc:      # noqa: BLE001
             res["errors"].append(f"could not list the target's mailbox: {error_detail(exc)}")
         res["notCopied"] = self._failed(("message", "gmail"))

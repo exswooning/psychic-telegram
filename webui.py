@@ -764,7 +764,7 @@ def _current_phase(lines: list[str]) -> list[str]:
     """
     start = 0
     for i, ln in enumerate(lines):
-        if _PHASE_START_RE.match(ln):
+        if _PHASE_START_RE.match(ln) or "verify + repair dispatched for " in ln:
             start = i
     return lines[start:] if start else lines
 
@@ -4588,6 +4588,8 @@ def _job_progress(name: str, lines: list[str], elapsed: float,
     # never the run: live, dharan.gov.np read 100% minutes into a pass. Its progress is the
     # ledger's done over discovery's expected, below.
     pct = None if name in ("migrate", "delta") else _counter_progress_pct(lines)
+    if name == "verify" and pct is not None and pct >= 100:
+        return None, None  # Counted phase complete; live job may still reconcile or recheck.
     if pct is not None:
         pass
     elif name == "seed":

@@ -502,3 +502,62 @@ def repair_empty_doc(auth, db, settings, user, target, sid, tid, sm, tm, backup)
         "backup": backup_id,
         "scope": "paragraph text readback; full style fidelity requires the final native check",
     }
+
+
+def compare_sheets_streamed(source, target, sid, tid, lookup=lambda fid: None,
+                            fetch=lambda request: request.execute(), pace=lambda: None,
+                            max_cells=10_000_000, window_cells=10000):
+    """Compare every allocated cell in bounded windows; never retain whole grids.
+
+    Request/cell limits still fail closed. Structures are compared independently;
+    diagnostics identify ranges and contain no cell contents.
+    """
+    fields = SHEET_FIELDS.split(',data(', 1)[0] + ')'
+    def get(api, fid, **kwargs):
+        pace()
+        return fetch(api.spreadsheets().get(spreadsheetId=fid, **kwargs))
+    a = get(source, sid, fields=fields)
+    b = get(target, tid, fields=fields)
+    # A provider ignoring a field mask must not make the metadata comparison
+    # retain huge grid data; grid windows below are the authoritative cell reads.
+    def metadata(doc):
+        if not isinstance(doc.get('sheets'), list) or not doc['sheets']:
+            raise RuntimeError('Sheet metadata is incomplete')
+        return {**doc, 'sheets': [{k:v for k,v in s.items() if k!='data'} for s in doc['sheets']]}
+    a,b=metadata(a),metadata(b)
+    diffs = _sheet_differences(canonical_sheet(a, lookup), canonical_sheet(b))
+    if diffs:
+        return ['native Sheet structures differ'] + diffs
+    cells = sum(int(s['properties'].get('gridProperties', {}).get('rowCount',0))*
+                int(s['properties'].get('gridProperties', {}).get('columnCount',0)) for s in a.get('sheets',[]))
+    if cells > max_cells:
+        raise RuntimeError('Streaming Sheet comparison exceeds qualified cell budget; coverage incomplete')
+    def content(doc, sheet_id):
+        matches=[s for s in doc.get('sheets',[]) if s.get('properties',{}).get('sheetId')==sheet_id]
+        if len(matches)!=1:
+            raise RuntimeError('Sheet window response omitted or duplicated its sheet identity')
+        values={}
+        for grid in matches[0].get('data',[]):
+            row0,col0=grid.get('startRow',0),grid.get('startColumn',0)
+            for ri,row in enumerate(grid.get('rowData',[])):
+                for ci,cell in enumerate(row.get('values',[])):
+                    if cell:values[f'{row0+ri}:{col0+ci}']=cell
+        return values
+    for sa,sb in zip(a.get('sheets',[]),b.get('sheets',[])):
+        props=sa['properties'];grid=props.get('gridProperties',{})
+        if props.get('sheetType','GRID')!='GRID':continue
+        width,height=int(grid.get('columnCount',0)),int(grid.get('rowCount',0))
+        if width <= 0 or height <= 0:
+            raise RuntimeError('Sheet grid dimensions are unavailable; coverage incomplete')
+        for col in range(0,width,100):
+            end=min(width,col+100); step=max(1,window_cells//max(1,end-col))
+            for row in range(0,height,step):
+                rng="'"+props['title'].replace("'","''")+"'!"+_a1(col,row)+':'+_a1(end-1,min(height,row+step)-1)
+                fields='sheets(properties.sheetId,data(startRow,startColumn,rowData(values('+CELL_FIELDS+'))))'
+                x=content(get(source,sid,ranges=[rng],includeGridData=True,fields=fields),props['sheetId'])
+                y=content(get(target,tid,ranges=[rng],includeGridData=True,fields=fields),sb['properties']['sheetId'])
+                if _rewrite(x, lookup)!=y:
+                    diffs.append('native Sheet cell content/style differs in '+rng)
+                    # Even after a mismatch, continue reading every range; output alone is bounded.
+                    if len(diffs)>20:diffs=diffs[:20]
+    return diffs

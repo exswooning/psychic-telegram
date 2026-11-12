@@ -6,6 +6,8 @@ after each attempt and stops when it is zero. Limits: 5 attempts; if the count s
 Claude (logs/autopilot/INBOX.md) and stops, rather than repeating the same failure. Never deletes an import.
 """
 import json, subprocess, sys, time
+import fcntl
+import uuid
 
 ROOT = "/opt/bitport"
 CSV = f"{ROOT}/logs/dms/3/identities-fresh-45.csv"
@@ -39,7 +41,7 @@ def wait_done(unit):
 
 
 def run_delta(attempt):
-    unit = f"bitport-dms-delta-{attempt}"
+    unit = f"bitport-dms-delta-{attempt}-{uuid.uuid4().hex[:10]}"
     code = (f"import sys,subprocess,webui;env=webui._dms_env(3);env['MIGRATION_DB']='{ROOT}/data/accounts/3/migration.db';"
             f"sys.exit(subprocess.call(['{ROOT}/.venv/bin/python','dms_migrate.py','--apply','--watch','120',"
             f"'--until-done','4320','--timeout','200','--identities','{CSV}','--no-tally'],env=env,cwd='{ROOT}'))")
@@ -49,7 +51,7 @@ def run_delta(attempt):
     wait_done(unit)
 
 
-def main():
+def _main():
     say("delta loop started: waiting for the fresh import to finish")
     wait_done("bitport-dms-fresh")
     prev = None
@@ -65,6 +67,9 @@ def main():
             with open(INBOX, "a", encoding="utf-8") as fh:
                 fh.write(f"- {time.strftime('%Y-%m-%d %H:%MZ', time.gmtime())} NEEDS CLAUDE: {msg}\n")
             return 2
+        if n < 0 or not status.lower().startswith("complete"):
+            say("HOLD: DMS completion/failure count is unknown; no retry admitted")
+            return 2
         prev = n
         say(f"delta attempt {attempt}")
         run_delta(attempt)
@@ -73,6 +78,17 @@ def main():
     with open(INBOX, "a", encoding="utf-8") as fh:
         fh.write(f"- {time.strftime('%Y-%m-%d %H:%MZ', time.gmtime())} NEEDS CLAUDE: DMS still has {n} failed after {MAX_ATTEMPTS} deltas\n")
     return 1
+
+
+def main():
+    # A scheduler restart cannot create a second loop beside this one.
+    with open(f"{ROOT}/logs/jobs/3/dms-delta-scheduler.lock", "a") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            say("HOLD: another DMS delta scheduler owns the account")
+            return 2
+        return _main()
 
 
 if __name__ == "__main__":

@@ -277,7 +277,7 @@ def test_reconciliation_detects_new_unclassified_mail_before_done(
         db.conn.execute(
             "SELECT status FROM identity_map WHERE source_email=?", (SRC_USER,)
         ).fetchone()[0]
-        == "AWAITING_DMS"
+        == "BLOCKED"
     )
 
 

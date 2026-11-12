@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import base64
 from link_rewrite import DRIVE_ID
 
@@ -150,6 +152,7 @@ def reconcile_dms(auth, db, settings, progress=None, users=None):
     from verify_sample import _stop_check
 
     verified_items = []
+    reused = 0
     wanted = {u.lower() for u in users} if users else None
     users = [dict(r) for r in db.all_identities() if r["entity_type"] == "user"
              and (wanted is None or r["source_email"].lower() in wanted)]
@@ -181,18 +184,37 @@ def reconcile_dms(auth, db, settings, progress=None, users=None):
                 db.record_label(
                     source, label["id"], by_name[label["name"]], label["name"]
                 )
-        rows = db.conn.execute(
-            "SELECT item_id,status FROM audit_log WHERE source_user=? AND item_type='message' AND status IN (?, ?, 'SUCCESS') ORDER BY item_id",
-            (source, DEFERRED_TO_DMS, DELIVERED_BY_DMS),
-        ).fetchall()
+        from mail_reconciliation import Checkpoint, outcome
+        checkpoint = Checkpoint(gm)
+        # Audit rows only describe what the engine saw. DMS may carry every
+        # other message, including mail arriving after discovery.
+        from mail_reconciliation import inventory
+        live, drafts = inventory(gm)
+        excluded_chat = {r[0] for r in db.conn.execute(
+            "SELECT item_id FROM audit_log WHERE source_user=? AND item_type='message' AND status='SKIPPED_CHAT'", (source,))}
+        rows = [{"item_id": sid} for sid in sorted(live - drafts - excluded_chat)]
+        out.setdefault("inventories", []).append({"user": source, "sourceMessages": len(live),
+                                                  "draftMessages": len(drafts), "selected": len(rows)})
 
         user_start = out["checked"]
         progress(f"DMS reconciliation: {source} | starting {len(rows)} email checks")
 
+        import threading
+        local = threading.local()
+        base_gm = gm
+
         def inspect(item):
+            if not hasattr(local, "gm"):
+                local.gm = GmailMigrator(auth, db, settings, source, target)
+                local.gm.limiter = base_gm.limiter
+            gm = local.gm
             _stop_check()
             mid = item["item_id"]
+            tid = None
             try:
+                cached = checkpoint.get(mid)
+                if cached:
+                    return (source, mid, cached), None
                 full = gm._retry(
                     lambda: (
                         gm.src.users()
@@ -249,17 +271,30 @@ def reconcile_dms(auth, db, settings, progress=None, users=None):
                         raise RuntimeError(
                             "DMS overlap changed the mapped destination identity"
                         )
+                conflict = db.conn.execute(
+                    "SELECT 1 FROM id_mapping WHERE source_user=? AND type='message' AND target_id=? AND source_id!=? LIMIT 1",
+                    (source, tid, mid)).fetchone()
+                if conflict:
+                    raise RuntimeError("DMS destination identity is already mapped to another source message")
+                from gmail_engine import SYSTEM_LABELS
+                unmapped_labels = set(full.get("labelIds") or []) - SYSTEM_LABELS - set(db.get_label_map(source))
+                if unmapped_labels:
+                    raise RuntimeError("Source user labels have no destination label mapping; label parity incomplete")
                 if not verify_written_mail(
                     gm, mid, tid, expected, gm._map_label_ids(full.get("labelIds", []))
                 ):
-                    raise RuntimeError(
-                        "DMS destination content or labels did not match"
-                    )
+                    receipt = db.conn.execute(
+                        "SELECT evidence FROM migration_item_receipts WHERE source_user=? AND source_id=? AND target_id=? AND service='gmail'",
+                        (source, mid, tid)).fetchone()
+                    proof = json.loads(receipt[0]) if receipt else {}
+                    if (proof.get("contentProven") is True and not proof.get("findings", {}).get("errors")
+                            and proof.get("labelDifferences") and not mapped):
+                        db.adopt_message_mapping(source, mid, tid)
+                    raise RuntimeError("DMS destination content or labels did not match")
+                checkpoint.save(mid, tid, "VERIFIED", {"scope": "content and labels", "target": tid})
                 if not mapped:
-                    db.record_mapping(source, mid, tid, "message")
+                    db.adopt_message_mapping(source, mid, tid)
                 # Resolve only this phase's own error findings after fresh success.
-                import json
-
                 with db.write() as c:
                     if c.execute(
                         "SELECT 1 FROM sqlite_master WHERE name='verification_repair_queue'"
@@ -284,6 +319,7 @@ def reconcile_dms(auth, db, settings, progress=None, users=None):
                 import verification_repairs
 
                 error = str(exc)[:220]
+                checkpoint.save(mid, tid, outcome(error), {"error": error})
                 verification_repairs.enqueue_findings(
                     db,
                     source,
@@ -331,6 +367,8 @@ def reconcile_dms(auth, db, settings, progress=None, users=None):
                     )
         progress(f"DMS reconciliation: {source} | item checks finished {out['checked'] - user_start}/{len(rows)}; "
                  "mailbox completion still requires coverage checks")
+        reused += checkpoint.reused
+    out["reusedComparisons"] = reused
     out["recordedDelivered"] = db.mark_dms_delivered(verified_items)
     # The original migration remains AWAITING_DMS until fresh full source
     # coverage passes. New mail arriving during DMS cannot disappear here.

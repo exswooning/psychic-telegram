@@ -1441,6 +1441,17 @@ class MigrationDB:
                 # outlive someone genuinely in flight right now.
                 self._mapping_cache.move_to_end(source_user)
 
+    def adopt_message_mapping(self, user: str, sid: str, tid: str) -> None:
+        """Adopt a proven identity atomically, preserving existing mappings and collisions."""
+        with self.write() as conn:
+            old = conn.execute("SELECT target_id FROM id_mapping WHERE source_user=? AND source_id=? AND type='message'", (user,sid)).fetchone()
+            collision = conn.execute("SELECT 1 FROM id_mapping WHERE source_user=? AND type='message' AND target_id=? AND source_id!=? LIMIT 1", (user,tid,sid)).fetchone()
+            if collision or (old and old[0] != tid):
+                raise RuntimeError("DMS destination identity is absent, changed or ambiguous")
+            conn.execute("INSERT OR IGNORE INTO id_mapping(source_user,source_id,target_id,type,created_at) VALUES(?,?,?,'message',?)", (user,sid,tid,utc_now()))
+        with self._cache_lock:
+            self._mapping_cache.pop(user, None)
+
     # -- audit_log -----------------------------------------------------------
     def log_audit(self, source_user: str, item_id: str, item_type: str,
                   status: str, error_message: str = "",

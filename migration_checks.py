@@ -317,7 +317,8 @@ def verify_written_mail(migrator, source_id, target_id, expected_raw, labels, al
                 receipt["inlineLabelAlignment"] = {"added":add,"removed":remove,"checked":not label_diffs}
         diffs += label_diffs
         receipt.update(expectedSha256=hashlib.sha256(expected).hexdigest(),
-                       targetSha256=hashlib.sha256(actual).hexdigest(), comparison=verdict)
+                       targetSha256=hashlib.sha256(actual).hexdigest(), comparison=verdict,
+                       contentProven=verdict != "different", labelDifferences=label_diffs)
         if diffs:
             result["differences"] = [{"source": source_id, "target": target_id, "diffs": diffs}]
         else:
