@@ -96,6 +96,20 @@ def test_wipe_page_tokens_are_collected_before_mutation_and_cycles_fail():
         wipe_tenant._all_pages(r, 'items')
 
 
+def test_wipe_resumes_a_transient_read_timeout_without_claiming_the_failed_attempt_succeeded(monkeypatch):
+    calls=[]
+    def wipe(client):
+        calls.append(client)
+        if len(calls)==1:
+            raise TimeoutError('The read operation timed out')
+        return 3
+    monkeypatch.setitem(wipe_tenant.WIPERS,'drive',wipe)
+    monkeypatch.setattr(wipe_tenant.time,'sleep',lambda *a: None)
+    result=wipe_tenant.wipe(['u@tenantb.com'],lambda *a: 'client','admin@tenantb.com',
+                            services=('drive',),shared_drives=False,out=lambda *a,**kw: None)
+    assert len(calls)==2 and result['failed']=={'drive':[]} and result['totals']['drive']==3
+
+
 def test_drive_wipe_removes_trashed_owned_items_without_emptying_foreign_trash():
     store = {'mine': 'owned', 'trashed': 'owned', 'foreign': 'foreign'}
     class Files:

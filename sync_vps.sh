@@ -159,8 +159,8 @@ fi
 # THREAD inside bitport-api, which no `ps` can see, so an unfinished repair_runs row
 # (started in the last 12 h) counts as busy too. A frontend-only deploy restarts
 # nothing and is never refused. DEPLOY_OVER_JOBS=1 is the explicit override.
-# A Google DMS job (dms_migrate.py) does not refuse a deploy (operator, 8 Nov 2026): it runs for up to three days,
-# its work is on Google's side, and bitport-api's KillMode=process leaves it running across a restart.
+# DMS, full verification and the fresh campaign also block a release. Their
+# Python baseline is pinned even while Google is doing the remote copy.
 # A mirror cycle alone is waited out rather than refused: it runs under a minute every
 # few minutes and resumes from its markers, so refusing only made the deploy a matter
 # of timing by hand. MIRROR_WAIT_SEC bounds the wait; anything else still refuses.
@@ -168,7 +168,7 @@ if [[ ( -n "$RUNTIME_CHANGES" || "${FORCE_RESTART:-0}" == "1" ) && "${DEPLOY_OVE
  WAITED=0
  while :; do
   BUSY="$("${SSH[@]}" "$TARGET" "cd '$DEST' 2>/dev/null || exit 0
-ps -eo pid=,args= | grep -iE '^ *[0-9]+ +[^ ]*python[0-9.]* +([^ ]*/)?(main\.py .*(migrate|delta|mirror|discover|run-shard)|(seed_sandbox|reset_target|wipe_target|wipe_tenant|remove_tenant_setup|tally|verify_sample|sandbox_campaign|full_setup|workspace_configuration)\.py)'
+ps -eo pid=,args= | grep -iE '^ *[0-9]+ +[^ ]*python[0-9.]* +((-[uBEOISsqv]+|-X +[^ ]+|-W +[^ ]+) +)*([^ ]*/)?(main\.py .*(migrate|delta|mirror|discover|run-shard)|(seed_sandbox|reset_target|wipe_target|wipe_tenant|remove_tenant_setup|tally|verify_sample|tenant_verify|dms_migrate|dms_delta_loop|parity_loop|sandbox_campaign|full_setup|workspace_configuration)\.py)'
 for db in data/accounts/*/migration.db; do [ -f \"\$db\" ] && .venv/bin/python -c 'import sqlite3,sys
 c = sqlite3.connect(\"file:\" + sys.argv[1] + \"?mode=ro\", uri=True)
 for r in c.execute(\"SELECT id, started_at FROM repair_runs WHERE finished_at IS NULL AND started_at >= strftime(\x27%Y-%m-%dT%H:%M:%SZ\x27, \x27now\x27, \x27-12 hours\x27)\"): print(\"repair\", r[0], \"unfinished since\", r[1], \"in\", sys.argv[1])' \"\$db\" 2>/dev/null; done; true" 2>/dev/null || true)"

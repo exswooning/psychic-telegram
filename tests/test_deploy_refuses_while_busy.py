@@ -133,15 +133,16 @@ def test_a_mirror_cycle_that_outlasts_the_wait_still_refuses(box):
     assert r.returncode == 3 and "mirror" in r.stderr and "rsync:" not in log
 
 
-def test_a_running_dms_does_not_refuse(box):
-    """8 Nov 2026, the operator: deploys continue while Google's DMS runs. It can run for three days, its work is on
-    Google's side, and bitport-api's KillMode=process leaves it running across a restart."""
+def test_a_running_dms_refuses_before_copying_the_pinned_campaign_baseline(box):
+    """The fresh campaign pins the actual Python baseline across all phases,
+    including the local DMS controller; do not replace it while it is active."""
     job = box.tmp / "dms_migrate.py"
     job.write_text("import time; time.sleep(30)\n")
     p = subprocess.Popen([sys.executable, str(job)])
     try:
         time.sleep(0.5)
         r, log = box()
-        assert r.returncode == 0 and "REFUSING" not in r.stderr
+        assert r.returncode == 3 and "REFUSING" in r.stderr
+        assert "rsync:" not in log and "systemctl restart" not in log
     finally:
         p.kill()

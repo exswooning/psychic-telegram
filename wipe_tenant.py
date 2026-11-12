@@ -68,7 +68,8 @@ TRIES = 4
 
 
 def _transient(exc: Exception) -> bool:
-    return isinstance(exc, HttpError) and getattr(getattr(exc, "resp", None), "status", None) in TRANSIENT
+    return (isinstance(exc, (TimeoutError, ConnectionError)) or
+            isinstance(exc, HttpError) and getattr(getattr(exc, "resp", None), "status", None) in TRANSIENT)
 
 
 # -- one service for one user --------------------------------------------------------

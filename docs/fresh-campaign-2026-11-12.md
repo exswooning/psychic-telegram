@@ -76,3 +76,14 @@ before admitting DMS. Later ordered passes can overwrite AWAITING_DMS with DONE,
 so neither the status badge nor a missing gmail services_done flag alone decides
 that handoff. Real daily byte expenditure can still establish a quota pause
 when a later pass overwrote the original pause status.
+
+Additional live evidence: social and ward10 Drive wipes raised TimeoutError:
+The read operation timed out. These were recorded as failed services while other
+users continued. Timeout/connection errors now use the existing bounded four
+idempotent wipe attempts; authentication and permanent errors remain held.
+
+Deployment process recognition now includes Python -u/-B options and all campaign,
+DMS, parity and full verification controllers. Real filter tests cover the exact
+commands used here; a running DMS now refuses copying/restart under the pinned
+campaign baseline. This strengthens the gate rather than overriding it. The
+previous DMS-allowed test was updated for the current all-phases idle policy.
