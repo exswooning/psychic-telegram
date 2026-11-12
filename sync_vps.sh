@@ -37,6 +37,15 @@ runtime_changes() {
     esac
   done
 }
+# Render the installed deployment directory into service templates. Never assume
+# the old VPS location applies to a laptop installation.
+render_unit() {
+  python3 -c 'import sys; print(sys.stdin.read().replace("/root/migration", sys.argv[1]), end="")' "$1"
+}
+if [[ "${1:-}" == "--render-unit" ]]; then
+  render_unit "${2:?missing deployment directory}"
+  exit 0
+fi
 if [[ "${1:-}" == "--classify" ]]; then
   changed="$(runtime_changes)"
   if [[ -z "$changed" ]]; then echo "frontend-only"; exit 0; fi
@@ -122,6 +131,7 @@ SYNC_EXCLUDES=(
   --exclude 'keys/' --exclude 'oauth/' --exclude 'env.sh'
   --exclude 'run_state.json'
   --exclude 'logs/' --exclude 'node_modules/'
+  --exclude '._*' --exclude '.DS_Store'
 )
 
 # What would this change on the box? Compared by CONTENT (-c): a checkout or a
@@ -330,6 +340,12 @@ fi
 # incident.
 if [[ -d "$(cd "$(dirname "$0")" && pwd)/systemd" ]]; then
   SD="$(cd "$(dirname "$0")" && pwd)/systemd"
+  RENDERED_UNITS="$(mktemp -d)"
+  for unit in "$SD/"*.service "$SD/"*.timer; do
+    [[ -f "$unit" ]] || continue
+    render_unit "$DEST" < "$unit" > "$RENDERED_UNITS/$(basename "$unit")" || exit 1
+  done
+  SD="$RENDERED_UNITS"
   if rsync -az -e "${SSH[*]}" "$SD/"*.service "$TARGET:/etc/systemd/system/" 2>/dev/null; then
     if compgen -G "$SD/"'*.timer' >/dev/null; then
       rsync -az -e "${SSH[*]}" "$SD/"*.timer "$TARGET:/etc/systemd/system/" 2>/dev/null || true
