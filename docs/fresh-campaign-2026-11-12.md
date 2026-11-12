@@ -147,7 +147,7 @@ repeat the full wipe or clear current file/message mappings to fix these reply
 records. Full user/tenant checks, source-after and readiness remain pending.
 
 Fresh-run confirmation: audit_log now records administration comment FAILED at
-2026-11-12T10:24:36Z on source file 1eKNFDzD8PGChUdfkDCXjcR-b0DlouUsRtCfZB-itywI:
+2026-11-12T10:24:36Z on the file identified in the private campaign evidence:
 Mapped comment/reply is missing; do not create another blindly. Runtime 469e441,
 copy attempt 1. This is separate from the earlier read-only residue observation.
 The source reply receipts prove the old target-file association.
