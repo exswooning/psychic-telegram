@@ -43,3 +43,36 @@ never equate process completion with parity. Unsupported features, source change
 provider access failures and remaining differences need explicit investigation.
 Generated code still requires review, meaningful tests, publication and idle-gated
 deployment; this campaign does not automatically deploy model suggestions.
+
+## First live run: observed failure and recovery
+
+The 45-user baseline completed at 2026-11-12T06:08:42Z; deletion began at
+06:12:52Z. Administration Gmail returned HTTP 400 Precondition check failed for
+batchDelete. Its target inventory/metadata remained readable, no Chat messages
+or drafts were listed, and a five-message delete using the existing full-mail
+wipe credential succeeded. An initial diagnostic through the ordinary migration
+credential returned 403 insufficient scopes; that is a different credential and
+must not be confused with the original 400. The underlying Google precondition
+is not yet identified. No message bodies were exported for this investigation.
+
+The pending fix splits only an explicit failedPrecondition batch into bounded
+sub-batches, then tries the documented single-message delete. Any retained IDs
+remain a failed wipe; auth/quota/malformed-request errors do not become success.
+Regression tests cover deletable and permanently blocked items and refusal to
+split unrelated errors. This is fixture evidence until the failed mailbox is
+successfully recovered live.
+
+The scheduled next phase was paused while the initial wipe continues. After it
+is terminal, deploy the reviewed correction through idle gates. Use
+--admit-release only after checking installed hashes; the admission records the
+previous code hash. --recover-wipe is an explicit operator continuation of ONLY
+failed user/service pairs recorded in wipe.json, at most twice, and refuses once
+any fresh copy or import started. The timer cannot choose wipe recovery. Never
+clear wipeStartedAt or restart a complete target wipe.
+
+Copying excludes deliberate Gmail deferral from the engine's unfinished work;
+a separate handoff phase freshly inventories every source and mapped target
+before admitting DMS. Later ordered passes can overwrite AWAITING_DMS with DONE,
+so neither the status badge nor a missing gmail services_done flag alone decides
+that handoff. Real daily byte expenditure can still establish a quota pause
+when a later pass overwrote the original pause status.

@@ -34,6 +34,45 @@ def test_quota_wait_preserves_rolling_window_not_local_midnight():
     assert c.execute('SELECT SUM(bytes_sent) FROM upload_ledger').fetchone()[0] == 103
 
 
+def test_split_mail_is_admitted_only_to_a_separate_fresh_handoff_gate():
+    done = 'drive,calendar,contacts,tasks'
+    # A later ordered pass may replace the status, but Gmail is still owed.
+    assert campaign.unfinished_copies([dict(services_done=done,status='DONE')]) == []
+    assert campaign.unfinished_copies([dict(services_done=done,status='AWAITING_DMS')]) == []
+    missing_drive = dict(services_done='calendar,contacts,tasks',status='DONE')
+    assert campaign.unfinished_copies([missing_drive]) == [missing_drive]
+
+
+@pytest.mark.parametrize('incomplete', [False, True])
+def test_handoff_rechecks_actual_source_coverage_before_any_dms_start(tmp_path, monkeypatch, incomplete):
+    import config, db as database, auth, migration_checks
+    rows = [dict(entity_type='user',source_email=f'u{i}@{campaign.PAIR[0]}',
+                 target_email=f'u{i}@{campaign.PAIR[1]}') for i in range(45)]
+    settings = SimpleNamespace(source_domain=campaign.PAIR[0], target_domain=campaign.PAIR[1],
+                               db_path='unused',max_retries=1)
+    fake_db = SimpleNamespace(all_identities=lambda: rows, close=lambda: None)
+    monkeypatch.setattr(config,'Settings',lambda **kw: settings)
+    monkeypatch.setattr(database,'MigrationDB',lambda *a: fake_db)
+    monkeypatch.setattr(auth,'AuthManager',lambda *a: object())
+    monkeypatch.setattr(campaign,'idle',lambda: None)
+    monkeypatch.setattr(campaign.os,'environ',dict(campaign.os.environ))
+    monkeypatch.setattr(campaign,'child',lambda *a: pytest.fail('handoff must only inventory, not import'))
+    seen=[]
+    def check(*a,**kw):
+        seen.append(a[3])
+        return {'handoffReady':not incomplete,'complete':False,'awaitingDms':30,
+                'notCopied':1 if incomplete else 0}
+    monkeypatch.setattr(migration_checks,'mailbox_completion',check)
+    state={'phase':'handoff'}
+    if incomplete:
+        with pytest.raises(RuntimeError,match='handoff inventory incomplete'):
+            campaign.step(tmp_path,state)
+        assert len(seen)==1 and state['phase']=='handoff'
+    else:
+        campaign.step(tmp_path,state)
+        assert len(seen)==45 and state['phase']=='dms'
+
+
 def test_interrupted_campaign_never_repeats_wipe(tmp_path, monkeypatch):
     import hashlib
     state = dict(phase='prepare', inProgress=True, wipeStartedAt='before-delete',
@@ -70,6 +109,49 @@ def test_drive_wipe_removes_trashed_owned_items_without_emptying_foreign_trash()
             pytest.fail('blanket emptyTrash may delete items not owned by the target user')
     assert wipe_tenant.wipe_drive(SimpleNamespace(files=Files)) == 2
     assert store == {'foreign': 'foreign'}
+
+
+@pytest.mark.parametrize('undeletable', [False, True])
+def test_gmail_batch_precondition_is_isolated_without_claiming_a_partial_wipe(undeletable):
+    from tests.fakes import http_error
+    store = {'a', 'b', 'bad', 'z'}
+    class Messages:
+        def list(self, **kw):
+            return SimpleNamespace(execute=lambda: {'messages':[{'id':i} for i in sorted(store)]})
+        def batchDelete(self, body, **kw):
+            def run():
+                if 'bad' in body['ids']:
+                    raise http_error(400, 'failedPrecondition', 'Precondition check failed')
+                store.difference_update(body['ids'])
+            return SimpleNamespace(execute=run)
+        def delete(self, id, **kw):
+            def run():
+                if undeletable:
+                    raise http_error(400, 'failedPrecondition', 'Precondition check failed')
+                store.discard(id)
+            return SimpleNamespace(execute=run)
+    empty = SimpleNamespace(list=lambda **kw: SimpleNamespace(execute=lambda: {}))
+    users = SimpleNamespace(messages=Messages, drafts=lambda: empty, labels=lambda: empty)
+    gmail = SimpleNamespace(users=lambda: users)
+    if undeletable:
+        with pytest.raises(RuntimeError, match='1 undeletable'):
+            wipe_tenant.wipe_gmail(gmail)
+        assert store == {'bad'}
+    else:
+        assert wipe_tenant.wipe_gmail(gmail)==4 and not store
+
+
+@pytest.mark.parametrize('status,reason', [(403,'insufficientPermissions'),(429,'rateLimitExceeded'),(400,'invalidArgument')])
+def test_gmail_wipe_does_not_split_authorization_quota_or_malformed_request_errors(status, reason):
+    from tests.fakes import http_error
+    calls=[]
+    def fail():
+        calls.append(1)
+        raise http_error(status,reason)
+    messages=SimpleNamespace(batchDelete=lambda **kw: SimpleNamespace(execute=fail))
+    with pytest.raises(Exception):
+        wipe_tenant._delete_mail_batch(messages,['a','b'],{})
+    assert len(calls)==1
 
 
 def test_service_reset_discards_old_receipts_but_keeps_other_users_and_real_quota(db):
@@ -129,3 +211,31 @@ def test_timer_waits_until_quota_expiry_without_spending_an_attempt(tmp_path, mo
     monkeypatch.setattr(campaign, 'step', lambda *a: pytest.fail('quota has not expired'))
     assert campaign.main(['--directory', str(tmp_path)]) == 0
     assert json.loads((tmp_path/'state.json').read_text())['migrationAttempts'] == 1
+
+
+def test_wipe_recovery_refuses_once_fresh_copying_has_started(tmp_path):
+    with pytest.raises(RuntimeError, match='after new copying'):
+        campaign.recover_wipe(tmp_path,{'migrationAttempts':1},None,None,[])
+
+
+def test_explicit_wipe_recovery_touches_only_recorded_failed_user_service(tmp_path,monkeypatch):
+    source,target=f'u@{campaign.PAIR[0]}',f'u@{campaign.PAIR[1]}'
+    result=dict(failed={s:[target] if s=='gmail' else [] for s in campaign.SERVICES},
+                totals={s:0 for s in campaign.SERVICES},shared_drives=0,groups=0,emptied=[])
+    (tmp_path/'wipe.json').write_text(json.dumps(result))
+    import reset_target
+    monkeypatch.setattr(reset_target,'assert_sandbox',lambda *a: None)
+    monkeypatch.setattr(wipe_tenant,'key_clients',lambda *a: object())
+    monkeypatch.setattr(campaign.os,'environ',dict(campaign.os.environ))
+    calls=[]
+    def wipe(users,clients,admin,**kw):
+        calls.append((users,kw['services'],kw['shared_drives']))
+        return {'failed':{'gmail':[]},'totals':{'gmail':3}}
+    monkeypatch.setattr(wipe_tenant,'wipe',wipe)
+    monkeypatch.setattr(wipe_tenant,'reset_ledger',lambda *a,**kw: None)
+    monkeypatch.setattr(campaign,'finish_wipe',lambda state,*a: state.update(phase='migrate'))
+    state={'phase':'recover-wipe'}
+    campaign.recover_wipe(tmp_path,state,SimpleNamespace(target_sa_key='key',target_admin=target),
+                          object(),[(source,target)])
+    assert calls==[([target],('gmail',),False)]
+    assert state['phase']=='migrate' and state['wipeRecoveryAttempts']==1

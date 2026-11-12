@@ -72,6 +72,16 @@ def quota_resume_at(conn, targets, at=None):
     return max(waits) if waits else at
 
 
+def unfinished_copies(rows):
+    """Split mail is unfinished delivery, not unfinished engine copying.
+
+    Ordered later passes can replace AWAITING_DMS with DONE. Neither status
+    proves the handoff; a separate fresh source-ID gate must admit DMS.
+    """
+    return [r for r in rows if not (set(SERVICES)-{'gmail'}) <=
+            set((r['services_done'] or '').split(','))]
+
+
 def idle():
     """Fail closed if unrelated tenant work or unfinished repair records exist."""
     result = subprocess.run(['ps', '-eo', 'pid=,args='], capture_output=True, text=True, check=True)
@@ -141,6 +151,10 @@ def prepare(directory, state, settings, db, pairs):
                             groups_gone=result['groups'] is not None, failed=result['failed'])
     if any(result['failed'].values()) or result['shared_drives'] is None or result['groups'] is None:
         raise RuntimeError('Partial wipe; inspect wipe.json. Never automatically wipe again')
+    finish_wipe(state, db, pairs)
+
+
+def finish_wipe(state, db, pairs):
     with db.write() as c:
         c.executemany("UPDATE identity_map SET status='PENDING',services_done='' WHERE source_email=?",
                       [(s,) for s, _ in pairs])
@@ -150,6 +164,46 @@ def prepare(directory, state, settings, db, pairs):
             c.execute('DELETE FROM verification_repairs WHERE source_user=?', (s,))
     state['wipeCompletedAt'] = now().isoformat()
     state['phase'] = 'migrate'
+
+
+def recover_wipe(directory, state, settings, db, pairs):
+    """Explicit operator continuation of ONLY recorded failed wipe services.
+
+    Refuse once any copying/import has begun. The timer never selects this phase.
+    """
+    if state.get('migrationAttempts') or state.get('dmsStartedAt'):
+        raise RuntimeError('Cannot recover a wipe after new copying or import has begun')
+    if state.get('wipeRecoveryAttempts', 0) >= 2:
+        raise RuntimeError('Two explicit wipe recovery attempts exhausted')
+    result = json.loads((directory/'wipe.json').read_text())
+    targets = {t for _, t in pairs}
+    if set(result['failed']) != set(SERVICES) or any(set(us)-targets for us in result['failed'].values()):
+        raise RuntimeError('Recorded wipe failures do not match the fixed sandbox scope')
+    import reset_target, wipe_tenant
+    os.environ['SANDBOX_MODE'] = 'true'
+    reset_target.assert_sandbox(settings, PAIR[1], 'target')
+    state['wipeRecoveryAttempts'] = state.get('wipeRecoveryAttempts', 0) + 1
+    save(directory/'state.json', state)
+    clients = wipe_tenant.key_clients(settings.target_sa_key)
+    for service, users in list(result['failed'].items()):
+        if not users:
+            continue
+        part = wipe_tenant.wipe(users, clients, settings.target_admin, services=(service,),
+                                workers=2, shared_drives=False)
+        result['failed'][service] = part['failed'][service]
+        result['totals'][service] += part['totals'][service]
+        (directory/'wipe.json').write_text(json.dumps(result, indent=2))
+    if result['shared_drives'] is None:
+        result['shared_drives'] = wipe_tenant.wipe_shared_drives(clients('drive', settings.target_admin))
+    if result['groups'] is None:
+        result['groups'] = wipe_tenant.wipe_groups(clients('groups', settings.target_admin), PAIR[1])
+    result['emptied'] = [s for s in SERVICES if not result['failed'][s]]
+    (directory/'wipe.json').write_text(json.dumps(result, indent=2))
+    wipe_tenant.reset_ledger(db, result['emptied'], result['shared_drives'] is not None,
+                            groups_gone=result['groups'] is not None, failed=result['failed'])
+    if any(result['failed'].values()):
+        raise RuntimeError('Scoped wipe recovery remains incomplete; retained failed IDs need review')
+    finish_wipe(state, db, pairs)
 
 
 def step(directory, state):
@@ -175,6 +229,8 @@ def step(directory, state):
             if state.get('wipeStartedAt'):
                 raise RuntimeError('Wipe already started; manual recovery required')
             prepare(directory, state, settings, db, pairs)
+        elif state['phase'] == 'recover-wipe':
+            recover_wipe(directory, state, settings, db, pairs)
         elif state['phase'] == 'migrate':
             attempts = state.get('migrationAttempts', 0)
             if attempts >= 4:
@@ -184,15 +240,29 @@ def step(directory, state):
             child(['main.py', '--account-id', '3', 'migrate', '--ordered', '--services',
                    ','.join(SERVICES)], directory, 'migrate.log', env)
             users = [r for r in db.all_identities() if r['entity_type'] == 'user']
-            pending = [r for r in users if not set(SERVICES) <= set((r['services_done'] or '').split(','))]
-            paused = [r for r in pending if r['status'] == 'PAUSED_QUOTA']
+            pending = unfinished_copies(users)
+            paused = [r for r in pending if r['status'] == 'PAUSED_QUOTA'
+                      or db.bytes_sent_24h(r['target_email']) >= settings.effective_upload_cap]
             if pending and len(paused) != len(pending):
                 raise RuntimeError('Migration has non-quota unfinished users; inspect migrate.log before retrying')
             if paused:
                 state['nextEligibleAt'] = quota_resume_at(db.conn, [r['target_email'] for r in paused]).isoformat()
                 state['quotaUsers'] = len(paused)
             else:
-                state['phase'] = 'dms'
+                state['phase'] = 'handoff'
+        elif state['phase'] == 'handoff':
+            from auth import AuthManager
+            from migration_checks import mailbox_completion
+            from resilience import retry_on_google_error
+            auth = AuthManager(settings)
+            retry = retry_on_google_error(max_retries=settings.max_retries, max_elapsed=180)
+            checks = {}
+            for source, target in pairs:
+                checks[source] = mailbox_completion(auth, db, settings, source, target, retry=retry)
+                (directory/'handoff.json').write_text(json.dumps(checks, indent=2, default=str))
+                if not (checks[source].get('complete') or checks[source].get('handoffReady')):
+                    raise RuntimeError(f'Fresh mail handoff inventory incomplete for {source}; inspect handoff.json')
+            state['phase'] = 'dms'
         elif state['phase'] == 'dms':
             from webui import _dms_env
             scoped = _dms_env(3); scoped.update({k: v for k, v in env.items() if k not in scoped})
@@ -240,6 +310,8 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--directory', type=Path, required=True)
     ap.add_argument('--start', action='store_true', help='Operator authorization for one fresh account-3 wipe')
+    ap.add_argument('--admit-release', action='store_true', help='Operator reviewed a new idle-gated installed release')
+    ap.add_argument('--recover-wipe', action='store_true', help='Operator continuation of recorded failed wipe services only')
     a = ap.parse_args(argv)
     a.directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     path = a.directory/'state.json'
@@ -255,10 +327,22 @@ def main(argv=None):
             save(path, state)
         else:
             state = json.loads(path.read_text())
+        if a.admit_release:
+            if state.get('inProgress'):
+                raise SystemExit('Never admit new code during an active phase')
+            idle()
+            state.setdefault('releaseAdmissions', []).append(dict(at=now().isoformat(), previous=state['codeHash']))
+            state.update(codeHash=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(), manifest=manifest())
+            save(path, state)
         if state.get('codeHash') != hashlib.sha256(Path(__file__).read_bytes()).hexdigest():
             raise SystemExit('Campaign code changed; review and explicitly admit the new version before resuming')
         if state.get('manifest') and state['manifest'] != manifest():
             raise SystemExit('Installed Python baseline changed; campaign held for review')
+        if a.recover_wipe:
+            if state['phase'] != 'BLOCKED' or not (a.directory/'wipe.json').exists() or state.get('inProgress'):
+                raise SystemExit('Only an idle, recorded partial wipe may be explicitly recovered')
+            state['phase'] = 'recover-wipe'
+            save(path, state)
         if state['phase'] in ('BLOCKED', 'REVIEW_REQUIRED'):
             return 0
         if state.get('inProgress'):

@@ -31,6 +31,7 @@ without notifying anyone.
 from __future__ import annotations
 
 import logging
+import json
 
 import argparse
 import concurrent.futures as futures
@@ -109,6 +110,44 @@ def _all_pages(resource, key: str, **kwargs) -> list:
         seen.add(token)
 
 
+def _mail_precondition(exc):
+    try:
+        error = json.loads(exc.content).get('error', {})
+        reasons = {e.get('reason') for e in error.get('errors', [])}
+    except (ValueError, TypeError):
+        return False
+    return exc.resp.status == 400 and ('failedPrecondition' in reasons or error.get('status') == 'FAILED_PRECONDITION')
+
+
+def _delete_mail_batch(messages, ids, blocked):
+    """Isolate a batch precondition failure; retain every undeletable ID.
+
+    Authorization, malformed requests and quota errors are never reclassified.
+    Binary splitting is bounded by the size of this already-authorized batch.
+    """
+    try:
+        messages.batchDelete(userId="me", body={"ids": ids}).execute()
+        return len(ids)
+    except HttpError as exc:
+        if not _mail_precondition(exc):
+            raise
+        logging.getLogger(__name__).warning("Gmail wipe batch precondition for %d item(s); isolating", len(ids))
+        if len(ids) > 1:
+            middle = len(ids)//2
+            return (_delete_mail_batch(messages, ids[:middle], blocked) +
+                    _delete_mail_batch(messages, ids[middle:], blocked))
+        try:
+            messages.delete(userId='me', id=ids[0]).execute()
+            return 1
+        except HttpError as single:
+            if _gone(single):
+                return 0
+            if not _mail_precondition(single):
+                raise
+            blocked[ids[0]] = str(single)[:300]
+            return 0
+
+
 def wipe_gmail(gmail) -> int:
     """Every message deleted for good, bin and spam included; drafts and user labels deleted.
 
@@ -116,15 +155,18 @@ def wipe_gmail(gmail) -> int:
     (includeSpamTrash), and a re-migration then "adopts" the binned copy -- reported as delivered,
     left in Trash -- while the DMS collapses its import against it. A wipe before a fresh run must
     leave no copy to find."""
-    n = 0
+    n, blocked = 0, {}
     users = gmail.users()
     while True:
         ids = [m["id"] for m in users.messages().list(
             userId="me", maxResults=500, includeSpamTrash=True).execute().get("messages", [])]
+        ids = [i for i in ids if i not in blocked]
         if not ids:
             break
-        users.messages().batchDelete(userId="me", body={"ids": ids}).execute()
-        n += len(ids)
+        n += _delete_mail_batch(users.messages(), ids, blocked)
+    if blocked:
+        logging.getLogger(__name__).error("Gmail wipe retained blocked IDs: %s", json.dumps(blocked))
+        raise RuntimeError(f"Gmail wipe incomplete: {len(blocked)} undeletable item(s): {','.join(list(blocked)[:5])}")
     token = None
     while True:
         r = users.drafts().list(userId="me", maxResults=500, pageToken=token).execute()
