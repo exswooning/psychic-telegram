@@ -253,3 +253,26 @@ def test_explicit_wipe_recovery_touches_only_recorded_failed_user_service(tmp_pa
                           object(),[(source,target)])
     assert calls==[([target],('gmail',),False)]
     assert state['phase']=='migrate' and state['wipeRecoveryAttempts']==1
+
+
+def test_qualified_copy_retry_preserves_attempt_budget_and_never_selects_wipe():
+    state=dict(phase='BLOCKED',inProgress=False,wipeCompletedAt='done',migrationAttempts=1,error='old case')
+    wipe=dict(failed={s:[] for s in campaign.SERVICES},shared_drives=0,groups=0)
+    campaign.admit_copy_retry(state,wipe)
+    assert state['phase']=='migrate' and state['migrationAttempts']==1 and 'error' not in state
+
+
+@pytest.mark.parametrize('change', [dict(inProgress=True),dict(wipeCompletedAt=None),
+    dict(dmsStartedAt='started'),dict(migrationAttempts=4),dict(phase='REVIEW_REQUIRED')])
+def test_copy_retry_never_overrides_activity_delivery_or_bounded_recovery(change):
+    state=dict(phase='BLOCKED',inProgress=False,wipeCompletedAt='done',migrationAttempts=1)
+    state.update(change)
+    with pytest.raises(RuntimeError):
+        campaign.admit_copy_retry(state,dict(failed={s:[] for s in campaign.SERVICES},shared_drives=0,groups=0))
+
+
+def test_copy_retry_rejects_a_failed_wipe_even_when_a_completion_marker_exists():
+    state=dict(phase='BLOCKED',inProgress=False,wipeCompletedAt='done',migrationAttempts=1)
+    failures={s:[] for s in campaign.SERVICES};failures['gmail']=['u@t.example']
+    with pytest.raises(RuntimeError,match='partial or unproven'):
+        campaign.admit_copy_retry(state,dict(failed=failures,shared_drives=0,groups=0))

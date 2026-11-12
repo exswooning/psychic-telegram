@@ -145,3 +145,20 @@ idleness before deployment, independently qualify its concrete sandbox scope,
 then recheck affected comments with preserved target edits and backups. Never
 repeat the full wipe or clear current file/message mappings to fix these reply
 records. Full user/tenant checks, source-after and readiness remain pending.
+
+Fresh-run confirmation: audit_log now records administration comment FAILED at
+2026-11-12T10:24:36Z on source file 1eKNFDzD8PGChUdfkDCXjcR-b0DlouUsRtCfZB-itywI:
+Mapped comment/reply is missing; do not create another blindly. Runtime 469e441,
+copy attempt 1. This is separate from the earlier read-only residue observation.
+The source reply receipts prove the old target-file association.
+
+The controller now supports an explicit --admit-release --retry-copy after an
+operator-qualified fix: idle BLOCKED copy only, successful completed wipe, no DMS
+started and at most four total copy attempts. It resumes retained mappings and
+never selects another wipe or resets the attempt budget. Activity, incomplete
+wipe, post-DMS delivery, exhausted attempts and review-terminal states refuse.
+86 affected recovery/reset/comment tests passed in isolation. Pause cooperatively
+for the confirmed comment fix, wait for all child work to drain, deploy through
+normal gates, qualify one concrete comment case with source/target readback, then
+resume the retained copies through the admitted retry path. No source mutations,
+full re-wipe or arbitrary target-edit overwrites are authorized by this recovery.

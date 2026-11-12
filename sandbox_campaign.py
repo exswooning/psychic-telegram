@@ -82,6 +82,19 @@ def unfinished_copies(rows):
             set((r['services_done'] or '').split(','))]
 
 
+def admit_copy_retry(state, wipe):
+    """Resume existing copies after an operator-qualified fix; never re-wipe."""
+    if (state.get('phase') != 'BLOCKED' or state.get('inProgress')
+            or not state.get('wipeCompletedAt') or state.get('dmsStartedAt')
+            or not 1 <= state.get('migrationAttempts', 0) < 4):
+        raise RuntimeError('Copy retry requires an idle blocked copy, completed wipe and remaining attempt budget before DMS')
+    if (set(wipe.get('failed', {})) != set(SERVICES) or any(wipe['failed'].values())
+            or wipe.get('shared_drives') is None or wipe.get('groups') is None):
+        raise RuntimeError('Cannot resume copying over a partial or unproven target wipe')
+    state.update(phase='migrate', operatorResumedAt=now().isoformat())
+    state.pop('error', None)
+
+
 def idle():
     """Fail closed if unrelated tenant work or unfinished repair records exist."""
     result = subprocess.run(['ps', '-eo', 'pid=,args='], capture_output=True, text=True, check=True)
@@ -312,6 +325,7 @@ def main(argv=None):
     ap.add_argument('--start', action='store_true', help='Operator authorization for one fresh account-3 wipe')
     ap.add_argument('--admit-release', action='store_true', help='Operator reviewed a new idle-gated installed release')
     ap.add_argument('--recover-wipe', action='store_true', help='Operator continuation of recorded failed wipe services only')
+    ap.add_argument('--retry-copy', action='store_true', help='Operator-qualified fix; resume saved copies without another wipe')
     a = ap.parse_args(argv)
     a.directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     path = a.directory/'state.json'
@@ -338,6 +352,11 @@ def main(argv=None):
             raise SystemExit('Campaign code changed; review and explicitly admit the new version before resuming')
         if state.get('manifest') and state['manifest'] != manifest():
             raise SystemExit('Installed Python baseline changed; campaign held for review')
+        if a.retry_copy:
+            if not a.admit_release:
+                raise SystemExit('A copy retry requires explicit admission of the reviewed installed release')
+            admit_copy_retry(state, json.loads((a.directory/'wipe.json').read_text()))
+            save(path, state)
         if a.recover_wipe:
             if state['phase'] != 'BLOCKED' or not (a.directory/'wipe.json').exists() or state.get('inProgress'):
                 raise SystemExit('Only an idle, recorded partial wipe may be explicitly recovered')
