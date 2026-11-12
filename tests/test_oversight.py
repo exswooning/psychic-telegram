@@ -299,6 +299,49 @@ def test_a_few_fallbacks_in_many_copies_or_old_ones_are_not(db, tmp_path):
     assert O.watch_fallbacks(ctx(db, tmp_path)) == []
 
 
+def test_native_rebuild_alert_does_not_invent_a_broken_or_streamed_route(db, tmp_path):
+    """Forms have no export mapping; native API rebuilds need feature checks, not a retry."""
+    for i in range(8):
+        _audit(db, f"f{i}", "transfer_route", "SUCCESS", '{"method":"native_api"}')
+        _audit(db, f"f{i}", "fallback", "FALLBACK",
+               "download_upload -> native_api: SKIPPED_UNEXPORTABLE: no export mapping")
+    [f] = O.watch_fallbacks(ctx(db, tmp_path))
+    assert "native_api" in f["summary"]
+    assert "rebuild" in f["summary"] and "feature" in f["summary"]
+    assert "first route is broken" not in f["summary"]
+    assert "sends the bytes through this box" not in f["summary"]
+
+
+def test_fallback_alert_uses_only_the_same_users_route_and_holds_unknowns(db, tmp_path):
+    for i in range(8):
+        _audit(db, f"f{i}", "fallback", "FALLBACK", "download_upload -> native_api: ")
+        with db.write() as c:
+            c.execute("INSERT INTO audit_log(source_user,item_id,item_type,status,error_message,timestamp) "
+                      "VALUES(?,?,?,?,?,?)", ("different@s.example", f"f{i}", "transfer_route", "SUCCESS",
+                                              '{"method":"download_upload"}', iso(NOW)))
+    [f] = O.watch_fallbacks(ctx(db, tmp_path))
+    assert "8 unknown" in f["summary"]
+    assert "sends the bytes through this box" not in f["summary"]
+
+
+def test_a_newer_primary_success_cannot_relabel_an_old_fallback(db, tmp_path):
+    for i in range(8):
+        _audit(db, f"f{i}", "fallback", "FALLBACK", "server_side -> native_api: HTTP 403")
+        _audit(db, f"f{i}", "transfer_route", "SUCCESS", '{"method":"download_upload"}', minutes_ago=0)
+    [f] = O.watch_fallbacks(ctx(db, tmp_path))
+    assert "8 unknown" in f["summary"]
+    assert "sends the bytes through this box" not in f["summary"]
+
+
+def test_a_recorded_streamed_fallback_keeps_its_cost_and_cause(db, tmp_path):
+    for i in range(8):
+        _audit(db, f"f{i}", "transfer_route", "SUCCESS", '{"method":"download_upload"}')
+        _audit(db, f"f{i}", "fallback", "FALLBACK", "server_side -> download_upload: HTTP 404")
+    [f] = O.watch_fallbacks(ctx(db, tmp_path))
+    assert "8 download_upload" in f["summary"] and "sends the bytes through this box" in f["summary"]
+    assert "HTTP 404" in f["summary"]
+
+
 def test_a_dropped_setting_is_named(db, tmp_path):
     _audit(db, "f1", "carried", "CARRIED_DROPPED", "writersCanShare,appProperties: HTTP 403 teamDrivesSharingRestrictionNotAllowed")
     [f] = O.watch_fallbacks(ctx(db, tmp_path))

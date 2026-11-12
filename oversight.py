@@ -491,8 +491,12 @@ def watch_fallbacks(ctx: Context) -> list[dict]:
     out = []
     for aid, path in ctx.ledgers():
         with _ro(path) as c:
-            fb = c.execute("SELECT error_message FROM audit_log WHERE item_type='fallback' AND status='FALLBACK' "
-                           "AND timestamp >= ?", (since,)).fetchall()
+            fb = c.execute("SELECT f.error_message, r.error_message AS route FROM audit_log f "
+                           "LEFT JOIN audit_log r ON r.source_user=f.source_user AND r.item_id=f.item_id "
+                           "AND r.item_type='transfer_route' AND r.status='SUCCESS' "
+                           "AND substr(r.timestamp,1,19)=substr(f.timestamp,1,19) "
+                           "WHERE f.item_type='fallback' AND f.status='FALLBACK' "
+                           "AND f.timestamp >= ?", (since,)).fetchall()
             routes = c.execute("SELECT COUNT(*) FROM audit_log WHERE item_type='transfer_route' "
                                "AND timestamp >= ?", (since,)).fetchone()[0]
             dropped = c.execute("SELECT source_user, item_id, error_message FROM audit_log WHERE "
@@ -501,10 +505,26 @@ def watch_fallbacks(ctx: Context) -> list[dict]:
         if len(fb) >= FALLBACK_MIN and len(fb) > FALLBACK_SHARE * max(routes, 1):
             causes = collections.Counter(re.sub(r"\b(?=[\w-]*\d)[\w-]{12,}\b", "<id>", (r[0] or ""))[:120] for r in fb)
             ex = "\n".join(f"- {n} x {k}" for k, n in causes.most_common(5))
+            methods = collections.Counter()
+            for row in fb:
+                try:
+                    route = json.loads(row["route"] or "{}")
+                    method = route.get("method") if isinstance(route, dict) else None
+                except (ValueError, TypeError):
+                    method = None
+                methods[method if method in ("server_side", "download_upload", "native_api", "move") else "unknown"] += 1
+            summary = ("The files arrived after an earlier route failed or could not carry them; "
+                       "arrival alone does not prove feature parity.\n\nRoutes: " +
+                       ", ".join(f"{n} {method}" for method, n in methods.most_common()) + ".")
+            if methods["native_api"]:
+                summary += " Native API rebuilds require feature comparisons; they do not establish original native fidelity."
+            if methods["download_upload"]:
+                summary += " The download_upload route sends the bytes through this box."
+            if methods["unknown"]:
+                summary += " The successful route could not be established for those unknown entries."
             out.append(finding("watch_fallbacks", aid, "rate",
                                f"{len(fb)} of {routes} files in 10 min arrived only by a fallback route",
-                               f"Every one arrived, so nothing failed -- but the first route is broken for them, and "
-                               f"the fallback is slower (download-and-upload sends the bytes through this box).\n\n{ex}",
+                               f"{summary}\n\n{ex}",
                                "error"))
         if dropped:
             keys = collections.Counter(k for r in dropped for k in (r[2] or "").split(":")[0].split(",") if k)

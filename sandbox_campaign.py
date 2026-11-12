@@ -255,7 +255,7 @@ def step(directory, state):
             users = [r for r in db.all_identities() if r['entity_type'] == 'user']
             pending = unfinished_copies(users)
             paused = [r for r in pending if r['status'] == 'PAUSED_QUOTA'
-                      or db.bytes_sent_24h(r['target_email']) >= settings.effective_upload_cap]
+                      or db.bytes_sent_24h(r['target_email']) >= settings.effective_upload_cap()]
             if pending and len(paused) != len(pending):
                 raise RuntimeError('Migration has non-quota unfinished users; inspect migrate.log before retrying')
             if paused:

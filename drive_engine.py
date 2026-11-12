@@ -1836,6 +1836,7 @@ class DriveMigrator:
         # thread-safe.
         local_failures = 0
         last_error = ""
+        first_skip = ""
         strategies = self._strategies_for(item, is_native)
         if int(item.get("size") or 0) > self.settings.effective_upload_cap():
             # More than a whole day: only a server-side copy can carry it. Streamed, it
@@ -1868,6 +1869,8 @@ class DriveMigrator:
                 # never open either, which the strategy list already covers.
                 if not last_error:
                     last_error = row["error_message"] or ""
+            elif row is not None and row["status"] in self._RETRYABLE_SKIPS and not first_skip:
+                first_skip = f"{row['status']}: {row['error_message'] or ''}"
             if not self.db.get_target_id(self.source_user, item["id"], "file") \
                     and not self._worth_another_strategy(item):
                 # A deliberate skip, not a failure. canDownload=false is the
@@ -1883,17 +1886,18 @@ class DriveMigrator:
                     if local_failures:
                         self._bump("failed", -local_failures)
                     self._bump("recovered_by_fallback")
-                    # Its own row, with WHY the first route failed: a fallback is a fault the
-                    # file survived (the staging sweep of 9 Nov 2026 showed only as INFO lines).
+                    # A route may be unsupported rather than broken (Forms have no export).
+                    # Keep that reason as well as real failures for the error observer.
                     self.db.log_audit(self.source_user, item["id"], "fallback", "FALLBACK",
-                                      f"{attempts[0]} -> {name}: {(last_error or '')[:200]}")
+                                      f"{attempts[0]} -> {name}: {(last_error or first_skip or 'reason unavailable')[:200]}")
+                    outcome = "failed" if local_failures else "could not carry it"
                     self.db.log_audit(
                         self.source_user, item["id"], "file", "SUCCESS",
                         f"copied by {name} after {', '.join(attempts[:-1])} "
-                        f"failed")
-                    log.info("[%s] %s recovered %s after %s failed",
+                        f"{outcome}")
+                    log.info("[%s] %s recovered %s after %s %s",
                              self.source_user, name, item.get("name"),
-                             ", ".join(attempts[:-1]))
+                             ", ".join(attempts[:-1]), outcome)
                 return
 
         # Every route declined it for a reason no retry changes -- a Form or an Apps

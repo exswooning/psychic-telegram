@@ -28,6 +28,34 @@ start and checked on each phase. Autopilot can use isolated state and observe-on
 mode so it cannot race the campaign's durable recovery. Typed target repairs run
 only after copying, through the existing admitted repair implementations.
 
+### Follow-up fixes found while copying (not yet deployed)
+
+The live observer's incident 68 described every fallback as a broken primary
+route sending bytes through this host. At 11:34 UTC all 39 observed fallbacks
+were successful Forms API rebuilds. Forms lack an export mapping; that is a
+capability skip, not evidence the export service broke. The reporting correction
+retains the original skip reason and describes only the recorded successful
+route. Unknown/corrupt or different-user/time route records remain unknown.
+Rebuilds still require supported-feature comparisons and do not establish native
+fidelity. No fallback findings were erased or relabeled in the live ledger.
+
+Code review also found the quota controller compared byte usage to the bound
+`effective_upload_cap` method rather than its return value when later ordered
+passes overwrote a pause status. Two actual-step regressions reproduced the
+TypeError below/at the cap before the fix. Calling the method restores the
+non-quota hold and rolling-window delay respectively; real expenditure, attempts
+and all gates remain intact. The active process was not patched or restarted.
+
+The combined 227 isolated campaign/Drive/Forms/observer/source-protection tests
+passed. These establish controller/reporting behavior, not Google parity. Both
+fixes remain pending the normal idle-gated release; runtime is still d1b4651.
+
+An independent configuration check found `/api/queue` returning 502 because the
+preserved Caddy fallback points to 127.0.0.1:8081 while bitport-webui actually
+listens on 8080. The v2 API and /next assets remain reachable. The configuration
+has not been changed during tenant work; align the route with the real listener,
+retain a backup and validate both UIs at the next safe deployment point.
+
 Copy retries: at most four attempts; only PAUSED_QUOTA gets an automatic delayed
 resume. Wait until the affected users' recorded upload buckets have expired
 (bucket start +25h, conservative), or 24h from observed refusal if unknown. Do not

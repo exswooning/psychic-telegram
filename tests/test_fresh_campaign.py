@@ -43,6 +43,41 @@ def test_split_mail_is_admitted_only_to_a_separate_fresh_handoff_gate():
     assert campaign.unfinished_copies([missing_drive]) == [missing_drive]
 
 
+@pytest.mark.parametrize('bytes_sent', [99, 100])
+def test_ordered_pass_overwritten_status_uses_the_real_callable_quota_cap(tmp_path, monkeypatch, bytes_sent):
+    """Later passes can mark a quota-paused Drive user DONE; inspect actual bytes, not the method object."""
+    import config, db as database
+    rows = [dict(entity_type='user',source_email=f'u{i}@{campaign.PAIR[0]}',
+                 target_email=f'u{i}@{campaign.PAIR[1]}',status='DONE',
+                 services_done='drive,calendar,contacts,tasks') for i in range(45)]
+    rows[0]['services_done'] = 'calendar,contacts,tasks'
+    cap_calls = []
+    settings = SimpleNamespace(source_domain=campaign.PAIR[0],target_domain=campaign.PAIR[1],
+        db_path='unused',effective_upload_cap=lambda: (cap_calls.append(1), 100)[1])
+    c = sqlite3.connect(':memory:')
+    c.execute('CREATE TABLE upload_ledger(target_user,day_utc,bytes_sent)')
+    c.execute('INSERT INTO upload_ledger VALUES(?,?,?)', (rows[0]['target_email'],'2026-11-12T11', bytes_sent))
+    fake_db = SimpleNamespace(all_identities=lambda: rows,close=lambda: None,conn=c,
+        bytes_sent_24h=lambda user: bytes_sent)
+    monkeypatch.setattr(config,'Settings',lambda **kw: settings)
+    monkeypatch.setattr(database,'MigrationDB',lambda *a: fake_db)
+    monkeypatch.setattr(campaign,'idle',lambda: None)
+    monkeypatch.setattr(campaign.os,'environ',dict(campaign.os.environ))
+    monkeypatch.setattr(campaign,'child',lambda *a: None)
+    monkeypatch.setattr(campaign,'now',lambda: datetime(2026,11,12,12,tzinfo=timezone.utc))
+    state={'phase':'migrate','migrationAttempts':1}
+    if bytes_sent < 100:
+        with pytest.raises(RuntimeError,match='non-quota unfinished users'):
+            campaign.step(tmp_path,state)
+        assert 'nextEligibleAt' not in state
+    else:
+        campaign.step(tmp_path,state)
+        assert state['phase']=='migrate' and state['quotaUsers']==1
+        assert state['nextEligibleAt']=='2026-11-13T12:00:00+00:00'
+    assert cap_calls and state['migrationAttempts']==2
+    assert c.execute('SELECT bytes_sent FROM upload_ledger').fetchone()[0] == bytes_sent
+
+
 @pytest.mark.parametrize('incomplete', [False, True])
 def test_handoff_rechecks_actual_source_coverage_before_any_dms_start(tmp_path, monkeypatch, incomplete):
     import config, db as database, auth, migration_checks
