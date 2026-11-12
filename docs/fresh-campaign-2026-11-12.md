@@ -56,6 +56,17 @@ listens on 8080. The v2 API and /next assets remain reachable. The configuration
 has not been changed during tenant work; align the route with the real listener,
 retain a backup and validate both UIs at the next safe deployment point.
 
+The recurring cause is now reproduced: install.sh chooses a free UI port and
+points Caddy to it, but sync_vps.sh refreshed the unit back to port 8080. The
+reviewed correction reads the actual installed ExecStart before copying and
+preserves its validated port when rendering units. An ambiguous/non-numeric port
+aborts before transfer. The actual stubbed deployment pipeline retains 8081;
+81 deployment tests passed with local process inspection enabled (the restricted
+shell cannot see the fake active tenant processes). No active job is an exception
+to the idle gate. A proposed one-upstream Caddy correction for this box validated
+successfully without altering the active configuration; apply with backup only
+after an orderly pause and verified all-account idleness.
+
 Copy retries: at most four attempts; only PAUSED_QUOTA gets an automatic delayed
 resume. Wait until the affected users' recorded upload buckets have expired
 (bucket start +25h, conservative), or 24h from observed refusal if unknown. Do not

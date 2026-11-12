@@ -40,11 +40,29 @@ runtime_changes() {
 # Render the installed deployment directory into service templates. Never assume
 # the old VPS location applies to a laptop installation.
 render_unit() {
-  python3 -c 'import sys; print(sys.stdin.read().replace("/root/migration", sys.argv[1]), end="")' "$1"
+  python3 -c 'import re,sys
+port=sys.argv[2]
+if not re.fullmatch(r"[0-9]{1,5}",port) or not 1<=int(port)<=65535:
+    raise SystemExit("Invalid installed web UI port")
+unit=sys.stdin.read().replace("/root/migration",sys.argv[1])
+unit=unit.replace("webui.py --port 8080","webui.py --port "+port)
+unit=unit.replace("webui.py, port 8080","webui.py, port "+port)
+print(unit,end="")' "$1" "${2:-8080}"
 }
 if [[ "${1:-}" == "--render-unit" ]]; then
-  render_unit "${2:?missing deployment directory}"
-  exit 0
+  render_unit "${2:?missing deployment directory}" "${3:-8080}"
+  exit $?
+fi
+webui_port() {
+  python3 -c 'import re,sys
+ports=re.findall(r"(?:^|[/\s])webui\.py\s+--port\s+([0-9]+)(?=\s|;|$)",sys.stdin.read())
+if len(ports)!=1 or not 1<=int(ports[0])<=65535:
+    raise SystemExit("Cannot establish the installed web UI port; no unit may be replaced")
+print(ports[0])'
+}
+if [[ "${1:-}" == "--webui-port" ]]; then
+  webui_port
+  exit $?
 fi
 if [[ "${1:-}" == "--classify" ]]; then
   changed="$(runtime_changes)"
@@ -183,6 +201,21 @@ for r in c.execute(\"SELECT id, started_at FROM repair_runs WHERE finished_at IS
     echo "$BUSY" | sed 's/^/    /' >&2
     echo "  Wait for it to finish, or set DEPLOY_OVER_JOBS=1 to deploy anyway." >&2
     exit 3
+  fi
+fi
+
+# install.sh may choose a nondefault free port and point Caddy there. Refreshing
+# the shipped unit must preserve that choice, rather than silently resetting it
+# to 8080 and leaving the original UI and /api/queue behind a 502. Read before
+# copying; an unreadable/ambiguous installed command aborts without changing files.
+WEBUI_PORT=8080
+if [[ -n "$RUNTIME_CHANGES" || "${FORCE_RESTART:-0}" == "1" ]]; then
+  if ! INSTALLED_WEBUI_EXEC="$("${SSH[@]}" "$TARGET" "systemctl show bitport-webui.service --property=ExecStart --value 2>/dev/null || true")"; then
+    echo "  DEPLOY ABORTED: cannot read the installed web UI command." >&2
+    exit 1
+  fi
+  if [[ -n "$INSTALLED_WEBUI_EXEC" ]]; then
+    WEBUI_PORT="$(printf '%s' "$INSTALLED_WEBUI_EXEC" | webui_port)" || exit 1
   fi
 fi
 
@@ -349,7 +382,7 @@ if [[ -d "$(cd "$(dirname "$0")" && pwd)/systemd" ]]; then
   RENDERED_UNITS="$(mktemp -d)"
   for unit in "$SD/"*.service "$SD/"*.timer; do
     [[ -f "$unit" ]] || continue
-    render_unit "$DEST" < "$unit" > "$RENDERED_UNITS/$(basename "$unit")" || exit 1
+    render_unit "$DEST" "$WEBUI_PORT" < "$unit" > "$RENDERED_UNITS/$(basename "$unit")" || exit 1
   done
   SD="$RENDERED_UNITS"
   if rsync -az -e "${SSH[*]}" "$SD/"*.service "$TARGET:/etc/systemd/system/" 2>/dev/null; then
@@ -436,7 +469,7 @@ fi
 #
 # The final check compares the listening PID against the one just started. If
 # they differ, something else owns the port and the deploy did not take.
-PORT_UI=8080
+PORT_UI="$WEBUI_PORT"
 "${SSH[@]}" "$TARGET" "set -u; cd $DEST; \
   OLD=\$(ss -ltnp 'sport = :$PORT_UI' 2>/dev/null | grep -o 'pid=[0-9]*' | head -1 | cut -d= -f2); \
   if [ -n \"\${OLD:-}\" ]; then kill \"\$OLD\" 2>/dev/null; fi; \

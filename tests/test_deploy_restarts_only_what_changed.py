@@ -62,9 +62,12 @@ def box(tmp_path):
     (bindir / "rsync").write_text(
         '#!/usr/bin/env bash\n'
         'if [[ " $* " == *" -azcn "* ]]; then echo "dry: $*" >> "$FAKE_LOG"; cat "$FAKE_WOULD"; exit "${FAKE_DRY_RC:-0}"; fi\n'
-        'echo "rsync: $*" >> "$FAKE_LOG"; exit 0\n')
+        'echo "rsync: $*" >> "$FAKE_LOG"\n'
+        'for arg in "$@"; do if [[ "$arg" == */bitport-webui.service && -f "$arg" ]]; then cat "$arg" >> "$FAKE_LOG"; fi; done\n'
+        'exit 0\n')
     (bindir / "ssh").write_text(
         '#!/usr/bin/env bash\necho "ssh: $*" >> "$FAKE_LOG"\n'
+        'if [[ "$*" == *"systemctl show bitport-webui.service"* ]]; then printf "%s" "${FAKE_WEBUI_EXEC:-}"; exit 0; fi\n'
         # An unfinished restart left by an earlier deploy: only when the test says so.
         'if [[ "$*" == *"test -f"*"RESTART_PENDING"* ]]; then [[ "${FAKE_PENDING:-0}" == 1 ]]; exit $?; fi\n'
         'if [[ "${FAKE_STAMP_FAIL:-0}" == 1 && "$*" == *"DEPLOYED_COMMIT"* ]]; then exit 255; fi\n'
@@ -89,6 +92,20 @@ def test_failed_release_stamp_never_claims_completion_or_continues_restarting(bo
     assert 'could not record the installed release' in result.stderr
     assert 'stamped DEPLOYED_COMMIT' not in result.stdout
     assert 'systemctl restart' not in log
+
+
+def test_invalid_installed_ui_port_aborts_before_copying_or_restarting(box):
+    result, log = box(['api_server.py'], FAKE_WEBUI_EXEC='webui.py --port invalid')
+    assert result.returncode != 0 and 'Cannot establish' in result.stderr
+    assert 'rsync:' not in log and 'systemctl restart' not in log
+
+
+def test_real_deploy_pipeline_keeps_the_installed_ui_port_in_the_refreshed_unit(box):
+    result, log = box(['api_server.py'], FAKE_WEBUI_EXEC=(
+        '{ path=/srv/app/.venv/bin/python ; argv[]=/srv/app/.venv/bin/python webui.py --port 8081 ; }'))
+    assert result.returncode == 0, result.stderr
+    assert 'ExecStart=/srv/app/.venv/bin/python webui.py --port 8081' in log
+    assert 'KillMode=process' in log
 
 
 def restarts(log: str) -> bool:
