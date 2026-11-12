@@ -87,3 +87,29 @@ DMS, parity and full verification controllers. Real filter tests cover the exact
 commands used here; a running DMS now refuses copying/restart under the pinned
 campaign baseline. This strengthens the gate rather than overriding it. The
 previous DMS-allowed test was updated for the current all-phases idle policy.
+
+## Recovery rollout checkpoint
+
+The initial wipe ended at 07:10:35Z with three Drive timeouts (social, ward10,
+ward16) and administration Gmail incomplete. Two local one-time release-wait
+helpers accidentally overlapped; the first detected drift caused by the other,
+then removed their shared transport key while the second was finishing. New
+files reached disk but the restart did not complete. No migration/import had
+started; RESTART_PENDING remained and the campaign timer was still disabled.
+Both helpers are terminal and the helper script was retired. The reviewed
+469e441 baseline (193 installed Python files including three preserved operator
+helpers) was verified and the normal deployment was completed at the next
+operator continuation, with four services healthy and 525 UI files unchanged.
+
+This exposed an independent deployment-reporting defect: a failed SSH stamp
+could still print stamped DEPLOYED_COMMIT and return success. Both frontend-only
+and backend paths now fail closed if the stamp cannot be recorded. Two tests
+reproduced the false success before the patch; all 66 targeted deployment tests
+passed afterward. This script-only correction is pushed separately; it is not a
+claim that the current migration has been rechecked or that remote Google
+preconditions were repaired.
+
+Scoped wipe recovery was explicitly admitted against the verified 469e441
+baseline, with the quota timer restored. All three Drive failures recovered;
+administration Gmail was still being emptied at the last check (1,569 messages
+remaining). Do not claim the wipe or migration complete from this checkpoint.

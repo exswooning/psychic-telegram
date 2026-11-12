@@ -223,7 +223,10 @@ fi
 if [[ -z "$RUNTIME_CHANGES" && "${FORCE_RESTART:-0}" != "1" ]]; then
   COMMIT="$(cd "$SRC_DIR" && git rev-parse --short HEAD 2>/dev/null || echo unknown)"
   [[ -n "$(cd "$SRC_DIR" && git status --porcelain 2>/dev/null)" ]] && COMMIT="$COMMIT-dirty"
-  "${SSH[@]}" "$TARGET" "printf '%s\n' '$COMMIT' > $DEST/DEPLOYED_COMMIT"
+  if ! "${SSH[@]}" "$TARGET" "printf '%s\n' '$COMMIT' > $DEST/DEPLOYED_COMMIT"; then
+    echo "  DEPLOY ABORTED: could not record the installed release; completion is unconfirmed." >&2
+    exit 1
+  fi
   echo "  stamped DEPLOYED_COMMIT=$COMMIT"
   record_deploy "$COMMIT" 0
   echo "  FRONTEND-ONLY: nothing that runs on the box changed, so no service was"
@@ -289,7 +292,10 @@ DIRTY="$(cd "$REPO" && git status --porcelain 2>/dev/null)"
 if [[ -n "$DIRTY" ]]; then
   COMMIT="$COMMIT-dirty"
 fi
-"${SSH[@]}" "$TARGET" "printf '%s\n' '$COMMIT' > $DEST/DEPLOYED_COMMIT"
+if ! "${SSH[@]}" "$TARGET" "printf '%s\n' '$COMMIT' > $DEST/DEPLOYED_COMMIT"; then
+    echo "  DEPLOY ABORTED: could not record the installed release; completion is unconfirmed." >&2
+    exit 1
+  fi
 echo "  stamped DEPLOYED_COMMIT=$COMMIT"
 record_deploy "$COMMIT" 1
 

@@ -67,6 +67,7 @@ def box(tmp_path):
         '#!/usr/bin/env bash\necho "ssh: $*" >> "$FAKE_LOG"\n'
         # An unfinished restart left by an earlier deploy: only when the test says so.
         'if [[ "$*" == *"test -f"*"RESTART_PENDING"* ]]; then [[ "${FAKE_PENDING:-0}" == 1 ]]; exit $?; fi\n'
+        'if [[ "${FAKE_STAMP_FAIL:-0}" == 1 && "$*" == *"DEPLOYED_COMMIT"* ]]; then exit 255; fi\n'
         'exit 0\n')
     for f in bindir.iterdir():
         f.chmod(f.stat().st_mode | stat.S_IEXEC)
@@ -79,6 +80,15 @@ def box(tmp_path):
         r = subprocess.run(["bash", SCRIPT, "root@box", "/srv/app"], capture_output=True, text=True, env=e, cwd=ROOT)
         return r, log.read_text()
     return deploy
+
+
+@pytest.mark.parametrize('changed', [['migration-webui/src/a.tsx'], ['api_server.py']])
+def test_failed_release_stamp_never_claims_completion_or_continues_restarting(box, changed):
+    result, log = box(changed, FAKE_STAMP_FAIL=1)
+    assert result.returncode == 1
+    assert 'could not record the installed release' in result.stderr
+    assert 'stamped DEPLOYED_COMMIT' not in result.stdout
+    assert 'systemctl restart' not in log
 
 
 def restarts(log: str) -> bool:
