@@ -113,3 +113,35 @@ Scoped wipe recovery was explicitly admitted against the verified 469e441
 baseline, with the quota timer restored. All three Drive failures recovered;
 administration Gmail was still being emptied at the last check (1,569 messages
 remaining). Do not claim the wipe or migration complete from this checkpoint.
+
+## Copying started; confirmed reset residue
+
+Scoped wipe recovery completed successfully at 10:14:17Z. All recorded wipe
+failures are empty. The timer launched the fresh copy at 10:15Z; the Drive pass
+and link-mail inventory started at 10:16:39Z. No new audit failures were present
+at the initial checks (118, then 634, then 957 fresh file mappings). Source data
+has not been a wipe subject. The final temporary deployment key was removed.
+
+A read-only comparison with the pre-wipe database found 118 comment_reply
+mappings with the exact pre-wipe destination IDs, all with CONFIRMED prior
+comment_delivery_attempts receipts. Drive reset omitted that helper-owned type.
+This is observed bookkeeping residue, not a claim that the new migration has
+already thrown a reply exception. A failing-before regression reproduces the
+subsequent Mapped comment/reply is missing hold on a newly mapped file.
+
+The pending correction adds reply mappings/optional delivery receipts to the
+user's Drive reset and invalidates that user's in-process mapping cache after
+commit. It preserves other users, Gmail and real quota. Comment reconciliation
+may ignore a missing old mapped reply ONLY when an existing nonempty receipt
+proves it belongs to a DIFFERENT target file, while the current exact file
+mapping is checked. The same-file case, missing/empty evidence, target edits,
+ambiguity and uncertain delivery on the current file remain held. Retrying an
+already recovered reply reuses the confirmed copy without another write.
+
+79 affected reset/wipe/campaign/comment tests passed using isolated fake Google
+services. These are not a live qualification of changed comment writes. Keep the
+running 469e441 copy intact. Publish this reviewed correction, await global
+idleness before deployment, independently qualify its concrete sandbox scope,
+then recheck affected comments with preserved target edits and backups. Never
+repeat the full wipe or clear current file/message mappings to fix these reply
+records. Full user/tenant checks, source-after and readiness remain pending.

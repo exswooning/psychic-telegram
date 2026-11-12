@@ -53,7 +53,7 @@ from db import MigrationDB    # noqa: E402
 # tenants live), so clearing them costs no resumability.
 # `acl_pass` is the marker for an item whose sharing was started and not finished; it goes
 # with the items it describes.
-DRIVE_TYPES = ("folder", "file", "shortcut", "acl", "comment", "acl_pass", "links_pass",
+DRIVE_TYPES = ("folder", "file", "shortcut", "acl", "comment", "comment_reply", "acl_pass", "links_pass",
                "form_link",
                # per-file decisions and evidence about the copies a reset removes: which
                # route/method copied it, a Google-flagged file, a source-tripwire change
@@ -209,6 +209,9 @@ def reset_service_ledger(db: MigrationDB, source_email: str,
                 if table in tables:
                     side_deleted += conn.execute(
                         f"DELETE FROM {table} WHERE source_user=?", (source_email,)).rowcount
+        if "drive" in services and "comment_delivery_attempts" in tables:
+            side_deleted += conn.execute(
+                "DELETE FROM comment_delivery_attempts WHERE source_user=?", (source_email,)).rowcount
         if "parity_user" in tables:
             stages = (*services, *(("gmail-awaiting-dms",) if "gmail" in services else ()))
             side_deleted += conn.execute(
@@ -261,6 +264,10 @@ def reset_service_ledger(db: MigrationDB, source_email: str,
             conn.execute(
                 "UPDATE identity_map SET services_done=? WHERE source_email=?",
                 (",".join(sorted(have)), source_email))
+    # A same-process reset must not keep answering from the deleted map.
+    # Invalidate only after commit; other users and services remain on disk.
+    with db._cache_lock:
+        db._mapping_cache.pop(source_email, None)
     return {"user": source_email, "id_mapping_rows": mapping_deleted,
             "audit_log_rows": audit_deleted,
             "side_table_rows": side_deleted,

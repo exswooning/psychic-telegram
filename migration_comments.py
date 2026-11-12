@@ -147,14 +147,22 @@ def reconcile(migrator, sid, tid):
         if mapped:
             found = next((r for r in candidates if r["id"] == mapped), None)
             if not found:
-                raise RuntimeError(
-                    "Mapped comment/reply is missing; do not create another blindly"
-                )
-            if not _body_matches(found, body):
-                raise RuntimeError(
-                    "Existing target comment/reply differs; preserve possible target edits"
-                )
-            return mapped
+                # A proven receipt for another target copy is not evidence
+                # about this freshly mapped file. Missing replies on the SAME
+                # copy, or without that receipt, remain a target-edit hold.
+                receipt = migrator.db.conn.execute(
+                    "SELECT target_file FROM comment_delivery_attempts WHERE source_user=? AND item_key=?",
+                    (migrator.source_user, key)).fetchone()
+                if not receipt or not str(receipt[0] or "").strip() or receipt[0] == tid:
+                    raise RuntimeError(
+                        "Mapped comment/reply is missing; do not create another blindly"
+                    )
+            else:
+                if not _body_matches(found, body):
+                    raise RuntimeError(
+                        "Existing target comment/reply differs; preserve possible target edits"
+                    )
+                return mapped
         matches = [
             r for r in candidates if _body_matches(r, body)
         ]
