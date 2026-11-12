@@ -12,7 +12,10 @@ unchanged. Repo branch codex/google-configuration-ui; preserve .claude/settings.
 State: /opt/bitport/logs/campaigns/fresh-20261112/state.json.
 Current service bitport-fresh-copy-resume; phase migrate, attempt 2. Timer
 bitport-fresh-campaign.timer enabled (five-minute eligible-phase ticks).
-11:19 UTC: 3,898 file mappings, 307 folders, zero current failed audit items.
+11:43 UTC: 6,936 file mappings, 548 folders, zero current failed audit items.
+Copy-pass user states: 22 DONE, 19 PENDING, 4 RUNNING; those are not parity verdicts.
+Two info shortcuts await migrated targets; one ss permission has no emailAddress
+(likely an orphaned deleted-account grant), so do not invent a recipient.
 Source baseline: 45 users, 40,932 Drive items, taken 06:08:42 UTC.
 All selected target data was emptied successfully at 10:14:17 UTC; keep accounts,
 auth/configuration and real upload_ledger. DO NOT REPEAT THE WIPE.
@@ -83,3 +86,25 @@ protected the interrupted state; the release was completed normally before copyi
 
 Scope fidelity remains UNPROVEN until the queued full checks complete. Do not call
 source-wide unchanged from the single-file canary, or call samples/fixtures parity.
+
+## New pending follow-up release
+
+3eca98714d02a4eb0bfc2ed8ad887aefe1e48f27 is pushed, NOT installed. Runtime remains
+d1b4651; do not stamp it as 3eca987 or edit its pinned files during the active run.
+Two reproduced defects: campaign quota comparison failed with int >= method
+when a later pass overwrote PAUSED_QUOTA; call effective_upload_cap(). Observer
+described all fallbacks as broken streamed routes although all 39 observed at
+11:34 UTC were successful Forms native_api rebuilds after unsupported export.
+Keep skip reasons and attribute only same-user/item/second successful route data;
+unknown history stays unknown and rebuilt-feature fidelity remains unchecked.
+227 isolated campaign/Drive/Forms/observer/source-protection tests passed; original
+regressions failed before patches. These are local behavior tests, not live parity.
+
+Live /next Jobs shows legacy /api/queue 502. Read-only config/socket evidence:
+Caddy fallback reverse_proxy 127.0.0.1:8081, webui actually 127.0.0.1:8080,
+no listener on 8081. Both app services and bitport-cloudflared remain healthy;
+v2 API and /next assets work. Preserve config, align this narrow fallback at a
+safe idle-gated rollout and validate both UIs; no Caddy change performed yet.
+No new root credential currently exists; prior approval covered d1b only and that
+key was removed. Use existing authorized shell for reads; don't add another key
+without needed fresh permission. Timer/copy left running; no stop/restart/deploy.
