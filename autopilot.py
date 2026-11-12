@@ -27,7 +27,7 @@ import sys
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-DIR = os.path.join(HERE, "logs", "autopilot")
+DIR = os.getenv("AUTOPILOT_STATE_DIR") or os.path.join(HERE, "logs", "autopilot")
 STATE = os.path.join(DIR, "state.json")
 INBOX = os.path.join(DIR, "INBOX.md")
 OLLAMA = os.getenv("AUTOPILOT_OLLAMA", "http://127.0.0.1:11434")
@@ -115,6 +115,8 @@ def repairs_enabled(account: int) -> bool:
 
 
 def act(a: dict, state: dict, account: int) -> str:
+    if os.getenv("AUTOPILOT_OBSERVE_ONLY") == "1" and a["do"] in ("resume", "fix_mtime"):
+        return "held: managed campaign owns recovery and typed repairs"
     if a["do"] == "resume":
         body = dict(state.get("launch") or {})
         if not body:
@@ -312,6 +314,8 @@ def main(argv=None) -> int:
     feeds = {"feed": os.path.join(HERE, "logs", "incidents", "feed.log"),
              "parity": os.path.join(HERE, "logs", "jobs", str(args.account_id), "parity.log"),
              "run": os.path.join(HERE, "logs", "jobs", str(args.account_id), "migrate.log")}
+    if os.getenv("BITPORT_CAMPAIGN_LOG"):
+        feeds["campaign"] = os.environ["BITPORT_CAMPAIGN_LOG"]
     offs = state.setdefault("offsets", {})
     for k, p in feeds.items():
         offs.setdefault(k, os.path.getsize(p) if os.path.exists(p) else 0)

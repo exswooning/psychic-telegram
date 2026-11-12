@@ -77,7 +77,7 @@ def wipe_drive(drive) -> int:
     so a file that cannot be deleted is left rather than looped on."""
     n = 0
     for q in ("'root' in parents and 'me' in owners and trashed = false",
-              "'me' in owners and trashed = false"):
+              "'me' in owners"):
         while True:
             files = drive.files().list(q=q, pageSize=1000, spaces="drive",
                                        fields="files(id)").execute().get("files", [])
@@ -92,11 +92,21 @@ def wipe_drive(drive) -> int:
             n += done
             if not files or not done:
                 break
-    try:
-        drive.files().emptyTrash().execute()
-    except Exception:      # noqa: BLE001 - the bin empties itself after 30 days anyway
-        logging.getLogger(__name__).debug("ignored an error", exc_info=True)
     return n
+
+
+def _all_pages(resource, key: str, **kwargs) -> list:
+    """List before deleting: pagination tokens must not span our mutations."""
+    items, token, seen = [], None, set()
+    while True:
+        result = resource.list(**kwargs, **({"pageToken": token} if token else {})).execute()
+        items.extend(result.get(key, []))
+        token = result.get("nextPageToken")
+        if not token:
+            return items
+        if token in seen:
+            raise RuntimeError("Repeated wipe inventory page token")
+        seen.add(token)
 
 
 def wipe_gmail(gmail) -> int:
@@ -142,7 +152,7 @@ def wipe_calendar(cal) -> int:
     """Secondary calendars deleted whole; every event on the primary deleted, telling
     nobody -- a wipe must not send a cancellation for every past meeting."""
     n = 0
-    for entry in cal.calendarList().list(minAccessRole="owner").execute().get("items", []):
+    for entry in _all_pages(cal.calendarList(), "items", minAccessRole="owner"):
         if entry.get("primary"):
             continue
         try:
@@ -152,8 +162,8 @@ def wipe_calendar(cal) -> int:
             if not _gone(exc):
                 raise
     while True:
-        items = [e for e in cal.events().list(calendarId="primary", maxResults=2500,
-                                              singleEvents=False).execute().get("items", [])
+        items = [e for e in _all_pages(cal.events(), "items", calendarId="primary", maxResults=2500,
+                                       singleEvents=False)
                  if e.get("status") != "cancelled"]
         done = 0
         for ev in items:
@@ -180,7 +190,7 @@ def wipe_contacts(people) -> int:
             break
         people.people().batchDeleteContacts(body={"resourceNames": names}).execute()
         n += len(names)
-    for g in people.contactGroups().list(pageSize=1000).execute().get("contactGroups", []):
+    for g in _all_pages(people.contactGroups(), "contactGroups", pageSize=1000):
         if g.get("groupType") == "USER_CONTACT_GROUP":
             try:
                 people.contactGroups().delete(resourceName=g["resourceName"]).execute()
@@ -194,7 +204,7 @@ def wipe_tasks(tasks) -> int:
     """Every list deleted with its tasks; the default list, which cannot be deleted,
     is emptied instead."""
     n = 0
-    for tl in tasks.tasklists().list(maxResults=100).execute().get("items", []):
+    for tl in _all_pages(tasks.tasklists(), "items", maxResults=100):
         try:
             tasks.tasklists().delete(tasklist=tl["id"]).execute()
             n += 1
@@ -202,8 +212,8 @@ def wipe_tasks(tasks) -> int:
         except HttpError as exc:
             if _gone(exc):
                 continue
-        for t in tasks.tasks().list(tasklist=tl["id"], maxResults=100, showHidden=True,
-                                    showCompleted=True).execute().get("items", []):
+        for t in _all_pages(tasks.tasks(), "items", tasklist=tl["id"], maxResults=100,
+                            showHidden=True, showCompleted=True):
             try:
                 tasks.tasks().delete(tasklist=tl["id"], task=t["id"]).execute()
                 n += 1

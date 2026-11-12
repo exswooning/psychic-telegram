@@ -57,7 +57,7 @@ DRIVE_TYPES = ("folder", "file", "shortcut", "acl", "comment", "acl_pass", "link
                "form_link",
                # per-file decisions and evidence about the copies a reset removes: which
                # route/method copied it, a Google-flagged file, a source-tripwire change
-               "source_change", "flagged_file", "method", "transfer_route")
+               "source_change", "flagged_file", "method", "transfer_route", "fallback", "carried")
 
 # The ledger row types each service owns. Everything the engine writes to
 # id_mapping/audit_log has to appear here, or a reset leaves rows behind
@@ -194,6 +194,26 @@ def reset_service_ledger(db: MigrationDB, source_email: str,
         side_deleted += conn.execute(
             f"DELETE FROM user_verification WHERE source_user=? AND service IN "
             f"({','.join('?' * len(services))})", (source_email, *services)).rowcount
+        # These receipts/checkpoints describe the deleted target, not the next
+        # migration. Optional tables may not exist in older ledgers. Preserve
+        # other users/services and the rolling upload ledger (real Google quota).
+        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        for table in ("migration_item_receipts", "verification_repair_queue"):
+            if table in tables:
+                side_deleted += conn.execute(
+                    f"DELETE FROM {table} WHERE source_user=? AND service IN "
+                    f"({','.join('?' * len(services))})", (source_email, *services)).rowcount
+        if "gmail" in services:
+            for table in ("verification_mail_cache", "verification_mail_checkpoints",
+                          "mail_reconciliation_items"):
+                if table in tables:
+                    side_deleted += conn.execute(
+                        f"DELETE FROM {table} WHERE source_user=?", (source_email,)).rowcount
+        if "parity_user" in tables:
+            stages = (*services, *(("gmail-awaiting-dms",) if "gmail" in services else ()))
+            side_deleted += conn.execute(
+                f"DELETE FROM parity_user WHERE source_user=? AND stage IN "
+                f"({','.join('?' * len(stages))})", (source_email, *stages)).rowcount
         # user_tally has no such per-service split -- one row combines every service into a
         # single countParity -- so any service being reset invalidates the whole row rather
         # than a slice of it.
