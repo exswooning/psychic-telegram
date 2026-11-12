@@ -162,3 +162,10 @@ for the confirmed comment fix, wait for all child work to drain, deploy through
 normal gates, qualify one concrete comment case with source/target readback, then
 resume the retained copies through the admitted retry path. No source mutations,
 full re-wipe or arbitrary target-edit overwrites are authorized by this recovery.
+
+Final qualified checkpoint: d1b4651 passed the live one-file reply case (6 creates,
+0 on retry, unchanged source). Conditional metadata restoration passed with a real
+V2 ETag after a real-token negative condition was rejected with 412. Exact failure
+history retained. Copy attempt 2 resumed at 11:09:56 UTC, with retained mappings and
+the quota timer restored. See codex-handoff-2026-11-12-fresh.md; overall parity and
+the complete source-after check remain pending. Temporary deployment access removed.
