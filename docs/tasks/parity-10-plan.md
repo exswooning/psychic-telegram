@@ -85,3 +85,18 @@ A run scores 10 when all hold with nobody involved between Start and the final r
   chain for all 45 users (decision in logs/jobs/3/dms_decision.json); then delta, deep check, review file
   logs/jobs/3/REVIEW-post-migration.md. Repairs paused. Check `grep chain2: logs/jobs/3/scheduled.log`.
 - Not deployed yet: the Phase 1 commit after b0adcb8 (deploy when the box is idle).
+
+## Priority order from 13 Nov evening (operator: faster, parity first time, failures handled)
+Work these first, one or two per usage window, each with a test and a before/after measurement on one
+sandbox mailbox or user. Stop a session at about 60% of the usage window.
+1. Bulk DMS reconciliation by a Message-ID index (Phase 3). Biggest saving: ~20 h projected today.
+2. Verify streams results to the ledger instead of holding them (the 11 GB growth), reuses the index for
+   extras, and re-verifies only what changed since its last "as of".
+3. Read each mailbox once (shared classifier between the link inventory and the mail pass).
+4. End-of-pass retry of failed items by class: transient (retry), quota (wait for the reset), explained
+   (accepted list), unexplained (hold that user, continue the rest, incident). Two rounds with no
+   progress stops and reports.
+5. Preflight gate before Start: both tenants ready, quota, network, DMS login and authorisation, disk,
+   no pending upgrade. Refuse with the reason.
+6. One target write per Drive file; DMS started per user as its mail pass ends clean.
+7. Run record with phases; fault-injection tests; UI refuses a full verify while the DMS imports.
