@@ -25,7 +25,7 @@ A run scores 10 when all hold with nobody involved between Start and the final r
 - [x] Lint green on HEAD (repair.py unused target read, split_mail/verify_sample dead names).
 - [x] Link inventory stops with the run (Codex's change, committed).
 - [x] A later pass no longer overwrites an earlier pass's failure or a mail hand-off still owed
-      (`main._standing_failures`; helper tested). TODO: one end-to-end test through `migrate_user`.
+      (`main._standing_failures`; tested on its own and end to end through `migrate_user`).
 - [x] SSH password entries removed from `.claude/settings.json`. OPERATOR: rotate the SSH/sudo password,
       the Bitport admin password and the source admin password; decide on rewriting git history
       (the password is in pushed history); remove the temporary key from root's authorized_keys.
@@ -48,9 +48,9 @@ A run scores 10 when all hold with nobody involved between Start and the final r
       `systemd/needrestart-bitport.conf`, installed on l3novo and by every deploy.
 - [x] Console navigation retries on DNS/connection errors with backoff (`dwd_helper.retry_navigation`;
       one ERR_NAME_NOT_RESOLVED ended the DMS job). Not yet deployed.
-- [ ] A verify with repair (`verify_sample.py --account-id 3 --repair-after-user`, no users named) was
-      started by the API at 07:02 UTC on 13 Nov, after that restart, and ran for hours beside the DMS.
-      Find what starts it (a job resumed on API start, or a UI press) and whether it should.
+- [x] Explained: the verify with repair that ran beside the DMS from 07:02 UTC on 13 Nov was a
+      One-to-one run pressed in the web UI (`POST /api/v2/one-to-one/run` from 192.168.1.5), not a bug.
+      Open question for the run record: should the UI refuse a full verify while the DMS is importing?
 
 ## Phase 3: speed (measure before and after)
 - [ ] Read each mailbox once: the mail pass takes candidates from the link inventory
@@ -71,7 +71,9 @@ A run scores 10 when all hold with nobody involved between Start and the final r
 - [ ] Fault-injection tests: kill mid-copy, DNS drop, rate limits, full disk; the rerun converges.
 - [ ] Nightly end-to-end run on the sandbox with a morning report.
 - [ ] Each known difference fixed or formally accepted (sent-mail label, orphaned grants, Form image).
-- [ ] Quick test gate under 10 minutes before deploy; the full suite (about 21,000 tests, ~2 h) nightly.
+- [x] Quick test gate: `./gate.sh` runs the files in `tests/gate.txt` (lint, status, split mail, DMS,
+      verify, Drive, deploy, safety guards) in about 5 minutes. Run it before every deploy.
+      TODO: have `sync_vps.sh` refuse without a passing gate; the full suite (~21,000 tests, ~2 h) nightly.
 - [ ] Split api_server.py (9,700 lines) and webui.py (6,900 lines) by concern.
 - [ ] Confirm throughput is at Google's quota ceiling; wired network or a hosted box if the box is the limit.
 

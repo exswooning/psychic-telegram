@@ -142,3 +142,40 @@ class TestALaterPassDoesNotOverwriteAnEarlierFailure:
         d.log_audit("u@src", "u@src", "user", "FAILED", "x")
         assert main._standing_failures(d, "u@src", {"calendar"}) == {}
         d.close()
+
+
+class TestThroughMigrateUser:
+    """The same rule, end to end: a clean tasks pass after a failed mail pass."""
+
+    def _clean_tasks_pass(self, auth, db, settings, monkeypatch, prior, gmail_failed):
+        from tests.conftest import SRC_USER, TGT_USER
+
+        class _Tasks:
+            def __init__(self, *a, **k):
+                pass
+
+            def run(self, delta=False):
+                return {"tasks": 1, "failed": 0}
+
+        monkeypatch.setattr(main, "TasksMigrator", _Tasks)
+        settings.migrate_tasks = True
+        db.conn.execute("INSERT OR REPLACE INTO identity_map(source_email,target_email,entity_type,status) "
+                        "VALUES(?,?,'user',?)", (SRC_USER, TGT_USER, prior))
+        db.conn.commit()
+        if gmail_failed:
+            db.log_audit(SRC_USER, SRC_USER, "gmail", "FAILED", "coverage incomplete")
+        main.migrate_user(auth, db, settings, SRC_USER, TGT_USER, {"tasks"}, False, 0)
+        row = db.conn.execute("SELECT status, notes FROM identity_map WHERE source_email=?", (SRC_USER,)).fetchone()
+        return row["status"], row["notes"] or ""
+
+    def test_a_failed_mail_pass_stands_after_a_clean_tasks_pass(self, auth, db, settings, monkeypatch):
+        status, notes = self._clean_tasks_pass(auth, db, settings, monkeypatch, "FAILED", True)
+        assert status == "FAILED" and "gmail: failed in an earlier pass" in notes
+
+    def test_mail_still_owed_to_the_dms_stands_too(self, auth, db, settings, monkeypatch):
+        status, _ = self._clean_tasks_pass(auth, db, settings, monkeypatch, "AWAITING_DMS", False)
+        assert status == "AWAITING_DMS"
+
+    def test_a_clean_user_still_ends_done(self, auth, db, settings, monkeypatch):
+        status, _ = self._clean_tasks_pass(auth, db, settings, monkeypatch, "PENDING", False)
+        assert status == "DONE"
