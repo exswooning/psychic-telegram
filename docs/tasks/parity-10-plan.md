@@ -29,8 +29,11 @@ A run scores 10 when all hold with nobody involved between Start and the final r
 - [x] SSH password entries removed from `.claude/settings.json`. OPERATOR: rotate the SSH/sudo password,
       the Bitport admin password and the source admin password; decide on rewriting git history
       (the password is in pushed history); remove the temporary key from root's authorized_keys.
-- [ ] Key-only SSH for deploys (install `~/.ssh/bitport_lenovo.pub` on the box: needs the operator's word),
-      then `sync_vps.sh` works again.
+- [x] Key login for deploys: the operator installed `~/.ssh/bitport_lenovo.pub` for l3novo and root
+      (13 Nov); `ssh -i ~/.ssh/bitport_lenovo root@100.79.158.38` works, so
+      `./sync_vps.sh root@100.79.158.38 /opt/bitport ~/.ssh/bitport_lenovo` can be used again.
+      OPERATOR, still open: password login is still enabled (switch it off after rotating the password);
+      root's authorized_keys also holds l3novo's older key and the temporary key `bitport-5fa-qualified-20261112`.
 - [x] Label race: Gmail re-files inserted sent mail moments after the insert. The inline check now waits,
       aligns once more and looks again (`LABEL_SETTLE_SEC`, 2 tries); labels still settling are recorded
       `LABELS_PENDING` and queued for the full verify, and no longer fail the user. Not yet proven live.
