@@ -2,6 +2,8 @@
 not only counted."""
 import mail_dead_links as M
 from tests.conftest import SRC_USER
+import concurrent.futures
+import pytest
 
 GONE = "1GoneFileIdGoneFileIdGoneFileId0001"
 MOVED = "1CopiedFileIdCopiedFileIdCopied0002"
@@ -59,3 +61,26 @@ def test_link_emails_are_recorded_with_whether_gmail_search_named_them(gmail_mig
     rows = dict(db.conn.execute("SELECT message_id, by_search FROM mail_link_messages").fetchall())
     assert rows == {named: 1, hidden: 0}
     assert (r["linkMessages"], r["searchMissed"]) == (2, 1)
+
+
+def test_stop_inside_a_mailbox_does_not_drain_queued_reads_or_replace_complete_evidence(gmail_migrator, auth, db, monkeypatch):
+    """Live account 3: a daemon inventory kept its non-daemon pool alive after Stop."""
+    import main
+    g=auth.source_gmail(SRC_USER)
+    g.add_message(_mail('old',GONE),['INBOX'])
+    M.inventory_user(gmail_migrator,workers=1,say=lambda *_: None)
+    before=M.report(db.conn)
+    for i in range(30):g.add_message(_mail(str(i),MOVED),['INBOX'])
+    retry=gmail_migrator._retry;reads=[]
+    def stopping_read(call,**kw):
+        result=retry(call,**kw)
+        if kw.get('label')=='gmail.dead_links.get':
+            reads.append(1);main.SHUTDOWN.set()
+        return result
+    monkeypatch.setattr(gmail_migrator,'_retry',stopping_read)
+    try:
+        with pytest.raises(concurrent.futures.CancelledError):
+            M.inventory_user(gmail_migrator,workers=1,say=lambda *_: None)
+        assert len(reads)==1
+        assert M.report(db.conn)==before
+    finally:main.SHUTDOWN.clear()

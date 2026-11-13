@@ -121,17 +121,16 @@
       "Bash(.venv/bin/python -m pytest tests/test_ab_scoping.py tests/test_ab_transfer.py tests/test_ab_transfer_matrix.py tests/test_benchmark_run.py tests/test_benchmark_safety_extensions.py -q -p no:cacheprovider)",
       "Bash(cat > *)",
       "Read(//tmp/claude-501/**)",
-      "Bash(SSHPASS='1234567890' sshpass -e ssh -o PreferredAuthentications=password -o PubkeyAuthentication=no -o ConnectTimeout=20 l3novo@100.79.158.38 'hostname; date -u +%FT%TZ')",
-      "Bash(SSHPASS='1234567890' sshpass -e ssh -o PreferredAuthentications=password -o PubkeyAuthentication=no l3novo@100.79.158.38 'cat > /tmp/p30.sh; echo 1234567890 | sudo -S -p \"\" bash /tmp/p30.sh; rm -f /tmp/p30.sh' < /tmp/claude-501/p30.sh 2>&1 | cut -c1-300 | head -70)",
       "Bash(git -C .. status --short)",
-      "Bash(export SSHPASS='1234567890')",
-      "Bash(sshpass -e ssh -o PreferredAuthentications=password -o PubkeyAuthentication=no l3novo@100.79.158.38 'echo 1234567890 | sudo -S -p \"\" bash -c \"cd /opt/bitport && setsid nohup .venv/bin/python ab_transfer.py --account-id 3 --user audit@s.sarafgloabalexim.com --mail-mode engine --mail-mode split --report logs/ab_results.md > logs/ab_transfer.log 2>&1 < /dev/null & echo started\"; sleep 25; echo 1234567890 | sudo -S -p \"\" bash -c \"cd /opt/bitport; cat logs/ab_progress.json; echo; tail -5 logs/ab_transfer.log | cut -c1-200\"')",
       "Bash(awk '/started = time.strftime/{f=1} f{print NR\": \"$0} /write_progress\\\\\\(running=False/{if\\(f\\)exit}' ab_transfer.py)",
       "Bash(awk 'NR>=340 && NR<=358{print NR\": \"$0}' ab_transfer.py)",
-      "Bash(sshpass -e ssh -o PreferredAuthentications=password -o PubkeyAuthentication=no l3novo@100.79.158.38 'cat > /tmp/p35.sh; echo 1234567890 | sudo -S -p \"\" bash /tmp/p35.sh; rm -f /tmp/p35.sh')",
       "Bash(/usr/local/bin/python3 concord_sync.py --login)",
       "Bash(security add-generic-password *)",
-      "Bash(security find-generic-password *)"
+      "Bash(security find-generic-password *)",
+      "Bash(sed -n '/^def interactive_login/,/^def retry_failed\\\\|^    print\\(\"Concord: logged in/p' concord_sync.py)",
+      "Bash(/usr/local/bin/python3 -m py_compile concord_sync.py concord_browser.py closer_server.py)",
+      "Bash(/usr/local/bin/python3 test_ledger.py)",
+      "Bash(cd \"/Users/aryan/Library/Application Support/NestSalesLedger/\" && grep -n \"def load_ledger\" -A 6 whatsapp_followup.py; grep -n \"^def _contacts_for\" -A 40 whatsapp_followup.py | head -50; grep -n \"def run\" whatsapp_followup.py)"
     ],
     "additionalDirectories": [
       "/private/tmp",

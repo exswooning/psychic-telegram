@@ -113,3 +113,32 @@ class TestAPassThatRanNothingDoesNotPromote:
         assert out["services"] == {}
         assert out["status"] != "DONE"
         d.close()
+
+
+class TestALaterPassDoesNotOverwriteAnEarlierFailure:
+    """Account 3, 13 Nov 2026: after the mail pass two users were FAILED and 34 AWAITING_DMS; the
+    calendar/contacts/tasks pass ran clean and all 45 read DONE, nothing fixed and the mail still owed."""
+
+    def _run(self, tmp_path, monkeypatch, prior, service_row=None):
+        import db as dbmod
+        d = dbmod.MigrationDB(str(tmp_path / "m.db"))
+        d.conn.execute("INSERT INTO identity_map(source_email,target_email,entity_type,status) "
+                       "VALUES('u@src','u@tgt','user',?)", (prior,))
+        d.conn.commit()
+        if service_row:
+            d.log_audit("u@src", "u@src", service_row, "FAILED", "coverage incomplete")
+        return d
+
+    def test_the_helper_names_only_services_outside_this_pass(self, tmp_path, monkeypatch):
+        d = self._run(tmp_path, monkeypatch, "FAILED", "gmail")
+        assert main._standing_failures(d, "u@src", {"calendar", "contacts", "tasks"}) == {"gmail": "coverage incomplete"}
+        assert main._standing_failures(d, "u@src", {"gmail"}) == {}, "the service itself is judged by its own re-run"
+        d.log_audit("u@src", "u@src", "gmail", "SUCCESS", "cleared: a later run finished it")
+        assert main._standing_failures(d, "u@src", {"calendar"}) == {}, "a clean re-run clears it"
+        d.close()
+
+    def test_the_user_row_itself_is_not_a_service(self, tmp_path, monkeypatch):
+        d = self._run(tmp_path, monkeypatch, "FAILED")
+        d.log_audit("u@src", "u@src", "user", "FAILED", "x")
+        assert main._standing_failures(d, "u@src", {"calendar"}) == {}
+        d.close()

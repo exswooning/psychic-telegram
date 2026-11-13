@@ -19,6 +19,7 @@ import argparse
 import base64
 import collections
 import concurrent.futures as futures
+from itertools import islice
 import os
 import sys
 import time
@@ -77,9 +78,16 @@ def classify(error_text: str | None, owners: list | None, own_domain: str) -> tu
 def inventory_user(gm, workers: int = 8, say=print) -> dict:
     """Every unmapped Drive link in one user's mail, checked against the source, recorded."""
     from db import utc_now
+    from resilience import shutdown_requested
+
+    def checkpoint():
+        if shutdown_requested():
+            raise futures.CancelledError('Link inventory stopped; previous complete evidence retained')
+    checkpoint()
     src = gm.src
     ids, token = [], None
     while True:
+        checkpoint()
         r = gm._retry(lambda t=token: src.users().messages().list(
             userId="me", maxResults=500, pageToken=t, includeSpamTrash=True).execute(), label="gmail.dead_links.list")
         ids += [m["id"] for m in r.get("messages", [])]
@@ -94,26 +102,47 @@ def inventory_user(gm, workers: int = 8, say=print) -> dict:
     from gmail_engine import LINK_SEARCHES
     by_search: set = set()
     for term in LINK_SEARCHES:
+        checkpoint()
         by_search |= gm._list_ids(term)
 
     def read(mid: str) -> tuple[str, set]:
+        checkpoint()
         gm.scan_limiter.acquire()
+        checkpoint()
         # gm.src, not the `src` above: AuthManager builds one client per thread, and httplib2 is not
         # thread-safe (a shared client aborted fidelity_audit, 9 Nov 2026).
         full = gm._retry(lambda: gm.src.users().messages().get(userId="me", id=mid, format="full").execute(),
                          label="gmail.dead_links.get")
+        checkpoint()
         return mid, text_ids(full.get("payload") or {})
-    with futures.ThreadPoolExecutor(max_workers=workers) as pool:
-        for mid, found in pool.map(read, ids):
-            if found:
-                linked[mid] = found
-            for fid in found:
-                if not gm._drive_link_target(fid):          # a copy exists: the engine rewrites it
-                    mentions[fid] += 1
-                    example.setdefault(fid, mid)
+    with futures.ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+        remaining = iter(ids)
+        pending = {pool.submit(read, mid) for mid in islice(remaining, max(1, workers) * 2)}
+        try:
+            while pending:
+                checkpoint()
+                done, pending = futures.wait(pending, timeout=0.25, return_when=futures.FIRST_COMPLETED)
+                for future in done:
+                    checkpoint()
+                    mid, found = future.result()
+                    if found:
+                        linked[mid] = found
+                    for fid in found:
+                        checkpoint()
+                        if not gm._drive_link_target(fid):          # a copy exists: the engine rewrites it
+                            mentions[fid] += 1
+                            example.setdefault(fid, mid)
+                    checkpoint()
+                    next_mid = next(remaining, None)
+                    if next_mid is not None:
+                        pending.add(pool.submit(read, next_mid))
+        finally:
+            for future in pending:
+                future.cancel()
     own = (gm.settings.source_domain or "").lower()
     rows = []
     for fid in sorted(mentions):
+        checkpoint()
         try:
             meta = gm._retry(lambda f=fid: gm.auth.source_drive(gm.source_user).files().get(
                 fileId=f, fields="id,owners(emailAddress)", supportsAllDrives=True).execute(),
@@ -123,7 +152,9 @@ def inventory_user(gm, workers: int = 8, say=print) -> dict:
             status, detail = classify(str(exc), None, own)
         rows.append((gm.source_user, fid, status, detail, mentions[fid], example[fid], utc_now()))
     now = utc_now()
+    checkpoint()
     with gm.db.write() as c:
+        checkpoint()
         c.execute(SCHEMA)
         c.execute(LINK_SCHEMA)
         c.execute("DELETE FROM mail_dead_links WHERE source_user=?", (gm.source_user,))

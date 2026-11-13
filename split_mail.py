@@ -145,7 +145,6 @@ def reconcile_dms(auth, db, settings, progress=None, users=None):
     """
     if progress is None:
         progress = lambda message: print(message, flush=True)
-    from config import DEFERRED_TO_DMS, DELIVERED_BY_DMS
     from gmail_engine import GmailMigrator
     from migration_checks import verify_written_mail
     from link_rewrite import rewrite_raw

@@ -1743,7 +1743,6 @@ class Verifier:
         self._note_sample(res, "message", "draft")
         # Duplicates and extras by Message-ID.
         try:
-            welcome = trashed = 0
             scanned = 0
             for m in self._list_all(tgt):
                 scanned += 1

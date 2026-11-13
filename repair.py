@@ -360,9 +360,6 @@ def repair_verified_gmail_labels(auth, db, settings, report: dict,
                 source = gm._retry(lambda: gm.src.users().messages().get(
                     userId="me", id=source_id, format="metadata").execute(),
                     label="repair.gmail.source-labels")
-                target = gm._retry(lambda: gm.tgt.users().messages().get(
-                    userId="me", id=target_id, format="metadata").execute(),
-                    label="repair.gmail.target-labels")
                 # A stored label finding may outlive a target edit. Confirm content
                 # again immediately before changing its labels.
                 import base64

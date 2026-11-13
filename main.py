@@ -639,6 +639,9 @@ def migrate_user(auth: AuthManager, db: MigrationDB, settings: Settings,
                 result["services"][name] = run_service()
                 if isinstance(result["services"][name], dict) and result["services"][name].get("completion_incomplete"):
                     failures[name] = "Full source/destination ID coverage is incomplete; findings scheduled for repair"
+                    # On the record per service, so a later pass cannot promote the user past it
+                    # (_standing_failures); a clean re-run of this service clears it below.
+                    db.log_audit(source_user, source_user, name, "FAILED", failures[name])
             except QuotaExhausted as exc:
                 # Still the whole user's problem, not this service's. The cap
                 # is a daily byte budget for the TARGET account, so it is
@@ -716,8 +719,18 @@ def migrate_user(auth: AuthManager, db: MigrationDB, settings: Settings,
             # Nothing this account has was in scope. BLOCKED, not FAILED:
             # waiting on a licence, not on a fix here.
             status = "BLOCKED"
+        # A pass judges only the services it ran. Status is one value per user, so the last pass used to
+        # win: account 3, 13 Nov 2026 -- two users FAILED and 34 AWAITING_DMS after the mail pass all read
+        # DONE once calendar/contacts/tasks ran clean, with nothing fixed and the mail still owed.
+        standing = _standing_failures(db, source_user, set(result["services"])) if track_status else {}
+        if status == "DONE" and standing:
+            status = "FAILED"
+        elif status == "DONE" and prior_status == "AWAITING_DMS" and "gmail" not in result["services"]:
+            status = "AWAITING_DMS"
         note = "; ".join(
             [f"{n}: no access" for n in sorted(no_access)]
+            + ([f"{n}: failed in an earlier pass -- {why[:160]}" for n, why in sorted(standing.items())]
+               if status == "FAILED" and not failures else [])
             # the reason too: "drive: failed" alone sent people to logs that a repair
             # thread never wrote (live, ward1/12/15/16 on 2026-10-23)
             # A check cut short by a Stop or a memory pause did not FAIL: it did not
@@ -864,6 +877,18 @@ def _renew_until(stop: threading.Event, account_id, source_user: str) -> None:
 
 # What proves a service ran for a user: SUCCESS rows of these item types.
 # One definition for the skip check and for `backfill-services`.
+def _standing_failures(db, source_user: str, ran: set) -> dict:
+    """{service: reason} for services NOT in this pass whose own last result is a failure. Each service
+    records its outcome under (user, user, service); a clean re-run of that service clears it."""
+    names = {s for p in ORDERED_PASSES for s in p} - set(ran)
+    if not names:
+        return {}
+    rows = db.conn.execute(
+        "SELECT item_type, error_message FROM audit_log WHERE source_user=? AND item_id=? "
+        "AND status LIKE 'FAILED%'", (source_user, source_user)).fetchall()
+    return {r["item_type"]: (r["error_message"] or "failed") for r in rows if r["item_type"] in names}
+
+
 SERVICE_EVIDENCE = {
     "drive": ("file", "folder"),
     "gmail": ("message", "label", "draft"),
@@ -2136,6 +2161,9 @@ def _start_link_inventory(auth, db, settings, only) -> threading.Thread:
             try:
                 mail_dead_links.inventory_user(GmailMigrator(auth, db, settings, source, target),
                                                workers=8, say=log.info)
+            except futures.CancelledError:
+                log.info("link inventory stopped; prior complete mailbox evidence retained")
+                return
             except Exception as exc:      # noqa: BLE001 - the mail pass re-reads anything missing
                 log.warning("link inventory for %s did not finish: %s", source, exc)
     t = threading.Thread(target=go, name="link-inventory", daemon=True)
