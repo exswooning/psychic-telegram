@@ -6,9 +6,16 @@ content checks. Integer byte values remain decimal strings through the API.
 from __future__ import annotations
 
 import logging
+import contextlib
 import json
+import os
+import time
 from concurrent.futures import ThreadPoolExecutor
 from db import utc_now
+
+LABEL_SETTLE_SEC = float(os.getenv("LABEL_SETTLE_SEC", "2"))      # wait before looking at labels again
+LABEL_SETTLE_TRIES = 2
+_NO_LOCK = contextlib.nullcontext()
 
 
 def ensure(db):
@@ -286,6 +293,7 @@ def verify_written_mail(migrator, source_id, target_id, expected_raw, labels, al
     result = V.Verifier._blank()
     result.update(checked=1, itemScope=True)
     receipt = {"target": target_id, "verifiedAt": utc_now(), "scope": "message content and labels"}
+    labels_pending = False
     decode = lambda raw: base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4))
     try:
         migrator.limiter.acquire()
@@ -311,10 +319,29 @@ def verify_written_mail(migrator, source_id, target_id, expected_raw, labels, al
                 migrator._retry(lambda: migrator.tgt.users().messages().modify(
                     userId="me", id=target_id, body={"addLabelIds":add,"removeLabelIds":remove}).execute(),
                     label="gmail.inline_label_alignment")
-                fresh = migrator._retry(lambda: migrator.tgt.users().messages().get(
-                    userId="me", id=target_id, format="metadata", fields="id,labelIds").execute())
-                label_diffs = V.compare_labels(desired, set(fresh.get("labelIds") or []))
-                receipt["inlineLabelAlignment"] = {"added":add,"removed":remove,"checked":not label_diffs}
+                read = lambda: set(migrator._retry(lambda: migrator.tgt.users().messages().get(
+                    userId="me", id=target_id, format="metadata", fields="id,labelIds").execute()).get("labelIds") or [])
+                label_diffs = V.compare_labels(desired, read())
+                # Gmail files an inserted message on its own a moment after the insert (sent mail under
+                # INBOX / CATEGORY_PERSONAL), so one look straight after the alignment can still read the
+                # old labels: account 3, 13 Nov 2026 -- 47 such messages failed administration@. Wait,
+                # align once more, look again; what still differs is recorded as pending, not a failure.
+                tries = 0
+                while label_diffs and tries < LABEL_SETTLE_TRIES:
+                    tries += 1
+                    time.sleep(LABEL_SETTLE_SEC)
+                    now = read()
+                    again_add, again_remove = sorted((desired-now)&manageable), sorted((now-desired)&manageable)
+                    if again_add or again_remove:
+                        migrator.limiter.acquire()
+                        migrator._retry(lambda: migrator.tgt.users().messages().modify(
+                            userId="me", id=target_id,
+                            body={"addLabelIds": again_add, "removeLabelIds": again_remove}).execute(),
+                            label="gmail.inline_label_alignment")
+                    label_diffs = V.compare_labels(desired, read())
+                receipt["inlineLabelAlignment"] = {"added":add,"removed":remove,"checked":not label_diffs,
+                                                   "settleTries": tries}
+                labels_pending = bool(label_diffs)
         diffs += label_diffs
         receipt.update(expectedSha256=hashlib.sha256(expected).hexdigest(),
                        targetSha256=hashlib.sha256(actual).hexdigest(), comparison=verdict,
@@ -329,7 +356,14 @@ def verify_written_mail(migrator, source_id, target_id, expected_raw, labels, al
     receipt["verificationKind"] = "item"
     receipt["findings"] = {k: result[k] for k in ("differences", "errors")}
     receipt["diagnostics"] = diagnose("gmail", result)
-    receipt["status"] = "VERIFIED" if result["identical"] == 1 else "NEEDS_RECHECK"
+    # Content proven, labels aligned twice and still settling: the copy is right and Gmail is still filing
+    # it. Recorded and queued for the full verify (which repairs labels), but it does not fail the user.
+    pending = labels_pending and not result.get("errors")
+    receipt["status"] = ("VERIFIED" if result["identical"] == 1 else
+                         "LABELS_PENDING" if pending else "NEEDS_RECHECK")
+    if pending and isinstance(getattr(migrator, "stats", None), dict):
+        with getattr(migrator, "_stats_lock", _NO_LOCK):
+            migrator.stats["labels_pending"] = migrator.stats.get("labels_pending", 0) + 1
     with migrator.db.write() as c:
         c.execute("""CREATE TABLE IF NOT EXISTS migration_item_receipts (
             source_user TEXT NOT NULL, service TEXT NOT NULL, source_id TEXT NOT NULL,
@@ -340,4 +374,4 @@ def verify_written_mail(migrator, source_id, target_id, expected_raw, labels, al
     if receipt["status"] != "VERIFIED":
         import verification_repairs
         verification_repairs.enqueue_findings(migrator.db, migrator.source_user, {"gmail": result})
-    return receipt["status"] == "VERIFIED"
+    return receipt["status"] in ("VERIFIED", "LABELS_PENDING")

@@ -391,6 +391,14 @@ if [[ -d "$(cd "$(dirname "$0")" && pwd)/systemd" ]]; then
     fi
     "${SSH[@]}" "$TARGET" "systemctl daemon-reload" >/dev/null 2>&1 && \
       echo "  systemd units installed"
+    # A library upgrade must never restart a running migration (13 Nov 2026: needrestart restarted every
+    # bitport-* unit after an unattended upgrade and the DMS import died). Units restart by a deploy only.
+    if [[ -f systemd/needrestart-bitport.conf ]]; then
+      "${SSH[@]}" "$TARGET" "mkdir -p /etc/needrestart/conf.d" >/dev/null 2>&1 && \
+        rsync -az -e "${SSH[*]}" systemd/needrestart-bitport.conf \
+          "$TARGET:/etc/needrestart/conf.d/bitport.conf" 2>/dev/null && \
+        echo "  needrestart: bitport units are never restarted by an upgrade"
+    fi
     for t in $(cd "$SD" && ls *.timer 2>/dev/null); do
       if "${SSH[@]}" "$TARGET" "systemctl enable --now $t" >/dev/null 2>&1; then
         echo "  timer enabled: $t"

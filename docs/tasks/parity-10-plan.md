@@ -31,8 +31,9 @@ A run scores 10 when all hold with nobody involved between Start and the final r
       (the password is in pushed history); remove the temporary key from root's authorized_keys.
 - [ ] Key-only SSH for deploys (install `~/.ssh/bitport_lenovo.pub` on the box: needs the operator's word),
       then `sync_vps.sh` works again.
-- [ ] Label race: Gmail re-files inserted sent mail moments after the insert; re-check after a settle
-      delay instead of failing the user (`migration_checks.verify_written_mail`; 47 on administration@).
+- [x] Label race: Gmail re-files inserted sent mail moments after the insert. The inline check now waits,
+      aligns once more and looks again (`LABEL_SETTLE_SEC`, 2 tries); labels still settling are recorded
+      `LABELS_PENDING` and queued for the full verify, and no longer fail the user. Not yet proven live.
 
 ## Phase 2: one orchestrator
 - [ ] Box scripts become admitted jobs with `--account-id` (autopilot.py, parity_loop.py,
@@ -41,9 +42,15 @@ A run scores 10 when all hold with nobody involved between Start and the final r
       is superseded by `dms_pipeline.py` + the `verify-after-dms` follow-on (deployed b0adcb8, not yet
       proven live): prove it on the next run, then delete the box script.
 - [ ] One run record with phases (wipe, drive, mail, dms, reconcile, verify, review); a restart resumes
-      from the recorded phase; nothing else can start the same phase twice (an unidentified actor restarted
-      bitport-dms-fresh at 06:54 UTC on 13 Nov during a Wi-Fi drop).
-- [ ] DMS driver retries navigation on DNS/connection errors with backoff (one ERR_NAME_NOT_RESOLVED ended it).
+      from the recorded phase; nothing else can start the same phase twice.
+- [x] Upgrades never restart Bitport units. The 06:54 UTC restart on 13 Nov was needrestart after an
+      unattended upgrade: it restarted every bitport-* unit (the API too) and the DMS import died.
+      `systemd/needrestart-bitport.conf`, installed on l3novo and by every deploy.
+- [x] Console navigation retries on DNS/connection errors with backoff (`dwd_helper.retry_navigation`;
+      one ERR_NAME_NOT_RESOLVED ended the DMS job). Not yet deployed.
+- [ ] A verify with repair (`verify_sample.py --account-id 3 --repair-after-user`, no users named) was
+      started by the API at 07:02 UTC on 13 Nov, after that restart, and ran for hours beside the DMS.
+      Find what starts it (a job resumed on API start, or a UI press) and whether it should.
 
 ## Phase 3: speed (measure before and after)
 - [ ] Read each mailbox once: the mail pass takes candidates from the link inventory

@@ -530,3 +530,58 @@ def test_a_link_into_another_organisations_shared_drive_is_external(gmail_migrat
 
 def test_a_link_into_the_tenants_own_shared_drive_still_blocks(gmail_migrator, auth, settings):
     assert _shared_drive_link(gmail_migrator, auth, settings, "0AOURS", tenant_drives={"0AOURS"}) == "unresolved"
+
+
+def test_a_label_gmail_refiles_once_is_aligned_again_and_verified(auth, db, settings, monkeypatch):
+    """Account 3, 13 Nov 2026: one look straight after the alignment failed 47 messages of one user."""
+    import domain_guard
+    monkeypatch.setattr(domain_guard, "source_domains", lambda: {"tenanta.com"})
+    from migration_checks import verify_written_mail
+    from gmail_engine import GmailMigrator
+    gm = GmailMigrator(auth, db, settings, SRC_USER, TGT_USER)
+    target = auth.target_gmail(TGT_USER)
+    tid = target.add_message(PLAIN, ["INBOX", "UNREAD"])
+    db.record_mapping(SRC_USER, "fresh", tid, "message")
+    import migration_checks
+    monkeypatch.setattr(migration_checks.time, "sleep", lambda s: None)
+    first = {"done": False}
+    # Gmail's own filing puts INBOX back once, right after the first alignment
+    original_retry = gm._retry
+    def retry(call, **kw):
+        out = original_retry(call, **kw)
+        if kw.get("label") == "gmail.inline_label_alignment" and not first["done"]:
+            first["done"] = True
+            target.messages[tid]["labelIds"] = ["INBOX", "UNREAD"]
+        return out
+    monkeypatch.setattr(gm, "_retry", retry)
+    assert verify_written_mail(gm, "fresh", tid, base64.urlsafe_b64encode(PLAIN).decode(), ["UNREAD"],
+                               allow_label_fix=True)
+    assert set(target.messages[tid]["labelIds"]) == {"UNREAD"}
+    status = db.conn.execute("SELECT status FROM migration_item_receipts WHERE source_id='fresh'").fetchone()[0]
+    assert status == "VERIFIED" and not gm.stats.get("labels_pending")
+
+
+def test_labels_still_settling_are_pending_not_a_failed_user(auth, db, settings, monkeypatch):
+    import domain_guard
+    monkeypatch.setattr(domain_guard, "source_domains", lambda: {"tenanta.com"})
+    from migration_checks import verify_written_mail
+    from gmail_engine import GmailMigrator
+    gm = GmailMigrator(auth, db, settings, SRC_USER, TGT_USER)
+    target = auth.target_gmail(TGT_USER)
+    tid = target.add_message(PLAIN, ["INBOX", "UNREAD"])
+    db.record_mapping(SRC_USER, "fresh", tid, "message")
+    original_retry = gm._retry
+    def retry(call, **kw):      # Gmail puts INBOX back after every alignment
+        out = original_retry(call, **kw)
+        if kw.get("label") == "gmail.inline_label_alignment":
+            target.messages[tid]["labelIds"] = ["INBOX", "UNREAD"]
+        return out
+    monkeypatch.setattr(gm, "_retry", retry)
+    import migration_checks
+    monkeypatch.setattr(migration_checks.time, "sleep", lambda s: None)
+    assert verify_written_mail(gm, "fresh", tid, base64.urlsafe_b64encode(PLAIN).decode(), ["UNREAD"],
+                               allow_label_fix=True), "content is proven: the user is not failed for it"
+    status = db.conn.execute("SELECT status FROM migration_item_receipts WHERE source_id='fresh'").fetchone()[0]
+    assert status == "LABELS_PENDING" and gm.stats.get("labels_pending") == 1
+    queued = db.conn.execute("SELECT COUNT(*) FROM verification_repair_queue WHERE source_user=?", (SRC_USER,)).fetchone()[0]
+    assert queued, "still queued for the full verify, which repairs labels"
