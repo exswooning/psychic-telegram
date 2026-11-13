@@ -6,6 +6,10 @@ reconcile or verify job is live. Update the checkboxes here in the same commit. 
 the 13 Nov session (score 6/10: Drive 8, mail 5, verification 6, orchestration 4, operations 4, security 3,
 tests 6).
 
+Operator, 13 Nov 2026: both tenants of account 3 (s. and t.sarafgloabalexim.com) may be used for live
+tests and verification, including test writes to the source. Still ask first: an SSH key on the box
+(the permission check refused it on the general grant), a wipe, a git history rewrite, password rotation.
+
 ## What 10/10 means (the acceptance test)
 
 A run scores 10 when all hold with nobody involved between Start and the final report:
