@@ -111,3 +111,18 @@ Weekly limits reset Fri 20 Nov, 9:45 AM Nepal. The Fable weekly limit is the bin
 Rule from 14 Nov: about 55% of the Fable week is left for 6 days, so spend at most about 8% a session:
 one or two plan items, targeted reads, the gate, then stop and schedule the next run. Claude cannot read
 the meter itself; the operator's screenshots are the only measurements.
+
+## State, 14 Nov 00:55 Nepal (13 Nov 19:10 UTC)
+- Deployed a84d9fd through `sync_vps.sh` (first gated deploy with the key). The deploy first failed its
+  compile check on 739 macOS `._*` files an earlier hand deploy (tar) had left on the box; removed.
+- Priority item 1, first half done: the DMS reconciliation has its own 8 threads and 20 reads/s per
+  mailbox (was 2 threads at 4/s). Not yet measured live. Second half (a Message-ID index instead of one
+  search per message) is still open.
+- The box chain is retired: it read the watcher's death (DNS, 18:32 UTC) as "DMS finished" and started
+  the deep check early. Incident #72 (`dms_not_started`) is open so the API's hourly retry starts the
+  default pipeline (`dms_pipeline.py`, then `verify-after-dms` with repair). First live proof of that path.
+- One-to-one verify from the UI (finished 15:00 UTC, mid-DMS): 44,505 of 44,576 identical, 0 missing;
+  60 Gmail label differences (the label race), 6 Sheet cell differences, 4 comment differences, the
+  accepted Form; 100,990 target-only messages are DMS mail awaiting reconciliation; 6 read errors.
+- Google's import at 18:30 UTC: 133,743 of 133,760 imported, 17 failed, 44 of 45 users; info@ (to
+  nest@t) had 34,964 of 40,193.
