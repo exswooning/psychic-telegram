@@ -2187,13 +2187,10 @@ def _start_dms(account_id: int | None, *, require_clean: bool, why: str) -> tupl
         return False, reason
 
     if require_clean:
+        # Per user, not all or nothing (operator, 13 Nov 2026): dms_pipeline holds back only a user whose
+        # mail the DMS could carry unrewritten (unfinished, failed link mail, new mail with a Drive link)
+        # and starts the rest -- one user no longer holds every mailbox. What stays here: nobody finished.
         p = _migration_progress(account_id)
-        if p["failed"] or p["running"] or p["blocked"]:
-            return decline(f"{p['failed']} user(s) failed, {p['running']} still running, "
-                           f"{p['blocked']} blocked on something outside the tool")
-        if p.get("mailBlockingDms", 0):
-            return decline(f"{p['mailBlockingDms']} unresolved mail item(s) the DMS would carry across "
-                           f"unrewritten; split handoff is incomplete")
         if not p["done"] and not p.get("awaitingDms", 0):
             return decline("no user finished")
     st = Settings(account_id=account_id)
@@ -2212,13 +2209,21 @@ def _start_dms(account_id: int | None, *, require_clean: bool, why: str) -> tupl
     csv_path, n = _export_identities_csv(account_id)
     if not n:
         return decline("there are no users to map")
-    argv = [PY, "dms_migrate.py", "--apply", "--watch", "720", "--until-done", "4320", "--timeout", "200",
-            "--identities", csv_path,
-            "--source-domain", st.source_domain, "--target-admin", st.target_admin]
+    dms_args = ["--watch", "720", "--until-done", "4320", "--timeout", "200",
+                "--source-domain", st.source_domain, "--target-admin", st.target_admin]
     if st.source_admin:
-        argv += ["--source-admin", st.source_admin]
+        dms_args += ["--source-admin", st.source_admin]
+    then = None
+    if account_id is None:
+        argv = [PY, "dms_migrate.py", "--apply", "--identities", csv_path] + dms_args
+    else:
+        # The whole procedure (operator, 13 Nov 2026): hold/ready decision recorded first, the import for the
+        # ready users, confirmed to have started, then deltas until zero failed -- and after it, a verify of
+        # every item with repair (the verify-after-dms follow-on), as its own job so its progress shows.
+        argv = [PY, "dms_pipeline.py", "--account-id", str(account_id), "--identities", csv_path] + dms_args
+        then = ["verify-after-dms"]
     action = cpdb.begin_action("auto", "system", "dms.start", why, st.target_domain, {"users": n}, None, account_id)
-    ok, detail = _run_admitted(argv, account_id, "dms", env=env)
+    ok, detail = _run_admitted(argv, account_id, "dms", env=env, **({"then": then} if then else {}))
     cpdb.finish_action(action, "OK" if ok else "FAILED", detail)
     return ok, detail
 
@@ -2535,6 +2540,28 @@ def _follow_users(kind: str) -> list[str] | None:
     return [u for u in kind.split("@", 1)[1].split(",") if u] if "@" in kind else None
 
 
+VERIFY_AFTER_DMS_SERVICES = "drive,gmail,calendar,contacts,tasks"      # Chat is out of scope by default
+
+
+def _start_verify_after_dms(account_id: int | None) -> tuple[bool, str]:
+    """After the DMS reports zero failed emails: a verify of every item of every user, each user repaired
+    as it is checked (operator, 13 Nov 2026: report AND repair, with its progress shown). Its own admitted
+    job, named verify, so the Jobs page shows it and its [n/total] progress; repairs are switched on for
+    the account first, by the operator's standing choice -- a later pause from the UI still holds."""
+    from db import MigrationDB
+    import verification_repairs
+    d = MigrationDB(_account_db_path(account_id))
+    try:
+        verification_repairs.enable(d, operator=True)
+    finally:
+        d.close()
+    argv = [PY, "verify_sample.py"] + _account_argv(account_id) + [
+        "--services", VERIFY_AFTER_DMS_SERVICES, "--limit", "0", "--repair-after-user"]
+    ok, detail = _run_admitted(argv, account_id, "verify")
+    log.info("verify after the DMS (account %s): %s %s", account_id, "started" if ok else "not started", detail)
+    return ok, detail
+
+
 def _follow_on(kind: str, account_id: int | None) -> None:
     """What a job that just exited cleanly asked to have done next."""
     if kind.startswith("verify-repair:"):
@@ -2555,6 +2582,8 @@ def _follow_on(kind: str, account_id: int | None) -> None:
     elif kind == "dms":
         _start_dms(account_id, require_clean=True, why="started automatically: the split migration finished cleanly, "
                                                        "so the mail it left for the DMS is now owed")
+    elif kind == "verify-after-dms":
+        _start_verify_after_dms(account_id)
     elif kind.split("@")[0] == "tally":
         _start_tally_after_repair(account_id, _follow_users(kind))
     elif kind.split("@")[0] == "tally_fix":

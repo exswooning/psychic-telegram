@@ -81,20 +81,24 @@ class TestAfterASplitRun:
         ok, _ = A._start_dms(3, require_clean=True, why="after the split")
         assert ok and len(wired["jobs"]) == 1
         job = wired["jobs"][0]
-        assert job["name"] == "dms" and job["argv"][1] == "dms_migrate.py"
-        for flag in ("--apply", "--watch", "--identities"):
+        # The pipeline drives dms_migrate --apply itself: decision first, a confirmed start, deltas to zero.
+        assert job["name"] == "dms" and job["argv"][1] == "dms_pipeline.py"
+        assert job["argv"][job["argv"].index("--account-id") + 1] == "3"
+        for flag in ("--watch", "--until-done", "--identities"):
             assert flag in job["argv"]
+        assert job["then"] == ["verify-after-dms"], "the verify of every item follows the DMS on its own"
         assert job["argv"][job["argv"].index("--source-domain") + 1] == "a.com"
         assert job["argv"][job["argv"].index("--target-admin") + 1] == "admin@b.com"
         assert job["env"] == {"DISPLAY": ":99", "DWD_PASSWORD": "x"}, \
             "the account's own DMS environment, with the admin login"
 
-    @pytest.mark.parametrize("field", ["failed", "running", "blocked"])
-    def test_it_does_not_start_over_a_user_who_failed_is_running_or_is_blocked(self, wired, field):
+    @pytest.mark.parametrize("field", ["failed", "running", "blocked", "mailBlockingDms"])
+    def test_one_users_trouble_no_longer_holds_every_mailbox(self, wired, field):
+        # Per user now (operator, 13 Nov 2026): dms_pipeline holds back only the users whose mail the DMS
+        # could carry unrewritten (tests/test_dms_pipeline.py) and starts the rest.
         wired["progress"][field] = 2
-        ok, why = A._start_dms(3, require_clean=True, why="x")
-        assert not ok and not wired["jobs"] and field in why
-        assert wired["incidents"][0]["kind"] == "dms_not_started" and wired["incidents"][0]["account_id"] == 3
+        ok, _ = A._start_dms(3, require_clean=True, why="x")
+        assert ok and [j["name"] for j in wired["jobs"]] == ["dms"] and not wired["incidents"]
 
     def test_it_does_not_start_when_nobody_finished(self, wired):
         wired["progress"]["done"] = 0
@@ -369,7 +373,7 @@ class TestADeclinedDmsIsAskedAgain:
         import run_watch
         monkeypatch.setattr(run_watch, "list_incidents", lambda status, limit=200: (
             [{"kind": "dms_not_started", "account_id": 3}, {"kind": "crashed", "account_id": 3}] if status == "open" else []))
-        wired["progress"]["mailBlockingDms"] = 9
-        assert A._retry_declined_dms() == [] and not wired["jobs"]          # still blocked: not started
-        wired["progress"]["mailBlockingDms"] = 0
+        wired["progress"]["done"] = 0
+        assert A._retry_declined_dms() == [] and not wired["jobs"]          # nobody finished yet: not started
+        wired["progress"]["done"] = 3
         assert A._retry_declined_dms() == [3] and [j["name"] for j in wired["jobs"]] == ["dms"]

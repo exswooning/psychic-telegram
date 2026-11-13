@@ -907,6 +907,28 @@ def approval_link(source_admin: str) -> str | None:
     return _approval_link_in("\n".join(bodies))
 
 
+APPROVE_WAIT_POLLS = 30          # x 3 s: the consents page can take well over 8 s to draw its buttons
+
+
+def press_approve(page, polls: int = APPROVE_WAIT_POLLS) -> str | None:
+    """Wait for the consents page's Approve button and press it; the label pressed, or None.
+
+    Account 3, 13 Nov 2026: one look after a fixed 8 s found the Admin console still loading (a blank
+    page under its progress bar), so the request sat unapproved and the DMS waited for a click that
+    never came. Polls instead, and reloads once halfway in case the page stalled."""
+    for attempt in range(polls):
+        for label in APPROVE_BUTTONS:
+            btn = page.get_by_role("button", name=re.compile(f"^{label}$", re.I))
+            if btn.count() and btn.first.is_enabled():
+                btn.first.click()
+                page.wait_for_timeout(6000)
+                return label
+        if attempt == polls // 2:
+            page.reload(wait_until="domcontentloaded", timeout=60000)
+        page.wait_for_timeout(3000)
+    return None
+
+
 def approve_as_source(timeout: int, headful: bool) -> list[str]:
     """Approve the pending connection as the SOURCE super admin: the link from
     their mail, signed in as them, the page's approve button pressed. Returns
@@ -953,14 +975,10 @@ def approve_as_source(timeout: int, headful: bool) -> list[str]:
             if page.url.split("#")[0] != direct.split("#")[0]:
                 page.goto(direct, wait_until="domcontentloaded", timeout=60000)
                 page.wait_for_timeout(8000)
-        for label in APPROVE_BUTTONS:
-            btn = page.get_by_role("button", name=re.compile(f"^{label}$", re.I))
-            if btn.count() and btn.first.is_enabled():
-                btn.first.click()
-                page.wait_for_timeout(6000)
-                page.screenshot(path="/tmp/dms_approve.png", full_page=True)
-                return [f"pressed {label!r} as {email}"]
+        pressed = press_approve(page)
         page.screenshot(path="/tmp/dms_approve.png", full_page=True)
+        if pressed:
+            return [f"pressed {pressed!r} as {email}"]
         return [f"no approve button on {page.url.split('?')[0]} (see /tmp/dms_approve.png)"]
     except Exception as exc:      # noqa: BLE001
         return [f"approving as {email} failed: {str(exc)[:160]}"]
