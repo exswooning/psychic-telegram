@@ -100,3 +100,14 @@ sandbox mailbox or user. Stop a session at about 60% of the usage window.
    no pending upgrade. Refuse with the reason.
 6. One target write per Drive file; DMS started per user as its mail pass ends clean.
 7. Run record with phases; fault-injection tests; UI refuses a full verify while the DMS imports.
+
+## Usage log (operator's Claude Pro limits; keep each session small)
+Weekly limits reset Fri 20 Nov, 9:45 AM Nepal. The Fable weekly limit is the binding one.
+| When (Nepal) | Session (5 h) | Weekly | Weekly Fable | Note |
+|---|---|---|---|---|
+| 13 Nov ~3:00 PM | 72% | 23% | 16% | before the audit fixes |
+| 13 Nov ~9:00 PM | 92% | - | - | plan written, stopped |
+| 14 Nov 12:40 AM | 0% | 41% | 45% | one evening of Fable cost about 29% of the week |
+Rule from 14 Nov: about 55% of the Fable week is left for 6 days, so spend at most about 8% a session:
+one or two plan items, targeted reads, the gate, then stop and schedule the next run. Claude cannot read
+the meter itself; the operator's screenshots are the only measurements.

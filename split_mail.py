@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 
 import base64
 from link_rewrite import DRIVE_ID
@@ -137,6 +138,24 @@ def classify_payload(message, lookup, fetch_text_attachment=None, unknown=None, 
     }
 
 
+from resilience import RateLimiter  # noqa: E402
+
+
+def reconcile_tuning() -> tuple[int, float]:
+    """(threads per mailbox, reads a second per mailbox) for the DMS reconciliation.
+
+    It only reads: one raw read on each tenant and one search per message. Two threads behind the
+    engine's 4-calls-a-second limiter gave about 2 messages a second (account 3, 13 Nov 2026: 14,000 in
+    two hours, a projected 20 hours for 141,000), under a tenth of what one Gmail user allows.
+    DMS_RECONCILE_WORKERS (8, at most 16) and DMS_RECONCILE_QPS (20, at most 40) tune it."""
+    def read(name, default, lo, hi, kind):
+        try:
+            return max(lo, min(hi, kind(os.getenv(name, str(default)))))
+        except ValueError:
+            return kind(default)
+    return read("DMS_RECONCILE_WORKERS", 8, 1, 16, int), read("DMS_RECONCILE_QPS", 20, 1.0, 40.0, float)
+
+
 def reconcile_dms(auth, db, settings, progress=None, users=None):
     """Inspect exact deferred IDs; Google completion counters alone prove nothing.
 
@@ -170,6 +189,8 @@ def reconcile_dms(auth, db, settings, progress=None, users=None):
         ):
             raise ValueError("DMS identity is outside the configured tenant pair")
         gm = GmailMigrator(auth, db, settings, source, target)
+        workers, qps = reconcile_tuning()
+        gm.limiter = RateLimiter(qps)       # shared by every thread's migrator below
         # New DMS-created labels are mapped by name, without creating labels.
         src_labels = gm._retry(
             lambda: gm.src.users().labels().list(userId="me").execute()
@@ -347,7 +368,6 @@ def reconcile_dms(auth, db, settings, progress=None, users=None):
 
         from concurrent.futures import ThreadPoolExecutor
 
-        workers = max(1, min(2, int(getattr(settings, "mail_workers", 1) or 1)))
         with ThreadPoolExecutor(
             max_workers=workers, thread_name_prefix="dms-reconcile"
         ) as pool:
