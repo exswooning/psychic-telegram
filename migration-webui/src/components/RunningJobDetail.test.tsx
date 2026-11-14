@@ -31,6 +31,23 @@ const job = (o: Partial<RunningJob> = {}): RunningJob => ({
   detail: 'seeding 34/200 users', pct: 17, elapsedSec: 600, ...o,
 })
 
+describe('migration phase accounting', () => {
+  it('uses phase and copied counts without inventing an overall percentage or ETA', async () => {
+    fetchMyMetrics.mockResolvedValue({ accountId: 3, error: '', latest: null,
+      operations: [], limiters: {}, history: [],
+      metricsScope: 'busiest fresh reporting process; item totals include all processes',
+      movement: { stage: { pass: 2, of: 3, services: 'gmail' },
+        drive: { method: 'server_side', how: 'Google copies files', filesCopied: 10, filesOnSource: 0, formsRebuilt: 0 },
+        mail: { method: 'split', how: 'Link copies then DMS', messagesCopied: 1234, messagesOnSource: 0 } } })
+    render(<RunningJobDetail job={job({ kind: 'migrate', pct: null, accountId: 3 })} onClose={() => {}} />)
+    await waitFor(() => expect(screen.getByText('Pass 2 of 3')).toBeInTheDocument())
+    expect(screen.getByText(/1,234 emails copied; count completion is not 1:1/)).toBeInTheDocument()
+    expect(screen.getByText('Not yet available')).toBeInTheDocument()
+    expect(screen.getByText(/DMS reports import progress after/)).toBeInTheDocument()
+    expect(screen.queryByText('100%')).not.toBeInTheDocument()
+  })
+})
+
 describe('projected ETA', () => {
   it('projects from what has elapsed and what is done', () => {
     // 25% in 100s implies 300s left at the same rate
@@ -180,7 +197,7 @@ describe('a running migrate job\'s own metrics', () => {
     expect(screen.getByTestId('how-drive')).toHaveTextContent('31,000 of 31,419 files')
     expect(screen.getByTestId('how-drive')).toHaveTextContent('the source is only read')
     expect(screen.getByTestId('how-drive')).toHaveTextContent('39 Google file(s) rebuilt')
-    expect(screen.getByTestId('how-mail')).toHaveTextContent('114,042 of 207,797 messages')
+    expect(screen.getByTestId('how-mail')).toHaveTextContent('114,042 of 207,797 emails')
   })
 
   it('shows no Data stat when discovery has never run, rather than a fabricated total', async () => {

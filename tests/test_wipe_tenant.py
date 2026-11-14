@@ -76,7 +76,7 @@ def test_everything_goes(auth, tenant):
     assert out["emptied"] == list(wt.SERVICES)
     assert auth.target_drive(TGT_USER).count() == 0
     g = auth.target_gmail(TGT_USER)
-    assert all("TRASH" in m["labelIds"] for m in g.messages.values())      # to the bin
+    assert g.messages == {}         # deleted for good: a binned copy is "adopted" by the next run
     assert g.drafts == {} and not [l for l in g.labels if l["type"] == "user"]
     c = auth.target_calendar(TGT_USER)
     assert c.calendar_store == {} and all(e["status"] == "cancelled" for e in c.store.values())
@@ -141,3 +141,45 @@ def test_reset_targets_chat_check_is_really_made(monkeypatch):
     asked = []
     monkeypatch.setattr(wt, "granted", lambda key, admin, s: asked.append((admin, s)) or True)
     assert wt.granted("k", "admin@x", "chat") is True and asked == [("admin@x", "chat")]
+
+
+def test_mail_already_in_the_bin_goes_too_so_a_rerun_has_nothing_to_adopt(auth, tenant):
+    """A re-migration's adopt path searches the bin by Message-ID; a binned copy left by a
+    wipe or a repair would be adopted -- delivered on paper, sitting in Trash."""
+    g = auth.target_gmail(TGT_USER)
+    g.add_message(RAW.replace(b"<w@", b"<binned@"), ["TRASH"])
+    wt.wipe([TGT_USER], tenant["clients"], ADMIN, groups_domain="tenantb.com", out=quiet)
+    assert g.messages == {}
+    assert wt.SCOPES["gmail"] == ["https://mail.google.com/"]
+
+
+def _http(status):
+    from googleapiclient.errors import HttpError
+    return HttpError(type("R", (), {"status": status, "reason": "x"})(), b"{}")
+
+
+def test_a_transient_500_is_retried_not_the_end_of_that_users_wipe(monkeypatch):
+    """Live, 9 Nov: one Drive 500 ended ward14@'s wipe half done and kept every user's Drive ledger."""
+    calls = []
+
+    def flaky(_client):
+        calls.append(1)
+        if len(calls) == 1:
+            raise _http(500)
+        return 7
+    monkeypatch.setitem(wt.WIPERS, "drive", flaky)
+    monkeypatch.setattr(wt.time, "sleep", lambda *_: None)
+    out = wt.wipe([TGT_USER], lambda s, u: object(), ADMIN, services=("drive",), shared_drives=False, out=quiet)
+    assert len(calls) == 2 and out["emptied"] == ["drive"] and out["totals"]["drive"] == 7
+
+
+def test_one_users_failure_keeps_only_that_users_ledger(db, identity):
+    from db import bulk_seed_identities
+    bulk_seed_identities(db, [("other@tenanta.com", "other@tenantb.com")])
+    db.record_mapping(SRC_USER, "f1", "t1", "file")
+    db.record_mapping("other@tenanta.com", "f2", "t2", "file")
+    r = wt.reset_ledger(db, [], shared_drives_gone=False, out=quiet,
+                        failed={"drive": ["other@tenantb.com"], "gmail": []})
+    assert db.get_target_id(SRC_USER, "f1", "file") is None                 # emptied: forgotten
+    assert db.get_target_id("other@tenanta.com", "f2", "file") == "t2"     # not emptied: kept
+    assert r["kept"] == {"drive": ["other@tenanta.com"]}

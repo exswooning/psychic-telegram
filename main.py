@@ -58,6 +58,7 @@ from calendar_engine import CalendarMigrator
 from chat_engine import ChatMigrator
 from contacts_engine import ContactsMigrator
 import memtrace
+import progress
 import user_claims
 import config
 from config import Settings
@@ -103,6 +104,14 @@ class _VerifyQueue:
                 fn(*args)
             except Exception:      # noqa: BLE001 - verify_user already swallows; this is the last net
                 log.exception("verification worker")
+            except BaseException as exc:      # noqa: BLE001
+                # A cooperative Stop reaches a check as VerificationCancelled (a BaseException on
+                # purpose, so per-item collectors cannot swallow it). Left uncaught here it killed
+                # the worker and printed "Exception in thread verify-0" with a full traceback every
+                # time anyone pressed Stop (account 3, 2026-11-02): a normal stop reads as a crash.
+                if type(exc).__name__ != "VerificationCancelled":
+                    raise
+                log.info("verification stopped by operator")
             finally:
                 with self._lock:
                     self._pending -= 1
@@ -343,6 +352,16 @@ def _services_that_succeeded(services: dict) -> list[str]:
     return done
 
 
+def _service_unreachable(message) -> bool:
+    """The source manifest could not READ one service because the account has no access to it -- a
+    refusal (HTTP 403 PERMISSION_DENIED, an API or scope not enabled), not a fault in the run.
+    Live (account 3, 7 Nov 2026): Chat answered 403 for six users and, read as fatal, took their
+    calendar, contacts and tasks down with it (incident #11)."""
+    low = str(message).lower()
+    return ("permission_denied" in low and "403" in low) or "has not been used in project" in low \
+        or "service_disabled" in low
+
+
 def is_blocked_externally(exc: Exception) -> bool:
     """Is this obstacle outside the tool's reach entirely?
 
@@ -453,6 +472,9 @@ def migrate_user(auth: AuthManager, db: MigrationDB, settings: Settings,
 
     acceptance = None
     acceptance_enabled = inline_acceptance_enabled(settings,delta=delta,track_status=track_status)
+    from mail_completion import full_mail_check
+    acceptance_services = services if full_mail_check(settings) else services - {"gmail"}
+    acceptance_enabled = acceptance_enabled and bool(acceptance_services)
     prior_status = ""
     if track_status:
         row = db.conn.execute(
@@ -476,8 +498,28 @@ def migrate_user(auth: AuthManager, db: MigrationDB, settings: Settings,
             dm.consolidate_under = source_user
         stats = dm.run(delta=delta)
         if checkpoints and not SHUTDOWN.is_set() and not delta:
-            from migration_checks import drive_completion
+            from migration_checks import drive_completion, reopen_missing_mappings
             check = drive_completion(auth, db, settings, source_user, target_user)
+            # Mapped copies that are no longer on the target (an account emptied after the ledger
+            # was written): Bitport forgets the confirmed-gone mappings and walks the user's Drive
+            # once more, so they are copied again instead of being skipped as migrated.
+            if check.get("missingItems"):
+                reopened = reopen_missing_mappings(db, auth.target_drive(target_user), source_user,
+                                                   check["missingItems"])
+                if reopened:
+                    # A repair Bitport made, not a failure: WARNING, so the operator's stop-on-error
+                    # rule and the error watcher do not stop a run for Bitport doing its job.
+                    log.warning("[%s] %d mapped Drive item(s) were gone from the target; mappings "
+                              "forgotten, copying them again", source_user, reopened)
+                    again = DriveMigrator(auth, db, settings, source_user, target_user, quota)
+                    if dm.consolidate_under:
+                        again.consolidate_under = dm.consolidate_under
+                    redo = again.run(delta=delta)
+                    stats["recopied_missing"] = reopened
+                    stats["files"] = stats.get("files", 0) + redo.get("files", 0)
+                    stats["failed"] = stats.get("failed", 0) + redo.get("failed", 0)
+                    check = drive_completion(auth, db, settings, source_user, target_user)
+            check.pop("missingItems", None)      # ids are for the repair above, not the run log
             stats["coverage_check"] = check
             stats["completion_incomplete"] = not check["complete"]
         return stats
@@ -503,6 +545,22 @@ def migrate_user(auth: AuthManager, db: MigrationDB, settings: Settings,
         if (checkpoints or settings.mail_only_with_links) and not SHUTDOWN.is_set() and not delta:
             from migration_checks import mailbox_completion
             check = mailbox_completion(auth, db, settings, source_user, target_user)
+            # Mapped messages gone from the target (a mailbox emptied after the ledger was written):
+            # the confirmed-gone mappings are forgotten and the mailbox inserted once more, instead
+            # of the user failing the coverage check on every run. Same rule as Drive, above.
+            if check.get("missingItems"):
+                from migration_checks import reopen_missing_messages
+                reopened = reopen_missing_messages(db, auth.target_gmail(target_user), source_user,
+                                                   check["missingItems"])
+                if reopened:
+                    log.warning("[%s] %d mapped message(s) were gone from the target; mappings "
+                                "forgotten, inserting them again", source_user, reopened)
+                    again = GmailMigrator(auth, db, settings, source_user, target_user).run(
+                        delta=delta, since_epoch_days=delta_days, drive_in_scope="drive" in services)
+                    stats["recopied_missing"] = reopened
+                    stats["inserted"] = stats.get("inserted", 0) + again.get("inserted", 0)
+                    check = mailbox_completion(auth, db, settings, source_user, target_user)
+            check.pop("missingItems", None)
             stats["coverage_check"] = check
             stats["awaiting_dms"] = check.get("awaitingDms", 0)
             stats["completion_incomplete"] = (not check["complete"] and not check.get("handoffReady")) or bool(stats.get("inline_verification_failed"))
@@ -549,10 +607,25 @@ def migrate_user(auth: AuthManager, db: MigrationDB, settings: Settings,
             dependencies = dependency_preflight(auth,db,settings,source_user,target_user)
             if dependencies:
                 result["dependencyFindings"] = dependencies
-            acceptance = Acceptance(auth,db,settings,source_user,target_user,services)
+            acceptance = Acceptance(auth,db,settings,source_user,target_user,acceptance_services)
             result["acceptanceRunId"] = acceptance.run_id
             if not acceptance.ready():
-                raise RuntimeError("Source manifest could not be completed: "+json.dumps(acceptance.errors))
+                unreachable = {s: e for s, e in acceptance.errors.items() if _service_unreachable(e)}
+                if not unreachable or len(unreachable) != len(acceptance.errors):
+                    raise RuntimeError("Source manifest could not be completed: "+json.dumps(acceptance.errors))
+                # Only services the account cannot reach: skip and record them, migrate the rest.
+                for name, why in unreachable.items():
+                    no_access[name] = str(why)
+                    log.warning("[%s] no access to %s (%s) — skipping it and continuing with the rest",
+                                source_user, name, str(why)[:120])
+                    db.log_audit(source_user, source_user, name, "SKIPPED_NO_ACCESS", str(why)[:300])
+                acceptance_services = acceptance_services - set(unreachable)
+                acceptance = (Acceptance(auth,db,settings,source_user,target_user,acceptance_services)
+                              if acceptance_services else None)
+                if acceptance is not None:
+                    result["acceptanceRunId"] = acceptance.run_id
+                    if not acceptance.ready():
+                        raise RuntimeError("Source manifest could not be completed: "+json.dumps(acceptance.errors))
         # One service failing must not take the others with it. A user whose
         # Drive is switched off used to lose their mail as well: Drive
         # raised, the single try block around every service caught it, and
@@ -560,12 +633,15 @@ def migrate_user(auth: AuthManager, db: MigrationDB, settings: Settings,
         # came back FAILED having migrated nothing, though five of the six
         # services were available to them. Migrate what the account has.
         for name, wanted, run_service in plan:
-            if not wanted or SHUTDOWN.is_set():
+            if not wanted or SHUTDOWN.is_set() or name in no_access:
                 continue
             try:
                 result["services"][name] = run_service()
                 if isinstance(result["services"][name], dict) and result["services"][name].get("completion_incomplete"):
                     failures[name] = "Full source/destination ID coverage is incomplete; findings scheduled for repair"
+                    # On the record per service, so a later pass cannot promote the user past it
+                    # (_standing_failures); a clean re-run of this service clears it below.
+                    db.log_audit(source_user, source_user, name, "FAILED", failures[name])
             except QuotaExhausted as exc:
                 # Still the whole user's problem, not this service's. The cap
                 # is a daily byte budget for the TARGET account, so it is
@@ -594,6 +670,12 @@ def migrate_user(auth: AuthManager, db: MigrationDB, settings: Settings,
                                 "continuing with the rest", source_user, name)
                     db.log_audit(source_user, source_user, name,
                                  "SKIPPED_NO_ACCESS", detail)
+                elif SHUTDOWN.is_set():
+                    # Stopped by the operator mid-service: the user ends INTERRUPTED (below) and
+                    # the next run resumes it. Logged as a stop, not a failure with a traceback --
+                    # one Stop printed 20 "gmail failed" tracebacks (account 3, 2026-11-03).
+                    log.info("[%s] %s stopped by operator: %s", source_user, name, str(exc)[:160])
+                    db.log_audit(source_user, source_user, name, "INTERRUPTED", detail)
                 else:
                     failures[name] = detail
                     log.exception("[%s] %s failed", source_user, name)
@@ -614,6 +696,19 @@ def migrate_user(auth: AuthManager, db: MigrationDB, settings: Settings,
                         failures.pop(service,None)
                         stats=result["services"].get(service)
                         if isinstance(stats,dict):stats["completion_incomplete"]=False
+        # A service that ran clean this time clears its own old FAILED row. Nothing did: a service
+        # that failed once stayed "failed" in the ledger for ever (account 3, 2026-11-03: six mail rows
+        # from a stopped run counted against the DMS hand-off after their mail had finished).
+        if not SHUTDOWN.is_set():
+            try:
+                for name, stats in result["services"].items():
+                    if name in failures or (isinstance(stats, dict) and stats.get("completion_incomplete")):
+                        continue
+                    prior = db.get_audit(source_user, source_user, name)
+                    if prior and str(prior["status"]).startswith("FAILED"):
+                        db.log_audit(source_user, source_user, name, "SUCCESS", "cleared: a later run finished it")
+            except Exception as exc:      # noqa: BLE001 - bookkeeping never fails a finished user
+                log.debug("[%s] could not clear an old service failure: %s", source_user, exc)
         interrupted = SHUTDOWN.is_set() or (result.get("acceptance") or {}).get("state") == "INTERRUPTED"
         status = "INTERRUPTED" if interrupted else "DONE"
         if failures and not interrupted:
@@ -624,8 +719,18 @@ def migrate_user(auth: AuthManager, db: MigrationDB, settings: Settings,
             # Nothing this account has was in scope. BLOCKED, not FAILED:
             # waiting on a licence, not on a fix here.
             status = "BLOCKED"
+        # A pass judges only the services it ran. Status is one value per user, so the last pass used to
+        # win: account 3, 13 Nov 2026 -- two users FAILED and 34 AWAITING_DMS after the mail pass all read
+        # DONE once calendar/contacts/tasks ran clean, with nothing fixed and the mail still owed.
+        standing = _standing_failures(db, source_user, set(result["services"])) if track_status else {}
+        if status == "DONE" and standing:
+            status = "FAILED"
+        elif status == "DONE" and prior_status == "AWAITING_DMS" and "gmail" not in result["services"]:
+            status = "AWAITING_DMS"
         note = "; ".join(
             [f"{n}: no access" for n in sorted(no_access)]
+            + ([f"{n}: failed in an earlier pass -- {why[:160]}" for n, why in sorted(standing.items())]
+               if status == "FAILED" and not failures else [])
             # the reason too: "drive: failed" alone sent people to logs that a repair
             # thread never wrote (live, ward1/12/15/16 on 2026-10-23)
             # A check cut short by a Stop or a memory pause did not FAIL: it did not
@@ -693,6 +798,12 @@ def migrate_user(auth: AuthManager, db: MigrationDB, settings: Settings,
         result["error"] = detail
 
     result["elapsed_sec"] = round(time.time() - started, 1)
+    if (track_status and "gmail" in services and result.get("status") == "DONE"
+            and not full_mail_check(settings) and not SHUTDOWN.is_set()):
+        from mail_completion import compare_mail_counts
+        result["mailCountCheck"] = compare_mail_counts(auth, db, settings,
+            progress=lambda message: log.info("[%s] %s", source_user, message),
+            source_users=(source_user,))
     if checkpoints:
         from migration_checks import capture_and_save
         result["storage_check"] = capture_and_save(auth, db, source_user, target_user, services, "after")
@@ -706,7 +817,8 @@ def migrate_user(auth: AuthManager, db: MigrationDB, settings: Settings,
         import verify_sample
         from resilience import retry_on_google_error
         done = [s for s in verify_sample.ALL_SERVICES
-                if s == "directory" or s in _services_that_succeeded(result["services"])]
+                if (s == "directory" or s in _services_that_succeeded(result["services"]))
+                and (s != "gmail" or full_mail_check(settings))]
         if done:
             VERIFY.submit(verify_sample.verify_user, auth, db, settings, source_user, tuple(done),
                           settings.verify_sample_per_service,
@@ -765,6 +877,18 @@ def _renew_until(stop: threading.Event, account_id, source_user: str) -> None:
 
 # What proves a service ran for a user: SUCCESS rows of these item types.
 # One definition for the skip check and for `backfill-services`.
+def _standing_failures(db, source_user: str, ran: set) -> dict:
+    """{service: reason} for services NOT in this pass whose own last result is a failure. Each service
+    records its outcome under (user, user, service); a clean re-run of that service clears it."""
+    names = {s for p in ORDERED_PASSES for s in p} - set(ran)
+    if not names:
+        return {}
+    rows = db.conn.execute(
+        "SELECT item_type, error_message FROM audit_log WHERE source_user=? AND item_id=? "
+        "AND status LIKE 'FAILED%'", (source_user, source_user)).fetchall()
+    return {r["item_type"]: (r["error_message"] or "failed") for r in rows if r["item_type"] in names}
+
+
 SERVICE_EVIDENCE = {
     "drive": ("file", "folder"),
     "gmail": ("message", "label", "draft"),
@@ -811,10 +935,8 @@ def _services_already_done(db, r, services) -> bool:
     return set(services) <= done
 
 
-def run_batch(auth: AuthManager, db: MigrationDB, settings: Settings,
-              services: set[str], delta: bool, delta_days: int,
-              only: list[str] | None = None) -> list[dict]:
-    """Fan out across users with a bounded thread pool."""
+def _pass_user_pairs(db, settings, services, delta, only):
+    """Eligible users for one pass, before process sharding or profile writes."""
     rows = [r for r in db.all_identities() if r["entity_type"] == "user"]
 
     def _already_done(r) -> bool:
@@ -846,6 +968,14 @@ def run_batch(auth: AuthManager, db: MigrationDB, settings: Settings,
         wanted = {u.lower() for u in only}
         pairs = [p for p in pairs if p[0] in wanted]
 
+    return pairs
+
+
+def run_batch(auth: AuthManager, db: MigrationDB, settings: Settings,
+              services: set[str], delta: bool, delta_days: int,
+              only: list[str] | None = None) -> list[dict]:
+    """Fan out across users with a bounded thread pool."""
+    pairs = _pass_user_pairs(db, settings, services, delta, only)
     # One process of a pass split across several (_run_pass_in_processes): a
     # disjoint, stable slice of the users, so no two processes ever hold one.
     shard = os.getenv("MIGRATE_SHARD")
@@ -871,7 +1001,14 @@ def run_batch(auth: AuthManager, db: MigrationDB, settings: Settings,
         log.warning("[%s] Directory profile not reconciled; migrating the data anyway -- "
                     "see User profiles", source)
 
-    _warn_if_ledger_is_stale(db, auth, pairs)
+    # Only in a pass that copies Drive: reopening forgets Drive mappings, and in a later pass of an
+    # ordered run (mail) nothing re-copies them -- live (account 3, 2026-11-03 03:28) a stale-ledger
+    # repair at the start of the mail pass forgot it.department@'s 2,053 mappings after Drive had run,
+    # and the mail scan then blocked on links to its own files. A mail-only pass leaves it to the
+    # next run's Drive pass (and its link scan blocks meanwhile, which is the safe side).
+    if "drive" in services:
+        _warn_if_ledger_is_stale(db, auth, pairs)
+        _reopen_lost_mappings(db, [p[0] for p in pairs])
 
     # Worker count used to be decided ONCE, when Settings() was built at
     # process startup, and frozen for the rest of the process -- including
@@ -927,6 +1064,7 @@ def run_batch(auth: AuthManager, db: MigrationDB, settings: Settings,
                 # leak from ordinary concurrency cost: per-user state should
                 # be gone by now, so anything still held is held wrongly.
                 memtrace.user_finished(src)
+                progress.finish(src)
 
         claimed, why = user_claims.acquire(account_id, src, services=svc_label)
         if not claimed:
@@ -941,10 +1079,12 @@ def run_batch(auth: AuthManager, db: MigrationDB, settings: Settings,
         try:
             out = migrate_user(auth, db, settings, src, tgt,
                                services, delta, delta_days)
+            progress.finish(src)
             user_claims.finish(account_id, src, status="DONE")
             memtrace.user_finished(src)
             return out
         except BaseException as exc:
+            progress.finish(src)
             # Record the failure against the claim before re-raising, so the
             # user shows as FAILED rather than sitting CLAIMED until the
             # lease lapses and looking like a live node still working on it.
@@ -1246,8 +1386,11 @@ def _run_with_memory_pause(auth, db, settings, services, delta, delta_days,
         kwargs={"run": _run_label(settings, "delta" if delta else "migrate")},
         name="metrics", daemon=True)
     flusher.start()
+    threading.Thread(target=_heartbeat, args=(stop,), name="heartbeat", daemon=True).start()
     try:
-        with _registered("delta" if delta else "migrate",
+        # BITPORT_JOB_NAME: a benchmark arm (ab_transfer) is not a migration of the account, and
+        # judged as one it opened "users_failed" incidents for its test users (#2, #6, #7).
+        with _registered(os.getenv("BITPORT_JOB_NAME") or ("delta" if delta else "migrate"),
                          getattr(settings, "account_id", None)):
             # `passes` is an --ordered run: the same services, as separate passes
             # across ALL users. They live inside this ONE registration, memory
@@ -1266,6 +1409,13 @@ def _run_with_memory_pause(auth, db, settings, services, delta, delta_days,
             if whole_tenant and not delta:
                 _before_passes(db, auth, settings, everything)
             os.environ["DRIVE_FAILED_USERS"] = ""
+            # Split mode: the link-email inventory runs BESIDE the Drive pass, not after it. Its reads
+            # are mail only, so they do not share the Drive pass's quota or the box's line; by the time
+            # mail is delivered, the link list is already in the ledger (11 Nov 2026: a scan after Drive
+            # added hours to the run).
+            if ("drive" in everything and "gmail" in everything and getattr(settings, "mail_only_with_links", False)
+                    and not settings.dry_run and not getattr(settings, "sample_limit", None)):
+                _start_link_inventory(auth, db, settings, only)
             for i, one in enumerate(plan, 1):
                 if len(plan) > 1:
                     # Read back by the API to say which pass a live run is on. Carries
@@ -1381,8 +1531,17 @@ def cmd_init_db(args, settings: Settings, db: MigrationDB, auth: AuthManager):
         tgt_users = set(list_domain_users(auth, "target", settings.target_domain))
         pairs = []
         missing = []
+        kept = []
+        existing = ({r["source_email"].lower(): r["target_email"] for r in db.all_identities()
+                     if r["entity_type"] == "user"} if db is not None else {})
         for s in src_users:
             candidate = s.split("@")[0] + "@" + settings.target_domain
+            # An operator's own mapping stays (info@s -> nest@t, 2026-11-02): auto-map only
+            # fills gaps and replaces a pointer at a benchmark's throwaway test account.
+            prior = existing.get(s.lower())
+            if prior and prior.lower() != candidate and not _is_test_target(prior):
+                kept.append((s, prior))
+                continue
             if candidate in tgt_users:
                 pairs.append((s, candidate))
             elif getattr(args, "include_missing", False):
@@ -1403,6 +1562,8 @@ def cmd_init_db(args, settings: Settings, db: MigrationDB, auth: AuthManager):
         from db import bulk_seed_identities
         bulk_seed_identities(db, pairs)
         print(f"Auto-mapped {len(pairs)} of {len(src_users)} source users.")
+        for src, tgt in kept:
+            print(f"  kept {src} -> {tgt} (an existing mapping, not a test account)")
         if missing:
             print(f"  {len(missing)} of them have no target account yet. "
                   f"They are mapped so `provision-users` can create them; "
@@ -1411,6 +1572,12 @@ def cmd_init_db(args, settings: Settings, db: MigrationDB, auth: AuthManager):
                   "`provision-users --tenant target --dry-run` first to see "
                   "the exact list.")
     print(f"Schema initialised at {settings.db_path}")
+
+
+def _is_test_target(email: str) -> bool:
+    """A benchmark arm's throwaway account (ab_transfer: <user>-ab<n>[t]-<MMDDHHMM>@<target>)."""
+    import re
+    return bool(re.search(r"-ab\d+t?-\d{8}@", email or ""))
 
 
 METRICS_FLUSH_SEC = 15.0
@@ -1428,6 +1595,29 @@ def _run_label(settings, kind: str) -> dict:
     return {"kind": kind, "pid": os.getpid(), "started_at": _RUN_STARTED,
             "source_domain": getattr(settings, "source_domain", None),
             "target_domain": getattr(settings, "target_domain", None)}
+
+
+HEARTBEAT_SEC = float(os.getenv("MIGRATE_HEARTBEAT_SEC", "60"))
+
+
+def _heartbeat(stop_event: threading.Event, interval: float = HEARTBEAT_SEC) -> None:
+    """One line per active user a minute, in the 1:1 check's heartbeat shape, with the Drive rate
+    limiters' current rates -- what oversight's stall check reads and the limiter sentinel judges.
+    Daemon; never raises."""
+    import progress
+    while not stop_event.wait(interval):
+        try:
+            rates = {}
+            try:
+                import drive_engine
+                for tenant, lim in list(drive_engine._PROJECT_LIMITERS.items()):
+                    rates[f"drive{tenant.capitalize()}Rate"] = float(lim.rate)
+            except Exception:      # noqa: BLE001
+                pass
+            for line in progress.heartbeat_lines(rates):
+                log.info(line)
+        except Exception:      # noqa: BLE001 - a missing heartbeat must never stop the work
+            logging.getLogger(__name__).debug("ignored an error", exc_info=True)
 
 
 def _metrics_flusher(stop_event: threading.Event, db,
@@ -1560,6 +1750,11 @@ def _ensure_target_accounts(auth: AuthManager, settings: Settings,
     db = db or MigrationDB(settings.db_path)
     result = user_profiles.sync_profiles(auth, db, settings, pairs, apply=True,
                                         create_missing=True, progress=log.info)
+    try:
+        # Advisory, like the profile itself: a photo is never worth holding a user's data.
+        user_profiles.sync_photos(auth, db, settings, pairs, apply=True, progress=log.info)
+    except Exception as exc:      # noqa: BLE001
+        log.warning("profile photos not copied: %s", exc)
     created = [e for e, _ in result["created"]]
     if created:
         log.info("auto-provisioned %d source-backed target profiles", len(created))
@@ -1658,6 +1853,24 @@ def _wait_until_usable(auth, emails: list[str], timeout_s: float = 600, every_s:
     return waiting
 
 
+def _reopen_lost_mappings(db, users) -> list:
+    """Reopen a DONE user whose ledger says Drive items were copied but whose mappings for them are
+    gone, so this run walks their Drive again. The walk adopts the copies already on the target
+    (drive_engine._take_placed, folders included) instead of copying them twice. Live (account 3,
+    2026-11-03): an A/B arm cleared it.department@'s mappings, the "copied" rows kept the user DONE,
+    Drive was skipped, and the mail link scan blocked on links to its own files."""
+    try:
+        lost = db.lost_drive_mappings(users)
+    except Exception as exc:      # noqa: BLE001 - a check, never a reason a run cannot start
+        log.warning("could not check for lost Drive mappings (%s); continuing", str(exc)[:160])
+        return []
+    for user, n in lost:
+        log.warning("[%s] %d copied Drive item(s) have lost their mapping; reopening the user so "
+                    "this run adopts the copies and the links to them resolve", user, n)
+        db.reopen_identity(user)
+    return lost
+
+
 def _warn_if_ledger_is_stale(db, auth, pairs) -> None:
     """Refuse to start a run that would skip everything and call it success.
 
@@ -1682,18 +1895,22 @@ def _warn_if_ledger_is_stale(db, auth, pairs) -> None:
         return
     if not report.stale:
         return
-    log.error(
-        "%d of %d user(s) have %s mapping(s) that no longer exist on the "
-        "target -- their accounts were recreated after the ledger was "
-        "written. Those items will be SKIPPED as already-migrated and this "
-        "run will report success without copying them. Run "
-        "`main.py --account-id N verify-ledger --reopen` first.",
+    # Bitport handles this itself (operator, 2 Nov 2026): the mappings name items in accounts that
+    # were deleted and recreated, so they are forgotten and their users reopened, and the run
+    # copies them again into the new accounts. Before this, a warning was logged and the run went on
+    # to skip them as already migrated -- a refusal raised in a worker process stops nothing.
+    # The audit history is kept: it records that this was done and when.
+    log.warning(
+        "%d of %d user(s) have %s mapping(s) naming items in accounts that were recreated after "
+        "the ledger was written; reopening them so they are copied again into the new accounts.",
         len(report.stale), report.checked, f"{report.stale_mappings:,}")
-    for verdict in report.stale[:3]:
-        log.error("  %s: %s", verdict.source_user, verdict.reason)
-    raise SystemExit(
-        "refusing to start against a ledger that does not match the target; "
-        "see verify-ledger")
+    for verdict in report.stale:
+        log.warning("  reopened %s (%s mapping(s)): %s", verdict.source_user, verdict.mappings, verdict.reason)
+    try:
+        forgotten = ledger_verify.reopen(db, report, dry_run=False)
+    except Exception as exc:      # noqa: BLE001 - only a failure to repair stops the run
+        raise SystemExit(f"could not reopen the stale mappings ({exc}); nothing was copied") from exc
+    log.warning("forgot %s stale mapping(s); the run copies them again", f"{forgotten:,}")
 
 
 def _auto_repair(db, auth, settings) -> None:
@@ -1768,6 +1985,12 @@ def _run_pass(auth, db, settings, services, delta, delta_days, only) -> list[dic
     n = int(getattr(settings, "migrate_processes", 0) or 0)
     if n <= 0 and settings is not None and not settings.dry_run and not os.getenv("MIGRATE_SHARD"):
         n = _auto_processes()
+        eligible = len(_pass_user_pairs(db, settings, services, delta, only))
+        bounded = min(n, max(eligible, 1))
+        if bounded != n:
+            log.info("processes for this pass capped from %d to %d: %d eligible user(s)",
+                     n, bounded, eligible)
+        n = bounded
     if n <= 1 or getattr(settings, "dry_run", False) or os.getenv("MIGRATE_SHARD"):
         return run_batch(auth, db, settings, services, delta=delta,
                          delta_days=delta_days, only=only)
@@ -1807,6 +2030,12 @@ def _run_pass_in_processes(settings, services, delta, delta_days, only, n: int) 
             argv += ["--user", u]
         env = {**os.environ, "MIGRATE_SHARD": f"{k}/{n}", "PROCESS_SHARE": str(n),
                "SHARD_PARENT": str(os.getpid())}
+        # glibc gives every thread its own 64 MB arena, and a mail pass allocates and frees ~2 MB
+        # message buffers on 8 threads: 45 arenas held 2.2 GB of one shard's 3.5 GB (account 3, 9 Nov
+        # 2026) and four shards filled 19 GB. Two arenas, and memory handed back when freed. It has
+        # to be in the child's environment: glibc reads it at process start.
+        env.setdefault("MALLOC_ARENA_MAX", "2")
+        env.setdefault("MALLOC_TRIM_THRESHOLD_", "262144")
         procs.append((subprocess.Popen(argv, env=env), out))
     log.info("pass %s split across %d processes", ",".join(sorted(services)), n)
     passed_on = False
@@ -1914,6 +2143,33 @@ def _users_whose_drive_failed(results: list[dict]) -> list[str]:
     """Users a Drive pass attempted and failed: FAILED, with no Drive result."""
     return sorted({r["source"] for r in results
                    if r.get("status") == "FAILED" and "drive" not in (r.get("services") or {})})
+
+
+def _start_link_inventory(auth, db, settings, only) -> threading.Thread:
+    """Read every mailbox's text beside the Drive pass: which emails carry a Drive link, which file
+    each names, and whether Gmail search would have found it (mail_dead_links.inventory_user). A
+    daemon thread: it never raises into the run, and it stops when the run is stopped."""
+    import mail_dead_links
+    from gmail_engine import GmailMigrator
+    users = [(r["source_email"], r["target_email"]) for r in db.all_identities()
+             if r["entity_type"] == "user" and (not only or r["source_email"].lower() in only)]
+
+    def go() -> None:
+        for source, target in users:
+            if SHUTDOWN.is_set():
+                return
+            try:
+                mail_dead_links.inventory_user(GmailMigrator(auth, db, settings, source, target),
+                                               workers=8, say=log.info)
+            except futures.CancelledError:
+                log.info("link inventory stopped; prior complete mailbox evidence retained")
+                return
+            except Exception as exc:      # noqa: BLE001 - the mail pass re-reads anything missing
+                log.warning("link inventory for %s did not finish: %s", source, exc)
+    t = threading.Thread(target=go, name="link-inventory", daemon=True)
+    t.start()
+    log.info("link-email inventory started beside the Drive pass (%d mailboxes)", len(users))
+    return t
 
 
 def _repair_between_passes(db, auth, settings) -> None:
@@ -2299,7 +2555,7 @@ def resolve_services(raw: str) -> set[str]:
     services = {s.strip().lower() for s in raw.split(",") if s.strip()}
     if "all" in services:
         services.discard("all")
-        services |= set(PER_USER_SERVICES)
+        services |= {s for s in PER_USER_SERVICES if s != "chat" or config.chat_by_default()}
     unknown = services - set(PER_USER_SERVICES)
     if unknown:
         sys.exit(f"unknown service(s): {', '.join(sorted(unknown))}. "

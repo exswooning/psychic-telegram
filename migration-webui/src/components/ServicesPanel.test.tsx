@@ -4,6 +4,7 @@ import ServicesPanel from './ServicesPanel'
 
 const fetchHostServices = vi.fn()
 const restartHostUnit = vi.fn()
+vi.mock('@/hooks/useAccountPair', () => ({ useAccountPair: () => '' }))
 vi.mock('@/api/client', () => ({
   fetchHostServices: (...a: unknown[]) => fetchHostServices(...a),
   restartHostUnit: (...a: unknown[]) => restartHostUnit(...a),
@@ -50,5 +51,16 @@ describe('the services, without SSH', () => {
     const { container } = render(<ServicesPanel />)
     await waitFor(() => expect(fetchHostServices).toHaveBeenCalled())
     expect(container.textContent).toBe('')
+  })
+  it('shows release integrity and reports mismatched files', async () => {
+    fetchHostServices.mockResolvedValue({ ok: true, deployed_commit: 'version', units: [], oom: [], busy: [],
+      releaseCheck: { originalUiSha256: 'original-hash', workspace: null,
+        backend: { commit: 'version', checked: 2, total: 3, mismatches: ['changed.py'], error: '' } } })
+    render(<ServicesPanel />)
+    const checks = await screen.findByTestId('release-checks')
+    expect(checks).toHaveTextContent('2/3 file hashes match')
+    expect(checks).toHaveTextContent('Files differ: changed.py')
+    expect(checks).toHaveTextContent('integrity not checked')
+    expect(checks).toHaveTextContent('original-hash')
   })
 })

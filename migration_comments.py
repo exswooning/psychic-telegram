@@ -33,6 +33,28 @@ def list_threads(svc, fid, execute=lambda fn: fn()):
         seen.add(token)
 
 
+def _text(value):
+    # Drive keeps a comment's text without the trailing space the engine writes after the
+    # "[Author, date]" prefix, so an exact comparison called every action-only reply
+    # (empty body) "differs" and refused it. Trailing whitespace is not a difference.
+    # Only text is trimmed: quotedFileContent is an object ({"mimeType", "value"}), and trimming it
+    # failed health@, ward15@ and ward4@ with "'dict' object has no attribute 'rstrip'" (7 Nov 2026).
+    if isinstance(value, str):
+        return value.rstrip()
+    return "" if value is None else value
+
+
+def _body_matches(found, body):
+    # Only comment text has Drive's trailing-whitespace normalization.
+    # quotedFileContent is an object; anchors/actions and quote fields must
+    # retain exact equality so target edits are never mistaken for our copy.
+    return all(
+        _text(found.get(key)) == _text(value)
+        if key == "content" else found.get(key) == value
+        for key, value in body.items()
+    )
+
+
 def content(row, lookup):
     author = (row.get("author") or {}).get("displayName") or "unknown"
     return (
@@ -53,9 +75,14 @@ def differences(source, target, lookup):
         candidates = [
             c
             for c in remaining
-            if c.get("content", "")
-            in (wanted, rewrite_text(comment.get("content", ""), lookup)[0])
+            if _text(c.get("content"))
+            in (_text(wanted), _text(rewrite_text(comment.get("content", ""), lookup)[0]))
         ]
+        if len(candidates) > 1:
+            # Two threads with the same words on different spots (live, finance@s.: one PDF,
+            # "[FINANCE, 2023-01-13]" twice): the anchor tells them apart, as delivery does.
+            candidates = [c for c in candidates
+                          if all(c.get(f) == comment.get(f) for f in ("anchor", "quotedFileContent"))]
         if len(candidates) != 1:
             diffs.append("comment thread missing or ambiguous")
             continue
@@ -67,15 +94,15 @@ def differences(source, target, lookup):
             if comment.get(field) != found.get(field):
                 diffs.append("comment " + field + " differs")
         want = Counter(
-            (content(r, lookup), r.get("action", ""))
+            (_text(content(r, lookup)), r.get("action", ""))
             for r in comment.get("replies", [])
         )
         actual = Counter(
-            (r.get("content", ""), r.get("action", ""))
+            (_text(r.get("content")), r.get("action", ""))
             for r in found.get("replies", [])
         )
         raw = Counter(
-            (rewrite_text(r.get("content", ""), lookup)[0], r.get("action", ""))
+            (_text(rewrite_text(r.get("content", ""), lookup)[0]), r.get("action", ""))
             for r in comment.get("replies", [])
         )
         if actual not in (want, raw):
@@ -120,25 +147,38 @@ def reconcile(migrator, sid, tid):
         if mapped:
             found = next((r for r in candidates if r["id"] == mapped), None)
             if not found:
-                raise RuntimeError(
-                    "Mapped comment/reply is missing; do not create another blindly"
-                )
-            if any(found.get(k, "") != v for k, v in body.items()):
-                raise RuntimeError(
-                    "Existing target comment/reply differs; preserve possible target edits"
-                )
-            return mapped
+                # A proven receipt for another target copy is not evidence
+                # about this freshly mapped file. Missing replies on the SAME
+                # copy, or without that receipt, remain a target-edit hold.
+                receipt = migrator.db.conn.execute(
+                    "SELECT target_file FROM comment_delivery_attempts WHERE source_user=? AND item_key=?",
+                    (migrator.source_user, key)).fetchone()
+                if not receipt or not str(receipt[0] or "").strip() or receipt[0] == tid:
+                    raise RuntimeError(
+                        "Mapped comment/reply is missing; do not create another blindly"
+                    )
+            else:
+                if not _body_matches(found, body):
+                    raise RuntimeError(
+                        "Existing target comment/reply differs; preserve possible target edits"
+                    )
+                return mapped
         matches = [
-            r for r in candidates if all(r.get(k, "") == v for k, v in body.items())
+            r for r in candidates if _body_matches(r, body)
         ]
         if len(matches) > 1:
             raise RuntimeError("Ambiguous comment/reply copies")
         if matches:
             target_id = matches[0]["id"]
         else:
+            # Only an attempt against THIS target file says anything about it. A file re-copied to a new
+            # target (repair, quarantine) clears its comments' mappings but not their attempt rows, and the
+            # old copy's rows then blocked the new copy's comments for good (finance@, it.department@:
+            # "needs reconciliation", live 7 Nov 2026) -- the user's comments never reached the new file.
             prior = migrator.db.conn.execute(
-                "SELECT state FROM comment_delivery_attempts WHERE source_user=? AND item_key=?",
-                (migrator.source_user, key),
+                "SELECT state FROM comment_delivery_attempts WHERE source_user=? AND item_key=? "
+                "AND target_file=?",
+                (migrator.source_user, key, tid),
             ).fetchone()
             if prior:
                 raise RuntimeError(
@@ -146,7 +186,7 @@ def reconcile(migrator, sid, tid):
                 )
             with migrator.db.write() as c:
                 c.execute(
-                    "INSERT INTO comment_delivery_attempts VALUES(?,?,?,'UNCERTAIN',?)",
+                    "INSERT OR REPLACE INTO comment_delivery_attempts VALUES(?,?,?,'UNCERTAIN',?)",
                     (migrator.source_user, key, tid, utc_now()),
                 )
             # No automatic request retry after an ambiguous create response.

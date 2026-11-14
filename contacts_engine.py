@@ -209,7 +209,41 @@ class ContactsMigrator:
                 return
 
     # -- entry point ---------------------------------------------------------
+    def _forget_gone_contacts(self) -> None:
+        """A mapped contact deleted on the target (a mailbox emptied after the ledger was written) is
+        copied again, not skipped as migrated. Only a 404 for that very contact counts as gone."""
+        rows = list(self.db.conn.execute(
+            "SELECT source_id, target_id FROM id_mapping WHERE source_user=? AND type='contact'",
+            (self.source_user,)))
+        if not rows or self.settings.dry_run:
+            return
+        live, token = set(), None
+        try:
+            while True:
+                self.limiter.acquire()
+                r = self._retry(lambda t=token: self.tgt.people().connections().list(
+                    resourceName="people/me", personFields="names", pageSize=1000, pageToken=t).execute())
+                live |= {p["resourceName"] for p in r.get("connections", [])}
+                token = r.get("nextPageToken")
+                if not token:
+                    break
+        except Exception as exc:      # noqa: BLE001 - no listing, no forgetting
+            log.warning("[%s] could not list the target's contacts: %s", self.source_user, exc)
+            return
+        for source_id, target_id in rows:
+            if target_id in live:
+                continue
+            try:
+                self.limiter.acquire()
+                self._retry(lambda t=target_id: self.tgt.people().get(
+                    resourceName=t, personFields="names").execute())
+            except Exception as exc:      # noqa: BLE001
+                if "404" in str(exc) or "not found" in str(exc).lower():
+                    self.db.forget_mapping(self.source_user, source_id, "contact")
+                    self.stats["recopied_missing"] = self.stats.get("recopied_missing", 0) + 1
+
     def run(self) -> dict:
+        self._forget_gone_contacts()
         group_map = self._migrate_groups()
         # migrate_user() only checks SHUTDOWN between whole services, so a
         # large contact list would otherwise run to the end regardless of

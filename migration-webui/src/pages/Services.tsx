@@ -12,6 +12,9 @@ import JobRunner from '@/components/JobRunner'
 import TenantScopePicker from '@/components/TenantScopePicker'
 import DmsImportButton from '@/components/DmsImportButton'
 import DmsMetrics from '@/components/DmsMetrics'
+import ConfigurationReport from '@/components/ConfigurationReport'
+import { fetchMe, migrationOf } from '@/api/controlPlane'
+import { useAccountPair } from '@/hooks/useAccountPair'
 
 /**
  * The migration capabilities that the per-user run does not cover.
@@ -41,8 +44,13 @@ const Services: React.FC = () => {
   // Which tenant every action on this page acts on. It was implicit --
   // whichever the session resolved to -- and unnamed anywhere on screen.
   const [scopeAccount, setScopeAccount] = useState<number | undefined>()
+  const pair = useAccountPair(scopeAccount)
 
   useEffect(() => {
+    // The global migration picker is authoritative. A second selector here
+    // previously defaulted to the login id while the header named another pair.
+    fetchMe().then(me => setScopeAccount(migrationOf(me)))
+      .catch(e => setErr(`Cannot resolve the selected migration: ${String(e)}`))
     fetchActions().then(setActions).catch((e) => setErr(String(e)))
     fetchToggles()
       .then((t) => { setSvc(t.toggles.services || {}); setDry(!!t.toggles.dry_run) })
@@ -65,7 +73,7 @@ const Services: React.FC = () => {
     }
   }
 
-  const has = (k: string) => Boolean(actions[k])
+  const has = (k: string) => scopeAccount !== undefined && Boolean(actions[k])
 
   return (
     <Box>
@@ -79,13 +87,22 @@ const Services: React.FC = () => {
         the migrate step would touch.
       </Typography>
 
-      <TenantScopePicker accountId={scopeAccount}
-                         onAccountChange={setScopeAccount} />
+      {scopeAccount !== undefined && pair && (
+        <Alert severity="info" sx={{ mb: 2 }} data-testid="acting-on">
+          Everything on this page acts on <strong>{pair}</strong> — the migration chosen in the header's
+          Migration box, not the Viewing account box beside it.
+        </Alert>
+      )}
+      {scopeAccount !== undefined && <TenantScopePicker accountId={scopeAccount}
+                         onAccountChange={setScopeAccount} locked />}
 
       {err && <Alert severity="warning" sx={{ mb: 3 }}>{err}</Alert>}
       {Object.keys(actions).length === 0 && !err && (
         <Typography variant="body2" color="text.secondary">Loading…</Typography>
       )}
+
+      {scopeAccount !== undefined && <ConfigurationReport key={scopeAccount}
+        accountId={scopeAccount} actions={actions} />}
 
       {(has('shared_drives_inventory') || has('shared_drives_migrate')) && (
         <Card elevation={0} sx={{ borderRadius: 2, border: '1px solid', borderColor: 'divider', mb: 3 }}>
@@ -154,9 +171,10 @@ const Services: React.FC = () => {
               lists, shared mailboxes, and every Drive share that names a
               group rather than a person. Migrate these <strong>before</strong>
               {' '}auditing ACLs, or every group-based grant looks like a share
-              to an address the target does not have. Group settings (who can
-              post, who reads the archive) are not copied: the target&apos;s
-              defaults apply, which are more restrictive rather than less.
+              to an address the target does not have. The legacy pass below copies
+              groups and members. Use the configuration report above to compare
+              aliases, roles, posting, archive visibility and moderation settings.
+              Target defaults may differ from the source.
             </Alert>
             <Stack spacing={2}>
               {has('groups_inventory') &&
@@ -239,6 +257,8 @@ const Services: React.FC = () => {
               than whatever the toggles currently say.
             </Alert>
             <Stack spacing={2}>
+              {has('sniff') &&
+                <JobRunner accountId={scopeAccount} name="sniff" spec={actions.sniff} />}
               {has('phased_count_only') &&
                 <JobRunner accountId={scopeAccount} name="phased_count_only" spec={actions.phased_count_only} />}
               {has('phased_migrate') &&
@@ -255,8 +275,12 @@ const Services: React.FC = () => {
                   It runs in parallel and spends none of this project&apos;s
                   Gmail quota; watch per-user progress in the Admin console.
                 </Typography>
-                <DmsImportButton spec={actions.dms_import} />
-                <DmsMetrics />
+                <DmsImportButton spec={actions.dms_import} accountId={scopeAccount} />
+                {has('dms_reconcile') &&
+                  <Box sx={{ mt: 1 }}><DmsImportButton spec={actions.dms_reconcile} accountId={scopeAccount} action="dms_reconcile" /></Box>}
+                {(['dms_wipe_dry', 'dms_wipe', 'ab_matrix'] as const).map((k) => has(k) &&
+                  <Box key={k} sx={{ mt: 1 }}><DmsImportButton spec={actions[k]} accountId={scopeAccount} action={k} /></Box>)}
+                <DmsMetrics accountId={scopeAccount} />
               </Box>
             )}
           </CardContent>

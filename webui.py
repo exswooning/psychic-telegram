@@ -378,6 +378,39 @@ ACTIONS: dict[str, dict] = {
         "destructive": True,
         "confirm": "DMS",
     },
+    "dms_reconcile": {
+        "label": "Record DMS deliveries",
+        "blurb": "For the users you name: check each email owed to the DMS on the target (content and "
+                 "labels) and record the ones found as delivered. Reads both mailboxes; changes no mail.",
+        "argv": [PY, "dms_migrate.py", "--reconcile-only"],
+        "parallel": True,
+        "confirm": "RECORD",
+    },
+    "dms_wipe_dry": {
+        "label": "Wipe DMS mail: dry run",
+        "blurb": "Counts, for the users you name, the emails on the TARGET that the ledger does not map "
+                 "(what the DMS imported). Deletes nothing.",
+        "argv": [PY, "wipe_dms_mail.py"],
+        "parallel": True,
+        "confirm": "COUNT",
+    },
+    "dms_wipe": {
+        "label": "Wipe DMS mail",
+        "blurb": "PERMANENTLY deletes, for the users you name, the emails on the TARGET that the ledger does "
+                 "not map (what the DMS imported); the engine's own copies stay. Sandbox targets only.",
+        "argv": [PY, "wipe_dms_mail.py", "--apply"],
+        "parallel": True,
+        "destructive": True,
+        "confirm": "WIPE",
+    },
+    "sniff": {
+        "label": "Error sniffer (read-only)",
+        "blurb": "Picks users by evidence (the biggest, the smallest, the deepest, those with open findings) "
+                 "and, for each, reads every scope -- Drive, Gmail, Calendar, Contacts, Tasks -- to predict "
+                 "what will fail, naming what the engine does about each. Writes nothing to either tenant.",
+        "argv": [PY, "sniff.py"],
+        "parallel": True,
+    },
     "dms_metrics_refresh": {
         "label": "Refresh DMS metrics",
         "blurb": "Read the live import counters from the Admin console and "
@@ -522,6 +555,21 @@ ACTIONS: dict[str, dict] = {
                  "would get. Reads only.",
         "argv": [PY, "groups_engine.py", "--inventory"],
     },
+    "configuration_check": {
+        "label": "Inspect groups and storage",
+        "blurb": "Read both tenants' group metadata, aliases, member roles and settings; "
+                 "retain exact reported storage bytes for mapped users. No tenant writes.",
+        "argv": [PY, "workspace_configuration.py"],
+    },
+    "configuration_apply_groups": {
+        "label": "Apply reviewed group configuration",
+        "blurb": "Apply the fresh reviewed plan to TARGET groups, aliases, roles and settings, "
+                 "then re-read both tenants. Can change who can access or post to groups. "
+                 "No source writes, deletions, archive import or storage-policy changes.",
+        "argv": [PY, "workspace_configuration.py", "--apply-groups"],
+        "destructive": True,
+        "confirm": "APPLY GROUP CONFIGURATION",
+    },
     "groups_migrate_dry": {
         "label": "Migrate groups (dry run)",
         "blurb": "What would be created, without writing. Groups are the "
@@ -531,9 +579,8 @@ ACTIONS: dict[str, dict] = {
     },
     "groups_migrate": {
         "label": "Migrate groups",
-        "blurb": "Create the groups and their members on the target. Group "
-                 "settings (who can post) are not copied -- target defaults "
-                 "apply, which are more restrictive rather than less.",
+        "blurb": "Create groups and members on the target. This legacy pass does not "
+                 "copy group settings; use Inspect groups and storage to review configuration parity.",
         "argv": [PY, "groups_engine.py"],
         "confirm": "GROUPS",
     },
@@ -603,6 +650,26 @@ ACTIONS: dict[str, dict] = {
         "blurb": "Calls the real APIs, read-only, and compares what they "
                  "return with what the engine and its tests assume.",
         "argv": [PY, "contract_probe.py"],
+    },
+    "regression": {
+        "label": "Regression set: four users, server-side + split",
+        "blurb": "Migrates four sandbox users who between them carry every problem kind seen "
+                 "live (Forms, bounce mail, twin comments, Sheets links, a plain control) into "
+                 "NEW target accounts, the way a full run does, checks each one to one and lists "
+                 "what got worse since the last run. Deletes nothing; uses four licences.",
+        "argv": [PY, "regression.py"],
+    },
+    "ab_matrix": {
+        "label": "Speed matrix: mail by DMS, split and engine",
+        "blurb": "For ONE named user, migrates the same corpus three times -- Drive server-side, mail by the "
+                 "DMS, by split and by the engine -- each into a brand-new target account (one licence per "
+                 "arm; nothing is deleted), checks each one to one, and ranks the arms by errors, then speed. "
+                 "The winner becomes the default for new runs.",
+        "argv": [PY, "ab_transfer.py", "--mode", "server_side", "--mail-mode", "dms", "--mail-mode", "split",
+                 "--mail-mode", "engine", "--fresh-targets", "--report", "logs/ab_results.md"],
+        "browser": True,        # the DMS arm signs in to the Admin consoles
+        "destructive": True,    # spends licences: the server asks for the typed words too
+        "confirm": "NEW ACCOUNTS",
     },
     "ab_transfer": {
         "label": "A/B: server-side vs download/upload",
@@ -697,7 +764,7 @@ def _current_phase(lines: list[str]) -> list[str]:
     """
     start = 0
     for i, ln in enumerate(lines):
-        if _PHASE_START_RE.match(ln):
+        if _PHASE_START_RE.match(ln) or "verify + repair dispatched for " in ln:
             start = i
     return lines[start:] if start else lines
 
@@ -817,6 +884,10 @@ class Job:
               env: dict | None = None, cwd: str | None = None,
               on_finish: Callable[[int | None], None] | None = None,
               retry: dict | None = None) -> tuple[bool, str]:
+        import account_isolation
+        why = account_isolation.refusal(self.account_id, env)
+        if why:
+            return False, why
         with self.lock:
             if self.running:
                 return False, f"{self.name} is still running"
@@ -855,6 +926,15 @@ class Job:
                 # same contract the in-memory list had. The previous run's
                 # transcript is already preserved by _save_result().
                 self._log_fh = open(self.log_path, "w", encoding="utf-8")
+                try:
+                    with open(os.path.join(HERE, 'DEPLOYED_COMMIT'), encoding='utf-8') as version_file:
+                        version = version_file.read().strip()
+                except OSError:
+                    version = 'unknown'
+                self._log_fh.write(json.dumps({'bitport_event': 1, 'kind': 'run_started',
+                    'version': version, 'run_id': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+                    'operation': name})+'\n')
+                self._log_fh.flush()
             except OSError as exc:
                 return False, f"could not open job log {self.log_path}: {exc}"
             try:
@@ -920,6 +1000,8 @@ class Job:
             chunk = chunk[:keep + 1]
         with self.lock:
             for line in chunk.splitlines():
+                if line.startswith('{"bitport_event": 1,'):
+                    continue  # machine telemetry remains on disk; keep the readable transcript clear
                 # FutureWarnings from the google libraries drown everything else.
                 if "FutureWarning" in line or "warnings.warn" in line:
                     continue
@@ -1361,12 +1443,15 @@ def queue_payload(account_id: int | None = None) -> dict:
     }
 
 
-def _dms_metrics_payload() -> dict:
-    """The last DMS counters scraped from the console, plus their age and
-    whether a refresh scrape is running right now."""
+def _dms_metrics_payload(account_id: int | None = None) -> dict:
+    """The last DMS counters scraped from the console for THIS account (dms_migrate.metrics_path), plus their
+    age. A fixed file named by DMS_METRICS_FILE (tests, one-off use) still wins."""
+    import dms_migrate
+    path = os.getenv("DMS_METRICS_FILE") or (dms_migrate.metrics_path(account_id) if account_id is not None
+                                             else DMS_METRICS_FILE)
     data, age = None, None
     try:
-        with open(DMS_METRICS_FILE, encoding="utf-8") as fh:
+        with open(path, encoding="utf-8") as fh:
             data = json.load(fh)
         read_at = data.get("read_at")
         if read_at:
@@ -1448,6 +1533,10 @@ def _queue_starter(account_id: int | None, label: str,
     itself, and releasing here as well would free the NEXT job's slot.
     """
     env = dict(os.environ, **payload.get("env", {})) or None
+    if any(("dms_migrate.py" in a or "ab_transfer.py" in a) for a in payload["argv"]):
+        # Its console logins are not stored in the queue (job_queue.without_secrets): read them again now.
+        env = dict(env or os.environ, **{k: v for k, v in _dms_env(account_id).items()
+                                         if job_queue.is_secret(k) and os.environ.get(k) != v})
     return get_job(account_id).start(
         label, list(payload["argv"]), env=env, cwd=payload.get("cwd") or None,
         on_finish=lambda rc: _job_finished(account_id, label),
@@ -4499,6 +4588,8 @@ def _job_progress(name: str, lines: list[str], elapsed: float,
     # never the run: live, dharan.gov.np read 100% minutes into a pass. Its progress is the
     # ledger's done over discovery's expected, below.
     pct = None if name in ("migrate", "delta") else _counter_progress_pct(lines)
+    if name == "verify" and pct is not None and pct >= 100:
+        return None, None  # Counted phase complete; live job may still reconcile or recheck.
     if pct is not None:
         pass
     elif name == "seed":
@@ -5124,6 +5215,60 @@ def _account_env(account_id: int | None, base: dict | None = None) -> dict:
 DWD_ENV_FILE = os.getenv("BITPORT_DWD_ENV", "/etc/bitport/dwd.env")
 
 
+DMS_PILOT_MAX_USERS = 5
+
+
+def _dms_pilot_argv(account_id: int | None, body: dict, argv: list) -> tuple[list, str]:
+    """A DMS import for a FEW users, optionally as a fresh import: `users` (source addresses, each one of this
+    account's own) and `fresh`. A fresh import deletes the console's finished import first, so it is allowed
+    only for a short list, never for a whole tenant from a button. Without `users` the argv is unchanged."""
+    users = [str(u).strip().lower() for u in (body.get("users") or []) if str(u).strip()]
+    fresh = bool(body.get("fresh"))
+    if not users:
+        return argv, ("a fresh import needs the users it is for" if fresh else "")
+    if len(users) > DMS_PILOT_MAX_USERS:
+        return argv, f"a pilot import takes at most {DMS_PILOT_MAX_USERS} users"
+    from config import Settings
+    from db import MigrationDB
+    db = MigrationDB(Settings(account_id=account_id).db_path)
+    try:
+        ledger = {r["source_email"].lower(): r["target_email"] for r in db.all_identities() if r["entity_type"] == "user"}
+    finally:
+        db.close()
+    unknown = [u for u in users if u not in ledger]
+    if unknown:
+        return argv, "not users of this account: " + ", ".join(unknown)
+    import csv
+    import hashlib
+    rows = sorted((u, ledger[u]) for u in users)
+    tag = hashlib.sha256("\n".join(",".join(r) for r in rows).encode()).hexdigest()[:8]
+    d = os.path.join(HERE, "logs", "dms", "_none" if account_id is None else str(account_id))
+    os.makedirs(d, exist_ok=True)
+    path = os.path.join(d, f"pilot-{len(rows)}u-{tag}.csv")
+    with open(path, "w", newline="", encoding="utf-8") as fh:
+        w = csv.writer(fh)
+        w.writerow(("source_email", "target_email"))
+        w.writerows(rows)
+    return argv + ["--identities", path] + (["--fresh-import"] if fresh else []), ""
+
+
+def _ab_matrix_argv(account_id: int | None, body: dict, argv: list) -> tuple[list, str]:
+    """The speed matrix takes exactly one of this account's own source users."""
+    users = [str(u).strip().lower() for u in (body.get("users") or []) if str(u).strip()]
+    if len(users) != 1:
+        return argv, "name exactly one source user for the speed matrix"
+    from config import Settings
+    from db import MigrationDB
+    db = MigrationDB(Settings(account_id=account_id).db_path)
+    try:
+        known = {r["source_email"].lower() for r in db.all_identities() if r["entity_type"] == "user"}
+    finally:
+        db.close()
+    if users[0] not in known:
+        return argv, "not a user of this account: " + users[0]
+    return argv + ["--user", users[0]], ""
+
+
 def _dms_env(account_id: int | None) -> dict:
     """Environment for the DMS browser run: the account's tenants plus a
     headless display and the admin login the Admin console requires.
@@ -5136,15 +5281,25 @@ def _dms_env(account_id: int | None) -> dict:
     env = _account_env(account_id)
     env.setdefault("DISPLAY", os.getenv("BITPORT_XVFB_DISPLAY", ":99"))
     env.setdefault("DWD_EMAIL", env.get("TARGET_ADMIN", ""))
+    stored: dict[str, str] = {}
     try:
         with open(DWD_ENV_FILE, encoding="utf-8") as fh:
             for line in fh:
                 line = line.strip()
                 if line and not line.startswith("#") and "=" in line:
                     k, v = line.split("=", 1)
-                    env[k.strip()] = v.strip()
+                    stored[k.strip()] = v.strip()
     except FileNotFoundError:
         pass
+    # The file holds ONE pair's admin logins. They are used only for that pair: a login named for another
+    # domain means the file is not this account's. Laid over whichever account asked, account 2's DMS got
+    # account 3's source admin and typed account 3's target password into gorkhatweed's sign-in (8 Nov 2026).
+    def _domain(address: str) -> str:
+        return (address or "").rsplit("@", 1)[-1].strip().lower()
+    src_ok = not stored.get("DWD_EMAIL_SOURCE") or _domain(stored["DWD_EMAIL_SOURCE"]) == (env.get("SOURCE_DOMAIN") or "").lower()
+    tgt_ok = not stored.get("DWD_EMAIL") or _domain(stored["DWD_EMAIL"]) == (env.get("TARGET_DOMAIN") or "").lower()
+    if src_ok and tgt_ok:
+        env.update(stored)
     # The Admin console the DMS signs in to is the TARGET's, and dwd_helper
     # reads only the generic DWD_PASSWORD. Taking it from the side-specific key
     # means the file need not carry a generic one -- which admin_secrets would
@@ -5578,6 +5733,20 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"error": scope_err}, 403)
                 return
             self._json(storage_summary_payload(aid))
+        elif path == "/api/configuration-report":
+            # Saved evidence only. A UI poll must never launch Google API scans.
+            from workspace_configuration import load_report
+            from config import Settings as _S
+            aid, scope_err = resolve_target_account(
+                self._account_id(), query.get("account", [""])[0] or self._on_screen())
+            if scope_err:
+                self._json({"error": scope_err}, 403)
+                return
+            try:
+                st = _S(account_id=aid) if aid else _S()
+                self._json({"report": load_report(st)})
+            except (OSError, ValueError) as exc:
+                self._json({"error": str(exc), "report": None}, 500)
         elif path == "/api/licence_preflight":
             self._json(licence_preflight(self._on_screen()))
         elif path == "/api/identities":
@@ -5620,7 +5789,14 @@ class Handler(BaseHTTPRequestHandler):
                 job_queue.dispatch_one(_queue_starter, job_queue.RUNNER_WEBUI)
             except Exception as exc:  # noqa: BLE001
                 print(f"queue dispatch on poll failed: {exc}", flush=True)
-            self._json(queue_payload(self._account_id()))
+            # "Mine" is relative to the account being looked at, as /api/job's is: a superadmin
+            # viewing account 3 saw that account's own verify labelled "another account".
+            viewing, scope_err = resolve_target_account(
+                self._account_id(), query.get("account", [""])[0] or None)
+            if scope_err:
+                self._json({"error": scope_err}, 403)
+                return
+            self._json(queue_payload(viewing))
         elif path == "/api/job":
             since = 0
             if "since=" in self.path:
@@ -5642,20 +5818,31 @@ class Handler(BaseHTTPRequestHandler):
                                      query.get("name", [""])[0] or None))
         elif path == "/api/dms_status":
             # The DMS import runs on its own Job (parallel to the migration),
-            # so it has its own status feed rather than /api/job's.
+            # so it has its own status feed rather than /api/job's. The account is the one the page is
+            # VIEWING when it names one, like every other feed: the header's migration picker said
+            # gorkhatweed while the page showed account 3, and the DMS went to account 2 (8 Nov 2026).
             since = 0
             if "since=" in self.path:
                 try:
                     since = int(self.path.split("since=")[1].split("&")[0])
                 except ValueError:
                     since = 0
-            self._json(get_parallel_job(self._account_id(),
-                                        "dms_import").snapshot(since))
+            asked = self.path.split("account=")[1].split("&")[0] if "account=" in self.path else None
+            watching, scope_err = resolve_target_account(self._account_id(), asked or None)
+            if scope_err:
+                self._json({"error": scope_err}, 403)
+                return
+            self._json(get_parallel_job(watching, "dms_import").snapshot(since))
         elif path == "/api/dms_metrics":
             # DMS counters live only in Google's console, so they are scraped
             # into a cache file (dms_migrate --status) and served from there;
             # a refresh is a separate browser job the UI can trigger.
-            self._json(_dms_metrics_payload())
+            asked = self.path.split("account=")[1].split("&")[0] if "account=" in self.path else None
+            watching, scope_err = resolve_target_account(self._account_id(), asked or None)
+            if scope_err:
+                self._json({"error": scope_err}, 403)
+                return
+            self._json(_dms_metrics_payload(watching))
         elif path == "/api/job_history":
             # The last COMPLETED run of a given job name, read back from
             # disk -- covers exactly the gap /api/job can't: a browser tab
@@ -6538,17 +6725,40 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"ok": False, "error": err}, 400)
                 return
 
+        if name == "configuration_apply_groups":
+            reviewed = str(body.get("review_hash") or "")
+            if len(reviewed) != 64 or any(c not in "0123456789abcdef" for c in reviewed):
+                self._json({"ok": False, "error": "Inspect and review the configuration plan first."}, 400)
+                return
+            env["CONFIGURATION_REVIEW_HASH"] = reviewed
+
+        argv = _action_argv(name)
+        if name == "ab_matrix":
+            argv, err = _ab_matrix_argv(account_id, body, argv)
+            if err:
+                self._json({"ok": False, "error": err}, 400)
+                return
+        if name in ("dms_import", "dms_reconcile", "dms_wipe", "dms_wipe_dry"):
+            if name != "dms_import" and not body.get("users"):
+                self._json({"ok": False, "error": "name the users to record"}, 400)
+                return
+            argv, err = _dms_pilot_argv(account_id, body, argv)
+            if err:
+                self._json({"ok": False, "error": err}, 400)
+                return
+
         if spec.get("parallel"):
             # A dedicated Job instance so it does not collide with the
             # account's primary migration Job (one process each). /api/job
             # keeps showing the migration; this job has its own status feed.
-            job = get_parallel_job(account_id, name)
-            ok, msg = job.start(spec["label"], _action_argv(name), env=env)
+            # Recording deliveries shares the import's slot: one feed (/api/dms_status), never both at once.
+            job = get_parallel_job(account_id, "dms_import" if name in ("dms_reconcile", "dms_wipe", "dms_wipe_dry") else name)
+            ok, msg = job.start(spec["label"], argv, env=env)
             self._json({"ok": ok, "error": None if ok else msg})
             return
 
         state, msg = launch_or_queue(
-            account_id, spec["label"], _action_argv(name), env=env,
+            account_id, spec["label"], argv, env=env,
             requested_by=_account_email(account_id))
         self._json({"ok": state != "error", "queued": state == "queued",
                     "msg": msg, "error": None if state != "error" else msg})

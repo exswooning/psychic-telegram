@@ -18,7 +18,7 @@ import json
 # id, service, matches(text) on the finding's own words, title, cause, fix, auto
 ISSUES = [
     ("gmail.labels_added", "gmail", lambda t: "labels added on the target" in t,
-     "Gmail added a label the source message does not have",
+     "Gmail added a label the source email does not have",
      "Inserted as SENT only, Gmail on the new tenant filed it as received mail (INBOX, "
      "or a category tab): the sender address is the OLD domain's, not the account's own.",
      "Remove the extra labels on the target copy (repair.repair_verified_gmail_labels); "
@@ -28,17 +28,17 @@ ISSUES = [
      "Label mapping or a later change on the target.",
      "Add the missing labels / read state on the target copy (same repair).", True),
     ("gmail.no_message_id", "gmail", lambda t: "Missing Message-ID" in t,
-     "Old message with no Message-ID header",
+     "Old email with no Message-ID header",
      "Nothing to look the copy up by, so it was not inserted blind (duplicate risk).",
-     "Match by the whole MIME tree's hash against every unclaimed target message; one exact "
+     "Match by the whole MIME tree's hash against every unclaimed target email; one exact "
      "match is adopted, none is inserted once with a durable attempt record "
      "(mail_identity.insert_without_message_id).", True),
     ("gmail.unmapped_source", "gmail", lambda t: "UNMAPPED_SOURCE" in t or "has no migration mapping" in t,
-     "Source message with no copy",
+     "Source email with no copy",
      "Arrived after the run, or the run stopped before it.",
      "Copied by the missing-mail repair (repair.repair_verified_missing_mail) or the delta.", True),
     ("gmail.body_link_copy", "gmail", lambda t: "body differs" in t,
-     "Message body differs",
+     "Email body differs",
      "Usually Bitport's own Drive-link rewrite pointing at one of several copies of a file "
      "shared with many users; otherwise a real content difference.",
      "Checker accepts any genuine copy (verify_sample.copy_lookup, 2026-10-23); what remains "
@@ -48,6 +48,21 @@ ISSUES = [
      "The sender is a bot (e.g. Drive notifications) or has no account on the target; Chat lets "
      "nobody post as them, so the user posts the same text prefixed \"[originally from ...]\".",
      "None possible through the Chat API. Text and order are intact; listed in the final report.", False),
+    ("chat.space_type", "chat", lambda t: "Chat conversation type differs" in t,
+     "A direct message became a group chat",
+     "Chat's import mode can only create spaces and group chats; a DIRECT_MESSAGE cannot be "
+     "imported, so the conversation lands as a two-person group chat (measured 2026-10-31).",
+     "None possible through the Chat API: chat messages, order and times are intact. Listed in the final report.", False),
+    ("chat.members", "chat", lambda t: "Chat participants differ" in t,
+     "A Chat participant did not come across",
+     "A bot or app (e.g. Drive notifications) cannot be added to an imported space; any other "
+     "difference is a member's role or state.",
+     "None possible for a bot. A missing person is added by the missing-member repair when one exists; listed otherwise.", False),
+    ("chat.sender", "chat", lambda t: "Original Chat sender identity was not reproduced" in t,
+     "A Chat message's sender is the migrating user",
+     "Same cause as an attributed chat message: Chat lets nobody post as a bot or an account that is "
+     "not on the target, so the thread check sees the user as sender.",
+     "None possible through the Chat API; the text carries \"[originally from ...]\".", False),
     ("chat.text", "chat", lambda t: "Chat text differs" in t,
      "Chat message text differs",
      "A real text difference (link rewrite or edit).",
@@ -104,6 +119,12 @@ ISSUES = [
      "The group does not exist on the target. Classroom-made groups are hidden from the "
      "Directory API, so their members cannot even be read.",
      "None automatic: create the group on the target or share with its people by hand.", False),
+    ("drive.ab_test_residue", "drive", lambda t: bool(__import__("re").search(r"-ab\w*-\d+@", t)),
+     "A grant to a throwaway A/B test account",
+     "The A/B benchmark created 28 accounts on the target (…-ab1-<time>@, …-ab1t-…) and left sharing with them on "
+     "some files, so the check sees grants nobody migrated (account 3, 8 Nov 2026). Not a migration fault.",
+     "DOCUMENTED, left by the operator's choice (8 Nov 2026): the accounts stay (deleting them would hold their "
+     "licences for about 20 days). Removing them, or their grants, clears it.", False),
     ("drive.grant_missing", "drive", lambda t: "grant missing on the target" in t,
      "A share did not come across",
      "A grant refused or skipped during the run.",
@@ -113,19 +134,37 @@ ISSUES = [
      "A source file has no copy",
      "Live: a personal account's file inside the user's own folder -- the walk listed only the "
      "user's own files, and shared-with-me shows only direct shares. (Bitport's own copies and "
-     "reasoned skips used to be counted here too; the checker no longer does.)",
+     "reasoned skips used to be counted here too; the checker no longer does. The migration's own "
+     "manifest did too until 8 Nov 2026: our target copies, shared back to the source user by a "
+     "server-side copy, were listed as source files owed a copy -- 14 for environment@, 243 for "
+     "it.department@.)",
      "The walk copies such files in place (drive_engine._sync_outsiders_here); repair re-walks "
-     "the user's Drive.", True),
+     "the user's Drive and retires queued rows that were our own target copies or are gone from the "
+     "source (verification_repairs.reconcile_target_copies).", True),
     ("drive.office_compared_as_native", "drive", lambda t: "must not be an Office file" in t,
      "An Office file could not be compared",
      "Word's mimeType ends in '.document' and PowerPoint's in '.presentation': the checker sent "
      "them to the Docs/Slides API.",
      "Checker compares Office files by their bytes (verify_sample, 2026-10-24); rechecked.", True),
     ("drive.read_refused", "drive", lambda t: "RESOURCE_EXHAUSTED" in t or "HTTP 429" in t
-                                             or "HTTP 500" in t or "(INTERNAL)" in t,
+                                             or "HTTP 500" in t or "(INTERNAL)" in t
+                                             or "HTTP 503" in t or "(UNAVAILABLE)" in t,
      "Google refused or failed a read during the check",
-     "Sheets allows 60 reads a minute per user; the Docs API sometimes answers 500.",
-     "Nothing on either tenant is wrong: the next check reads it again.", True),
+     "Sheets allows 60 reads a minute per user; the Docs API sometimes answers 500 or 503. The "
+     "check's own Sheets/Docs/Slides reads used to be paced per project only, so a big sheet "
+     "burst past the per-user limit (info@s., 2026-11-01).",
+     "Every content read is now paced per user as well (verify_sample._native_pace, "
+     "native_repair.read_sheet's pace); nothing on either tenant is wrong, and the repair "
+     "policy's next check reads it again.", True),
+    ("drive.unverified_transient", "drive", lambda t: "UNVERIFIED_TRANSIENT_ERROR" in t or "retry budget" in t
+                                                     or "circuit open" in t,
+     "A document could not be read in time and is still unverified",
+     "Google answered 5xx/429 (info@s., 2026-11-02: Docs 503 held item 326 of 1,403 for 27 minutes) or "
+     "kept it waiting past the per-document retry budget, or the endpoint's breaker was cooling down. "
+     "The document is neither identical nor different: it was not compared.",
+     "Each one is queued (verification_unverified), retried after a cooldown in the same run and on "
+     "every later run, and only a comparison that really happened clears it. The service stays "
+     "INCOMPLETE until then; nothing is written to either tenant.", True),
     ("drive.source_changed", "drive", lambda t: "Source changed during migration" in t,
      "The source changed while the user was copied",
      "Someone at the source edited the file during the run (the tripwire saw it).",
@@ -133,13 +172,79 @@ ISSUES = [
     ("drive.duplicate", "drive", lambda t: "duplicateOf" in t,
      "Two copies of one file on the target",
      "A copy landed twice (an earlier interrupted run).",
-     "None automatic: deleting is the operator's call. Listed with both ids.", False),
+     "Automatic, by the quarantine policy (finding_repairs.QUARANTINE_POLICY, the operator's rule of 6 Nov 2026): "
+     "the extra copy is renamed in place -- same folder, sharing unchanged, the original untouched, reversible -- so "
+     "the user keeps access and nothing is deleted. A copy whose content cannot be proven the same is left and "
+     "listed for a person.", True),
     ("drive.comments", "drive", lambda t: "comment resolution differs" in t or "comment anchor differs" in t
                                          or "comment replies differ" in t,
      "Comments differ",
      "Drive cannot write a comment as its author, mark one resolved on create, or anchor it "
      "to the same text in a rebuilt Office file.",
      "None automatic beyond what the copy carried. Listed in the final report.", False),
+    # Taken from s.sarafgloabalexim.com -> t. (2026-11-01): findings the check reported as
+    # "unclassified" until each was traced to its cause.
+    ("gmail.link_scan_fixed", "gmail", lambda t: "Pre-delivery link scan: HTTP 404" in t
+                                                or "Multipart body has no readable parts" in t,
+     "Link mail held back by a link check that has since been fixed",
+     "Split mail scans each email for Drive links before delivery. Until 2026-10-31 a link to "
+     "a file nobody can read (404) blocked the email, and until 2026-11-01 so did a bounce "
+     "report with no text part. Both now deliver (an unreadable link is left as found; the "
+     "bounce is read raw), but the emails already held stayed FAILED_SPLIT.",
+     "The missing-mail repair delivers them through the engine with links rewritten "
+     "(repair.repair_verified_missing_mail now takes these two errors).", True),
+    ("gmail.link_owner_not_migrated", "gmail", lambda t: "Unresolved Drive link mapping" in t,
+     "Link mail waiting for the linked file's owner",
+     "The email links to a file owned by someone on the source who is not migrated yet, so "
+     "there is no target copy to point the link at. Delivering it now would leave a link into "
+     "the source tenant, which breaks when the source is shut down.",
+     "Delivered by the next run once that owner's Drive is migrated (ordered passes: Drive for "
+     "every user before mail). In a run of chosen users it waits for the owner's run.", False),
+    ("gmail.link_scan_encrypted", "gmail", lambda t: "Encrypted MIME content cannot be cla" in t,
+     "Encrypted mail cannot be scanned for links",
+     "An S/MIME or PGP body cannot be read, so whether it carries a Drive link is unknown.",
+     "None automatic: a person decides whether to send it through Google's import as it is.", False),
+    ("gmail.duplicate", "gmail", lambda t: '"messageId"' in t and '"target"' in t and '"source"' not in t,
+     "An email is on the target twice",
+     "In split mode the engine writes the link mail with its links rewritten, and Google's "
+     "import, run after, can bring the same email again with the original links (19 on "
+     "finance@s., 2026-11-01). The import's copy still points at the source.",
+     "Kept on purpose: nothing is trashed. Each copy stays where it is and is listed, so the "
+     "operator can decide which to remove.", False),
+    ("gmail.rate_limited", "gmail", lambda t: "HTTP 429" in t or "rateLimitExceeded" in t,
+     "Gmail refused a read during the check",
+     "Gmail's per-user limit: a check reading the same mailbox as a running migration or "
+     "another check runs it dry.",
+     "Nothing on either tenant is wrong: the repair policy's next check reads it again.", True),
+    ("drive.comments_unreadable", "drive", lambda t: "Comment threads: HTTP 404" in t or "Comment threads: HTTP 403" in t,
+     "Comments on a file could not be read",
+     "A Form or Site has no Drive comments and answers 404; a file the reader cannot open "
+     "answers 403 or 404.",
+     "Forms are compared by their body instead (since 2026-11-01). Anything else is listed "
+     "for a person.", False),
+    ("drive.missing_on_target", "drive", lambda t: "not on the target" in t,
+     "A copied file is gone from the target",
+     "The ledger maps it, but the target copy was deleted after the run (a reset or a "
+     "person), or the target account itself was replaced.",
+     "None automatic: the mapping must be forgotten before Drive will copy it again.", False),
+    ("contacts.unmapped_source", "contacts", lambda t: "have no ledger mapping" in t,
+     "A source contact has no copy",
+     "Added at the source after the run, or the run stopped before it.",
+     "The delta (Mirror) copies it.", False),
+    ("contacts.missing_on_target", "contacts", lambda t: "not on the target" in t,
+     "A copied contact is gone from the target",
+     "Deleted on the target after the run.",
+     "None automatic: listed for a person.", False),
+    ("chat.not_migrated", "chat", lambda t: "Source Chat space has no migration mapping" in t
+                                           or "chat could not be verified" in t,
+     "Chat was not migrated",
+     "Chat is off by default since 2026-10-31 (MIGRATE_CHAT); a check of an earlier run still "
+     "lists its spaces as owed.",
+     "Turn Chat on for a run that should carry it; otherwise nothing is owed.", False),
+    ("tasks.list_missing", "tasks", lambda t: "Task list not found" in t,
+     "A task list is gone from the target",
+     "Deleted on the target after the run (a reset, or the account was replaced).",
+     "None automatic: listed for a person.", False),
 ]
 BY_ID = {i[0]: i for i in ISSUES}
 
@@ -153,24 +258,36 @@ def classify(service: str, item) -> str:
     return "unclassified"
 
 
+# Bump when classification rules change. Unknown is a result, not an instruction
+# to rescan every historical finding for every newly checked message.
+CLASSIFIER_VERSION = 1
+CLASSIFY_BATCH = 200
+
+
 def ensure(conn) -> None:
     conn.execute("""CREATE TABLE IF NOT EXISTS issue_fix_log (
         id INTEGER PRIMARY KEY AUTOINCREMENT, fixed_at TEXT NOT NULL, source_user TEXT NOT NULL,
         service TEXT NOT NULL, issue TEXT NOT NULL, item_id TEXT, how TEXT NOT NULL)""")
     cols = {r[1] for r in conn.execute("PRAGMA table_info(verification_repair_queue)")}
-    if cols and "issue" not in cols:
+    if not cols:
+        return
+    if "issue" not in cols:
         conn.execute("ALTER TABLE verification_repair_queue ADD COLUMN issue TEXT")
-    if cols:
-        # Rows queued before kinds existed, or before their kind was known: classified
-        # from their own stored detail (a kind added later names rows already open).
-        for r in conn.execute("SELECT rowid, service, category, detail FROM verification_repair_queue "
-                              "WHERE issue IS NULL OR issue='unclassified'").fetchall():
-            try:
-                item = json.loads(r[3])
-            except ValueError:
-                item = r[3]
-            conn.execute("UPDATE verification_repair_queue SET issue=? WHERE rowid=?",
-                         (classify(r[1], item if r[2] != "notCopied" else {"notCopied": item}), r[0]))
+    if "issue_version" not in cols:
+        conn.execute("ALTER TABLE verification_repair_queue ADD COLUMN issue_version INTEGER NOT NULL DEFAULT 0")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_finding_issue_version ON verification_repair_queue(issue_version)")
+    rows = conn.execute(
+        "SELECT rowid, service, category, detail FROM verification_repair_queue "
+        "WHERE issue_version < ? ORDER BY issue_version, rowid LIMIT ?",
+        (CLASSIFIER_VERSION, CLASSIFY_BATCH)).fetchall()
+    for r in rows:
+        try:
+            item = json.loads(r[3])
+        except ValueError:
+            item = r[3]
+        conn.execute("UPDATE verification_repair_queue SET issue=?,issue_version=? WHERE rowid=?",
+                     (classify(r[1], item if r[2] != "notCopied" else {"notCopied": item}),
+                      CLASSIFIER_VERSION, r[0]))
 
 
 def log_resolved(conn, rows, now: str) -> None:
@@ -312,6 +429,50 @@ RUN_KINDS = [
      "second file found the first file's mapping.",
      "Comment mappings are keyed by file (migration_comments.reconcile); the next run copies "
      "the second file's comment.", True),
+    ("run.comment_differs", ("comment",),
+     lambda t: "Existing target comment/reply differs" in t,
+     "A copied comment reply is reported as different, but nothing differs",
+     "Drive drops the trailing space the engine writes after an action-only reply's "
+     "\"[Author, date]\" prefix, so an exact comparison refused the reply as changed.",
+     "Comparison ignores trailing whitespace (migration_comments._text), fixed 2026-11-04; the "
+     "next run stops reporting it. Real text edits on the target are still preserved, not overwritten.", True),
+    ("drive.parent_folder", "drive", lambda t: "mapped parent folder IDs differ" in t,
+     "A file sits in a duplicate of its folder",
+     "The target already had two folders with the same name and creation time (16 Dec 2025, before "
+     "this migration). The ledger maps the first; some files sit in the second.",
+     "Automatic (repair_parent_folders): a file in a same-name duplicate is moved to the mapped folder "
+     "and read back; a file in a folder with another name is left and listed.", True),
+    ("drive.forms_response_sheet", "drive", lambda t: "native Sheet entered values, formatting, or structures differ" in t,
+     "A Form's responses Sheet differs from the source",
+     "A responses Sheet is filled by its Form. Google offers no way to copy a Form's past responses "
+     "into the new Sheet or to link them (the Form's linkedSheetId is read-only), so the copy's rows "
+     "and structure differ from the source's. Seen on 6 Sheets across 5 users (account 3, 6 Nov 2026).",
+     "DOCUMENTED EXCEPTION, not repaired. The Sheet and its Form are copied, owned and shared as in the "
+     "source, so the people who use them keep access; only the response rows differ. A repair keeps a "
+     "backup of the target copy. Relinking the Form to its Sheet is done by hand (form_relink.py).", False),
+    ("drive.sheet_too_large", "drive", lambda t: "allocated cells exceed the explicit per-read budget" in t,
+     "A Sheet is too large to compare cell by cell",
+     "The check reads a Sheet's grid in bounded requests and refuses one whose ALLOCATED cells (rows x "
+     "columns, blank included) exceed 2,000,000 -- reading it would take thousands of requests (seen on "
+     "suchanaadhikari@, account 3).",
+     "None automatic. Raise VERIFY_SHEET_CELL_BUDGET for a Sheet the operator has qualified; until then "
+     "the Sheet reads UNVERIFIED, never identical.", False),
+    ("run.comment_prior_attempt", ("comment",),
+     lambda t: "Prior uncertain comment/reply delivery needs reconciliation" in t,
+     "A comment was not copied because an earlier attempt is on record",
+     "A comment's create call that never answered is not repeated blindly. The record of that attempt was "
+     "kept when its Doc was copied again to a new target file, so the old copy's record blocked the new "
+     "copy's comments (finance@ and it.department@, account 3, 7 Nov 2026).",
+     "Fixed 2026-11-08: only an attempt against the same target file blocks (migration_comments.reconcile); "
+     "the next run copies the comments to the new file. An attempt on the SAME file is still left for a "
+     "person, since a duplicate comment is worse than a late one.", True),
+    ("run.mail_owed_to_dms", ("message", "draft"),
+     lambda t: any(m in t for m in ("Ambiguous destination Message-ID", "Unresolved Drive link mapping")),
+     "Link mail left to Google's DMS",
+     "The engine cannot deliver it rewritten: the target already holds the Message-ID more than once, or a link "
+     "names a file with no copy on the target (9 on audit@, account 3, 8 Nov 2026).",
+     "The operator's choice (8 Nov 2026): the DMS carries it with the rest, its links unrewritten. Owed, never a "
+     "blocker of the DMS (config.DMS_OWED_FAILURES).", True),
     ("run.held_for_drive", None,
      lambda t: "held: this user's Drive did not migrate" in t,
      "Mail or calendar held back for Drive",

@@ -22,7 +22,7 @@ const TRANSPORTS: { value: MailTransport; label: string; blurb: string }[] = [
   {
     value: 'engine',
     label: 'This engine',
-    blurb: 'Every message passes through here, so Drive links inside them can '
+    blurb: 'Every email passes through here, so Drive links inside them can '
       + 'be rewritten to point at the target. Slowest: Gmail caps inserts at '
       + '3/sec per account.',
   },
@@ -31,7 +31,7 @@ const TRANSPORTS: { value: MailTransport; label: string; blurb: string }[] = [
     label: "Google's DMS",
     blurb: 'Google copies mail server-to-server. Much faster, and nothing can '
       + 'be rewritten on the way through -- this engine never holds the '
-      + 'message. Links keep pointing at the source tenant.',
+      + 'email. Links keep pointing at the source tenant.',
   },
   {
     value: 'split',
@@ -132,7 +132,7 @@ export const RunOptions: React.FC = () => {
           />
 
           <Tooltip title={rewriteBlocked
-            ? "DMS never hands the message to this engine, so there is nothing to rewrite"
+            ? "DMS never hands the email to this engine, so there is nothing to rewrite"
             : ''}>
             <FormControlLabel
               control={
@@ -151,8 +151,8 @@ export const RunOptions: React.FC = () => {
               gets copied before anyone turns rewriting on, and delta is what
               you run afterwards. */}
           <Tooltip title={t.rewrite_drive_links
-            ? 'Trashes the old copy on the target and inserts a corrected one. Only messages a rewrite would change are touched.'
-            : 'Needs Drive-link rewriting on -- otherwise it would replace each message with an identical copy'}>
+            ? 'Trashes the old copy on the target and inserts a corrected one. Only emails a rewrite would change are touched.'
+            : 'Needs Drive-link rewriting on -- otherwise it would replace each email with an identical copy'}>
             <FormControlLabel
               control={
                 <Switch

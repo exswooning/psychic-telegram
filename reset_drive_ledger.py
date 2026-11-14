@@ -53,11 +53,11 @@ from db import MigrationDB    # noqa: E402
 # tenants live), so clearing them costs no resumability.
 # `acl_pass` is the marker for an item whose sharing was started and not finished; it goes
 # with the items it describes.
-DRIVE_TYPES = ("folder", "file", "shortcut", "acl", "comment", "acl_pass", "links_pass",
+DRIVE_TYPES = ("folder", "file", "shortcut", "acl", "comment", "comment_reply", "acl_pass", "links_pass",
                "form_link",
                # per-file decisions and evidence about the copies a reset removes: which
                # route/method copied it, a Google-flagged file, a source-tripwire change
-               "source_change", "flagged_file", "method", "transfer_route")
+               "source_change", "flagged_file", "method", "transfer_route", "fallback", "carried")
 
 # The ledger row types each service owns. Everything the engine writes to
 # id_mapping/audit_log has to appear here, or a reset leaves rows behind
@@ -81,7 +81,7 @@ SERVICE_TYPES: dict[str, tuple[str, ...]] = {
     # repointed. They must clear with the messages they describe, or a reset
     # leaves evidence of a rewrite for mail that is no longer there.
     # delegate: a mailbox delegation owed to a colleague with no target account yet.
-    "gmail": ("message", "draft", "filter", "signature", "link_rewrite",
+    "gmail": ("message", "draft", "filter", "signature", "link_rewrite", "message_link",
               "link_repair", "thread", "delegate", "forwarding"),
     # subscription: a calendar the user follows, re-followed on the target;
     # calendar_subscription is the audit row of one that could not be.
@@ -109,7 +109,9 @@ SERVICE_SIDE_TABLES: dict[str, tuple[tuple[str, str], ...]] = {
     "gmail": (("label_map", "source_user"),),
     # When the repair last checked this user's copied times: a reset Drive is copied
     # afresh, so its times are due a check again.
-    "drive": (("mtime_checks", "source_user"),),
+    # Objects the verifier could not read (verify_resilience): they describe items a Drive
+    # reset declares gone, so they go with them.
+    "drive": (("mtime_checks", "source_user"), ("verification_unverified", "source_user")),
     # A chat space this user's run claimed (db.claim): kept, the space it
     # names is gone from the ledger and no member's re-run would migrate it.
     "chat": (("tenant_claims", "owner"),),
@@ -192,6 +194,29 @@ def reset_service_ledger(db: MigrationDB, source_email: str,
         side_deleted += conn.execute(
             f"DELETE FROM user_verification WHERE source_user=? AND service IN "
             f"({','.join('?' * len(services))})", (source_email, *services)).rowcount
+        # These receipts/checkpoints describe the deleted target, not the next
+        # migration. Optional tables may not exist in older ledgers. Preserve
+        # other users/services and the rolling upload ledger (real Google quota).
+        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        for table in ("migration_item_receipts", "verification_repair_queue"):
+            if table in tables:
+                side_deleted += conn.execute(
+                    f"DELETE FROM {table} WHERE source_user=? AND service IN "
+                    f"({','.join('?' * len(services))})", (source_email, *services)).rowcount
+        if "gmail" in services:
+            for table in ("verification_mail_cache", "verification_mail_checkpoints",
+                          "mail_reconciliation_items"):
+                if table in tables:
+                    side_deleted += conn.execute(
+                        f"DELETE FROM {table} WHERE source_user=?", (source_email,)).rowcount
+        if "drive" in services and "comment_delivery_attempts" in tables:
+            side_deleted += conn.execute(
+                "DELETE FROM comment_delivery_attempts WHERE source_user=?", (source_email,)).rowcount
+        if "parity_user" in tables:
+            stages = (*services, *(("gmail-awaiting-dms",) if "gmail" in services else ()))
+            side_deleted += conn.execute(
+                f"DELETE FROM parity_user WHERE source_user=? AND stage IN "
+                f"({','.join('?' * len(stages))})", (source_email, *stages)).rowcount
         # user_tally has no such per-service split -- one row combines every service into a
         # single countParity -- so any service being reset invalidates the whole row rather
         # than a slice of it.
@@ -239,6 +264,10 @@ def reset_service_ledger(db: MigrationDB, source_email: str,
             conn.execute(
                 "UPDATE identity_map SET services_done=? WHERE source_email=?",
                 (",".join(sorted(have)), source_email))
+    # A same-process reset must not keep answering from the deleted map.
+    # Invalidate only after commit; other users and services remain on disk.
+    with db._cache_lock:
+        db._mapping_cache.pop(source_email, None)
     return {"user": source_email, "id_mapping_rows": mapping_deleted,
             "audit_log_rows": audit_deleted,
             "side_table_rows": side_deleted,

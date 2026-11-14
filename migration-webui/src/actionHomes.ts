@@ -47,6 +47,7 @@ export const CLAIMED_ELSEWHERE = [
   'shared_drives_inventory', 'shared_drives_migrate', 'staging_drives_cleanup',
   'sso_inventory', 'sso_migrate', 'reconcile', 'dms_import',
   'groups_inventory', 'groups_migrate_dry', 'groups_migrate',
+  'configuration_check', 'configuration_apply_groups',
   // Mission Control / Wizard / Scope / Identities
   //
   // NOT 'migrate'. Mission Control's button launches through api_server,
@@ -57,7 +58,7 @@ export const CLAIMED_ELSEWHERE = [
   // product could run a split DELTA and not a split MIGRATION.
   'scope', 'export_scope', 'separate_credentials',
   'init_db', 'init_db_auto', 'phased_migrate', 'phased_count_only',
-  'ab_transfer',
+  'ab_transfer', 'regression',
 ]
 
 // Audited live after this list was written, and three of its entries were

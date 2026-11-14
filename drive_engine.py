@@ -21,6 +21,7 @@ fixup pass that runs after the rest of the tree has been mirrored.
 from __future__ import annotations
 
 import concurrent.futures as futures
+import contextvars
 import json
 import logging
 import os
@@ -110,6 +111,25 @@ def carried_metadata(item: dict) -> dict:
 CARRIED_KEYS = tuple(_CARRIED_DEFAULTS) + ("properties", "folderColorRgb", "createdTime", "appProperties")
 
 
+# The item a Drive worker thread is on, so a dropped setting is recorded against it (each thread has
+# its own context). Set by DriveMigrator at the start of every file and folder.
+_CURRENT_ITEM: contextvars.ContextVar = contextvars.ContextVar("bitport_current_item", default=None)
+
+
+def _record_dropped(keys: list, exc) -> None:
+    """A setting the target refused is recorded, not only logged: ss@'s move dropped writersCanShare
+    and appProperties silently on 9 Nov 2026, found only by reading the log."""
+    cur = _CURRENT_ITEM.get()
+    if not cur:
+        return
+    migrator, item = cur
+    try:
+        migrator.db.log_audit(migrator.source_user, item["id"], "carried", "CARRIED_DROPPED",
+                              f"{','.join(keys)}: {str(exc)[:200]}")
+    except Exception:      # noqa: BLE001 - the record must never cost the file
+        log.debug("could not record dropped settings", exc_info=True)
+
+
 def with_carried_fallback(send, body: dict):
     """send(body); if Drive refuses it while the body carries metadata beyond what
     was always sent, once more without that metadata. Carrying a star or a
@@ -118,10 +138,12 @@ def with_carried_fallback(send, body: dict):
         return send(body)
     except PermanentAPIError as exc:
         extra = [k for k in CARRIED_KEYS if k in body]
-        if not extra or not re.search(r"(?:HTTP|HttpError)\s+400\b",str(exc)):
+        if not extra or not (re.search(r"(?:HTTP|HttpError)\s+400\b", str(exc))
+                             or "teamDrivesSharingRestrictionNotAllowed" in str(exc)):
             raise
         log.warning("Drive refused a write carrying %s (%s); retrying without them",
                     ",".join(extra), exc)
+        _record_dropped(extra, exc)
         return send({k: v for k, v in body.items() if k not in extra})
 
 
@@ -221,7 +243,8 @@ def _project_limiter(qps: float, tenant: str = "target", db=None):
             # never START above the configured safety guess, only below it.
             if db is not None:
                 try:
-                    learned = db.load_rate_ceiling(tenant)
+                    learned = db.load_rate_ceiling(
+                        tenant, float(os.getenv("RATE_CEILING_TTL_HOURS", "24")))
                     if learned is not None:
                         starting_ceiling = min(guess, learned)
                 except Exception as exc:      # noqa: BLE001 - advisory only
@@ -234,7 +257,7 @@ def _project_limiter(qps: float, tenant: str = "target", db=None):
 
             def _on_change(kind: str, before: float, after: float,
                           t: str = tenant, d=db, n: int = share) -> None:
-                _log_rate_change(kind, before, after, t)
+                _log_rate_change(kind, before, after, t, _PROJECT_LIMITERS[t].last_reason)
                 if kind == "backoff" and d is not None:
                     try:
                         d.save_rate_ceiling(t, _PROJECT_LIMITERS[t].ceiling * n)
@@ -386,12 +409,12 @@ def limiter_events() -> dict:
 
 
 def _log_rate_change(kind: str, before: float, after: float,
-                     tenant: str = "target") -> None:
+                     tenant: str = "target", reason: str | None = None) -> None:
     """Say it out loud. A limiter that silently retunes itself is a limiter
     nobody can debug when a run is mysteriously slow."""
     if kind == "backoff":
-        log.warning("drive %s project rate: %.1f -> %.1f/s (quota pushback)",
-                    tenant, before, after)
+        log.warning("drive %s project rate: %.1f -> %.1f/s (quota pushback: %s)",
+                    tenant, before, after, reason or "unknown")
     else:
         log.info("drive %s project rate: %.1f -> %.1f/s (probing up)",
                  tenant, before, after)
@@ -1266,6 +1289,8 @@ class DriveMigrator:
         """The only writer to `stats`. See _stats_lock in __init__."""
         with self._stats_lock:
             self.stats[key] = self.stats.get(key, 0) + n
+        import progress
+        progress.tick(self.source_user, "drive", n)      # the heartbeat oversight's stall check reads
 
     def _walk(self, src_parent: str, tgt_parent: str, depth: int) -> None:
         if depth > self.settings.max_recursion_depth:
@@ -1440,6 +1465,7 @@ class DriveMigrator:
     # -- folders ---------------------------------------------------------------
     def _sync_folder(self, item: dict, tgt_parent: str) -> str | None:
         item = {**item, "_bitport_source_user": self.source_user}
+        _CURRENT_ITEM.set((self, item))
         existing = self.db.get_target_id(self.source_user, item["id"], "folder")
         if existing:
             if self.db.acl_pending(self.source_user, item["id"]) and not self.settings.dry_run:
@@ -1450,6 +1476,17 @@ class DriveMigrator:
             log.info("[DRY RUN] would create folder %s", item["name"])
             self._bump("folders")
             return f"dryrun:{item['id']}"
+
+        placed = self._take_placed(item, tgt_parent)
+        if placed is not None:
+            # The folder an earlier run made here, its mapping since lost: adopted, so the files
+            # under it find their own copies instead of a new, empty folder beside it.
+            self.db.record_mapping(self.source_user, item["id"], placed["id"], "folder",
+                                   parent_target_id=tgt_parent, source_name=item["name"])
+            self.db.log_audit(self.source_user, item["id"], "folder", "SUCCESS",
+                              modified_time=item.get("modifiedTime"))
+            self._bump("folders")
+            return placed["id"]
 
         body = {"name": item["name"], "mimeType": FOLDER_MIME, "parents": [tgt_parent]}
         if item.get("modifiedTime"):
@@ -1521,6 +1558,8 @@ class DriveMigrator:
         # after, so with the folder, the name and the type it names Bitport's own copy.
         return (parent, f.get("name"), f.get("mimeType"), (f.get("createdTime") or "")[:19])
 
+    target_preexisting = 0           # files/folders the target held before this user's first migrated item
+
     def _take_placed(self, item: dict, tgt_parent: str) -> dict | None:
         """A copy an earlier run put in its folder and was stopped before recording:
         _landed writes the mapping first, so a kill between the copy landing and that
@@ -1545,8 +1584,10 @@ class DriveMigrator:
         return None
 
     def _index_placed(self) -> dict[tuple, list[dict]]:
-        """The target's files no mapping names, by _placed_key. One listing per user."""
-        mapped = set(self.db.mapped_ids(self.source_user, ("file",)).values())
+        """The target's files AND folders no mapping names, by _placed_key. One listing per user.
+        Folders too: a user whose mappings were lost (an A/B arm cleared it.department@'s, account 3)
+        would otherwise get every folder re-created and every file copied again beside its first copy."""
+        mapped = set(self.db.mapped_ids(self.source_user, ("file", "folder")).values())
         where = (dict(corpora="drive", driveId=self.target_drive_id, includeItemsFromAllDrives=True,
                       supportsAllDrives=True, q="trashed = false") if self.shared_drive
                  else dict(spaces="drive", q="'me' in owners and trashed = false"))
@@ -1559,11 +1600,17 @@ class DriveMigrator:
                     fields="nextPageToken,files(id,name,mimeType,createdTime,modifiedTime,"
                            "md5Checksum,parents)").execute(), write=False)
                 for f in resp.get("files", []):
-                    if f["id"] not in mapped and f.get("mimeType") != FOLDER_MIME:
+                    if f["id"] not in mapped:
                         for p in f.get("parents") or []:
                             out.setdefault(self._placed_key(f, p), []).append(f)
                 token = resp.get("nextPageToken")
                 if not token:
+                    self.target_preexisting = sum(len(v) for v in out.values())
+                    if self.target_preexisting and not mapped:
+                        log.warning("[%s] the target already holds %d file(s)/folder(s) before any was migrated "
+                                    "(none is in the ledger): a copy matching a source file's folder, name, type and "
+                                    "created time is adopted, the rest stays beside the migrated files",
+                                    self.source_user, self.target_preexisting)
                     return out
         except (PermanentAPIError, RuntimeError) as exc:
             log.warning("[%s] could not list the target's files; a copy an earlier run left "
@@ -1731,7 +1778,10 @@ class DriveMigrator:
         self._bump("files")
         self._bump("degraded_format")
         log.info("[%s] %s %s", self.source_user, item.get("name"), note)
-        self._finish_item(item, tgt_id, comments=False)
+        # A rebuild is always a brand-new file stamped with the rebuild's time; nothing in the create
+        # carries the source's. Restored whether or not a later write happens (esc.mrc@, 9 Nov 2026:
+        # two unshared Forms kept today's date).
+        self._finish_item(item, tgt_id, comments=False, force_mtime_restore=True)
 
     # Skips another strategy CAN legitimately overturn: both mean "this
     # path cannot carry this file", not "this file must not be carried".
@@ -1770,6 +1820,7 @@ class DriveMigrator:
         because a file that arrived is not a failure, and leaving it counted
         as one is how a failure list stops being read.
         """
+        _CURRENT_ITEM.set((self, item))
         attempts: list[str] = []
         # Count THIS file's failures locally, from its own audit rows.
         #
@@ -1785,6 +1836,7 @@ class DriveMigrator:
         # thread-safe.
         local_failures = 0
         last_error = ""
+        first_skip = ""
         strategies = self._strategies_for(item, is_native)
         if int(item.get("size") or 0) > self.settings.effective_upload_cap():
             # More than a whole day: only a server-side copy can carry it. Streamed, it
@@ -1817,6 +1869,8 @@ class DriveMigrator:
                 # never open either, which the strategy list already covers.
                 if not last_error:
                     last_error = row["error_message"] or ""
+            elif row is not None and row["status"] in self._RETRYABLE_SKIPS and not first_skip:
+                first_skip = f"{row['status']}: {row['error_message'] or ''}"
             if not self.db.get_target_id(self.source_user, item["id"], "file") \
                     and not self._worth_another_strategy(item):
                 # A deliberate skip, not a failure. canDownload=false is the
@@ -1832,13 +1886,18 @@ class DriveMigrator:
                     if local_failures:
                         self._bump("failed", -local_failures)
                     self._bump("recovered_by_fallback")
+                    # A route may be unsupported rather than broken (Forms have no export).
+                    # Keep that reason as well as real failures for the error observer.
+                    self.db.log_audit(self.source_user, item["id"], "fallback", "FALLBACK",
+                                      f"{attempts[0]} -> {name}: {(last_error or first_skip or 'reason unavailable')[:200]}")
+                    outcome = "failed" if local_failures else "could not carry it"
                     self.db.log_audit(
                         self.source_user, item["id"], "file", "SUCCESS",
                         f"copied by {name} after {', '.join(attempts[:-1])} "
-                        f"failed")
-                    log.info("[%s] %s recovered %s after %s failed",
+                        f"{outcome}")
+                    log.info("[%s] %s recovered %s after %s %s",
                              self.source_user, name, item.get("name"),
-                             ", ".join(attempts[:-1]))
+                             ", ".join(attempts[:-1]), outcome)
                 return
 
         # Every route declined it for a reason no retry changes -- a Form or an Apps
@@ -1942,8 +2001,11 @@ class DriveMigrator:
 
         body = {"name": item["name"], "parents": [self._staging_drive_id]}
         # This call is made as the SOURCE user: starred is per user, so it would star the
-        # copy for them. It is set as the target in the move (_out_of_staging).
-        body.update({k: v for k, v in carried_metadata(item).items() if k != "starred"})
+        # copy for them. It is set as the target in the move (_out_of_staging). So is
+        # writersCanShare: the copy lands in a SHARED drive, which refuses it (403
+        # teamDrivesSharingRestrictionNotAllowed -- finance@, 9 Nov 2026: the whole copy failed and
+        # the file went the slow way).
+        body.update({k: v for k, v in carried_metadata(item).items() if k not in ("starred", "writersCanShare")})
         # copy() does not carry modifiedTime across on its own.
         if item.get("modifiedTime"):
             body["modifiedTime"] = item["modifiedTime"]
@@ -2093,12 +2155,28 @@ class DriveMigrator:
         body = {}
         if item.get("modifiedTime"):
             body["modifiedTime"] = item["modifiedTime"]
-        # Set here, as the target user, in the move it already makes: no extra call.
-        body.update(carried_metadata(item))
-        return with_carried_fallback(lambda b: self._retry(lambda: self.tgt.files().update(
+        # Set here, as the target user, in the move it already makes: no extra call --
+        # except writersCanShare, which Drive judges while the file is still in the shared
+        # staging drive and refuses (403 teamDrivesSharingRestrictionNotAllowed; the fallback
+        # then dropped it AND appProperties, 9 Nov 2026). It is set once the file is in My Drive.
+        carried = carried_metadata(item)
+        after = {k: carried.pop(k) for k in ("writersCanShare",) if k in carried}
+        body.update(carried)
+        moved = with_carried_fallback(lambda b: self._retry(lambda: self.tgt.files().update(
             fileId=file_id, addParents=tgt_parent, removeParents=self._staging_drive_id,
             body=b or None, supportsAllDrives=True, fields="id,modifiedTime",
         ).execute(), label="drive.files.move"), body)
+        if after:
+            if item.get("modifiedTime"):
+                after["modifiedTime"] = item["modifiedTime"]
+            try:
+                moved = self._retry(lambda: self.tgt.files().update(
+                    fileId=file_id, body=after, supportsAllDrives=True, fields="id,modifiedTime",
+                ).execute(), label="drive.files.update.carried")
+            except (PermanentAPIError, RuntimeError) as exc:      # the file is in place; a setting is not worth it
+                log.warning("[%s] %s: could not set %s after the move: %s", self.source_user,
+                            item.get("name"), ",".join(after), exc)
+        return moved
 
     def _landed(self, item: dict, target_id: str, tgt_parent: str, moved: dict | None,
                 bytes_moved: int = 0, note: str = "", comments: bool = True) -> None:
@@ -2754,12 +2832,14 @@ class DriveMigrator:
             # This user's own copy first; else whoever's copy exists. A shortcut usually
             # points at a colleague's file -- live, dharan: ward7 and info@ each had one
             # left SKIPPED_UNRESOLVED_TARGET although planning@'s copy was on the target.
-            mapped = (
-                self.db.get_target_id(self.source_user, target_id, "file")
-                or self.db.get_target_id(self.source_user, target_id, "folder")
-                or self.db.target_for_source_id(target_id, ("file", "folder"))
-            )
-            if not mapped:
+            # Every copy is a candidate, in that order: a colleague's copy this user cannot see
+            # answers 404 (account 3, ward1@, 2026-11-02, which FAILED the user on one shortcut),
+            # and another copy may well be reachable.
+            candidates = list(dict.fromkeys(c for c in (
+                self.db.get_target_id(self.source_user, target_id, "file"),
+                self.db.get_target_id(self.source_user, target_id, "folder"),
+                *self.db.targets_for_source_id(target_id, ("file", "folder"))) if c))
+            if not candidates:
                 self.db.log_audit(self.source_user, item["id"], "shortcut",
                                   "SKIPPED_UNRESOLVED_TARGET",
                                   "shortcut target has not migrated")
@@ -2771,25 +2851,43 @@ class DriveMigrator:
                 self._bump("files")
                 continue
 
-            body = {"name": item["name"], "mimeType": SHORTCUT_MIME,
-                   "parents": [tgt_parent], "shortcutDetails": {"targetId": mapped}}
             # Its own times too: live, seeduser200's shortcut was the one Drive item
             # whose created/modified time was the copy's. Dropped if Drive refuses them.
             times = {k: item[k] for k in ("createdTime", "modifiedTime") if item.get(k)}
-            try:
+            result, last_exc, unreachable = None, None, 0
+            for mapped in candidates:
+                body = {"name": item["name"], "mimeType": SHORTCUT_MIME,
+                        "parents": [tgt_parent], "shortcutDetails": {"targetId": mapped}}
                 try:
-                    result = self._retry(lambda: self.tgt.files().create(
-                        body={**body, **times}, fields="id", supportsAllDrives=True,
-                    ).execute())
-                except (PermanentAPIError, RuntimeError):
-                    if not times:
-                        raise
-                    result = self._retry(lambda: self.tgt.files().create(
-                        body=body, fields="id", supportsAllDrives=True,
-                    ).execute())
-            except (PermanentAPIError, RuntimeError) as exc:
-                self.db.log_audit(self.source_user, item["id"], "shortcut", "FAILED", str(exc))
-                self._bump("failed")
+                    try:
+                        result = self._retry(lambda: self.tgt.files().create(
+                            body={**body, **times}, fields="id", supportsAllDrives=True,
+                        ).execute())
+                    except (PermanentAPIError, RuntimeError):
+                        if not times:
+                            raise
+                        result = self._retry(lambda: self.tgt.files().create(
+                            body=body, fields="id", supportsAllDrives=True,
+                        ).execute())
+                    break
+                except (PermanentAPIError, RuntimeError) as exc:
+                    last_exc = exc
+                    if "404" in str(exc) or "not found" in str(exc).lower():
+                        unreachable += 1
+                        continue        # this copy is not visible to this user; try the next
+                    break               # any other refusal is a real failure
+            if result is None:
+                if last_exc is not None and unreachable == len(candidates):
+                    # Every copy is out of this user's reach for now (not shared with them yet).
+                    # A reasoned skip, re-walked by repair once another copy lands, not a failure.
+                    self.db.log_audit(self.source_user, item["id"], "shortcut",
+                                      "SKIPPED_UNRESOLVED_TARGET",
+                                      f"no copy of the shortcut's target is reachable by this user "
+                                      f"({len(candidates)} tried): {str(last_exc)[:160]}")
+                    self._bump("skipped")
+                else:
+                    self.db.log_audit(self.source_user, item["id"], "shortcut", "FAILED", str(last_exc))
+                    self._bump("failed")
                 continue
 
             self.db.record_mapping(self.source_user, item["id"], result["id"], "shortcut",
@@ -2818,9 +2916,30 @@ class DriveMigrator:
             self._bump("comments",written)
             return written
         except Exception as exc:
+            if "404" in str(exc) and self._has_no_comments_api(source_id):
+                # Apps Script projects and Forms have no Drive comments: the API answers 404 for
+                # them. A failure that can never succeed recurred on every run (since 3 Nov 2026,
+                # oversight's watch_recurring, incident #41) -- it is a fact about the type.
+                self.db.log_audit(self.source_user, source_id, "comment", "SKIPPED_NO_COMMENTS_API",
+                                  "this file type has no Drive comments")
+                return 0
             self.db.log_audit(self.source_user,source_id,"comment","FAILED",str(exc))
             log.warning("[%s] comment thread remains unresolved on %s: %s",self.source_user,source_id,exc)
             return 0
+
+    NO_COMMENTS_API = ("application/vnd.google-apps.script", "application/vnd.google-apps.form",
+                       "application/vnd.google-apps.site", "application/vnd.google-apps.map",
+                       "application/vnd.google-apps.jam", "application/vnd.google-apps.folder",
+                       "application/vnd.google-apps.shortcut")
+
+    def _has_no_comments_api(self, source_id: str) -> bool:
+        try:
+            mime = self._retry(lambda: self.src.files().get(
+                fileId=source_id, fields="mimeType", supportsAllDrives=True).execute(),
+                write=False, tenant="source").get("mimeType")
+        except Exception:      # noqa: BLE001 - unknown: keep it a failure
+            return False
+        return mime in self.NO_COMMENTS_API
 
     # -- ACL translation -----------------------------------------------------------
     def _sync_acls(self, source_id: str, target_id: str,
@@ -3221,7 +3340,10 @@ class DriveMigrator:
                 # 202 on the target. A number that alarming and that wrong
                 # is worse than no number, because it sends people to repair
                 # something that already worked.
-                self.db.log_audit(self.source_user, audit_key, "acl", "SUCCESS")
+                # The role rides in the detail: the Sharing view reports it, and nothing
+                # else in the ledger says what access a grantee was given.
+                self.db.log_audit(self.source_user, audit_key, "acl", "SUCCESS",
+                                  f"role={chunk[idx][0].get('role')}")
                 applied += 1
         return applied
 
@@ -3244,7 +3366,7 @@ class DriveMigrator:
                     supportsAllDrives=True, fields="id",
                 ).execute(), label="drive.permissions.create", max_retries=limit)
                 # Same upsert-clears-the-failure reasoning as the batch path.
-                self.db.log_audit(self.source_user, audit_key, "acl", "SUCCESS")
+                self.db.log_audit(self.source_user, audit_key, "acl", "SUCCESS", f"role={body.get('role')}")
                 return 1
             except (PermanentAPIError, RuntimeError) as exc:
                 grantee = body.get("emailAddress") or (audit_key or "").partition(":")[2]
@@ -3307,7 +3429,9 @@ class DriveMigrator:
         # Comments BEFORE sharing: Drive emails the people who can see a file about a new
         # comment on it, and once shared that includes a client's outside collaborators.
         # Written first, the only one who can see it is the target owner.
-        if comments and self.settings.migrate_comments:
+        # A Form has no Drive comment threads: the comments API answers it 404 "File not found",
+        # which was recorded as a FAILED comment on every Form copied (live, 2026-10-31).
+        if comments and self.settings.migrate_comments and item.get("mimeType") != FORM_MIME:
             try:
                 commented = self._sync_comments(item["id"], target_id)
                 touched += commented
@@ -3330,7 +3454,11 @@ class DriveMigrator:
         # Always put the time back after ANY step that may have written -- including one
         # that raised half way through.
         writes_applied = touched or (1 if failed else 0) or (1 if force_mtime_restore else 0)
-        self._restore_modified_time(target_id, item, writes_applied, late_bump=bool(commented))
+        # A Form's time is re-stamped by the Forms service a little after its rebuild, overwriting a
+        # restore that stuck when made (9 Nov 2026: rebuilt Forms read their last edit time while the
+        # restore had reported success) -- checked again after it settles, like a commented file.
+        late = bool(commented) or item.get("mimeType") == "application/vnd.google-apps.form"
+        self._restore_modified_time(target_id, item, writes_applied, late_bump=late)
         self._apply_lock(target_id, item)
         if shareable and sharing_ran:
             self.db.clear_acl_pending(self.source_user, item["id"])

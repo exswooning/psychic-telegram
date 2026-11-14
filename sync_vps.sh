@@ -37,6 +37,33 @@ runtime_changes() {
     esac
   done
 }
+# Render the installed deployment directory into service templates. Never assume
+# the old VPS location applies to a laptop installation.
+render_unit() {
+  python3 -c 'import re,sys
+port=sys.argv[2]
+if not re.fullmatch(r"[0-9]{1,5}",port) or not 1<=int(port)<=65535:
+    raise SystemExit("Invalid installed web UI port")
+unit=sys.stdin.read().replace("/root/migration",sys.argv[1])
+unit=unit.replace("webui.py --port 8080","webui.py --port "+port)
+unit=unit.replace("webui.py, port 8080","webui.py, port "+port)
+print(unit,end="")' "$1" "${2:-8080}"
+}
+if [[ "${1:-}" == "--render-unit" ]]; then
+  render_unit "${2:?missing deployment directory}" "${3:-8080}"
+  exit $?
+fi
+webui_port() {
+  python3 -c 'import re,sys
+ports=re.findall(r"(?:^|[/\s])webui\.py\s+--port\s+([0-9]+)(?=\s|;|$)",sys.stdin.read())
+if len(ports)!=1 or not 1<=int(ports[0])<=65535:
+    raise SystemExit("Cannot establish the installed web UI port; no unit may be replaced")
+print(ports[0])'
+}
+if [[ "${1:-}" == "--webui-port" ]]; then
+  webui_port
+  exit $?
+fi
 if [[ "${1:-}" == "--classify" ]]; then
   changed="$(runtime_changes)"
   if [[ -z "$changed" ]]; then echo "frontend-only"; exit 0; fi
@@ -115,13 +142,14 @@ print(json.dumps({"at": datetime.datetime.now(datetime.timezone.utc).strftime("%
     || echo "  (could not record this deploy on the box -- the deploy itself is unaffected)"
 }
 SYNC_EXCLUDES=(
-  --exclude '.git/' --exclude '__pycache__/' --exclude '.pytest_cache/' --exclude '.ruff_cache/'
+  --exclude '.git' --exclude '__pycache__/' --exclude '.pytest_cache/' --exclude '.ruff_cache/'
   --exclude '.venv' --exclude 'scratch/' --exclude 'migration.db*'
   --exclude 'unprotected_domains.json'
   --exclude '*.log' --exclude 'sandbox_manifest*.json' --exclude 'identities*.csv'
   --exclude 'keys/' --exclude 'oauth/' --exclude 'env.sh'
   --exclude 'run_state.json'
   --exclude 'logs/' --exclude 'node_modules/'
+  --exclude '._*' --exclude '.DS_Store'
 )
 
 # What would this change on the box? Compared by CONTENT (-c): a checkout or a
@@ -149,6 +177,8 @@ fi
 # THREAD inside bitport-api, which no `ps` can see, so an unfinished repair_runs row
 # (started in the last 12 h) counts as busy too. A frontend-only deploy restarts
 # nothing and is never refused. DEPLOY_OVER_JOBS=1 is the explicit override.
+# DMS, full verification and the fresh campaign also block a release. Their
+# Python baseline is pinned even while Google is doing the remote copy.
 # A mirror cycle alone is waited out rather than refused: it runs under a minute every
 # few minutes and resumes from its markers, so refusing only made the deploy a matter
 # of timing by hand. MIRROR_WAIT_SEC bounds the wait; anything else still refuses.
@@ -156,7 +186,7 @@ if [[ ( -n "$RUNTIME_CHANGES" || "${FORCE_RESTART:-0}" == "1" ) && "${DEPLOY_OVE
  WAITED=0
  while :; do
   BUSY="$("${SSH[@]}" "$TARGET" "cd '$DEST' 2>/dev/null || exit 0
-ps -eo pid=,args= | grep -iE '^ *[0-9]+ +[^ ]*python[0-9.]* +([^ ]*/)?(main\.py .*(migrate|delta|mirror|discover|run-shard)|(seed_sandbox|reset_target|wipe_target|wipe_tenant|remove_tenant_setup|tally|verify_sample|dms_migrate|full_setup)\.py)'
+ps -eo pid=,args= | grep -iE '^ *[0-9]+ +[^ ]*python[0-9.]* +((-[uBEOISsqv]+|-X +[^ ]+|-W +[^ ]+) +)*([^ ]*/)?(main\.py .*(migrate|delta|mirror|discover|run-shard)|(seed_sandbox|reset_target|wipe_target|wipe_tenant|remove_tenant_setup|tally|verify_sample|tenant_verify|dms_migrate|dms_delta_loop|parity_loop|sandbox_campaign|full_setup|workspace_configuration)\.py)'
 for db in data/accounts/*/migration.db; do [ -f \"\$db\" ] && .venv/bin/python -c 'import sqlite3,sys
 c = sqlite3.connect(\"file:\" + sys.argv[1] + \"?mode=ro\", uri=True)
 for r in c.execute(\"SELECT id, started_at FROM repair_runs WHERE finished_at IS NULL AND started_at >= strftime(\x27%Y-%m-%dT%H:%M:%SZ\x27, \x27now\x27, \x27-12 hours\x27)\"): print(\"repair\", r[0], \"unfinished since\", r[1], \"in\", sys.argv[1])' \"\$db\" 2>/dev/null; done; true" 2>/dev/null || true)"
@@ -171,6 +201,21 @@ for r in c.execute(\"SELECT id, started_at FROM repair_runs WHERE finished_at IS
     echo "$BUSY" | sed 's/^/    /' >&2
     echo "  Wait for it to finish, or set DEPLOY_OVER_JOBS=1 to deploy anyway." >&2
     exit 3
+  fi
+fi
+
+# install.sh may choose a nondefault free port and point Caddy there. Refreshing
+# the shipped unit must preserve that choice, rather than silently resetting it
+# to 8080 and leaving the original UI and /api/queue behind a 502. Read before
+# copying; an unreadable/ambiguous installed command aborts without changing files.
+WEBUI_PORT=8080
+if [[ -n "$RUNTIME_CHANGES" || "${FORCE_RESTART:-0}" == "1" ]]; then
+  if ! INSTALLED_WEBUI_EXEC="$("${SSH[@]}" "$TARGET" "systemctl show bitport-webui.service --property=ExecStart --value 2>/dev/null || true")"; then
+    echo "  DEPLOY ABORTED: cannot read the installed web UI command." >&2
+    exit 1
+  fi
+  if [[ -n "$INSTALLED_WEBUI_EXEC" ]]; then
+    WEBUI_PORT="$(printf '%s' "$INSTALLED_WEBUI_EXEC" | webui_port)" || exit 1
   fi
 fi
 
@@ -211,7 +256,10 @@ fi
 if [[ -z "$RUNTIME_CHANGES" && "${FORCE_RESTART:-0}" != "1" ]]; then
   COMMIT="$(cd "$SRC_DIR" && git rev-parse --short HEAD 2>/dev/null || echo unknown)"
   [[ -n "$(cd "$SRC_DIR" && git status --porcelain 2>/dev/null)" ]] && COMMIT="$COMMIT-dirty"
-  "${SSH[@]}" "$TARGET" "printf '%s\n' '$COMMIT' > $DEST/DEPLOYED_COMMIT"
+  if ! "${SSH[@]}" "$TARGET" "printf '%s\n' '$COMMIT' > $DEST/DEPLOYED_COMMIT"; then
+    echo "  DEPLOY ABORTED: could not record the installed release; completion is unconfirmed." >&2
+    exit 1
+  fi
   echo "  stamped DEPLOYED_COMMIT=$COMMIT"
   record_deploy "$COMMIT" 0
   echo "  FRONTEND-ONLY: nothing that runs on the box changed, so no service was"
@@ -277,7 +325,10 @@ DIRTY="$(cd "$REPO" && git status --porcelain 2>/dev/null)"
 if [[ -n "$DIRTY" ]]; then
   COMMIT="$COMMIT-dirty"
 fi
-"${SSH[@]}" "$TARGET" "printf '%s\n' '$COMMIT' > $DEST/DEPLOYED_COMMIT"
+if ! "${SSH[@]}" "$TARGET" "printf '%s\n' '$COMMIT' > $DEST/DEPLOYED_COMMIT"; then
+    echo "  DEPLOY ABORTED: could not record the installed release; completion is unconfirmed." >&2
+    exit 1
+  fi
 echo "  stamped DEPLOYED_COMMIT=$COMMIT"
 record_deploy "$COMMIT" 1
 
@@ -328,12 +379,26 @@ fi
 # incident.
 if [[ -d "$(cd "$(dirname "$0")" && pwd)/systemd" ]]; then
   SD="$(cd "$(dirname "$0")" && pwd)/systemd"
+  RENDERED_UNITS="$(mktemp -d)"
+  for unit in "$SD/"*.service "$SD/"*.timer; do
+    [[ -f "$unit" ]] || continue
+    render_unit "$DEST" "$WEBUI_PORT" < "$unit" > "$RENDERED_UNITS/$(basename "$unit")" || exit 1
+  done
+  SD="$RENDERED_UNITS"
   if rsync -az -e "${SSH[*]}" "$SD/"*.service "$TARGET:/etc/systemd/system/" 2>/dev/null; then
     if compgen -G "$SD/"'*.timer' >/dev/null; then
       rsync -az -e "${SSH[*]}" "$SD/"*.timer "$TARGET:/etc/systemd/system/" 2>/dev/null || true
     fi
     "${SSH[@]}" "$TARGET" "systemctl daemon-reload" >/dev/null 2>&1 && \
       echo "  systemd units installed"
+    # A library upgrade must never restart a running migration (13 Nov 2026: needrestart restarted every
+    # bitport-* unit after an unattended upgrade and the DMS import died). Units restart by a deploy only.
+    if [[ -f systemd/needrestart-bitport.conf ]]; then
+      "${SSH[@]}" "$TARGET" "mkdir -p /etc/needrestart/conf.d" >/dev/null 2>&1 && \
+        rsync -az -e "${SSH[*]}" systemd/needrestart-bitport.conf \
+          "$TARGET:/etc/needrestart/conf.d/bitport.conf" 2>/dev/null && \
+        echo "  needrestart: bitport units are never restarted by an upgrade"
+    fi
     for t in $(cd "$SD" && ls *.timer 2>/dev/null); do
       if "${SSH[@]}" "$TARGET" "systemctl enable --now $t" >/dev/null 2>&1; then
         echo "  timer enabled: $t"
@@ -412,7 +477,7 @@ fi
 #
 # The final check compares the listening PID against the one just started. If
 # they differ, something else owns the port and the deploy did not take.
-PORT_UI=8080
+PORT_UI="$WEBUI_PORT"
 "${SSH[@]}" "$TARGET" "set -u; cd $DEST; \
   OLD=\$(ss -ltnp 'sport = :$PORT_UI' 2>/dev/null | grep -o 'pid=[0-9]*' | head -1 | cut -d= -f2); \
   if [ -n \"\${OLD:-}\" ]; then kill \"\$OLD\" 2>/dev/null; fi; \

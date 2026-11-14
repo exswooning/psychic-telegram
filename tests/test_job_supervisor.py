@@ -204,3 +204,39 @@ class TestItRunsWithoutBeingAsked:
 
         monkeypatch.setattr(config, "Settings", _Boom)
         assert api_server._account_db_path(7) is None
+
+
+def _stat(proc, pid, ppid, utime, stime, comm="python3"):
+    import os as _os
+    _os.makedirs(_os.path.join(proc, str(pid)), exist_ok=True)
+    # pid (comm) state ppid pgrp session tty tpgid flags minflt cminflt majflt cmajflt utime stime ...
+    with open(_os.path.join(proc, str(pid), "stat"), "w") as fh:
+        fh.write(f"{pid} ({comm}) S {ppid} 1 1 0 -1 0 0 0 0 0 {utime} {stime} 0 0 20 0 1 0 0\n")
+
+
+class TestAParentWaitingOnBusyChildrenIsNotWedged:
+    """Live, regression.py waited on four ab_transfer runs through an hour of Google's mail import,
+    burned no CPU of its own, and was killed as wedged (2026-11-01, incident #8)."""
+
+    def test_cpu_counts_every_descendant(self, tmp_path):
+        proc = str(tmp_path)
+        _stat(proc, 100, 1, 5, 5)                    # the job: waits
+        _stat(proc, 200, 100, 30, 10)                # its child
+        _stat(proc, 300, 200, 7, 3, comm="chrome (renderer)")   # a grandchild, spaces in its name
+        _stat(proc, 400, 1, 999, 999)                # unrelated
+        assert job_supervisor.tree_cpu_ticks(100, proc) == 10 + 40 + 10
+
+    def test_a_child_moving_moves_the_total(self, tmp_path):
+        proc = str(tmp_path)
+        _stat(proc, 100, 1, 5, 5)
+        _stat(proc, 200, 100, 30, 10)
+        before = job_supervisor.tree_cpu_ticks(100, proc)
+        _stat(proc, 200, 100, 31, 10)
+        assert job_supervisor.tree_cpu_ticks(100, proc) == before + 1
+
+    def test_a_gone_process_reads_as_unknown(self, tmp_path):
+        assert job_supervisor.tree_cpu_ticks(12345, str(tmp_path)) is None
+
+    def test_it_is_the_default(self):
+        sup = job_supervisor.Supervisor(db_path_for=lambda a: None)
+        assert sup.cpu_fn is job_supervisor.tree_cpu_ticks

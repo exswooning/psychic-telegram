@@ -334,6 +334,33 @@ def _later_run(inc: dict, event: str, clean: bool) -> str | None:
     return r["at"] if r else None
 
 
+DMS_SETTLE_SEC = 1800
+
+
+def _dms_under_way(inc: dict) -> str | None:
+    """The DMS is really going, not merely launched: it finished cleanly, it is still running half an hour on,
+    or a person stopped it (a decision). One stopped a minute after launch, while it was still signing in,
+    closed this as "started" and so the hourly retry never asked again (account 3, 8 Nov 2026). A run that
+    died on its own leaves it open, and the retry asks again."""
+    with cpdb.ro() as c:
+        start = c.execute("SELECT at, pid FROM run_events WHERE event='started' AND job_name=? AND "
+                          "COALESCE(account_id,-1)=COALESCE(?,-1) AND at > ? ORDER BY id DESC LIMIT 1",
+                          (inc["job_name"], inc["account_id"], inc["last_seen_at"])).fetchone()
+        if not start:
+            return None
+        end = c.execute("SELECT at, rc FROM run_events WHERE event='finished' AND job_name=? AND "
+                        "COALESCE(account_id,-1)=COALESCE(?,-1) AND COALESCE(pid,-1)=COALESCE(?,-1) AND at >= ? "
+                        "ORDER BY id LIMIT 1", (inc["job_name"], inc["account_id"], start["pid"], start["at"])).fetchone()
+    if end is None:
+        began = _epoch(start["at"])
+        return (f"the DMS has been running since {start['at']}"
+                if began and time.time() - began >= DMS_SETTLE_SEC else None)
+    if end["rc"] == 0:
+        return f"the DMS ran and finished at {end['at']}"
+    who = stopped_by(start["pid"], start["at"])
+    return f"the DMS started at {start['at']} was stopped by {who}" if who else None
+
+
 def _cleared(inc: dict, ledger_path_for) -> str | None:
     """Why this incident's condition no longer holds, or None while it still does.
     Only evidence closes one: a later run, the ledger, the mirror's or lifecycle's own
@@ -361,8 +388,7 @@ def _cleared(inc: dict, ledger_path_for) -> str | None:
                 return f"a later report ({rep['id']}) passes {', '.join(sorted(failed))}"
         return None
     if kind == "dms_not_started":
-        at = _later_run(inc, "started", clean=False)
-        return f"the DMS was started at {at}" if at else None
+        return _dms_under_way(inc)
     if kind == "teardown":
         import lifecycle
         st = lifecycle.state(aid) if aid is not None else {}
@@ -521,6 +547,18 @@ class Watcher:
         self._offset: dict = {}          # (account, job) -> bytes of log already scanned
         self._swept_at = 0.0             # when sweep_cleared last ran
         self._gone: dict = {}            # run key -> when it was first seen gone with no exit code
+        self._error_maintenance_at = 0.0
+
+    def _collect_errors(self, account_id, job_name):
+        try:
+            import error_resolution
+            path = self.log_path_for(account_id, job_name)
+            if path and os.path.isfile(path):
+                stamp = os.path.join(HERE, 'DEPLOYED_COMMIT')
+                version = open(stamp, encoding='utf-8').read().strip() if os.path.isfile(stamp) else 'unknown'
+                error_resolution.ingest_file(path, account_id, job_name, version)
+        except Exception as exc:
+            log.warning('structured error collection failed; legacy watcher continues: %s', exc)
 
     # -- who is running -------------------------------------------------
     def _observe(self) -> None:
@@ -705,6 +743,7 @@ class Watcher:
         watched = 0
         for (aid, name, _pid) in list(self._live):
             try:
+                self._collect_errors(aid, name)
                 if name in ("migrate", "delta"):
                     self._watch_migration(aid, name); watched += 1
                 elif name.startswith("seed"):
@@ -714,6 +753,7 @@ class Watcher:
         finished = unhandled_finished()
         for ev in finished:
             try:
+                self._collect_errors(ev['account_id'], ev['job_name'])
                 self._handle_finished(ev)
             except Exception as exc:      # noqa: BLE001
                 log.warning("handling finished run %s failed: %s", ev.get("id"), exc)
@@ -721,5 +761,16 @@ class Watcher:
         if self.now() - self._swept_at >= SWEEP_SEC:
             self._swept_at = self.now()
             closed = sweep_cleared(self.ledger_path_for)
+        try:
+            import error_resolution
+            stamp = os.path.join(HERE, 'DEPLOYED_COMMIT')
+            version = open(stamp, encoding='utf-8').read().strip() if os.path.isfile(stamp) else 'unknown'
+            error_resolution.drain_sources(version)
+            error_resolution.sweep_verified(self.ledger_path_for)
+            if self.now()-self._error_maintenance_at >= 3600:
+                error_resolution.prune_events()
+                self._error_maintenance_at=self.now()
+        except Exception as exc:
+            log.warning('error resolution observer failed: %s', exc)
         return {"live": len(self._live), "watched": watched, "finished": len(finished),
                 "closed": len(closed)}

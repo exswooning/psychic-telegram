@@ -2216,3 +2216,44 @@ class TestRestoreDirectGrants:
         out = repair.restore_direct_grants(auth, db, settings, apply=True, stop=stop)
         assert (out["items"], out["granted"]) == (0, 0)
         assert tgt.perms[tm] == []
+
+
+def test_a_target_that_arrives_with_files_is_reported_before_anything_is_copied(auth, db, settings, identity, quota, caplog):
+    """The target held files and folders from earlier tests (304 later quarantined as duplicates, account 3,
+    8 Nov 2026) and nothing said so until a one-to-one check found them."""
+    import logging
+    import drive_engine
+
+    _server_side(settings)
+    src = auth.source_drive(SRC_USER)
+    fid = src.add_binary("a.pdf")
+    src.store[fid]["createdTime"] = "2026-09-18T15:22:03.790Z"
+    tgt = auth.target_drive(TGT_USER)
+    tgt.add_binary("somebody's older file.pdf")
+    tgt.add_binary("another.pdf")
+    with caplog.at_level(logging.WARNING, logger="drive_engine"):
+        m = drive_engine.DriveMigrator(auth, db, settings, SRC_USER, TGT_USER, quota)
+        m.run()
+    assert m.target_preexisting >= 2
+    assert any("already holds" in r.getMessage() and "before any was migrated" in r.getMessage() for r in caplog.records)
+
+
+def test_an_apps_script_projects_comments_404_is_a_skip_not_a_failure(auth, db, settings, identity, quota):
+    """Incident #41 (9 Nov 2026): Apps Script projects and Forms have no Drive comments; the 404 recurred
+    as a failure on every run since 3 Nov."""
+    import migration_comments
+    from drive_engine import DriveMigrator
+    from tests.conftest import SRC_USER, TGT_USER
+    src = auth.source_drive(SRC_USER)
+    fid = src.add_native("Untitled project", kind="script")
+    m = DriveMigrator(auth, db, settings, SRC_USER, TGT_USER, quota)
+
+    def boom(*_a, **_k):
+        raise Exception("HTTP 404 (notFound): <HttpError 404 when requesting .../comments")
+    orig = migration_comments.reconcile
+    migration_comments.reconcile = boom
+    try:
+        assert m._sync_comments(fid, "t1") == 0
+    finally:
+        migration_comments.reconcile = orig
+    assert db.get_audit(SRC_USER, fid, "comment")["status"] == "SKIPPED_NO_COMMENTS_API"

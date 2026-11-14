@@ -9,6 +9,7 @@ const startMigration = vi.fn()
 vi.mock('@/components/QuickVerification', () => ({
   default: ({ accountId }: { accountId: number }) => <div data-testid="quick-panel">{accountId}</div>,
 }))
+vi.mock('@/components/SharingPanel', () => ({ default: () => null }))
 vi.mock('@/components/RunReports', () => ({
   default: ({ accountId }: { accountId?: number }) => <div data-testid="reports-panel">{accountId}</div>,
 }))
@@ -315,25 +316,25 @@ describe('MigrationDetail: who moves the mail', () => {
     await waitFor(() => expect(startMigration).toHaveBeenCalled())
   }
 
-  it('offers all three and has this tool selected (split is experimental)', async () => {
+  it('offers all three and defaults to link scan plus DMS', async () => {
     await openDialog()
-    expect(screen.getByTestId('mail-by-engine').querySelector('input')).toBeChecked()
-    expect(screen.getByTestId('mail-by-split').querySelector('input')).not.toBeChecked()
+    expect(screen.getByTestId('mail-by-engine').querySelector('input')).not.toBeChecked()
+    expect(screen.getByTestId('mail-by-split').querySelector('input')).toBeChecked()
     expect(screen.getByTestId('mail-by-dms').querySelector('input')).not.toBeChecked()
   })
 
-  it('says split is experimental, runs Drive first and has the DMS import afterward', async () => {
+  it('explains pre-delivery scanning, counts and optional full verification', async () => {
     await openDialog()
     const split = screen.getByTestId('mail-by-split')
-    expect(split).toHaveTextContent('Split (experimental)')
+    expect(split).toHaveTextContent('Link scan + Google DMS')
     expect(split).toHaveTextContent('Drive first')
     expect(split).toHaveTextContent('imports the mailbox afterward')
   })
 
-  it('starts an engine run by default, and asks the server for it', async () => {
+  it('starts a split run by default and keeps the engine available', async () => {
     await openDialog(); await confirm()
     const [, services, users, dry, account, mode] = startMigration.mock.calls[0]
-    expect([services, users, dry, account, mode]).toEqual([['all'], [], false, 7, 'engine'])
+    expect([services, users, dry, account, mode]).toEqual([['all'], [], false, 7, 'split'])
   })
 
   it('sends the mode chosen, and never decides the service list itself', async () => {
@@ -342,6 +343,27 @@ describe('MigrationDetail: who moves the mail', () => {
     await confirm()
     expect(startMigration.mock.calls[0][1]).toEqual(['all'])          // the server drops mail for dms
     expect(startMigration.mock.calls[0][5]).toBe('dms')
+  })
+
+  it('reads every message for links by default', async () => {
+    await openDialog(); await confirm()
+    expect(startMigration.mock.calls[0][12]).toBe('exhaustive')
+  })
+
+  it('sends a search-first scan only when chosen, and says it is not safe by default', async () => {
+    await openDialog()
+    expect(screen.getByTestId('link-scan-search')).toHaveTextContent('Not safe by default')
+    fireEvent.click(screen.getByTestId('link-scan-search').querySelector('input')!)
+    await confirm()
+    expect(startMigration.mock.calls[0][12]).toBe('search')
+  })
+
+  it('sends no link scan for an engine run, and does not offer one', async () => {
+    await openDialog()
+    fireEvent.click(screen.getByTestId('mail-by-engine').querySelector('input')!)
+    expect(screen.queryByTestId('link-scan')).toBeNull()
+    await confirm()
+    expect(startMigration.mock.calls[0][12]).toBeUndefined()
   })
 
   it('asks the server to start the DMS itself, unless the box is unticked', async () => {
@@ -597,7 +619,7 @@ describe('MigrationDetail: what a split run says about itself', () => {
     show(detail({ progress: { users: 201, done: 201, running: 0, failed: 0, pending: 0, items: 12000,
                               itemsFailed: 0, itemsSkipped: 3, itemsDeferred: 349560 } }))
     const alert = await screen.findByTestId('awaiting-dms')
-    expect(alert).toHaveTextContent('349,560 mail message(s) are waiting')
+    expect(alert).toHaveTextContent('349,560 email(s) are waiting')
     expect(alert).toHaveTextContent('not on the target yet')
     expect(alert).toHaveTextContent('after this run has finished')
     expect(screen.getByTestId('to-services')).toBeInTheDocument()
@@ -609,6 +631,15 @@ describe('MigrationDetail: what a split run says about itself', () => {
     expect(await screen.findByTestId('stat-itemsdeferred')).toHaveTextContent('349,560')
     expect(screen.getByTestId('stat-itemsskipped')).toHaveTextContent('3')
     expect(screen.getByTestId('stat-itemsskipped')).not.toHaveTextContent('349,560')
+  })
+
+  it('shows the link mail the engine wrote beside what the DMS owes and has delivered', async () => {
+    show(detail({ progress: { users: 4, done: 4, running: 0, failed: 0, pending: 0, items: 100,
+                              itemsFailed: 0, itemsSkipped: 0, itemsDeferred: 900,
+                              mailWithLinks: 120, mailDelivered: 30 } }))
+    expect(await screen.findByTestId('stat-mailwithlinks')).toHaveTextContent('120')
+    expect(screen.getByTestId('stat-itemsdeferred')).toHaveTextContent('900')
+    expect(screen.getByTestId('stat-maildelivered')).toHaveTextContent('30')
   })
 
   it('says nothing about the DMS when nothing is waiting for it', async () => {

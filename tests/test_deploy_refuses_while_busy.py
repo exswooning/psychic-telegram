@@ -131,3 +131,18 @@ def test_a_mirror_cycle_that_outlasts_the_wait_still_refuses(box):
     finally:
         p.kill()
     assert r.returncode == 3 and "mirror" in r.stderr and "rsync:" not in log
+
+
+def test_a_running_dms_refuses_before_copying_the_pinned_campaign_baseline(box):
+    """The fresh campaign pins the actual Python baseline across all phases,
+    including the local DMS controller; do not replace it while it is active."""
+    job = box.tmp / "dms_migrate.py"
+    job.write_text("import time; time.sleep(30)\n")
+    p = subprocess.Popen([sys.executable, str(job)])
+    try:
+        time.sleep(0.5)
+        r, log = box()
+        assert r.returncode == 3 and "REFUSING" in r.stderr
+        assert "rsync:" not in log and "systemctl restart" not in log
+    finally:
+        p.kill()

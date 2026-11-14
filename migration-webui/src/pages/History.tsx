@@ -17,6 +17,7 @@ import {
 import { Refresh as RefreshIcon } from '@mui/icons-material'
 import { fetchHistory, fetchMe, HistoryRun, migrationOf } from '@/api/controlPlane'
 import { describeElapsed } from '@/hooks/useRunningJobs'
+import { plainRunDetail } from '@/utils/runDetail'
 
 const when = (iso: string | null) => {
   if (!iso) return '—'
@@ -96,8 +97,8 @@ export const History: React.FC = () => {
                 <TableCell><Outcome r={r} /></TableCell>
                 <TableCell sx={{ maxWidth: 360 }}>
                   {r.detail ? (
-                    <Tooltip title={r.detail}>
-                      <Typography variant="body2" color="text.secondary" noWrap>{r.detail}</Typography>
+                    <Tooltip title={plainRunDetail(r.detail)}>
+                      <Typography variant="body2" color="text.secondary" noWrap>{plainRunDetail(r.detail)}</Typography>
                     </Tooltip>
                   ) : null}
                 </TableCell>

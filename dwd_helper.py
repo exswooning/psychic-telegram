@@ -567,6 +567,34 @@ DWD_URL = "https://admin.google.com/ac/owl/domainwidedelegation"
 AUTHORIZE = re.compile(r"authori[sz]e", re.I)
 
 
+NETWORK_ERRORS = ("ERR_NAME_NOT_RESOLVED", "ERR_INTERNET_DISCONNECTED", "ERR_NETWORK_CHANGED",
+                  "ERR_CONNECTION_RESET", "ERR_CONNECTION_REFUSED", "ERR_CONNECTION_CLOSED",
+                  "ERR_CONNECTION_TIMED_OUT", "ERR_ADDRESS_UNREACHABLE")
+NETWORK_BACKOFF = (5, 15, 30, 60, 120)      # seconds: rides out a Wi-Fi drop of about four minutes
+
+
+def retry_navigation(page, sleep=None):
+    """Make every page.goto on this page survive a network drop.
+
+    13 Nov 2026 (account 3): one net::ERR_NAME_NOT_RESOLVED while the box's Wi-Fi re-associated ended
+    the DMS import job 1.6 s after it started, and nothing started it again. A navigation that fails
+    for the network is tried again after a growing wait; any other failure is raised as before."""
+    sleep = sleep or time.sleep
+    real = page.goto
+
+    def goto(url, **kw):
+        for wait in (*NETWORK_BACKOFF, None):
+            try:
+                return real(url, **kw)
+            except Exception as exc:      # noqa: BLE001 - re-raised unless it is the network
+                if wait is None or not any(e in str(exc) for e in NETWORK_ERRORS):
+                    raise
+                log(f"network error opening {str(url).split('?')[0]}; trying again in {wait}s")
+                sleep(wait)
+    page.goto = goto
+    return page
+
+
 def _open_dwd_console(p, headful: bool, timeout: int, url: str = DWD_URL,
                       ready_prefix: str = "https://admin.google.com/ac/owl/",
                       ready_text: str = "Add new"):
@@ -586,7 +614,7 @@ def _open_dwd_console(p, headful: bool, timeout: int, url: str = DWD_URL,
     caller only needs to turn that into its own return code.
     """
     browser = _installed_browser_launch(p, headful)
-    page = browser.new_page()
+    page = retry_navigation(browser.new_page())
     # A single redirect must not consume the entire sign-in deadline.
     nav = min(max(timeout * 1000, 1000), 30000)
     page.goto(url, wait_until="domcontentloaded", timeout=nav)

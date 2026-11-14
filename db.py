@@ -247,6 +247,25 @@ CREATE TABLE IF NOT EXISTS run_fidelity (
 -- verify_sample.py: what the one-to-one verifier last found for a user, one row
 -- per (user, service), newest wins. `payload` holds the counts and the first few
 -- of each kind of finding; the full report is the verifier's own file.
+-- Objects the verifier could not compare (verify_resilience): kept apart from user_verification
+-- so an item that is merely unread is never confused with one that was read and differs. A row
+-- is deleted when a later pass compares the object; one still here means "not verified".
+CREATE TABLE IF NOT EXISTS verification_unverified (
+  source_user TEXT NOT NULL,
+  service TEXT NOT NULL,
+  source_id TEXT NOT NULL,
+  target_id TEXT NOT NULL DEFAULT '',
+  mime TEXT,
+  state TEXT NOT NULL,
+  http_status INTEGER,
+  endpoint TEXT,
+  error TEXT,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  first_seen TEXT NOT NULL,
+  last_attempt TEXT NOT NULL,
+  next_retry_at TEXT,
+  PRIMARY KEY (source_user, service, source_id)
+);
 CREATE TABLE IF NOT EXISTS user_verification (
     source_user TEXT NOT NULL,
     service     TEXT NOT NULL,
@@ -1177,7 +1196,7 @@ class MigrationDB:
         for the shared logic (also used by api_server._verification_view against a
         read-only connection, and by the run report)."""
         users = [r for r in self.all_identities() if r["entity_type"] == "user"]
-        return verification_rollup(users, self.user_verifications())
+        return verification_rollup(users, self.user_verifications(), pending_items=pending_mail_checks(self.conn), expected_services=expected_verification_services(self.conn), pending_diagnostics=pending_mail_diagnostics(self.conn))
 
     def save_user_tally(self, source_user: str, target_user: str,
                         count_parity: Optional[float], payload: dict) -> None:
@@ -1240,6 +1259,21 @@ class MigrationDB:
             out.append(payload)
         return out
 
+    def lost_drive_mappings(self, users) -> list:
+        """(user, n) for DONE users with Drive items the audit calls copied but no mapping names.
+        finished_but_unmapped sees only users with NO mappings left; a partial loss slipped past."""
+        if not users:
+            return []
+        marks = ",".join("?" * len(users))
+        return [tuple(r) for r in self.conn.execute(
+            f"""SELECT a.source_user, COUNT(*) FROM audit_log a
+                 JOIN identity_map i ON i.source_email = a.source_user AND i.status = 'DONE'
+                WHERE a.source_user IN ({marks}) AND a.item_type IN ('file','folder')
+                  AND a.status = 'SUCCESS'
+                  AND NOT EXISTS (SELECT 1 FROM id_mapping m WHERE m.source_user = a.source_user
+                                  AND m.source_id = a.item_id AND m.type = a.item_type)
+                GROUP BY a.source_user ORDER BY 2 DESC""", list(users))]
+
     def finished_but_unmapped(self):
         """Users whose status says DONE while nothing maps to the target.
 
@@ -1292,13 +1326,30 @@ class MigrationDB:
                 "SET ceiling=excluded.ceiling, updated_at=excluded.updated_at",
                 (tenant, ceiling, utc_now()))
 
-    def load_rate_ceiling(self, tenant: str) -> float | None:
+    def load_rate_ceiling(self, tenant: str, max_age_hours: float | None = None) -> float | None:
         """The last proven ceiling for this tenant, or None if nothing has ever
-        been measured (a fresh account, or a ledger from before this existed)."""
+        been measured (a fresh account, or a ledger from before this existed) --
+        or, with `max_age_hours`, if it was proven longer ago than that. Google
+        meters per minute: a refusal from days ago is not evidence of today's
+        limit, and a stale low value only ever went down (account 3: 6.49/s
+        saved 1 Nov by the compounding-penalise bug held a whole 45-user run
+        to it on 9 Nov)."""
         row = self.conn.execute(
-            "SELECT ceiling FROM rate_limiter_ceiling WHERE tenant=?",
+            "SELECT ceiling, updated_at FROM rate_limiter_ceiling WHERE tenant=?",
             (tenant,)).fetchone()
-        return row["ceiling"] if row else None
+        if not row:
+            return None
+        if max_age_hours is not None and row["updated_at"]:
+            from datetime import datetime, timedelta, timezone
+            try:
+                when = datetime.fromisoformat(row["updated_at"].replace("Z", "+00:00"))
+                if when.tzinfo is None:
+                    when = when.replace(tzinfo=timezone.utc)
+                if datetime.now(timezone.utc) - when > timedelta(hours=max_age_hours):
+                    return None
+            except ValueError:
+                return None      # unreadable age: not evidence either
+        return row["ceiling"]
 
     def mark_dms_delivered(self, verified_items=()) -> int:
         """Only exact items freshly checked by reconciliation may become delivered.
@@ -1389,6 +1440,17 @@ class MigrationDB:
                 # list rather than let a long-idle preload from earlier
                 # outlive someone genuinely in flight right now.
                 self._mapping_cache.move_to_end(source_user)
+
+    def adopt_message_mapping(self, user: str, sid: str, tid: str) -> None:
+        """Adopt a proven identity atomically, preserving existing mappings and collisions."""
+        with self.write() as conn:
+            old = conn.execute("SELECT target_id FROM id_mapping WHERE source_user=? AND source_id=? AND type='message'", (user,sid)).fetchone()
+            collision = conn.execute("SELECT 1 FROM id_mapping WHERE source_user=? AND type='message' AND target_id=? AND source_id!=? LIMIT 1", (user,tid,sid)).fetchone()
+            if collision or (old and old[0] != tid):
+                raise RuntimeError("DMS destination identity is absent, changed or ambiguous")
+            conn.execute("INSERT OR IGNORE INTO id_mapping(source_user,source_id,target_id,type,created_at) VALUES(?,?,?,'message',?)", (user,sid,tid,utc_now()))
+        with self._cache_lock:
+            self._mapping_cache.pop(user, None)
 
     # -- audit_log -----------------------------------------------------------
     def log_audit(self, source_user: str, item_id: str, item_type: str,
@@ -1697,7 +1759,10 @@ def bulk_seed_identities(db: MigrationDB, pairs: Iterable[tuple[str, str]]) -> N
 
 # Worst verdict wins a user's rollup: one DIFFERENCES service means the user is not
 # clean, however many others came back IDENTICAL.
-_VERDICT_RANK = {"DIFFERENCES": 3, "INCOMPLETE": 2, "NOT_VERIFIED": 2, "IDENTICAL": 1}
+# EMPTY: the source was read live and holds nothing, so zero items were compared. It is a
+# pass, but never "identical" -- no item was matched -- and a user is EMPTY only when
+# every service is.
+_VERDICT_RANK = {"DIFFERENCES": 3, "INCOMPLETE": 2, "NOT_VERIFIED": 2, "IDENTICAL": 1, "EMPTY": 0}
 
 
 def parse_user_verification_rows(rows) -> list[dict]:
@@ -1717,15 +1782,64 @@ def parse_user_verification_rows(rows) -> list[dict]:
             payload["coverageComplete"] = False
             payload["coverageNote"] = "Historical item checks; feature/access coverage was not recorded. Recheck required."
         effective = r["verdict"]
-        if effective == "IDENTICAL" and payload.get("coverageComplete") is False:
+        if effective in ("IDENTICAL", "EMPTY") and any((payload.get("counts") or {}).get(k, 0) for k in ("differences", "missing", "duplicates", "extras", "notCopied")):
+            effective = "DIFFERENCES"
+        if effective == "IDENTICAL" and (payload.get("coverageComplete") is False or (payload.get("counts") or {}).get("errors", 0)):
             effective = "INCOMPLETE"
+        if effective == "IDENTICAL" and not r["checked"]:
+            effective = "EMPTY"
         out.append({"user": r["source_user"], "service": r["service"], "verifiedAt": r["verified_at"],
                     "verdict": effective, "itemVerdict": r["verdict"], "checked": r["checked"], "identical": r["identical"],
                     "sampledOf": r["sampled_of"], **payload})
     return out
 
 
-def verification_rollup(users, verifications: list[dict]) -> dict:
+def pending_mail_checks(conn):
+    """Read-only receipt blockers; no schema writes while the UI polls."""
+    try:
+        return dict(conn.execute("SELECT source_user,COUNT(*) FROM migration_item_receipts "
+                                 "WHERE service='gmail' AND status='NEEDS_RECHECK' GROUP BY source_user"))
+    except sqlite3.OperationalError:
+        return {}
+
+
+def pending_mail_diagnostics(conn):
+    """Bounded recent advisory evidence for the UI; never mail content."""
+    import json
+    out = {}
+    try:
+        rows = conn.execute("SELECT source_user,evidence FROM migration_item_receipts "
+                            "WHERE service='gmail' AND status='NEEDS_RECHECK' ORDER BY verified_at DESC LIMIT 150")
+        for user, evidence in rows:
+            try:
+                diagnostics = json.loads(evidence).get("diagnostics", [])
+            except (TypeError, ValueError, AttributeError):
+                continue
+            known = {d.get("code") for d in out.setdefault(user, [])}
+            for diagnostic in diagnostics:
+                if isinstance(diagnostic, dict) and diagnostic.get("code") not in known and len(out[user]) < 8:
+                    out[user].append(diagnostic)
+                    known.add(diagnostic.get("code"))
+    except sqlite3.OperationalError:
+        pass
+    return out
+
+
+def expected_verification_services(conn):
+    """An attempted service cannot disappear from parity just because it failed."""
+    mapping = {"file": "drive", "folder": "drive", "shortcut": "drive", "message": "gmail",
+               "draft": "gmail", "event": "calendar", "contact": "contacts", "task": "tasks"}
+    out = {}
+    try:
+        for user, kind in conn.execute("SELECT DISTINCT source_user,item_type FROM audit_log"):
+            if kind in mapping:
+                out.setdefault(user, set()).add(mapping[kind])
+    except sqlite3.OperationalError:
+        pass
+    return out
+
+
+def verification_rollup(users, verifications: list[dict], pending_items=None, expected_services=None, pending_diagnostics=None) -> dict:
     """Every user rolled up to one verdict: the worst across their checked services, or
     NOT_VERIFIED if nobody has checked any of them yet -- never a blank, which would read
     as a pass. `users` is identity_map rows (or anything indexable the same way) already
@@ -1739,9 +1853,24 @@ def verification_rollup(users, verifications: list[dict]) -> dict:
     totals = {"IDENTICAL": 0, "DIFFERENCES": 0, "INCOMPLETE": 0, "NOT_VERIFIED": 0}
     out_users = []
     for u in users:
-        svcs = list(by_user.get(u["source_email"], []))
+        svcs = [dict(row) for row in by_user.get(u["source_email"], [])]
+        pending = (pending_items or {}).get(u["source_email"], 0)
+        if pending:
+            mail = next((row for row in svcs if row["service"] == "gmail"), None)
+            if mail is None:
+                mail = {"user": u["source_email"], "service": "gmail", "verifiedAt": None,
+                        "verdict": "INCOMPLETE", "checked": 0, "identical": 0, "sampledOf": None}
+                svcs.append(mail)
+            mail["itemChecksPending"] = pending
+            diagnoses = list(mail.get("diagnostics") or []) + list((pending_diagnostics or {}).get(u["source_email"], []))
+            mail["diagnostics"] = list({d["code"]: d for d in diagnoses if isinstance(d, dict) and d.get("code")}.values())
+            mail["coverageComplete"] = False
+            if mail["verdict"] in ("IDENTICAL", "EMPTY", "NOT_VERIFIED"):
+                mail["verdict"] = "INCOMPLETE"
+            mail["notes"] = list(mail.get("notes") or []) + [f"{pending} item check(s) need recheck; saved mailbox result retained."]
         keys = u.keys() if hasattr(u, "keys") else []
         expected = set(filter(None, (u["services_done"] or "").split(","))) if "services_done" in keys else set()
+        expected.update((expected_services or {}).get(u["source_email"], ()))
         present = {row["service"] for row in svcs}
         for missing in sorted(expected - present):
             svcs.append({"user": u["source_email"], "service": missing, "verdict": "NOT_VERIFIED",
@@ -1751,7 +1880,13 @@ def verification_rollup(users, verifications: list[dict]) -> dict:
         verdict = (max((x["verdict"] for x in svcs), key=lambda v: _VERDICT_RANK.get(v, 0))
                   if svcs else "NOT_VERIFIED")
         totals[verdict] = totals.get(verdict, 0) + 1
+        declared = {service for row in svcs for service in (row.get("provenance") or {}).get("services", [])}
+        full_coverage = bool(declared) and declared <= {row["service"] for row in svcs} and all(
+            row.get("coverageComplete") is True and row.get("completion") == "COMPLETE"
+            and row.get("provenance") and not row.get("itemChecksPending")
+            and not (row.get("sampledOf") and row["sampledOf"] > row.get("checked", 0)) for row in svcs)
         out_users.append({"user": u["source_email"], "target": u["target_email"], "status": u["status"],
+                          "fullCoverageConfirmed": full_coverage,
                           "verdict": verdict, "verifiedAt": max((x["verifiedAt"] for x in svcs if x.get("verifiedAt")), default=None),
                           "services": svcs})
     return {"users": out_users, "totals": totals}

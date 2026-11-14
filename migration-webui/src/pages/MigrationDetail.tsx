@@ -18,14 +18,20 @@ import {
   fetchMigrationDetail, startDelta, startMigration, runRepair,
   MigrationDetail as Detail, RepairSurvey,
 } from '@/api/controlPlane'
-import type { MailMode, TransferMode } from '@/api/controlPlane'
+import MoveRouteProbe from '@/components/MoveRouteProbe'
+import type { MailLinkScan, MailMode, TransferMode } from '@/api/controlPlane'
 import SourceGuardPanel from '@/components/SourceGuardPanel'
 import UserProfilesPanel from '@/components/UserProfilesPanel'
 import ReasonCodeDialog from '@/components/ReasonCodeDialog'
+import ScheduledRuns from '@/components/ScheduledRuns'
+import ExperimentPanel from '@/components/ExperimentPanel'
 import RunReports from '@/components/RunReports'
 import QuickVerification from '@/components/QuickVerification'
 import OneToOneSummary from '@/components/OneToOneSummary'
+import SharingPanel from '@/components/SharingPanel'
 import CopySafetyCard from '@/components/CopySafetyCard'
+import { itemTypeLabel } from '@/utils/itemTypeLabel'
+import DmsMetrics from '@/components/DmsMetrics'
 
 /**
  * One migration in full: what moved, what failed, and why.
@@ -76,14 +82,16 @@ export const MigrationDetail: React.FC = () => {
      "Start a new migration" on the list page opens the setup wizard for a
      new tenant pair, which is a different thing entirely. */
   const [askFull, setAskFull] = useState(false)
-  // DMS imports a mailbox; overlapping rewritten copies still need qualification.
-  const [mailBy, setMailBy] = useState<MailMode>('engine')
+  // Source remains unchanged: link mail first, then Google's mailbox import.
+  const [mailBy, setMailBy] = useState<MailMode>('split')
+  const [linkScan, setLinkScan] = useState<MailLinkScan>('exhaustive')
   const [moreOpen, setMoreOpen] = useState(false)
   // Start Google's DMS on its own (api_server._start_dms); on unless switched off.
   const [dmsAuto, setDmsAuto] = useState(true)
   // '' = the server's own default (config.TRANSFER_MODES via TRANSFER_MODE) --
   // most runs never need to touch this.
   const [transferMode, setTransferMode] = useState<TransferMode | ''>('')
+  const [moveAvailable, setMoveAvailable] = useState(false)
   const [confirmMove, setConfirmMove] = useState('')
   // Who to migrate: every user, or the ones chosen here. Chosen users move their mail
   // through this tool -- the DMS only starts after a whole-tenant run, so Split or DMS
@@ -102,6 +110,7 @@ export const MigrationDetail: React.FC = () => {
   const [tuneFileWorkers, setTuneFileWorkers] = useState('')
   const [tuneCacheCap, setTuneCacheCap] = useState('')
   const [tuneProcesses, setTuneProcesses] = useState('')
+  const [startAt, setStartAt] = useState('')
   const [fullBusy, setFullBusy] = useState(false)
   // Quick migrate: a small slice of each user's data, small enough to check one to
   // one. See the dialog.
@@ -349,7 +358,7 @@ export const MigrationDetail: React.FC = () => {
                         </Typography>} />
                       <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
                         For mail and events that went in before the user&apos;s Drive did. A
-                        message still naming a source file is put back with the link
+                        email still naming a source file is put back with the link
                         repointed (the old copy goes to the trash); an event is edited in place, its links and any calendar it lists as a guest.
                       </Typography>
                       <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
@@ -372,9 +381,12 @@ export const MigrationDetail: React.FC = () => {
               migration's single self-check above: this fills in continuously as each
               user's migration finishes. Hides itself until there is something to say. */}
           <OneToOneSummary accountId={Number(accountId)} />
+          {Number.isFinite(id) && id > 0 && <SharingPanel accountId={id} />}
 
           <CopySafetyCard accountId={Number(accountId)} users={(d?.users ?? []).map((u) => u.sourceUser)} />
 
+          <ScheduledRuns accountId={Number(accountId)} />
+          <ExperimentPanel accountId={Number(accountId)} />
           {p && (
             <Paper variant="outlined" sx={{ p: 2, mb: 3 }}>
               <Stack direction="row" spacing={4} sx={{ flexWrap: 'wrap', gap: 2 }}>
@@ -389,9 +401,16 @@ export const MigrationDetail: React.FC = () => {
                       value={p.itemsSkipped ?? 0} />
                 {/* Its own figure, never folded into "skipped": a skip is a
                     decision, this is mail the target does not have yet. */}
+                {p.mailWithLinks !== undefined && (
+                  <Stat id="mailwithlinks" label="mail with Drive links (rewritten)"
+                        value={p.mailWithLinks} />
+                )}
                 {(p.itemsDeferred ?? 0) > 0 && (
                   <Stat id="itemsdeferred" label="mail awaiting DMS"
                         value={p.itemsDeferred ?? 0} tone="error" />
+                )}
+                {p.mailDelivered !== undefined && (
+                  <Stat id="maildelivered" label="mail delivered by DMS" value={p.mailDelivered} />
                 )}
                 <Stat id="itemsfailed" label="items failed" value={p.itemsFailed}
                       tone="error" />
@@ -415,13 +434,14 @@ export const MigrationDetail: React.FC = () => {
                              onClick={() => navigate('/services')}>
                        Other services
                      </Button>}>
-              <strong>{(p?.itemsDeferred ?? 0).toLocaleString()} mail message(s) are waiting
+              <strong>{(p?.itemsDeferred ?? 0).toLocaleString()} email(s) are waiting
               for Google&apos;s Data Migration Service</strong> and are not on the target yet.
               Start it <em>after</em> this run has finished — before, and it moves
               link-bearing mail without rewriting its links. A tally counts this mail as
               still owed, so mail parity stays short until the DMS has delivered it.
             </Alert>
           )}
+          {(p?.itemsDeferred ?? 0) > 0 && <DmsMetrics accountId={Number(accountId) || undefined} />}
 
           {/* Pressing Run delta changed nothing visible: it moves the same
               counters a finished migration already left on screen, and the
@@ -706,7 +726,7 @@ export const MigrationDetail: React.FC = () => {
                 {d.items.map((it) => (
                   <Chip key={it.type} size="small" variant="outlined"
                         data-testid={`item-${it.type}`}
-                        label={`${it.type} · ${it.count.toLocaleString()}`} />
+                        label={`${itemTypeLabel(it.type)} · ${it.count.toLocaleString()}`} />
                 ))}
               </Stack>
             )}
@@ -852,7 +872,7 @@ export const MigrationDetail: React.FC = () => {
                         <TableCell sx={{ fontWeight: 700 }}>
                           {f.count.toLocaleString()}
                         </TableCell>
-                        <TableCell sx={{ fontSize: 12 }}>{f.itemType}</TableCell>
+                        <TableCell sx={{ fontSize: 12 }}>{itemTypeLabel(f.itemType)}</TableCell>
                         <TableCell sx={{ fontSize: 12, maxWidth: 520 }}>
                           {f.reason}
                         </TableCell>
@@ -948,11 +968,12 @@ export const MigrationDetail: React.FC = () => {
                   data-testid="mail-by-split"
                   label={
                     <Typography variant="body2">
-                      <strong>Split (experimental)</strong> — Drive first, then this
-                      tool copies mail whose mapped Drive links change. Google&apos;s
+                      <strong>Link scan + Google DMS</strong> — Drive first, then scan every
+                      email that mentions Drive before delivery and copy mail whose mapped Drive links change. Google&apos;s
                       Data Migration Service imports the mailbox afterward, including
-                      mail the tool already copied. Completion requires checking
-                      destination content, labels and overlapping messages. Unresolved
+                      mail the tool already copied. Routine completion compares mailbox counts;
+                      equal counts do not prove content, labels or duplicate identity. Full 1:1
+                      verification remains available on the Verification page. Unresolved
                       links block a clean handoff. The source admin must authorize
                       the connection before Google imports mail.
                     </Typography>
@@ -982,6 +1003,22 @@ export const MigrationDetail: React.FC = () => {
                     </Typography>
                   } />
               </RadioGroup>
+              {mailBy === 'split' && (
+                <RadioGroup value={linkScan} sx={{ pl: 4 }} data-testid="link-scan"
+                            onChange={(e) => setLinkScan(e.target.value as MailLinkScan)}>
+                  <FormControlLabel value="exhaustive" control={<Radio size="small" />} data-testid="link-scan-exhaustive"
+                    label={<Typography variant="body2"><strong>Exhaustive link scan (recommended)</strong> — read
+                      every email before delivery, at up to 30 reads a second. Measured on one 758-email
+                      mailbox: 33 s at 25 a second, against 257 s at the old 3 a second. Nothing depends on
+                      Gmail&apos;s index.</Typography>} />
+                  <FormControlLabel value="search" control={<Radio size="small" />} data-testid="link-scan-search"
+                    label={<Typography variant="body2"><strong>Search-first</strong> — Gmail&apos;s own search
+                      names the mail that mentions Drive; only those emails are read. <em>Not safe by
+                      default:</em> Gmail does not index link text. On that mailbox the search found 0 of 9
+                      emails known to carry a Drive link (the best sender query, 5 of 9) and missed 3 of 4
+                      blocking emails. A link it misses goes to the DMS unrewritten.</Typography>} />
+                </RadioGroup>
+              )}
               {mailBy !== 'engine' && (
                 <FormControlLabel
                   sx={{ mt: 1 }}
@@ -1011,7 +1048,7 @@ export const MigrationDetail: React.FC = () => {
                   value="" control={<Radio size="small" />}
                   data-testid="transfer-mode-default"
                   label={<Typography variant="body2">
-                    <strong>Default (recommended)</strong> — whatever this server is configured for.
+                    <strong>Default (recommended)</strong> — Drive copies it directly; no bytes pass through this server.
                   </Typography>} />
                 <FormControlLabel
                   value="download_upload" control={<Radio size="small" />}
@@ -1038,6 +1075,7 @@ export const MigrationDetail: React.FC = () => {
                   } />
                 <FormControlLabel
                   value="move" control={<Radio size="small" />}
+                  disabled={!moveAvailable}
                   data-testid="transfer-mode-move"
                   label={
                     <Typography variant="body2">
@@ -1046,9 +1084,11 @@ export const MigrationDetail: React.FC = () => {
                       each file keeps its id, version history and comments. The files{' '}
                       <strong>leave the source</strong>. Needs the source admin to let content
                       move to other organisations; the run checks first and stops if not.
+                      {!moveAvailable && ' Offered once the test below shows a file can move.'}
                     </Typography>
                   } />
               </RadioGroup>
+              <MoveRouteProbe accountId={Number(accountId) || undefined} onAvailable={setMoveAvailable} />
               {transferMode === 'move' && (
                 <Box sx={{ mt: 1 }} data-testid="move-confirm">
                   <Alert severity="warning" sx={{ mb: 1 }}>
@@ -1061,6 +1101,12 @@ export const MigrationDetail: React.FC = () => {
                              inputProps={{ 'data-testid': 'move-confirm-input' }} />
                 </Box>
               )}
+            </Box>
+            <Box sx={{ mt: 2 }}>
+              <TextField size="small" type="datetime-local" label="Start at (optional)" value={startAt}
+                         onChange={(e) => setStartAt(e.target.value)} InputLabelProps={{ shrink: true }}
+                         helperText="Blank starts now. A time starts the run on its own, in your time zone; it is skipped if this server is down then."
+                         inputProps={{ 'data-testid': 'run-full-start-at' }} />
             </Box>
             <Box sx={{ mt: 2 }} data-testid="run-full-tuning">
               <Typography variant="subtitle2" sx={{ fontWeight: 600, mb: 0.5 }}>
@@ -1114,8 +1160,11 @@ export const MigrationDetail: React.FC = () => {
                                              mappingCacheUserCap: num(tuneCacheCap),
                                              processes: num(tuneProcesses) },
                                            who === 'some' && redoLinks,
-                                           transferMode === 'move' ? confirmMove : undefined)
+                                           transferMode === 'move' ? confirmMove : undefined,
+                                           mailBy === 'split' ? linkScan : undefined,
+                                           startAt ? new Date(startAt).toISOString() : undefined)
             if (!r.ok) throw new Error(r.detail || 'could not start')
+            setStartAt('')
             setAskFull(false)
             setStarted(r.detail || 'migration started')
             refresh()

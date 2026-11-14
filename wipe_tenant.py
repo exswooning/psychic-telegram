@@ -31,9 +31,11 @@ without notifying anyone.
 from __future__ import annotations
 
 import logging
+import json
 
 import argparse
 import concurrent.futures as futures
+import time
 from typing import Callable, Optional
 
 from googleapiclient.errors import HttpError
@@ -43,7 +45,9 @@ from config import Settings
 SERVICES = ("drive", "gmail", "calendar", "contacts", "tasks", "chat")
 SCOPES = {
     "drive": ["https://www.googleapis.com/auth/drive"],
-    "gmail": ["https://www.googleapis.com/auth/gmail.modify"],
+    # Permanent delete needs the full-mail scope. Without it the wipe of mail fails and keeps its
+    # ledger (named, as for any ungranted service) -- never a fallback to the bin: see wipe_gmail.
+    "gmail": ["https://mail.google.com/"],
     "calendar": ["https://www.googleapis.com/auth/calendar"],
     "contacts": ["https://www.googleapis.com/auth/contacts"],
     "tasks": ["https://www.googleapis.com/auth/tasks"],
@@ -59,6 +63,15 @@ def _gone(exc: HttpError) -> bool:
     return getattr(getattr(exc, "resp", None), "status", None) in (404, 410)
 
 
+TRANSIENT = (429, 500, 502, 503, 504)
+TRIES = 4
+
+
+def _transient(exc: Exception) -> bool:
+    return (isinstance(exc, (TimeoutError, ConnectionError)) or
+            isinstance(exc, HttpError) and getattr(getattr(exc, "resp", None), "status", None) in TRANSIENT)
+
+
 # -- one service for one user --------------------------------------------------------
 def wipe_drive(drive) -> int:
     """Everything the user owns: what sits in My Drive first (a folder takes what it
@@ -66,7 +79,7 @@ def wipe_drive(drive) -> int:
     so a file that cannot be deleted is left rather than looped on."""
     n = 0
     for q in ("'root' in parents and 'me' in owners and trashed = false",
-              "'me' in owners and trashed = false"):
+              "'me' in owners"):
         while True:
             files = drive.files().list(q=q, pageSize=1000, spaces="drive",
                                        fields="files(id)").execute().get("files", [])
@@ -81,25 +94,80 @@ def wipe_drive(drive) -> int:
             n += done
             if not files or not done:
                 break
-    try:
-        drive.files().emptyTrash().execute()
-    except Exception:      # noqa: BLE001 - the bin empties itself after 30 days anyway
-        logging.getLogger(__name__).debug("ignored an error", exc_info=True)
     return n
 
 
+def _all_pages(resource, key: str, **kwargs) -> list:
+    """List before deleting: pagination tokens must not span our mutations."""
+    items, token, seen = [], None, set()
+    while True:
+        result = resource.list(**kwargs, **({"pageToken": token} if token else {})).execute()
+        items.extend(result.get(key, []))
+        token = result.get("nextPageToken")
+        if not token:
+            return items
+        if token in seen:
+            raise RuntimeError("Repeated wipe inventory page token")
+        seen.add(token)
+
+
+def _mail_precondition(exc):
+    try:
+        error = json.loads(exc.content).get('error', {})
+        reasons = {e.get('reason') for e in error.get('errors', [])}
+    except (ValueError, TypeError):
+        return False
+    return exc.resp.status == 400 and ('failedPrecondition' in reasons or error.get('status') == 'FAILED_PRECONDITION')
+
+
+def _delete_mail_batch(messages, ids, blocked):
+    """Isolate a batch precondition failure; retain every undeletable ID.
+
+    Authorization, malformed requests and quota errors are never reclassified.
+    Binary splitting is bounded by the size of this already-authorized batch.
+    """
+    try:
+        messages.batchDelete(userId="me", body={"ids": ids}).execute()
+        return len(ids)
+    except HttpError as exc:
+        if not _mail_precondition(exc):
+            raise
+        logging.getLogger(__name__).warning("Gmail wipe batch precondition for %d item(s); isolating", len(ids))
+        if len(ids) > 1:
+            middle = len(ids)//2
+            return (_delete_mail_batch(messages, ids[:middle], blocked) +
+                    _delete_mail_batch(messages, ids[middle:], blocked))
+        try:
+            messages.delete(userId='me', id=ids[0]).execute()
+            return 1
+        except HttpError as single:
+            if _gone(single):
+                return 0
+            if not _mail_precondition(single):
+                raise
+            blocked[ids[0]] = str(single)[:300]
+            return 0
+
+
 def wipe_gmail(gmail) -> int:
-    """Every message to the bin, a thousand per call; drafts and user labels deleted."""
-    n = 0
+    """Every message deleted for good, bin and spam included; drafts and user labels deleted.
+
+    Never to the bin: a binned copy keeps its Message-ID, the engine's adopt path searches the bin
+    (includeSpamTrash), and a re-migration then "adopts" the binned copy -- reported as delivered,
+    left in Trash -- while the DMS collapses its import against it. A wipe before a fresh run must
+    leave no copy to find."""
+    n, blocked = 0, {}
     users = gmail.users()
     while True:
         ids = [m["id"] for m in users.messages().list(
-            userId="me", maxResults=500).execute().get("messages", [])]
+            userId="me", maxResults=500, includeSpamTrash=True).execute().get("messages", [])]
+        ids = [i for i in ids if i not in blocked]
         if not ids:
             break
-        users.messages().batchModify(userId="me", body={
-            "ids": ids, "addLabelIds": ["TRASH"], "removeLabelIds": ["INBOX"]}).execute()
-        n += len(ids)
+        n += _delete_mail_batch(users.messages(), ids, blocked)
+    if blocked:
+        logging.getLogger(__name__).error("Gmail wipe retained blocked IDs: %s", json.dumps(blocked))
+        raise RuntimeError(f"Gmail wipe incomplete: {len(blocked)} undeletable item(s): {','.join(list(blocked)[:5])}")
     token = None
     while True:
         r = users.drafts().list(userId="me", maxResults=500, pageToken=token).execute()
@@ -127,7 +195,7 @@ def wipe_calendar(cal) -> int:
     """Secondary calendars deleted whole; every event on the primary deleted, telling
     nobody -- a wipe must not send a cancellation for every past meeting."""
     n = 0
-    for entry in cal.calendarList().list(minAccessRole="owner").execute().get("items", []):
+    for entry in _all_pages(cal.calendarList(), "items", minAccessRole="owner"):
         if entry.get("primary"):
             continue
         try:
@@ -137,8 +205,8 @@ def wipe_calendar(cal) -> int:
             if not _gone(exc):
                 raise
     while True:
-        items = [e for e in cal.events().list(calendarId="primary", maxResults=2500,
-                                              singleEvents=False).execute().get("items", [])
+        items = [e for e in _all_pages(cal.events(), "items", calendarId="primary", maxResults=2500,
+                                       singleEvents=False)
                  if e.get("status") != "cancelled"]
         done = 0
         for ev in items:
@@ -165,7 +233,7 @@ def wipe_contacts(people) -> int:
             break
         people.people().batchDeleteContacts(body={"resourceNames": names}).execute()
         n += len(names)
-    for g in people.contactGroups().list(pageSize=1000).execute().get("contactGroups", []):
+    for g in _all_pages(people.contactGroups(), "contactGroups", pageSize=1000):
         if g.get("groupType") == "USER_CONTACT_GROUP":
             try:
                 people.contactGroups().delete(resourceName=g["resourceName"]).execute()
@@ -179,7 +247,7 @@ def wipe_tasks(tasks) -> int:
     """Every list deleted with its tasks; the default list, which cannot be deleted,
     is emptied instead."""
     n = 0
-    for tl in tasks.tasklists().list(maxResults=100).execute().get("items", []):
+    for tl in _all_pages(tasks.tasklists(), "items", maxResults=100):
         try:
             tasks.tasklists().delete(tasklist=tl["id"]).execute()
             n += 1
@@ -187,8 +255,8 @@ def wipe_tasks(tasks) -> int:
         except HttpError as exc:
             if _gone(exc):
                 continue
-        for t in tasks.tasks().list(tasklist=tl["id"], maxResults=100, showHidden=True,
-                                    showCompleted=True).execute().get("items", []):
+        for t in _all_pages(tasks.tasks(), "items", tasklist=tl["id"], maxResults=100,
+                            showHidden=True, showCompleted=True):
             try:
                 tasks.tasks().delete(tasklist=tl["id"], task=t["id"]).execute()
                 n += 1
@@ -307,10 +375,18 @@ def wipe(users: list[str], clients: Callable[[str, str], object], admin: str,
     def one(user: str) -> tuple[str, dict, dict]:
         got, bad = {}, {}
         for s in services:
-            try:
-                got[s] = WIPERS[s](clients(s, user))
-            except Exception as exc:      # noqa: BLE001 - one service must not lose the rest
-                bad[s] = f"{type(exc).__name__}: {str(exc)[:120]}"
+            # A wiper only lists and deletes, so a transient 5xx/429 is retried by running it
+            # again: one Drive 500 used to end that user's wipe half done (ward14@, 9 Nov).
+            for attempt in range(TRIES):
+                try:
+                    got[s] = WIPERS[s](clients(s, user))
+                    bad.pop(s, None)
+                    break
+                except Exception as exc:      # noqa: BLE001 - one service must not lose the rest
+                    bad[s] = f"{type(exc).__name__}: {str(exc)[:120]}"
+                    if not _transient(exc) or attempt == TRIES - 1:
+                        break
+                    time.sleep(5 * 2 ** attempt)
         return user, got, bad
 
     out(f"  [0/{len(users)}] users wiped", flush=True)
@@ -341,15 +417,27 @@ def wipe(users: list[str], clients: Callable[[str, str], object], admin: str,
 
 
 def reset_ledger(db, emptied: list[str], shared_drives_gone: bool,
-                 groups_gone: bool = False, out=print) -> dict:
-    """Forget, in the ledger, what the wipe removed from the target -- by service, and
-    only the services emptied for every user."""
+                 groups_gone: bool = False, out=print, failed: Optional[dict] = None) -> dict:
+    """Forget, in the ledger, what the wipe removed from the target -- per user and service.
+
+    `failed` ({service: [target users it could not be emptied for]}) makes it per user: every
+    service the wipe ran is forgotten for each user it emptied, and kept only for the users it did
+    not. Without it, only services emptied for every user are forgotten -- and one user's Drive 500
+    kept EVERY user's Drive ledger, so the next run would have skipped Drive on an empty target."""
     import reset_drive_ledger as rdl
-    ledger_services = tuple(s for s in emptied if s in rdl.SERVICE_TYPES)
-    users = [r["source_email"] for r in db.all_identities() if r["entity_type"] == "user"]
-    for u in users:
-        if ledger_services:
-            rdl.reset_service_ledger(db, u, ledger_services)
+    tried = tuple(failed) if failed is not None else tuple(emptied)
+    ledger_services = tuple(s for s in tried if s in rdl.SERVICE_TYPES)
+    pairs = [(r["source_email"], (r["target_email"] or "").lower()) for r in db.all_identities()
+             if r["entity_type"] == "user"]
+    users = [u for u, _ in pairs]
+    kept: dict = {}
+    for u, tgt in pairs:
+        mine = tuple(s for s in ledger_services
+                     if failed is None or tgt not in {x.lower() for x in failed.get(s, [])})
+        for s in set(ledger_services) - set(mine):
+            kept.setdefault(s, []).append(u)
+        if mine:
+            rdl.reset_service_ledger(db, u, mine)
     rows = 0
     if groups_gone:
         from groups_engine import LEDGER_USER
@@ -359,10 +447,12 @@ def reset_ledger(db, emptied: list[str], shared_drives_gone: bool,
             rows += conn.execute("DELETE FROM id_mapping WHERE type='shared_drive'").rowcount
             rows += conn.execute("DELETE FROM audit_log WHERE item_type='shared_drive'").rowcount
     out(f"Ledger reset for {', '.join(ledger_services) or 'nothing'} on {len(users)} user(s)"
+        + "".join(f"; {s} KEPT for {len(v)} user(s) it could not empty: {', '.join(v[:5])}"
+                  for s, v in sorted(kept.items()))
         + (f"; {rows} shared drive row(s) forgotten" if shared_drives_gone else "")
         + ("; groups forgotten" if groups_gone else ""), flush=True)
     return {"users": len(users), "services": list(ledger_services), "shared_drive_rows": rows,
-            "groups": groups_gone}
+            "groups": groups_gone, "kept": kept}
 
 
 def _users(settings: Settings, side: str, db) -> list[str]:
@@ -432,7 +522,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         kept.append("shared drives")
     if args.side == "target":
         reset_ledger(db, result["emptied"], result["shared_drives"] is not None,
-                     groups_gone=result["groups"] is not None)
+                     groups_gone=result["groups"] is not None, failed=result["failed"])
     if kept:
         print(f"NOT WIPED -- still on {domain}: {', '.join(kept)}"
               + (" (their ledger is kept, so a re-run neither skips nor duplicates them)"

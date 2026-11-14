@@ -4,9 +4,13 @@
  */
 import { render, screen, waitFor, fireEvent } from '@testing-library/react'
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { MemoryRouter } from 'react-router-dom'
 import QueuePanel from './QueuePanel'
 import { ago } from './QueuePanel.utils'
 import * as client from '@/api/client'
+
+vi.mock('@/hooks/useViewedAccount', () => ({ useViewedAccount: () => viewed.id }))
+const viewed = vi.hoisted(() => ({ id: undefined as number | undefined }))
 
 vi.mock('@/api/client', async () => {
   const actual = await vi.importActual<typeof client>('@/api/client')
@@ -31,17 +35,17 @@ afterEach(() => { vi.clearAllMocks() })
 
 describe('what is on the box', () => {
   it('names the job filling the slot, even though it is not mine', async () => {
-    render(<QueuePanel />)
+    render(<MemoryRouter><QueuePanel /></MemoryRouter>)
     expect(await screen.findByText('migrate')).toBeInTheDocument()
   })
 
   it('says how full the box is', async () => {
-    render(<QueuePanel />)
+    render(<MemoryRouter><QueuePanel /></MemoryRouter>)
     expect(await screen.findByText('1 of 2 slots busy')).toBeInTheDocument()
   })
 
   it('says who else it belongs to, so there is somebody to ask', async () => {
-    render(<QueuePanel />)
+    render(<MemoryRouter><QueuePanel /></MemoryRouter>)
     await waitFor(() =>
       expect(screen.getByText(/other@corp\.example/)).toBeInTheDocument())
   })
@@ -49,25 +53,25 @@ describe('what is on the box', () => {
 
 describe('where I am in the line', () => {
   it('shows my position', async () => {
-    render(<QueuePanel />)
+    render(<MemoryRouter><QueuePanel /></MemoryRouter>)
     expect(await screen.findByText(/#1 · seed/)).toBeInTheDocument()
   })
 
   it('says it starts on its own, so nobody sits there retrying', async () => {
-    render(<QueuePanel />)
+    render(<MemoryRouter><QueuePanel /></MemoryRouter>)
     await waitFor(() =>
       expect(screen.getByText(/starts on its own/)).toBeInTheDocument())
   })
 
   it('labels my own row as mine', async () => {
-    render(<QueuePanel />)
+    render(<MemoryRouter><QueuePanel /></MemoryRouter>)
     await waitFor(() => expect(screen.getByText(/yours/)).toBeInTheDocument())
   })
 })
 
 describe('cancelling', () => {
   it('drops my queued job by id', async () => {
-    render(<QueuePanel />)
+    render(<MemoryRouter><QueuePanel /></MemoryRouter>)
     const btn = await screen.findByRole('button')
     fireEvent.click(btn)
     expect(client.cancelQueued).toHaveBeenCalledWith(7)
@@ -77,7 +81,7 @@ describe('cancelling', () => {
     vi.mocked(client.fetchQueue).mockResolvedValue(snap({
       waiting: [{ id: 9, jobName: 'seed', position: 1, mine: false }],
     }))
-    render(<QueuePanel />)
+    render(<MemoryRouter><QueuePanel /></MemoryRouter>)
     await screen.findByText(/#1 · seed/)
     expect(screen.queryByRole('button')).toBeNull()
   })
@@ -87,7 +91,7 @@ describe('an idle box', () => {
   it('says a job started now begins immediately', async () => {
     vi.mocked(client.fetchQueue).mockResolvedValue(
       snap({ running: [], waiting: [] }))
-    render(<QueuePanel />)
+    render(<MemoryRouter><QueuePanel /></MemoryRouter>)
     expect(await screen.findByText(/begins\s+immediately/)).toBeInTheDocument()
   })
 })
@@ -98,7 +102,7 @@ describe('what happened to what I asked for', () => {
       recent: [{ id: 3, jobName: 'seed', status: 'failed', mine: true,
                  detail: 'no service-account key on file' }],
     }))
-    render(<QueuePanel />)
+    render(<MemoryRouter><QueuePanel /></MemoryRouter>)
     expect(await screen.findByText(/no service-account key on file/))
       .toBeInTheDocument()
   })
@@ -115,5 +119,14 @@ describe('ago', () => {
   it('is blank for nothing, not "NaN ago"', () => {
     expect(ago(undefined)).toBe('')
     expect(ago('not a date')).toBe('')
+  })
+})
+
+describe('which account "yours" means', () => {
+  it('asks the server about the account being looked at', async () => {
+    viewed.id = 3
+    render(<MemoryRouter><QueuePanel /></MemoryRouter>)
+    await waitFor(() => expect(client.fetchQueue).toHaveBeenCalledWith(3))
+    viewed.id = undefined
   })
 })

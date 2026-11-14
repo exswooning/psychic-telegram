@@ -44,6 +44,8 @@ import { tint } from '@/theme'
 import { describeElapsed } from '@/hooks/useRunningJobs'
 import { verificationEstimate } from '@/components/RunningJobDetail.utils'
 import PairParityCard from '@/components/PairParityCard'
+import VerificationUserResults from '@/components/VerificationUserResults'
+import { plainRunDetail } from '@/utils/runDetail'
 
 const runWhen = (value: string | null): string => {
   if (!value) return '—'
@@ -99,7 +101,8 @@ const VerificationRuns: React.FC = () => {
   const estimate = job?.running
     ? verificationEstimate(job.lines, job.elapsed) : null
 
-  return (
+  return (<>
+    <VerificationUserResults accountId={accountId} />
     <Card elevation={0} sx={{ borderRadius: 2, border: '1px solid', borderColor: 'divider', mb: 3 }}>
       <CardContent sx={{ p: 3 }}>
         <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 1 }}>
@@ -160,7 +163,7 @@ const VerificationRuns: React.FC = () => {
                   <TableCell><Typography variant="body2" sx={{ fontVariantNumeric: 'tabular-nums' }}>{runDuration(run)}</Typography></TableCell>
                   <TableCell><RunOutcome run={run} /></TableCell>
                   <TableCell sx={{ maxWidth: 320 }}>
-                    {run.detail && <Tooltip title={run.detail}><Typography variant="body2" color="text.secondary" noWrap>{run.detail}</Typography></Tooltip>}
+                    {run.detail && <Tooltip title={plainRunDetail(run.detail)}><Typography variant="body2" color="text.secondary" noWrap>{plainRunDetail(run.detail)}</Typography></Tooltip>}
                   </TableCell>
                 </TableRow>
               ))}
@@ -176,7 +179,7 @@ const VerificationRuns: React.FC = () => {
         </TableContainer>
       </CardContent>
     </Card>
-  )
+  </>)
 }
 
 /**
@@ -249,7 +252,7 @@ const VerifiedDomains: React.FC = () => {
           <Typography variant="h6" sx={{ fontWeight: 600, flexGrow: 1 }}>Verified Domains</Typography>
           <Tooltip title="Re-check">
             <span>
-              <IconButton size="small" onClick={refresh} disabled={loading}>
+              <IconButton size="small" onClick={refresh} disabled={loading} aria-label="Re-check">
                 <RefreshIcon fontSize="small" />
               </IconButton>
             </span>

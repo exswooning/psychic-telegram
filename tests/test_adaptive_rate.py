@@ -453,7 +453,7 @@ class TestTheLimiterHearsTheFirstRejectionThroughDriveEngine:
         monkeypatch.setattr(resilience.time, "sleep", lambda *_: None)
         mig = drive_engine.DriveMigrator(auth, db, settings, SRC_USER, TGT_USER, quota)
         seen = []
-        monkeypatch.setattr(mig._project_limiter, "penalise", lambda: seen.append(1))
+        monkeypatch.setattr(mig._project_limiter, "penalise", lambda reason=None: seen.append(1))
 
         def always_rate_limited():
             raise resilience.HttpError(
@@ -699,6 +699,17 @@ class TestTheLedgerRemembersWhatARunProved:
         assert n == 1
         d.close()
 
+    def test_a_ceiling_older_than_its_ttl_is_not_evidence(self, tmp_path):
+        """Account 3, 9 Nov: 6.49/s saved on 1 Nov held a 45-user run to it all day."""
+        d = self._db(tmp_path)
+        d.save_rate_ceiling("target", 6.49)
+        assert d.load_rate_ceiling("target", max_age_hours=24) == pytest.approx(6.49)    # fresh: used
+        with d.write() as c:
+            c.execute("UPDATE rate_limiter_ceiling SET updated_at='2026-11-01T17:22:52Z'")
+        assert d.load_rate_ceiling("target", max_age_hours=24) is None                   # stale: ignored
+        assert d.load_rate_ceiling("target") == pytest.approx(6.49)                      # no TTL: as before
+        d.close()
+
 
 class TestAFreshRunStartsFromWhatALastOneProved:
     """_project_limiter(db=...): the wiring half. Without this, restarting the
@@ -760,7 +771,7 @@ class TestAFreshRunStartsFromWhatALastOneProved:
         import drive_engine
 
         class Broken:
-            def load_rate_ceiling(self, tenant):
+            def load_rate_ceiling(self, tenant, max_age_hours=None):
                 raise RuntimeError("disk full")
         lim = drive_engine._project_limiter(40, "target", db=Broken())
         assert lim.ceiling >= 1000
@@ -769,7 +780,7 @@ class TestAFreshRunStartsFromWhatALastOneProved:
         import drive_engine
 
         class Broken:
-            def load_rate_ceiling(self, tenant):
+            def load_rate_ceiling(self, tenant, max_age_hours=None):
                 return None
 
             def save_rate_ceiling(self, tenant, ceiling):
@@ -777,3 +788,16 @@ class TestAFreshRunStartsFromWhatALastOneProved:
         lim = drive_engine._project_limiter(300, "target", db=Broken())
         lim.penalise()          # must not raise
         assert lim.rate < 300.0
+
+
+def test_rejections_are_counted_by_googles_reason():
+    """'quota pushback' alone could be a per-project, per-user or sharing limit; only a
+    per-project one is helped by a quota request, so each rejection keeps its reason."""
+    from resilience import AdaptiveRateLimiter
+    lim = AdaptiveRateLimiter(100, floor=1, ceiling=200, debounce_window=0)
+    lim.penalise("rateLimitExceeded")
+    lim.penalise("rateLimitExceeded")
+    lim.penalise("quotaExceeded")
+    lim.penalise()
+    assert lim.stats()["rejectionsByReason"] == {"rateLimitExceeded": 2, "quotaExceeded": 1, "unknown": 1}
+    assert lim.last_reason == "unknown"

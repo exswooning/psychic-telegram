@@ -28,7 +28,7 @@ class TestDeltaExpandsAll:
         monkeypatch.setattr(main, "_print_batch_summary", lambda r, s=None: None)
         st = MagicMock()
         main.cmd_delta(self._args(), st, MagicMock(), MagicMock())
-        assert seen["services"] == set(main.PER_USER_SERVICES)
+        assert seen["services"] == set(main.PER_USER_SERVICES) - {"chat"}    # Chat is opt-in since 2026-10-31
         assert "all" not in seen["services"], \
             "the literal string 'all' matches no service and runs nothing"
         assert seen["delta"] is True
@@ -113,3 +113,69 @@ class TestAPassThatRanNothingDoesNotPromote:
         assert out["services"] == {}
         assert out["status"] != "DONE"
         d.close()
+
+
+class TestALaterPassDoesNotOverwriteAnEarlierFailure:
+    """Account 3, 13 Nov 2026: after the mail pass two users were FAILED and 34 AWAITING_DMS; the
+    calendar/contacts/tasks pass ran clean and all 45 read DONE, nothing fixed and the mail still owed."""
+
+    def _run(self, tmp_path, monkeypatch, prior, service_row=None):
+        import db as dbmod
+        d = dbmod.MigrationDB(str(tmp_path / "m.db"))
+        d.conn.execute("INSERT INTO identity_map(source_email,target_email,entity_type,status) "
+                       "VALUES('u@src','u@tgt','user',?)", (prior,))
+        d.conn.commit()
+        if service_row:
+            d.log_audit("u@src", "u@src", service_row, "FAILED", "coverage incomplete")
+        return d
+
+    def test_the_helper_names_only_services_outside_this_pass(self, tmp_path, monkeypatch):
+        d = self._run(tmp_path, monkeypatch, "FAILED", "gmail")
+        assert main._standing_failures(d, "u@src", {"calendar", "contacts", "tasks"}) == {"gmail": "coverage incomplete"}
+        assert main._standing_failures(d, "u@src", {"gmail"}) == {}, "the service itself is judged by its own re-run"
+        d.log_audit("u@src", "u@src", "gmail", "SUCCESS", "cleared: a later run finished it")
+        assert main._standing_failures(d, "u@src", {"calendar"}) == {}, "a clean re-run clears it"
+        d.close()
+
+    def test_the_user_row_itself_is_not_a_service(self, tmp_path, monkeypatch):
+        d = self._run(tmp_path, monkeypatch, "FAILED")
+        d.log_audit("u@src", "u@src", "user", "FAILED", "x")
+        assert main._standing_failures(d, "u@src", {"calendar"}) == {}
+        d.close()
+
+
+class TestThroughMigrateUser:
+    """The same rule, end to end: a clean tasks pass after a failed mail pass."""
+
+    def _clean_tasks_pass(self, auth, db, settings, monkeypatch, prior, gmail_failed):
+        from tests.conftest import SRC_USER, TGT_USER
+
+        class _Tasks:
+            def __init__(self, *a, **k):
+                pass
+
+            def run(self, delta=False):
+                return {"tasks": 1, "failed": 0}
+
+        monkeypatch.setattr(main, "TasksMigrator", _Tasks)
+        settings.migrate_tasks = True
+        db.conn.execute("INSERT OR REPLACE INTO identity_map(source_email,target_email,entity_type,status) "
+                        "VALUES(?,?,'user',?)", (SRC_USER, TGT_USER, prior))
+        db.conn.commit()
+        if gmail_failed:
+            db.log_audit(SRC_USER, SRC_USER, "gmail", "FAILED", "coverage incomplete")
+        main.migrate_user(auth, db, settings, SRC_USER, TGT_USER, {"tasks"}, False, 0)
+        row = db.conn.execute("SELECT status, notes FROM identity_map WHERE source_email=?", (SRC_USER,)).fetchone()
+        return row["status"], row["notes"] or ""
+
+    def test_a_failed_mail_pass_stands_after_a_clean_tasks_pass(self, auth, db, settings, monkeypatch):
+        status, notes = self._clean_tasks_pass(auth, db, settings, monkeypatch, "FAILED", True)
+        assert status == "FAILED" and "gmail: failed in an earlier pass" in notes
+
+    def test_mail_still_owed_to_the_dms_stands_too(self, auth, db, settings, monkeypatch):
+        status, _ = self._clean_tasks_pass(auth, db, settings, monkeypatch, "AWAITING_DMS", False)
+        assert status == "AWAITING_DMS"
+
+    def test_a_clean_user_still_ends_done(self, auth, db, settings, monkeypatch):
+        status, _ = self._clean_tasks_pass(auth, db, settings, monkeypatch, "PENDING", False)
+        assert status == "DONE"

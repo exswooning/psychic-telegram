@@ -30,6 +30,7 @@ itself on the server with nobody watching.
 from __future__ import annotations
 
 import base64
+import copy
 import email
 import hashlib
 import json
@@ -37,8 +38,10 @@ import logging
 import os
 import re
 import sys
+import threading
 import time
 import unicodedata
+from contextlib import contextmanager
 from collections.abc import Iterator
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
@@ -63,11 +66,67 @@ def _stop_check():
 HERE = os.path.dirname(os.path.abspath(__file__))
 FOLDER = "application/vnd.google-apps.folder"
 DRIVE_METADATA_BATCH_SIZE = 25
+
+# Metadata can run in parallel, but each content read may materialise a large
+# native document plus canonical copies and embedded images. Share this slot
+# across ALL user workers, including the separate native-link read path.
+_CONTENT_SLOT = threading.BoundedSemaphore(1)
+
+
+def _glibc():
+    try:
+        import ctypes
+        return ctypes.CDLL("libc.so.6")
+    except OSError:      # not Linux/glibc (the dev Mac): nothing to tune
+        return None
+
+
+_LIBC = _glibc()
+M_ARENA_MAX = -8
+
+
+def limit_arenas(n: int = 2) -> None:
+    """glibc gives each thread its own memory pool and keeps every pool's high-water mark. A verify runs
+    dozens of threads (users x file workers), so one large comparison per thread left gigabytes held:
+    info@'s Drive alone held 2.1 GB after its walk (probe, 14 Nov 2026), and four users reached 11 GB
+    (10 Nov). main.py caps its shard processes the same way (MALLOC_ARENA_MAX=2)."""
+    if _LIBC is not None and not os.getenv("MALLOC_ARENA_MAX"):
+        _LIBC.mallopt(M_ARENA_MAX, n)
+
+
+def give_back_memory() -> None:
+    """Return freed memory to the system after a large comparison instead of keeping it as a high-water mark."""
+    if _LIBC is not None:
+        _LIBC.malloc_trim(0)
+
+
+@contextmanager
+def _content_slot():
+    while not _CONTENT_SLOT.acquire(timeout=0.25):
+        _stop_check()
+    try:
+        _stop_check()
+        yield
+    finally:
+        _CONTENT_SLOT.release()
+        give_back_memory()      # every content read can materialise a large document
+
+
+def _drive_file_workers() -> int:
+    """How many of one user's Drive files are compared at once (VERIFY_DRIVE_WORKERS, 1-16; default 6).
+    Bounded by the metadata window (25) and paced by the same per-user and per-project limiters."""
+    try:
+        return max(1, min(16, int(os.getenv("VERIFY_DRIVE_WORKERS", "6"))))
+    except ValueError:
+        return 6
 DRIVE_META_FIELDS = ("id,name,mimeType,parents,size,md5Checksum,modifiedTime,trashed,ownedByMe,version,"
                      "permissions(id,type,role,emailAddress,domain,deleted)")
 # Files larger than this are compared by size and MD5 only. Both sides are read into
 # memory to hash, and a sample is small; a 2 GB video is not what it is for.
 MAX_COMPARE_BYTES = 25 * 1024 * 1024
+# What a receipted message is still read for: the headers the check uses, with the labels, read
+# state and date Gmail returns with any metadata read (see Verifier._receipts).
+RECEIPT_HEADERS = ("Message-ID", "Date")
 NATIVE_EXPORT = {
     "application/vnd.google-apps.document": "text/plain",
     "application/vnd.google-apps.spreadsheet": "text/csv",
@@ -78,6 +137,7 @@ NATIVE_EXPORT = {
 # never silently.
 VOLATILE_HEADERS = {"received", "x-received", "x-gm-message-state", "x-google-smtp-source",
                     "return-path", "delivered-to", "authentication-results", "received-spf",
+                    "x-forwarded-encrypted",  # stamped by Gmail on storage in the target mailbox, never by the source
                     "arc-seal", "arc-message-signature", "arc-authentication-results"}
 PERSON_FIELDS = "names,emailAddresses,phoneNumbers,organizations,addresses,birthdays,biographies,urls,nicknames"
 PEOPLE_BATCH_SIZE = 200  # People API getBatchGet limit; halves calls for every 200 contacts per tenant.
@@ -97,9 +157,10 @@ def _gmail_batch_size():
 
 
 def _gmail_read_window():
-    """How many batch pairs are read ahead (VERIFY_GMAIL_WINDOW, 1-8; default 4)."""
+    """How many batch pairs are read ahead (VERIFY_GMAIL_WINDOW, 1-8; default 8). 4 ran a mailbox at about a
+    tenth of Gmail's per-user quota (dharan, 2026-10-23); 8 stays near a fifth. info@'s check was 631 min."""
     try:
-        return max(1, min(8, int(os.getenv("VERIFY_GMAIL_WINDOW", "4"))))
+        return max(1, min(8, int(os.getenv("VERIFY_GMAIL_WINDOW", "8"))))
     except ValueError:
         return 4
 
@@ -159,8 +220,12 @@ def compare_message(src_raw: bytes, tgt_raw: bytes, expected_after_rewrite: byte
     if sh == th and sb == tb:
         if assigned_id:
             return "equivalent", ["Gmail assigned a Message-ID absent from the source; other compared headers and payload match"]
-        added = sorted(set(BytesHeaderParser().parsebytes(tgt_raw).keys()) - set(BytesHeaderParser().parsebytes(want).keys()))
-        return "equivalent", [f"same message; headers added on the target: {', '.join(added) or 'none named'}"]
+        source_headers, target_headers = BytesHeaderParser().parsebytes(want), BytesHeaderParser().parsebytes(tgt_raw)
+        names = {k.lower(): k for h in (source_headers, target_headers) for k in h.keys()}
+        ignored = [names[k] for k in sorted(names) if k in VOLATILE_HEADERS
+                   and source_headers.get_all(k) != target_headers.get_all(k)]
+        return "equivalent", ["same message; ignored storage-header differences: " +
+                              (", ".join(ignored) or "none; equivalent decoded payload and normalised headers")]
     notes = []
     for k in sorted(set(sh) | set(th)):
         if sh.get(k) != th.get(k):
@@ -199,7 +264,7 @@ def _is_not_found(exc) -> bool:
 
 
 def compare_grants(src_perms: list[dict], tgt_perms: list[dict], translate, src_domain: str, tgt_domain: str,
-                   skipped_ids: set[str], source_id: str) -> dict:
+                   skipped_ids: set[str], source_id: str, owed_ids: set[str] = frozenset()) -> dict:
     """Who can see one file, source against target.
 
     Each grant is reduced to (who, role) -- the thing a person would notice
@@ -221,7 +286,10 @@ def compare_grants(src_perms: list[dict], tgt_perms: list[dict], translate, src_
             f"{source_id}:domain:{who}" if kind == "domain" else f"{source_id}:anyone")
     missing = sorted(want - got)
     explained = [k for k in missing if audit_id(k) in skipped_ids]
+    # Owed (the colleague has no target account YET) is still due; any other skip is a decision
+    # that stands (an outsider with no Google account) and leaves nothing to check.
     return {"matched": len(want & got), "notReproduced": [list(k) for k in explained],
+            "owed": sum(1 for k in explained if audit_id(k) in owed_ids),
             "missing": [list(k) for k in missing if k not in explained], "extra": [list(k) for k in sorted(got - want)]}
 
 
@@ -255,8 +323,23 @@ SUPERSTARS = {"YELLOW_STAR", "ORANGE_STAR", "RED_STAR", "PURPLE_STAR", "BLUE_STA
               "PURPLE_QUESTION"}
 
 
+CATEGORIES = {"CATEGORY_PERSONAL", "CATEGORY_SOCIAL", "CATEGORY_PROMOTIONS", "CATEGORY_UPDATES", "CATEGORY_FORUMS"}
+
+
+def _primary_is_no_category(names: set[str]) -> set[str]:
+    """CATEGORY_PERSONAL is Gmail's Primary tab, and Primary is also where a message with no category label
+    shows -- so CATEGORY_PERSONAL alone and no category at all look the same to the user. Gmail adds it to
+    inserted and DMS-delivered mail on its own and puts it back when removed (account 3, 14 Nov 2026: 2,857
+    messages). Operator's rule, 14 Nov: a label difference the user cannot see is not a difference. Any OTHER
+    category still counts: Updates or Promotions put a message in a different tab."""
+    if names & CATEGORIES == {"CATEGORY_PERSONAL"}:
+        return names - {"CATEGORY_PERSONAL"}
+    return names
+
+
 def compare_labels(src_names: set[str], tgt_names: set[str]) -> list[str]:
-    src_names, tgt_names = set(src_names) - SUPERSTARS, set(tgt_names) - SUPERSTARS
+    src_names = _primary_is_no_category(set(src_names) - SUPERSTARS)
+    tgt_names = _primary_is_no_category(set(tgt_names) - SUPERSTARS)
     # Gmail label names are Unicode text. Compare canonical forms and
     # normalized whitespace so visually equivalent names (notably labels
     # containing decomposed Nepali text) do not become false deltas.
@@ -489,6 +572,13 @@ class Verifier:
     def __init__(self, auth, db, settings, source_user: str, target_user: str, retry=lambda f: f,
                  limit: int | None = None, on_api_attempt=None, on_progress=None):
         self.auth, self.db, self.settings = auth, db, settings
+        self._native_mine: dict = {}      # this user's own per-minute Docs/Sheets/Slides buckets
+        # Set only while one unverified file is being compared again (_retry_unverified): past it,
+        # no further attempt starts for that file. Live, one Google Doc held the retry pass for 15+
+        # minutes at 0/1 (info@, 4 Nov 2026), retrying a read that timed out every time.
+        self._file_deadline: float | None = None
+        self._native_lock = threading.Lock()
+        self._gmail_budgets = {}
         self.src_user, self.tgt_user = source_user, target_user
         self._retry = retry
         self.evidence: list[dict] = []
@@ -499,12 +589,31 @@ class Verifier:
         self._on_api_attempt = on_api_attempt
         self._on_progress = on_progress
         self._operation = "initialising verifier"
+        import verify_resilience as vr
+        self._vr = vr
+        self._unverified = vr.UnverifiedStore(db)
+        self._retry_ctx: dict[str, dict] = {}       # transient-unverified files awaiting the retry pass
+        self._known_unverified: set[str] = set()
+        self._stats = {"identical": 0, "different": 0, "unverified": 0, "verified": 0, "phase": "idle",
+                       "currentDocument": None, "currentMime": None, "currentSince": None,
+                       "lastSuccessfulDocument": None, "lastSuccessAt": None, "lastApiStatus": None,
+                       "retryAttempt": 0, "retryDelay": 0.0}
 
     def _report_progress(self, operation: str, completed: int | None = None,
                          total: int | None = None, item: str | None = None) -> None:
         self._operation = operation
         if self._on_progress:
             self._on_progress(operation=operation, completed=completed, total=total, item=item)
+
+    def _publish_stats(self, **changes) -> None:
+        """What the heartbeat says beyond counts: which document, what phase (a live request, a retry
+        wait, a breaker cooldown, or between documents), the last success and the breaker states."""
+        self._stats.update(changes)
+        if self._on_progress:
+            st = dict(self._stats)
+            st["pendingRetry"] = len(self._retry_ctx)
+            st["breakers"] = {k: b.state for k, b in self._vr.BREAKERS.items()}
+            self._on_progress(stats=st)
 
     # -- plumbing ---------------------------------------------------------
     def _x(self, fn, operation: str | None = None, request_count: int = 1):
@@ -515,20 +624,30 @@ class Verifier:
         def counted():
             nonlocal attempt
             _stop_check()
+            if self._file_deadline and time.monotonic() > self._file_deadline:
+                # RetryBudgetExceeded, not TimeoutError: the ladder does not retry it and the verifier
+                # classes it a transient failure -- the file is unverified now and tried again later.
+                from resilience import RetryBudgetExceeded
+                raise RetryBudgetExceeded("this file's time budget ran out; recorded as unverified",
+                                          None, attempt, 0.0)
             attempt += 1
+            count = request_count() if callable(request_count) else request_count
             if self._on_api_attempt:
-                self._on_api_attempt("start", operation=operation, request_count=request_count,
+                self._on_api_attempt("start", operation=operation, request_count=count,
                                      attempt=attempt)
+            self._stats.update(phase="request", retryAttempt=attempt)
             try:
                 result = fn()
             except Exception as exc:
+                self._stats.update(phase="retry-wait", lastApiStatus=self._vr.classify(exc).status or type(exc).__name__)
                 if self._on_api_attempt:
-                    self._on_api_attempt("finish", operation=operation, request_count=request_count,
+                    self._on_api_attempt("finish", operation=operation, request_count=count,
                                          attempt=attempt, error=f"{type(exc).__name__}: {str(exc)[:180]}")
                 raise
             else:
+                self._stats.update(phase="compare", lastApiStatus=200)
                 if self._on_api_attempt:
-                    self._on_api_attempt("finish", operation=operation, request_count=request_count,
+                    self._on_api_attempt("finish", operation=operation, request_count=count,
                                          attempt=attempt)
                 return result
         return self._retry(counted)()
@@ -571,7 +690,22 @@ class Verifier:
             f"SELECT item_id, item_type, error_message, timestamp FROM audit_log WHERE source_user=? "
             f"AND status LIKE 'FAILED%' AND item_type IN ({q})", (self.src_user, *types)).fetchall()
         out = []
+        from config import owed_to_dms
         for r in rows:
+            if owed_to_dms(r["item_type"], r["error_message"] or ""):
+                continue            # left to the DMS by the operator's choice: owed, counted by the coverage note
+            # An item that failed once and is MAPPED now was copied since (a later run, or a repair): its old
+            # failure row is history, not a gap. info@'s repair delivered 137 held messages and the check
+            # still listed all 168 as not copied (7 Nov 2026).
+            if r["item_type"] != types[-1] and self.db.get_target_id(self.src_user, r["item_id"], r["item_type"]):
+                # Only a mapping written AFTER the failure counts as the recovery: an earlier copy followed by
+                # a failed later one, a tie at second resolution, or an unreadable time all keep the failure.
+                m = self.db.conn.execute(
+                    "SELECT created_at FROM id_mapping WHERE source_user=? AND source_id=? AND type=?",
+                    (self.src_user, r["item_id"], r["item_type"])).fetchone()
+                if m is None or (m["created_at"] and r["timestamp"] and m["created_at"][:1].isdigit()
+                                 and m["created_at"] > r["timestamp"]):
+                    continue
             if r["item_type"] == types[-1] and self.db.conn.execute(
                     f"SELECT 1 FROM audit_log WHERE source_user=? AND status='SUCCESS' AND timestamp>? "
                     f"AND item_type IN ({','.join('?' * len(items))}) LIMIT 1",
@@ -583,14 +717,136 @@ class Verifier:
     @staticmethod
     def _blank() -> dict:
         return {"checked": 0, "identical": 0, "differences": [], "missing": [], "extras": [],
-                "duplicates": [], "notCopied": [], "errors": [], "notes": []}
+                "duplicates": [], "notCopied": [], "errors": [], "notes": [], "unverified": []}
 
     # -- Drive ------------------------------------------------------------
+    def _drive_reads_all(self, kind, jobs, src, tgt, sc, tc) -> list[dict]:
+        """The slow reads of one metadata window's files -- folder paths, content, the links inside, sharing --
+        VERIFY_DRIVE_WORKERS at a time (default 6). One at a time, a 1,238-file Drive took 20-170 min at ~1 s a
+        call while the box sat idle (account 3, 7 Nov 2026). Results come back in the window's order; all
+        accounting stays on the caller's thread."""
+        workers = max(1, min(len(jobs), _drive_file_workers()))
+        self._ensure_acl_sets()          # once, here: a copy that loaded them would load them per file
+        if workers == 1:
+            return [self._drive_reads(kind, sid, tid, sm, tm, src, tgt, sc, tc) for sid, tid, sm, tm in jobs]
+        from concurrent.futures import ThreadPoolExecutor
+
+        def one(job):
+            _stop_check()
+            # AuthManager caches transports per thread: each worker resolves its own clients.
+            return self._drive_reads(kind, *job, self.auth.source_drive(self.src_user),
+                                     self.auth.target_drive(self.tgt_user), sc, tc)
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="verify-drive-file") as pool:
+            return list(pool.map(one, jobs))
+
+    def _drive_reads(self, kind, sid, tid, sm, tm, src, tgt, sc, tc) -> dict:
+        """Every READ one paired item needs, on a shallow copy of this verifier so the per-file budget
+        (_file_deadline) and the not-owner flag belong to this file alone. Writes nothing to the result."""
+        w = copy.copy(self)
+        w._file_deadline, w._not_owner = None, False
+        local = Verifier._blank()
+        out = {"local": local, "reused": None, "content": [], "links": [], "linkError": None}
+        carried_in = sm.get("ownedByMe") is False
+        # A file shared into this mailbox belongs to another source user. Its source-side ancestor path
+        # is not readable or meaningful to the copy, and the ACL is deliberately not migrated on behalf
+        # of this user. Avoid repeated parent and permission calls for that out-of-scope metadata.
+        out["sp"] = sp = "" if carried_in else w._drive_path(src, sid, sc)
+        out["tp"] = tp = w._drive_path(tgt, tid, tc)
+        out["diffs"] = compare_drive_file(sm, tm, sp, tp)
+        out["ev"] = ev = {"kind": kind, "name": sm.get("name"), "path": sp, "opened": False}
+        w._publish_stats(currentDocument=sid, currentMime=sm.get("mimeType"), currentSince=time.time(),
+                         phase="compare")
+        if kind == "file":
+            reused = drive_content_cache_get(self.db, self.src_user, sid, tid, sm, tm)
+            if reused is not None:
+                out["reused"] = reused
+            else:
+                out["content"] = w._content(src, tgt, sid, tid, sm, tm, ev)
+                if not ev.get("error"):
+                    drive_content_cache_put(self.db, self.src_user, sid, tid, sm, tm, out["content"], ev)
+            if getattr(self.settings, "rewrite_drive_links", False):
+                try:
+                    out["links"] = w._native_links(tid, sm)
+                except Exception as exc:      # noqa: BLE001 - unread is INCOMPLETE, never a pass
+                    out["linkError"] = f"file {sid}: the links inside could not be read: {error_detail(exc)}"
+        out["carriedIn"] = carried_in
+        out["sharing"] = [] if carried_in else w._sharing(src, tgt, sid, tid, local)
+        out["notOwner"] = bool(getattr(w, "_not_owner", False))
+        return out
+
+    def _drive_merge(self, kind, sid, tid, sm, tm, r, res, target_keys) -> None:
+        """Fold one item's reads into the result, in order, on the caller's thread."""
+        local = r["local"]
+        res["errors"] += local["errors"]
+        if local.get("not_owner"):
+            res["not_owner"] = res.get("not_owner", 0) + local["not_owner"]
+        if local.get("sharing"):
+            sh = res.setdefault("sharing", {"filesCompared": 0, "matched": 0, "notReproduced": 0, "owed": 0})
+            for k, v in local["sharing"].items():
+                sh[k] = sh.get(k, 0) + v
+        sp, tp, diffs, ev = r["sp"], r["tp"], list(r["diffs"]), r["ev"]
+        unverified, err_text, content = None, None, []
+        if kind == "file":
+            target_keys[(tp, tm.get("name"), tm.get("md5Checksum"))] = tid
+            reused = r["reused"]
+            if reused is not None:
+                diffs += reused["diffs"]
+                content = reused["diffs"]
+                ev.update(reused["ev"])
+                ev.update(reused=True, how=f"{reused['ev'].get('how', 'compared')} -- neither copy has "
+                                           f"changed since {reused['at']}, so that comparison is reused")
+                res["contentReused"] = res.get("contentReused", 0) + 1
+            else:
+                content = r["content"]
+                diffs += content
+            from copy_resolution import remember_content
+            remember_content(self, sid, tid, sm, tm, ev, content)
+            unverified = ev.pop("unverified", None)
+            if ev.get("error"):
+                err_text = f"file {sid}: {ev.pop('error')}"
+                res["errors"].append(err_text)
+            elif sid in self._known_unverified:
+                self._unverified.resolve(self.src_user, "drive", sid)    # compared now
+            if r["linkError"]:
+                res["errors"].append(r["linkError"])
+            diffs += r["links"]
+        if r["carriedIn"]:
+            # Carried in: owned by someone outside the source and shared with this
+            # user, copied for them (drive_engine._walk_shared_with_me). The copy is
+            # theirs, in their Drive; the owner's folder and sharing stay with the
+            # owner's original -- by design, not a difference (live, dharan.gov.np).
+            res["carriedIn"] = res.get("carriedIn", 0) + 1
+            diffs = [d for d in diffs if not d.startswith("folder path differs")]
+        elif r["notOwner"]:
+            diffs = [d for d in diffs if not d.startswith("folder path differs")]
+        diffs += r["sharing"]
+        record = {"service": "drive", **ev}
+        self.evidence.append(record)
+        entry = None
+        if diffs:
+            entry = {"item": sm.get("name"), "path": sp, "source": sid, "target": tid, "diffs": diffs}
+            res["differences"].append(entry)
+        if unverified is not None:
+            # The content was NOT compared: whatever else matched, this file is not "identical".
+            self._note_unverified(res, sid, tid, sm, tm, record, unverified, err_text, entry,
+                                  [d for d in diffs if d not in content])
+        elif not diffs:
+            res["identical"] += 1
+            self._stats["identical"] += 1
+        else:
+            self._stats["different"] += 1
+        if unverified is None:
+            self._stats["verified"] += 1
+            self._publish_stats(lastSuccessfulDocument=sid, lastSuccessAt=time.time(), phase="compare",
+                                currentDocument=None, currentMime=None, currentSince=None)
+
     def _remember_drive_permissions(self, svc, fid, metadata):
         if "permissions" in metadata:
             if not hasattr(self, "_drive_permission_cache"):
                 self._drive_permission_cache = {}
-            self._drive_permission_cache[(id(svc), fid)] = metadata.pop("permissions")
+            # Keyed by file id alone -- ids are unique across both tenants -- so a worker thread
+            # with its own client (verify_drive_workers) finds what the batch read stored.
+            self._drive_permission_cache[fid] = metadata.pop("permissions")
         return metadata
 
     def _drive_meta(self, svc, fid):
@@ -615,9 +871,6 @@ class Verifier:
         factory = getattr(svc, "new_batch_http_request", None)
         if not callable(factory) or not ids:
             return {}, {}
-        cache = getattr(self, "_drive_permission_cache", {})
-        for key in [k for k in cache if k[0] == id(svc)]:
-            cache.pop(key, None)  # carried-in items intentionally don't consume ACLs
         result, errors = {}, {}
         def received(request_id, response, error):
             if error is not None:
@@ -645,9 +898,15 @@ class Verifier:
             raise error
         return self._drive_meta(svc, fid)
 
-    def _drive_path(self, svc, fid, cache: dict) -> str:
+    def _drive_path(self, svc, fid, cache: dict, budget_sec: float | None = None) -> str:
+        # The walk is bounded per file: one file whose parents keep failing held the stray
+        # check for 40+ minutes (info@, 3 Nov 2026). Running out of budget is an error for that
+        # file, never a guessed path.
+        deadline = time.monotonic() + budget_sec if budget_sec else None
         parts, cur, guard = [], fid, 0
         while cur and guard < 200:
+            if deadline and time.monotonic() > deadline:
+                raise TimeoutError(f"path of {fid} not read within {budget_sec:.0f}s")
             guard += 1
             if cur not in cache:
                 cache[cur] = self._drive_meta(svc, cur)
@@ -672,10 +931,82 @@ class Verifier:
     def _export(self, svc, fid, mime) -> bytes:
         return self._x(lambda: svc.files().export_media(fileId=fid, mimeType=mime).execute())
 
+    def _note_unverified(self, res, sid, tid, sm, tm, ev, failure, err_text, entry, other_diffs) -> None:
+        """A file whose content was not compared. Recorded in the result (so the service cannot be
+        IDENTICAL), in the ledger (so a restart keeps it and the next pass retries it) and, when the
+        cause was transient, queued for this run's retry pass."""
+        mime = sm.get("mimeType") or ""
+        attempts = self._unverified.record(self.src_user, "drive", sid, tid, mime, failure)
+        row = {"source": sid, "target": tid, "name": sm.get("name"), "mime": mime, "state": failure.state,
+               "status": failure.status, "endpoint": failure.endpoint, "attempts": attempts}
+        res["unverified"].append(row)
+        self._stats["unverified"] += 1
+        if failure.transient:
+            self._retry_ctx[sid] = {"row": row, "tid": tid, "sm": sm, "tm": tm, "ev": ev, "err": err_text,
+                                    "entry": entry, "other": other_diffs}
+        self._publish_stats(phase="compare")
+
+    def _retry_unverified(self, res, src, tgt) -> None:
+        """Compare again the files that failed on a transient fault, after a cooldown, up to
+        VERIFY_RETRY_PASSES times. A file still failing stays UNVERIFIED (and the service INCOMPLETE);
+        one that now compares is counted as what it is -- identical or different -- and its error
+        and ledger row are removed. Nothing here writes to either tenant."""
+        passes = int(os.getenv("VERIFY_RETRY_PASSES", "2"))
+        wait = float(os.getenv("VERIFY_RETRY_WAIT_SEC", "90"))
+        for n in range(1, passes + 1):
+            if not self._retry_ctx:
+                return
+            self._publish_stats(phase="circuit-cooldown", retryAttempt=n, retryDelay=wait)
+            end = time.monotonic() + wait
+            while time.monotonic() < end:
+                _stop_check()
+                time.sleep(min(2.0, max(end - time.monotonic(), 0)))
+            todo = list(self._retry_ctx.items())
+            for i, (sid, ctx) in enumerate(todo):
+                self._report_progress("Drive retry unverified", i, len(todo), f"file {sid}")
+                ev2: dict = {}
+                self._publish_stats(currentDocument=sid, currentMime=ctx["sm"].get("mimeType"),
+                                    currentSince=time.time(), phase="compare", retryAttempt=n)
+                self._file_deadline = time.monotonic() + float(os.getenv("VERIFY_RETRY_FILE_BUDGET_SEC", "120"))
+                try:
+                    content = self._content(src, tgt, sid, ctx["tid"], ctx["sm"], ctx["tm"], ev2)
+                finally:
+                    self._file_deadline = None
+                failure = ev2.get("unverified")
+                if failure is not None:
+                    ctx["row"]["attempts"] = self._unverified.record(self.src_user, "drive", sid, ctx["tid"],
+                                                                     ctx["row"]["mime"], failure)
+                    ctx["row"].update(state=failure.state, status=failure.status)
+                    if not failure.transient:
+                        del self._retry_ctx[sid]
+                    continue
+                del self._retry_ctx[sid]
+                self._unverified.resolve(self.src_user, "drive", sid)
+                res["unverified"].remove(ctx["row"])
+                if ctx["err"] in res["errors"]:
+                    res["errors"].remove(ctx["err"])
+                self._stats["unverified"] -= 1
+                self._stats["verified"] += 1
+                ctx["ev"].update(ev2, retried=True)
+                ctx["ev"].pop("error", None)
+                if content or ctx["entry"] is not None:
+                    if ctx["entry"] is None:
+                        ctx["entry"] = {"item": ctx["sm"].get("name"), "path": ctx["ev"].get("path"),
+                                        "source": sid, "target": ctx["tid"], "diffs": []}
+                        res["differences"].append(ctx["entry"])
+                    ctx["entry"]["diffs"] = list(ctx["entry"]["diffs"]) + list(content)
+                    self._stats["different"] += 1
+                else:
+                    res["identical"] += 1
+                    self._stats["identical"] += 1
+                self._publish_stats(lastSuccessfulDocument=sid, lastSuccessAt=time.time(),
+                                    currentDocument=None, currentMime=None, currentSince=None)
+
     def drive(self) -> dict:
         res = self._blank()
         src, tgt = self.auth.source_drive(self.src_user), self.auth.target_drive(self.tgt_user)
         sc, tc = {}, {}
+        self._known_unverified = {r["source_id"] for r in self._unverified.pending(self.src_user, "drive")}
         # Every target the ledger knows -- not only the ones opened below -- so a sampled
         # run does not mistake the rest of the migration for strays.
         # Shortcuts too: a migrated shortcut is mapped as one, and leaving it out
@@ -686,111 +1017,71 @@ class Verifier:
             pairs = self._pairs(kind, sample=True)
             operation = f"Drive compare {kind}s"
             self._report_progress(operation, 0, len(pairs))
-            source_meta, source_errors, target_meta, target_errors = {}, {}, {}, {}
-            for pair_index, (sid, tid, recorded_name) in enumerate(pairs):
-                if pair_index % DRIVE_METADATA_BATCH_SIZE == 0:
-                    window = pairs[pair_index:pair_index + DRIVE_METADATA_BATCH_SIZE]
-                    source_meta, source_errors = self._drive_meta_many(
-                        src, [s for s, t, _ in window if s != t], "source")
-                    target_meta, target_errors = self._drive_meta_many(
-                        tgt, [t for s, t, _ in window if s != t], "target")
-                self._report_progress(operation, pair_index, len(pairs), f"item {sid}")
-                res["checked"] += 1
-                if sid == tid:
-                    # MOVED, not copied (drive_engine._sync_move): the source no longer
-                    # holds it, and what is on the target IS the file -- one id, its own
-                    # history. So it is checked there: present, not binned, its name.
-                    self._check_moved(tgt, sid, recorded_name, res)
-                    continue
-                try:
-                    sm = self._drive_meta_from_batch(src, sid, source_meta, source_errors)
-                    sc[sid] = sm
-                except Exception as exc:      # noqa: BLE001
-                    if _gone_from_source(exc, res):
+            for window_start in range(0, len(pairs), DRIVE_METADATA_BATCH_SIZE):
+                window = pairs[window_start:window_start + DRIVE_METADATA_BATCH_SIZE]
+                # Unconsumed ACLs from the previous window (carried-in items read none) are dropped here;
+                # every worker of that window has finished before this read.
+                self._drive_permission_cache = {}
+                source_meta, source_errors = self._drive_meta_many(src, [s for s, t, _ in window if s != t], "source")
+                target_meta, target_errors = self._drive_meta_many(tgt, [t for s, t, _ in window if s != t], "target")
+                jobs = []
+                for offset, (sid, tid, recorded_name) in enumerate(window):
+                    self._report_progress(operation, window_start + offset, len(pairs), f"item {sid}")
+                    res["checked"] += 1
+                    if sid == tid:
+                        # MOVED, not copied (drive_engine._sync_move): the source no longer
+                        # holds it, and what is on the target IS the file -- one id, its own
+                        # history. So it is checked there: present, not binned, its name.
+                        self._check_moved(tgt, sid, recorded_name, res)
+                        continue
+                    try:
+                        sm = self._drive_meta_from_batch(src, sid, source_meta, source_errors)
+                        sc[sid] = sm
+                    except Exception as exc:      # noqa: BLE001
+                        if _gone_from_source(exc, res):
+                            if kind == "file":
+                                from copy_resolution import record
+                                record(self, res, sid, tid, source_unreadable=True)
+                            continue
+                        res["errors"].append(f"{kind} {sid}: could not read the SOURCE: {error_detail(exc)}")
                         if kind == "file":
                             from copy_resolution import record
                             record(self, res, sid, tid, source_unreadable=True)
                         continue
-                    res["errors"].append(f"{kind} {sid}: could not read the SOURCE: {error_detail(exc)}")
-                    if kind == "file":
-                        from copy_resolution import record
-                        record(self, res, sid, tid, source_unreadable=True)
-                    continue
-                try:
-                    tm = self._drive_meta_from_batch(tgt, tid, target_meta, target_errors)
-                    tc[tid] = tm
-                except Exception as exc:      # noqa: BLE001
-                    if _is_not_found(exc):
-                        res["missing"].append({"source": sid, "target": tid, "name": sm.get("name"),
-                                               "why": f"not on the target ({str(exc)[:80]})"})
-                    else:
-                        res["errors"].append(f"file {tid}: could not read the TARGET: {error_detail(exc)}")
-                    continue
-                if tm.get("trashed") and sm.get("trashed"):
-                    # Binned on the source too, and the mirror carried it across: the
-                    # copy is where its original is (11 of seeduser200's, 2026-10-10).
-                    res["identical"] += 1
-                    continue
-                if tm.get("trashed"):
-                    res["missing"].append({"source": sid, "target": tid, "name": sm.get("name"), "why": "in the target's trash"})
-                    continue
-                carried_in = sm.get("ownedByMe") is False
-                # A file shared into this mailbox belongs to another source
-                # user. Its source-side ancestor path is not readable or
-                # meaningful to the copy, and the ACL is deliberately not
-                # migrated on behalf of this user. Avoid repeated parent and
-                # permission calls for that out-of-scope metadata.
-                sp = "" if carried_in else self._drive_path(src, sid, sc)
-                tp = self._drive_path(tgt, tid, tc)
-                diffs = compare_drive_file(sm, tm, sp, tp)
-                ev = {"kind": kind, "name": sm.get("name"), "path": sp, "opened": False}
-                if kind == "file":
-                    target_keys[(tp, tm.get("name"), tm.get("md5Checksum"))] = tid
-                    reused = drive_content_cache_get(self.db, self.src_user, sid, tid, sm, tm)
-                    if reused is not None:
-                        diffs += reused["diffs"]
-                        content = reused["diffs"]
-                        ev.update(reused["ev"])
-                        ev.update(reused=True, how=f"{reused['ev'].get('how', 'compared')} -- neither copy has "
-                                                   f"changed since {reused['at']}, so that comparison is reused")
-                        res["contentReused"] = res.get("contentReused", 0) + 1
-                    else:
-                        content = self._content(src, tgt, sid, tid, sm, tm, ev)
-                        diffs += content
-                        if not ev.get("error"):
-                            drive_content_cache_put(self.db, self.src_user, sid, tid, sm, tm, content, ev)
-                    from copy_resolution import remember_content
-                    remember_content(self, sid, tid, sm, tm, ev, content)
-                    if ev.get("error"):
-                        res["errors"].append(f"file {sid}: {ev.pop('error')}")
-                    if getattr(self.settings, "rewrite_drive_links", False):
-                        try:
-                            diffs += self._native_links(tid, sm)
-                        except Exception as exc:      # noqa: BLE001 - unread is INCOMPLETE, never a pass
-                            res["errors"].append(f"file {sid}: the links inside could not be read: {error_detail(exc)}")
-                if carried_in:
-                    # Carried in: owned by someone outside the source and shared with this
-                    # user, copied for them (drive_engine._walk_shared_with_me). The copy is
-                    # theirs, in their Drive; the owner's folder and sharing stay with the
-                    # owner's original -- by design, not a difference (live, dharan.gov.np).
-                    res["carriedIn"] = res.get("carriedIn", 0) + 1
-                    diffs = [d for d in diffs if not d.startswith("folder path differs")]
-                    sharing = []
-                else:
-                    sharing = self._sharing(src, tgt, sid, tid, res)
-                    if getattr(self, "_not_owner", False):
-                        diffs = [d for d in diffs if not d.startswith("folder path differs")]
-                diffs += sharing
-                self.evidence.append({"service": "drive", **ev})
-                if diffs:
-                    res["differences"].append({"item": sm.get("name"), "path": sp, "source": sid, "target": tid, "diffs": diffs})
-                else:
-                    res["identical"] += 1
+                    try:
+                        tm = self._drive_meta_from_batch(tgt, tid, target_meta, target_errors)
+                        tc[tid] = tm
+                    except Exception as exc:      # noqa: BLE001
+                        if _is_not_found(exc):
+                            res["missing"].append({"source": sid, "target": tid, "name": sm.get("name"),
+                                                   "why": f"not on the target ({str(exc)[:80]})"})
+                        else:
+                            res["errors"].append(f"file {tid}: could not read the TARGET: {error_detail(exc)}")
+                        continue
+                    if tm.get("trashed") and sm.get("trashed"):
+                        # Binned on the source too, and the mirror carried it across: the
+                        # copy is where its original is (11 of seeduser200's, 2026-10-10).
+                        res["identical"] += 1
+                        continue
+                    if tm.get("trashed"):
+                        res["missing"].append({"source": sid, "target": tid, "name": sm.get("name"), "why": "in the target's trash"})
+                        continue
+                    jobs.append((sid, tid, sm, tm))
+                for (sid, tid, sm, tm), r in zip(jobs, self._drive_reads_all(kind, jobs, src, tgt, sc, tc)):
+                    self._drive_merge(kind, sid, tid, sm, tm, r, res, target_keys)
             self._report_progress(operation, len(pairs), len(pairs))
+        # The compare loop is over: no document is "current" any more. It used to keep showing the last file
+        # with a timer that grew through the stray check and the comment phase, and read as a 22-minute hang
+        # on info@ (7 Nov 2026) when the document itself had finished in seconds.
+        self._publish_stats(currentDocument=None, currentMime=None, currentSince=None)
+        self._retry_unverified(res, src, tgt)
         # Strays and duplicates on the target the ledger would never mention.
         try:
             extra = self._target_files(tgt)
-            for f in extra:
+            stray_op = "Drive stray check (target files the ledger does not map)"
+            for n, f in enumerate(extra):
+                if n % 10 == 0:
+                    self._report_progress(stray_op, n, len(extra))
                 if f["id"] in seen_targets:
                     continue
                 try:
@@ -800,12 +1091,18 @@ class Verifier:
                     receipt = None
                 if receipt and receipt["state"] == "QUARANTINED":
                     detail = json.loads(receipt["detail"])
-                    current = self._drive_meta(tgt, f["id"])
-                    canonical = self._drive_meta(tgt, detail["canonical"])
-                    same = bool(current.get("md5Checksum") and current.get("md5Checksum") == canonical.get("md5Checksum"))
-                    if detail.get("native"):
-                        from finding_repairs import _native_duplicate_equal
-                        same = self._x(lambda: _native_duplicate_equal(self.auth, self.tgt_user, f["id"], detail["canonical"], current["mimeType"]))
+                    try:
+                        current = self._drive_meta(tgt, f["id"])
+                        canonical = self._drive_meta(tgt, detail["canonical"])
+                        same = bool(current.get("md5Checksum") and current.get("md5Checksum") == canonical.get("md5Checksum"))
+                        if detail.get("native"):
+                            from finding_repairs import _native_duplicate_equal
+                            same = self._x(lambda: _native_duplicate_equal(self.auth, self.tgt_user, f["id"], detail["canonical"], current["mimeType"]))
+                    except Exception as exc:      # noqa: BLE001 - one file, not the whole listing
+                        # One quarantined copy too big to compare aborted the WHOLE target listing ("could not
+                        # list the target's Drive", education@, 8 Nov 2026). It is this file's check that failed.
+                        res["errors"].append(f"Quarantined duplicate {f['id']} could not be compared: {error_detail(exc)}")
+                        continue
                     if (current.get("parents") == detail.get("originalParents")
                             and current.get("name") == detail.get("quarantinedName")
                             and current.get("ownedByMe") and not current.get("trashed") and same):
@@ -813,7 +1110,24 @@ class Verifier:
                         res["notes"].append("Confirmed duplicate retained in target quarantine: " + f["id"])
                         continue
                     res["errors"].append("Quarantined duplicate changed or moved: " + f["id"])
-                key = (self._drive_path(tgt, f["id"], tc), f.get("name"), f.get("md5Checksum"))
+                # A copy repair made of a target file before rewriting it, kept on purpose so the
+                # repair can be undone (finding_repairs._backup) -- Bitport's own, not a stray.
+                try:
+                    kept = self.db.conn.execute(
+                        "SELECT 1 FROM finding_repair_actions WHERE source_user=? AND service='drive-backup' "
+                        "AND state='RETAINED' AND item_id LIKE ?", (self.src_user, "%:" + f["id"])).fetchone()
+                except Exception:      # noqa: BLE001 - no repair has run: nothing retained
+                    kept = None
+                if kept:
+                    res.setdefault("repairBackups", []).append({"target": f["id"], "name": f.get("name")})
+                    res["notes"].append("Repair backup kept on purpose so a repair can be undone: " + f["id"])
+                    continue
+                try:
+                    path = self._drive_path(tgt, f["id"], tc, budget_sec=float(os.getenv("VERIFY_PATH_BUDGET_SEC", "120")))
+                except TimeoutError as exc:
+                    res["errors"].append(f"target file {f['id']} not checked as a stray: {exc}")
+                    continue
+                key = (path, f.get("name"), f.get("md5Checksum"))
                 if key in target_keys:
                     res["duplicates"].append({"target": f["id"], "name": f.get("name"), "path": key[0],
                                               "duplicateOf": target_keys[key]})
@@ -886,10 +1200,9 @@ class Verifier:
                               "path": "", "opened": False, "moved": True})
 
     def _perms(self, svc, fid) -> list[dict]:
-        key = (id(svc), fid)
         cache = getattr(self, "_drive_permission_cache", {})
-        if key in cache:
-            return cache.pop(key)
+        if fid in cache:
+            return cache.pop(fid)
         out, token, seen = [], None, set()
         while True:
             r = self._x(lambda t=token: svc.permissions().list(
@@ -918,6 +1231,20 @@ class Verifier:
                 return []
             res["errors"].append(f"sharing of {sid}: could not be read: {error_detail(exc)}")
             return []
+        self._ensure_acl_sets()
+        g = compare_grants(sp, tp, self._translate, self.settings.source_domain, self.settings.target_domain,
+                           self._skipped_ids, sid, getattr(self, "_owed_ids", set()))
+        sh = res.setdefault("sharing", {"filesCompared": 0, "matched": 0, "notReproduced": 0, "owed": 0})
+        sh["filesCompared"] += 1
+        sh["matched"] += g["matched"]
+        sh["notReproduced"] += len(g["notReproduced"])
+        sh["owed"] = sh.get("owed", 0) + g["owed"]
+        out = [f"grant missing on the target: {m}" for m in g["missing"]]
+        out += [f"extra grant on the target (nobody granted it): {e}" for e in g["extra"]]
+        return out
+
+    def _ensure_acl_sets(self) -> None:
+        """The grants this user's migration deliberately did not make, read once per verifier."""
         if not hasattr(self, "_skipped_ids"):
             self._skipped_ids = {r["item_id"] for r in self.db.conn.execute(
                 # OWED too: a share with a colleague not migrated yet is recorded and granted
@@ -925,15 +1252,9 @@ class Verifier:
                 "SELECT item_id FROM audit_log WHERE source_user=? AND item_type='acl' "
                 "AND (status LIKE 'SKIPPED%' OR status LIKE 'OWED%')",
                 (self.src_user,))}
-        g = compare_grants(sp, tp, self._translate, self.settings.source_domain, self.settings.target_domain,
-                           self._skipped_ids, sid)
-        sh = res.setdefault("sharing", {"filesCompared": 0, "matched": 0, "notReproduced": 0})
-        sh["filesCompared"] += 1
-        sh["matched"] += g["matched"]
-        sh["notReproduced"] += len(g["notReproduced"])
-        out = [f"grant missing on the target: {m}" for m in g["missing"]]
-        out += [f"extra grant on the target (nobody granted it): {e}" for e in g["extra"]]
-        return out
+            self._owed_ids = {r["item_id"] for r in self.db.conn.execute(
+                "SELECT item_id FROM audit_log WHERE source_user=? AND item_type='acl' AND status LIKE 'OWED%'",
+                (self.src_user,))}
 
     def _target_files(self, svc) -> list[dict]:
         out, token, seen_tokens, page = [], None, set(), 0
@@ -955,15 +1276,40 @@ class Verifier:
             seen_tokens.add(next_token)
             token = next_token
 
+    def _doc_budget(self):
+        """A whole document, however many reads it takes, gets one wall-clock budget
+        (VERIFY_DOC_BUDGET_SEC, 300s). Live (info@, 7 Nov 2026): one Google Doc held its user for
+        1,352s -- each read inside the per-call retry limit, the document as a whole unbounded.
+        A budget already running (the retry pass sets a shorter one) is left as it is."""
+        import contextlib
+
+        @contextlib.contextmanager
+        def budget():
+            if self._file_deadline is not None:
+                yield
+                return
+            self._file_deadline = time.monotonic() + float(os.getenv("VERIFY_DOC_BUDGET_SEC", "300"))
+            try:
+                yield
+            finally:
+                self._file_deadline = None
+        return budget()
+
     def _content(self, src, tgt, sid, tid, sm, tm, ev) -> list[str]:
+        with _content_slot(), self._doc_budget():
+            return self._content_unbounded(src, tgt, sid, tid, sm, tm, ev)
+
+    def _content_unbounded(self, src, tgt, sid, tid, sm, tm, ev) -> list[str]:
         """Open BOTH files and compare what is inside them."""
         mime = sm.get("mimeType") or ""
         try:
             if mime == "application/vnd.google-apps.spreadsheet":
-                from native_repair import read_sheet, compare_sheets
-                source_sheet = self._x(lambda: read_sheet(self.auth.api("source", "sheets", self.src_user), sid))
-                target_sheet = self._x(lambda: read_sheet(self.auth.api("target", "sheets", self.tgt_user), tid))
-                differences = compare_sheets(source_sheet, target_sheet, self.db.target_for_source_id)
+                from native_repair import compare_sheets_streamed
+                differences = compare_sheets_streamed(
+                    self.auth.api("source", "sheets", self.src_user),
+                    self.auth.api("target", "sheets", self.tgt_user), sid, tid,
+                    self.db.target_for_source_id, fetch=lambda request: self._x(request.execute),
+                    pace=lambda: self._native_pace("sheets", "read"))
                 if differences and self.db.conn.execute(
                         "SELECT 1 FROM audit_log WHERE item_type='form_link' AND status='RELINKED' "
                         "AND error_message LIKE ?", (f"%-> sheet {tid}",)).fetchone():
@@ -972,9 +1318,26 @@ class Verifier:
                                        "Form is relinked" for d in differences]
                 ev.update(opened=True, how="native Sheet entered values, formulas, cell styles and structures; calculated results excluded",nativeFeaturesChecked=True,nativeFeaturesMatched=not differences)
                 return differences
+            if mime == "application/vnd.google-apps.form":
+                # Rebuilt by the Forms API (native_api.copy_form), so compared the same way: without
+                # this a Form was counted as native and never checked, and every user with one
+                # stayed INCOMPLETE (esc.mrc, live 2026-10-31).
+                from native_fidelity import compare_form
+                differences = self._x(lambda: compare_form(self.auth.api("source", "forms", self.src_user),
+                                                           self.auth.api("target", "forms", self.tgt_user), sid, tid))
+                ev.update(opened=True, nativeFeaturesChecked=True, nativeFeaturesMatched=not differences,
+                          how="Form title, description, quiz setting and every item with its options; "
+                              "generated ids, past responses and the responses-Sheet link excluded")
+                return differences
             if mime in ("application/vnd.google-apps.document", "application/vnd.google-apps.presentation"):
-                from native_fidelity import compare_native
-                differences,scope=self._x(lambda: compare_native(self.auth,self.src_user,self.tgt_user,sid,tid,mime,self.db.target_for_source_id))
+                from native_fidelity import compare_native, _fetch_image
+                kind = "docs" if mime.endswith(".document") else "slides"
+                # One breaker per API family: after a few documents fail on a Google 5xx the rest are
+                # not sent for a cooldown (they are queued as unverified, never passed).
+                differences,scope=self._vr.guarded(kind, lambda: self._x(
+                    lambda: compare_native(self.auth,self.src_user,self.tgt_user,sid,tid,mime,self.db.target_for_source_id,
+                                           pace=lambda: self._native_pace(kind, "read"),
+                                           fetch=lambda u: _fetch_image(u, self._file_deadline))))
                 ev.update(opened=True,how=scope,nativeFeaturesChecked=True,nativeFeaturesMatched=not differences)
                 return differences
             if mime in NATIVE_EXPORT:
@@ -993,6 +1356,15 @@ class Verifier:
                 ev["how"] = "not opened: this Google type has no text export"
                 return []
             size = int(sm.get("size") or 0)
+            # Drive's md5Checksum is computed by Google from the bytes it stores, on each tenant. Equal
+            # MD5 and size on both sides already says what downloading both would; downloading them
+            # cost 71 of it.department's 103 minutes (2.6 GB, twice, through the box's uplink). Set
+            # VERIFY_TRUST_MD5=0 to download and compare every byte as before.
+            if (os.getenv("VERIFY_TRUST_MD5", "1").lower() not in ("0", "false", "no")
+                    and sm.get("md5Checksum") and sm.get("md5Checksum") == tm.get("md5Checksum")
+                    and str(sm.get("size")) == str(tm.get("size"))):
+                ev.update(opened=False, how="identical by Drive's own MD5 and size on both tenants (not downloaded)")
+                return []
             if size > MAX_COMPARE_BYTES:
                 ev["how"] = f"not opened: {size:,} bytes is over the {MAX_COMPARE_BYTES:,}-byte comparison limit (size and MD5 only)"
                 return []
@@ -1005,25 +1377,51 @@ class Verifier:
                 out.append(f"content differs: sha256 {sha256(a)[:12]} -> {sha256(b)[:12]} ({len(a)} -> {len(b)} bytes)")
             return out
         except Exception as exc:      # noqa: BLE001
+            failure = self._vr.classify(exc)
             ev["how"] = f"could not be opened: {error_detail(exc)}"
             ev["error"] = f"content could not be compared: {error_detail(exc)}"
+            ev["unverified"] = failure      # drive() records it; it is never an identical
             return []
 
     def _native_links(self, tid, sm) -> list[str]:
+        with _content_slot(), self._doc_budget():
+            return self._native_links_unbounded(tid, sm)
+
+    def _native_links_unbounded(self, tid, sm) -> list[str]:
         """A Doc, Sheet or Slide's links live inside it, where no export comparison sees
         them: ask the same builder the rewrite uses what it would still change on the
         TARGET copy -- a link still naming a migrated source file. Reads only."""
-        from drive_engine import _NATIVE_KIND, _native_project_limiter
+        from drive_engine import _NATIVE_KIND
         import link_rewrite
         k = _NATIVE_KIND.get(sm.get("mimeType") or "")
         if not k:
             return []
         n = self._x(lambda: link_rewrite.rewrite_native(
             k, self.auth.api("target", k, self.tgt_user), tid, self.db.target_for_source_id,
-            pace=lambda op: _native_project_limiter(k, op).acquire(), apply=False))
+            pace=lambda op: self._native_pace(k, op), apply=False))
         return [f"links inside still point at the source ({n} rewrite(s) due)"] if n else []
 
+    def _native_pace(self, kind: str, op: str) -> None:
+        """This user's own per-minute quota AND the project's, as the engine paces its link
+        rewrite (drive_engine: `pace`). The project bucket alone let one user's Sheets reads
+        burst past Google's 60 a minute per user (live, finance@s.: 429 RESOURCE_EXHAUSTED,
+        six retries spent, the Drive verdict left INCOMPLETE)."""
+        from drive_engine import _native_project_limiter, _native_rate
+        from resilience import RateLimiter
+        with self._native_lock:
+            lim = self._native_mine.setdefault((kind, op), RateLimiter(_native_rate(kind, op, 0)))
+        lim.acquire()
+        _native_project_limiter(kind, op).acquire()
+
     # -- Gmail ------------------------------------------------------------
+    def _gmail_budget(self, side):
+        import verify_gmail_quota
+        with self._native_lock:
+            if side not in self._gmail_budgets:
+                user = self.src_user if side == "source" else self.tgt_user
+                self._gmail_budgets[side] = verify_gmail_quota.for_mailbox(self.auth, self.settings, side, user)
+            return self._gmail_budgets[side]
+
     def _label_names(self, svc) -> dict:
         r = self._x(lambda: svc.users().labels().list(userId="me").execute())
         return {l["id"]: l["name"] for l in r.get("labels", [])}
@@ -1032,8 +1430,45 @@ class Verifier:
         from verification_reads import gmail_raw
         return gmail_raw(svc, mid, self._x)
 
+    def _receipts(self) -> dict[str, str]:
+        """source message id -> target id the engine compared byte for byte as it wrote it
+        (migration_checks.verify_written_mail: the target read back against the source still in
+        memory). Gmail cannot change a message's content after it is written -- only its labels --
+        so a receipt holds while both ids exist, and the check need not download either message
+        again: it reads their labels, read state, date and Message-ID instead. Turned off with
+        VERIFY_USE_RECEIPTS=0, which reads every message in full as before."""
+        if os.getenv("VERIFY_USE_RECEIPTS", "1").lower() in ("0", "false", "no"):
+            return {}
+        try:
+            return {sid: tid for sid, tid in self.db.conn.execute(
+                "SELECT source_id, target_id FROM migration_item_receipts "
+                "WHERE source_user=? AND service='gmail' AND status='VERIFIED'", (self.src_user,))}
+        except Exception:      # noqa: BLE001 - no table yet: no receipts
+            return {}
+
+    def _head(self, svc, mid) -> tuple[bytes, dict]:
+        """Labels, read state, date and the two headers the check needs -- no body."""
+        return b"", self._x(lambda: svc.users().messages().get(
+            userId="me", id=mid, format="metadata", metadataHeaders=list(RECEIPT_HEADERS)).execute())
+
+    def _gmail_single(self, svc, mid, fmt, budget, cost):
+        def read():
+            budget.acquire(cost, _stop_check)
+            try:
+                message = svc.users().messages().get(userId="me", id=mid, format=fmt,
+                    **({"metadataHeaders": list(RECEIPT_HEADERS)} if fmt != "raw" else {})).execute()
+                if fmt != "raw":
+                    return b"", message
+                raw = message.get("raw", "")
+                raw = raw if isinstance(raw, str) else raw.decode()
+                return base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4)), message
+            except Exception as exc:
+                budget.penalise(exc)
+                raise
+        return self._x(read)
+
     def _raw_many(self, svc, message_ids: list[str], side: str, progress_offset: int = 0,
-                  progress_total: int | None = None) -> tuple[dict[int, tuple[bytes, dict]], dict[int, Exception]]:
+                  progress_total: int | None = None, fmt: str = "raw") -> tuple[dict[int, tuple[bytes, dict]], dict[int, Exception]]:
         """Read a bounded batch of raw messages, falling back for test/service adapters.
 
         Gmail has no collection-level raw export. The old loop made two synchronous HTTP
@@ -1046,18 +1481,23 @@ class Verifier:
         values: dict[int, tuple[bytes, dict]] = {}
         errors: dict[int, Exception] = {}
         progress_total = progress_total if progress_total is not None else len(message_ids)
+        from verify_gmail_quota import read_cost, is_quota_error
+        budget = self._gmail_budget(side)
+        cost = read_cost(fmt)
         if not hasattr(svc, "new_batch_http_request"):
             for index, message_id in enumerate(message_ids):
-                operation = f"Gmail {side} raw message reads"
+                operation = f"Gmail {side} {fmt} email reads"
                 self._report_progress(operation, progress_offset + index, progress_total,
-                                      f"message {message_id}")
+                                      f"email {message_id}")
                 try:
-                    values[index] = self._raw(svc, message_id)
+                    values[index] = self._gmail_single(svc, message_id, fmt, budget, cost)
                 except Exception as exc:  # noqa: BLE001 - retain per-message failure
                     errors[index] = exc
             return values, errors
 
         def decode_message(message: dict) -> tuple[bytes, dict]:
+            if fmt != "raw":
+                return b"", message
             raw = message.get("raw", "")
             raw = raw if isinstance(raw, str) else raw.decode()
             return base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4)), message
@@ -1074,8 +1514,8 @@ class Verifier:
             chunk = message_ids[offset:offset + batch_size]
             batch_number = offset // batch_size + 1
             batch_total = (len(message_ids) + batch_size - 1) // batch_size
-            operation = f"Gmail {side} raw message reads"
-            item = (f"batch {batch_number}/{batch_total}; messages "
+            operation = f"Gmail {side} {fmt} email reads"
+            item = (f"batch {batch_number}/{batch_total}; emails "
                     f"{progress_offset + offset + 1}-{progress_offset + offset + len(chunk)} "
                     f"of {progress_total}")
 
@@ -1091,27 +1531,42 @@ class Verifier:
                     except Exception as exc:  # noqa: BLE001 - malformed one-item response
                         errors[index] = exc
 
-            batch = svc.new_batch_http_request(callback=receive)
-            for index, message_id in enumerate(chunk):
-                request = svc.users().messages().get(userId="me", id=message_id, format="raw")
-                batch.add(request, request_id=str(offset + index))
             self._report_progress(operation, progress_offset + offset, progress_total, item)
 
             def execute_batch():
-                # A multipart batch can return HTTP 200 while individual reads contain
-                # quota/5xx errors. Surface one transient item error to the normal retry
-                # policy; successful siblings are safe to repeat because these are reads.
-                for index in range(offset, offset + len(chunk)):
-                    values.pop(index, None)
+                # Keep successes and permanent errors. Rebuild only rejected/unknown parts;
+                # outer HTTP failure can happen after some successful callbacks too.
+                pending = [i for i in range(offset, offset + len(chunk)) if i not in values
+                           and (i not in errors or retryable_part_error(errors[i]))]
+                if not pending:
+                    return
+                budget.acquire(cost * len(pending), _stop_check)
+                batch = svc.new_batch_http_request(callback=receive)
+                for index in pending:
                     errors.pop(index, None)
-                batch.execute()
-                transient = next((errors[i] for i in range(offset, offset + len(chunk))
+                    request = (svc.users().messages().get(userId="me", id=message_ids[index], format="raw") if fmt == "raw"
+                               else svc.users().messages().get(userId="me", id=message_ids[index], format="metadata",
+                                                               metadataHeaders=list(RECEIPT_HEADERS)))
+                    batch.add(request, request_id=str(index))
+                try:
+                    batch.execute()
+                except Exception as exc:
+                    budget.penalise(exc)
+                    raise
+                transient = next((errors[i] for i in pending
                                   if i in errors and retryable_part_error(errors[i])), None)
                 if transient is not None:
+                    quota_error = next((errors[i] for i in pending
+                                        if i in errors and is_quota_error(errors[i])), None)
+                    if quota_error is not None:
+                        budget.penalise(quota_error)
                     raise transient
+                self._report_progress(operation, progress_offset + offset + len(chunk), progress_total, item)
 
             try:
-                self._x(execute_batch, operation=operation, request_count=len(chunk))
+                self._x(execute_batch, operation=operation, request_count=lambda: sum(
+                    i not in values and (i not in errors or retryable_part_error(errors[i]))
+                    for i in range(offset, offset + len(chunk))))
             except Exception as exc:  # noqa: BLE001 - a rejected batch must finish as item errors
                 for index in range(offset, offset + len(chunk)):
                     if index not in values:
@@ -1123,18 +1578,19 @@ class Verifier:
                     from verification_reads import status_of
                     if status_of(errors[index]) == 400:
                         try:
-                            values[index] = self._raw(svc, message_ids[index])
+                            # Single-message fallback still passes through quota pacing.
+                            values[index] = self._gmail_single(svc, message_ids[index], fmt, budget, cost)
                             errors.pop(index, None)
                         except Exception as exc:
                             errors[index] = exc
         return values, errors
 
-    def _gmail_raw_chunks(self, pairs):
+    def _gmail_raw_chunks(self, pairs, fmt: str = "raw"):
         """Overlap independent tenant reads without sharing discovery HTTP clients.
 
         AuthManager caches transports per thread. Resolve each service INSIDE its
         worker; never send the main thread's httplib2 transport into the pool.
-        At most VERIFY_GMAIL_WINDOW pairs of batches (default 4) are live or held,
+        At most VERIFY_GMAIL_WINDOW pairs of batches (default 8) are live or held,
         yielded in order; ten bodies per side per batch.
         """
         from concurrent.futures import ThreadPoolExecutor
@@ -1145,7 +1601,7 @@ class Verifier:
             _stop_check()
             svc = (self.auth.source_gmail(self.src_user) if side == "source"
                    else self.auth.target_gmail(self.tgt_user))
-            return self._raw_many(svc, ids, side, offset, total)
+            return self._raw_many(svc, ids, side, offset, total, fmt=fmt)
         # A bounded read-ahead window of batch pairs, yielded in order. One pair at a
         # time left each mailbox ~10x under Gmail's per-user quota and took 8.7-11.5 h
         # for info@'s 39,756 messages (dharan, 2026-10-23). The window bounds memory too:
@@ -1183,6 +1639,40 @@ class Verifier:
         _stop_check()
         return offset, chunk, source_result, target_result
 
+    @staticmethod
+    def _pair_unreadable(index, sid, tid, source_errors, target_errors, res) -> bool:
+        """Record why a pair could not be read; True when it is not compared."""
+        if index in source_errors:
+            exc = source_errors[index]
+            if not _gone_from_source(exc, res):
+                res["errors"].append(f"message {sid}: could not read the SOURCE: {error_detail(exc)}")
+            return True
+        if index in target_errors:
+            exc = target_errors[index]
+            if _is_not_found(exc):
+                res["missing"].append({"source": sid, "target": tid,
+                                       "why": f"not on the target ({str(exc)[:80]})"})
+            else:
+                res["errors"].append(f"message {tid}: could not read the TARGET: {error_detail(exc)}")
+            return True
+        return False
+
+    @staticmethod
+    def _mail_state_diffs(sm, tm, sl, tl, date_header) -> list[str]:
+        """Labels, read state and date of one message pair -- everything Gmail lets change."""
+        diffs = compare_labels({sl.get(i, i) for i in sm.get("labelIds") or []},
+                               {tl.get(i, i) for i in tm.get("labelIds") or []})
+        if ("UNREAD" in (sm.get("labelIds") or [])) != ("UNREAD" in (tm.get("labelIds") or [])):
+            diffs.append("unread state differs")
+        try:
+            hdr_ms = int(parsedate_to_datetime(date_header).timestamp() * 1000)
+        except Exception:      # noqa: BLE001 - no usable Date header
+            hdr_ms = None
+        ti, si = int(tm.get("internalDate") or 0), int(sm.get("internalDate") or 0)
+        if ti and si and ti != si and (hdr_ms is None or abs(ti - hdr_ms) > 1000):
+            diffs.append(f"date differs: source {si}, target {ti}, Date header {hdr_ms}")
+        return diffs
+
     def gmail(self) -> dict:
         res = self._blank()
         src, tgt = self.auth.source_gmail(self.src_user), self.auth.target_gmail(self.tgt_user)
@@ -1210,57 +1700,70 @@ class Verifier:
             res["identical"] += 1
             mapped_msgids.add(cached.get("messageId", ""))
             self.evidence.append({"service":"gmail", "name":cached.get("messageId") or sid,
-                "how":"validated receipt reused after two-tenant history reconciliation",
-                "opened":False, "sha256":cached["sourceSha256"][:16]})
+                "how":("receipted when written; neither copy has changed since its last check (mailbox history)"
+                       if cached.get("receipt") else
+                       "validated comparison reused after two-tenant history reconciliation"),
+                "opened":False, "sha256":(cached.get("sourceSha256") or "")[:16]})
+        receipts = self._receipts()
+        receipted = [p for p in pending if receipts.get(p[0]) == p[1]]
+        pending = [p for p in pending if receipts.get(p[0]) != p[1]]
+        self._report_progress("Gmail check receipted emails", 0, len(receipted))
+        for offset, chunk, (smeta, serr), (tmeta, terr) in self._gmail_raw_chunks(receipted, fmt="metadata"):
+            for index, (sid, tid, _) in enumerate(chunk):
+                res["checked"] += 1
+                if self._pair_unreadable(index, sid, tid, serr, terr, res):
+                    continue
+                sm, tm = smeta[index][1], tmeta[index][1]
+                head = {h["name"].lower(): h["value"].strip()
+                        for h in (sm.get("payload") or {}).get("headers", [])}
+                msgid = head.get("message-id", "")
+                mapped_msgids.add(msgid)
+                diffs = self._mail_state_diffs(sm, tm, sl, tl, head.get("date"))
+                self.evidence.append({"service": "gmail", "name": msgid or sid, "opened": False,
+                                      "how": "content compared byte for byte when it was copied (receipt); "
+                                             "labels, read state and date read now"})
+                if diffs:
+                    res["differences"].append({"item": msgid or sid, "source": sid, "target": tid, "diffs": diffs})
+                else:
+                    res["identical"] += 1
+                    # Content was proven when it was written; labels and read state are what history watches.
+                    cache.put(sid, tid, {"messageId": msgid, "receipt": True, "comparison": "receipt"})
+            self._report_progress("Gmail check receipted emails", min(offset + len(chunk), len(receipted)),
+                                  len(receipted))
+        res["receipted"] = len(receipted)
         total_messages = len(pending)
-        self._report_progress("Gmail compare mapped messages", 0, total_messages)
+        self._report_progress("Gmail compare mapped emails", 0, total_messages)
         for offset, chunk, source_result, target_result in self._gmail_raw_chunks(pending):
             source_raw, source_errors = source_result
             target_raw, target_errors = target_result
             for index, (sid, tid, _) in enumerate(chunk):
                 res["checked"] += 1
-                if index in source_errors:
-                    exc = source_errors[index]
-                    if _gone_from_source(exc, res):
-                        continue
-                    res["errors"].append(f"message {sid}: could not read the SOURCE: {error_detail(exc)}")
-                    continue
-                if index in target_errors:
-                    exc = target_errors[index]
-                    if _is_not_found(exc):
-                        res["missing"].append({"source": sid, "target": tid,
-                                               "why": f"not on the target ({str(exc)[:80]})"})
-                    else:
-                        res["errors"].append(f"message {tid}: could not read the TARGET: {error_detail(exc)}")
+                if self._pair_unreadable(index, sid, tid, source_errors, target_errors, res):
                     continue
                 sraw, sm = source_raw[index]
                 traw, tm = target_raw[index]
                 source_headers = BytesHeaderParser().parsebytes(sraw)
                 msgid = (source_headers.get("Message-ID") or "").strip()
                 mapped_msgids.add(msgid)
-                expected = None
+                expected, linked = None, None
                 if sid in rewritten:
                     b64 = base64.urlsafe_b64encode(sraw).decode().rstrip("=")
                     # decoded parts too: a base64 or quoted-printable body hides the ids
-                    new_b64, _n = rewrite_raw(b64, copy_lookup(self.db, traw + normalise_message(traw)[1]))
+                    lookup, linked = copy_lookup(self.db, traw + normalise_message(traw)[1]), set()
+
+                    def recording(file_id, _lookup=lookup, _seen=linked):
+                        _seen.add(file_id)      # what this email's expected content depends on (the cache)
+                        return _lookup(file_id)
+                    new_b64, _n = rewrite_raw(b64, recording)
                     expected = base64.urlsafe_b64decode(new_b64 + "=" * (-len(new_b64) % 4))
                 verdict, notes = compare_message(sraw, traw, expected)
                 diffs = []
                 if verdict == "different":
                     diffs += [f"message differs: {n}" for n in notes] or ["message differs"]
-                diffs += compare_labels({sl.get(i, i) for i in sm.get("labelIds") or []},
-                                        {tl.get(i, i) for i in tm.get("labelIds") or []})
-                if ("UNREAD" in (sm.get("labelIds") or [])) != ("UNREAD" in (tm.get("labelIds") or [])):
-                    diffs.append("unread state differs")
-                try:
-                    hdr_ms = int(parsedate_to_datetime(source_headers.get("Date")).timestamp() * 1000)
-                except Exception:      # noqa: BLE001 - no usable Date header
-                    hdr_ms = None
-                ti, si = int(tm.get("internalDate") or 0), int(sm.get("internalDate") or 0)
-                if ti and si and ti != si and (hdr_ms is None or abs(ti - hdr_ms) > 1000):
-                    diffs.append(f"date differs: source {si}, target {ti}, Date header {hdr_ms}")
+                diffs += self._mail_state_diffs(sm, tm, sl, tl, source_headers.get("Date"))
                 self.evidence.append({"service": "gmail", "name": msgid or sid, "how": verdict, "bytes": len(sraw),
-                                      "sha256": sha256(sraw)[:16], "opened": True})
+                                      "sha256": sha256(sraw)[:16], "opened": True,
+                                      **({"comparisonNotes": notes} if verdict == "equivalent" else {})})
                 if verdict in ("identical after rewrite", "equivalent"):
                     said[verdict] = said.get(verdict, 0) + 1
                 if diffs:
@@ -1268,13 +1771,13 @@ class Verifier:
                 else:
                     res["identical"] += 1
                     cache.put(sid, tid, {"messageId":msgid, "sourceSha256":sha256(sraw),
-                        "targetSha256":sha256(traw), "comparison":verdict})
+                        "targetSha256":sha256(traw), "comparison":verdict}, links=linked)
             completed = min(offset + len(chunk), total_messages)
-            self._report_progress("Gmail compare mapped messages", completed, total_messages)
+            self._report_progress("Gmail compare mapped emails", completed, total_messages)
         for verdict, n in said.items():
-            res["notes"].append(f"{n} message(s) {verdict}: " + (
+            res["notes"].append(f"{n} email(s) {verdict}: " + (
                 "Drive links repointed at the copies on the target, as intended" if verdict == "identical after rewrite"
-                else "the same message, apart from headers Google adds when it inserts one"))
+                else "the same email, apart from headers Google adds when it inserts one"))
         try:
             mapped_ids |= self._draft_message_ids(tgt)
         except Exception as exc:      # noqa: BLE001 - only the stray check suffers; the drafts are still compared
@@ -1283,31 +1786,22 @@ class Verifier:
         self._note_sample(res, "message", "draft")
         # Duplicates and extras by Message-ID.
         try:
-            welcome = trashed = 0
             scanned = 0
             for m in self._list_all(tgt):
                 scanned += 1
                 self._report_progress("Gmail target inventory", scanned,
-                                      item=f"message {m.get('id', '?')}")
+                                      item=f"email {m.get('id', '?')}")
                 if m["id"] in mapped_ids:
                     continue
                 hdr = self._x(lambda i=m["id"]: tgt.users().messages().get(
                     userId="me", id=i, format="metadata", metadataHeaders=["Message-ID", "From"]).execute())
                 head = {h["name"].lower(): h["value"].strip() for h in hdr.get("payload", {}).get("headers", [])}
                 mid = head.get("message-id", "")
-                if "TRASH" in (hdr.get("labelIds") or []):
-                    trashed += 1        # deleted as far as the user can tell: not a copy that exists
-                    continue
-                if mid not in mapped_msgids and "@google.com" in head.get("from", "").lower():
-                    welcome += 1        # what Google puts in every new mailbox; nobody migrated it
-                    continue
-                (res["duplicates"] if mid in mapped_msgids else res["extras"]).append({"target": m["id"], "messageId": mid})
-            if trashed:
-                res["notes"].append(f"{trashed} message(s) in the target's trash -- what an earlier run left before a "
-                                    f"reset or a delete; they are not counted as copies or strays")
-            if welcome:
-                res["notes"].append(f"{welcome} message(s) from Google itself (new-mailbox welcome mail) sit on the "
-                                    f"target; they were never on the source and are not counted as strays")
+                # A sender domain or Trash label is not an accepted-difference
+                # record. Preserve and report unmatched destinations for review.
+                (res["duplicates"] if mid in mapped_msgids else res["extras"]).append({
+                    "target": m["id"], "messageId": mid, "labels": hdr.get("labelIds") or [],
+                    "classification": "UNMATCHED_DESTINATION"})
         except Exception as exc:      # noqa: BLE001
             res["errors"].append(f"could not list the target's mailbox: {error_detail(exc)}")
         res["notCopied"] = self._failed(("message", "gmail"))
@@ -1322,7 +1816,7 @@ class Verifier:
                 "gmail.sourceReferences", "Access to original unavailable Drive references", "NOT_VERIFIED",
                 checked=len(reference_gaps), note="Original unavailable URLs were preserved; "
                 "restoring their access requires the original file owner. Message equality does not establish link access."))
-            res["notes"].append(f"{len(reference_gaps)} source message(s) retain original unavailable Drive references; "
+            res["notes"].append(f"{len(reference_gaps)} source email(s) retain original unavailable Drive references; "
                                 "their content is preserved, but referenced-file access remains unverified")
         try:
             cache.finish()
@@ -1360,17 +1854,36 @@ class Verifier:
             deliberately_skipped = {r[0] for r in self.db.conn.execute(
                 "SELECT item_id FROM audit_log WHERE source_user=? AND item_type='message' AND status='SKIPPED_CHAT'",
                 (self.src_user,))}
+            # Mail without a Drive link is handed to Google's DMS, not missing: the ledger records it
+            # as DEFERRED_TO_DMS. Live (info@/audit@, 5 Nov 2026) 822 of them read as "no mapping".
+            from config import DEFERRED_TO_DMS, owed_to_dms
+            deferred = {r[0] for r in self.db.conn.execute(
+                "SELECT item_id FROM audit_log WHERE source_user=? AND item_type='message' AND status=?",
+                (self.src_user, DEFERRED_TO_DMS))}
+            # Link mail left to the DMS by the operator's choice (config.DMS_OWED_FAILURES) is owed too.
+            deferred |= {r[0] for r in self.db.conn.execute(
+                "SELECT item_id, error_message FROM audit_log WHERE source_user=? AND item_type='message' "
+                "AND status LIKE 'FAILED%'", (self.src_user,)) if owed_to_dms("message", r[1])}
+            owed = 0
             scanned = 0
             for message in self._list_all(src, side="source"):
                 scanned += 1
                 sid = message.get("id")
+                if sid and sid in deferred and sid not in known:
+                    owed += 1
+                    continue
                 if sid and sid not in known and sid not in draft_messages and sid not in deliberately_skipped and ("message", sid) not in existing:
                     res["notCopied"].append({"type": "message", "id": sid,
                         "status": "UNMAPPED_SOURCE", "error": "Live source message has no migration mapping; destination coverage is not established"})
                     existing.add(("message", sid))
-            res["notes"].append(f"Source coverage: inventoried {scanned} live message IDs, including spam and trash; checked unmapped messages and drafts")
+            res["notes"].append(f"Source coverage: inventoried {scanned} live email IDs, including spam and trash; checked unmapped emails and drafts")
+            if owed:
+                res["notes"].append(f"{owed} email(s) without a Drive link are owed to Google's DMS, not missing")
             if deliberately_skipped:
                 res["notes"].append(f"{len(deliberately_skipped)} legacy chat message(s) are outside Gmail migration coverage")
+            # Every live source message was listed, sampled check or not: an unmapped message this
+            # listing no longer names is copied or gone (verification_repairs.enqueue_findings).
+            res["sourceCoverage"] = True
         except Exception as exc:
             res["errors"].append(f"could not establish full source mailbox coverage: {str(exc)[:160]}")
 
@@ -1747,6 +2260,19 @@ class Verifier:
 # ---------------------------------------------------------------------------
 # A run
 # ---------------------------------------------------------------------------
+def _verdict_by_user(users: dict, expected: dict, services) -> tuple[str, list[str]]:
+    """verdict_of over each user's OWN services; the worst wins (DIFFERENCES, then INCOMPLETE)."""
+    verdicts, reasons = [], []
+    for u, per in users.items():
+        v, r = verdict_of({u: per}, expected.get(u, services))
+        verdicts.append(v)
+        reasons += r
+    for worst in ("DIFFERENCES", "INCOMPLETE"):
+        if worst in verdicts:
+            return worst, reasons
+    return (verdicts[0] if verdicts else verdict_of({}, services)[0]), reasons
+
+
 def verdict_of(users: dict, services: tuple[str, ...]) -> tuple[str, list[str]]:
     """IDENTICAL only when every paired item matched and nothing was left over.
     A check that could not be made is INCOMPLETE, never a pass."""
@@ -1761,13 +2287,18 @@ def verdict_of(users: dict, services: tuple[str, ...]) -> tuple[str, list[str]]:
             if r.get("coverageComplete") is False:
                 incomplete = True
                 reasons.append(f"{user}: {svc} has required scopes that are not fully checked")
+            if r.get("unverified"):
+                incomplete = True
+                states = sorted({u.get("state", "UNVERIFIED") for u in r["unverified"]})
+                reasons.append(f"{user}: {svc} has {len(r['unverified'])} object(s) not verified "
+                               f"({', '.join(states)}) -- not identical, not different: unread")
             if r["errors"]:
                 incomplete = True
                 reasons.append(f"{user}: {svc} had {len(r['errors'])} check(s) that could not be made")
             elif r["checked"] == 0 and not r.get("emptySource"):
                 incomplete = True
                 reasons.append(f"{user}: {svc} checked no items and the source was not confirmed empty")
-            for label in ("differences", "missing", "duplicates", "notCopied"):
+            for label in ("differences", "missing", "duplicates", "notCopied", "extras"):
                 if r[label]:
                     bad = True
                     reasons.append(f"{user}: {svc} has {len(r[label])} {label}")
@@ -1784,30 +2315,90 @@ def service_complete(result: dict) -> bool:
     Known differences are complete checks. An error, or zero checks without an explicitly
     verified empty source, is incomplete and must not be presented as a pass.
     """
-    return (not result.get("errors") and result.get("coverageComplete") is not False
+    return (not result.get("errors") and not result.get("unverified")
+            and result.get("coverageComplete") is not False
             and (result.get("checked", 0) > 0 or result.get("emptySource", False)))
 
 
+def chat_in_scope(db, settings, user: str) -> bool:
+    """Is Chat part of this user's migration: selected for the run, mapped, or really attempted (a refusal is
+    not an attempt -- _chat_attempted). A Chat that failed outright is in scope and still reads as not copied."""
+    selected = getattr(settings, "migrate_chat", None)
+    if selected is None:
+        import config
+        selected = config.chat_by_default()
+    if selected:
+        return True
+    if db.conn.execute("SELECT 1 FROM id_mapping WHERE source_user=? AND type='chat_space' LIMIT 1",
+                       (user,)).fetchone():
+        return True
+    return _chat_attempted(db, user)
+
+
+def retire_chat(db, users) -> None:
+    """Retire Chat findings of users for whom Chat is not part of the migration: their saved Chat verdict and
+    their open Chat queue rows. Nothing about it is owed, so nothing about it is left open."""
+    if not users or not hasattr(db, "write"):
+        return
+    import verification_repairs
+    verification_repairs.ensure(db)
+    from db import utc_now
+    with db.write() as conn:
+        for u in users:
+            conn.execute("DELETE FROM user_verification WHERE source_user=? AND service='chat'", (u,))
+            rows = conn.execute("SELECT source_user,service,finding_key,item_id,issue FROM verification_repair_queue "
+                                "WHERE source_user=? AND service='chat' AND state!='RESOLVED'", (u,)).fetchall()
+            verification_repairs._resolve(conn, rows, utc_now())
+
+
+def _chat_attempted(db, user: str) -> bool:
+    """A Chat row that is a REFUSAL (no access to the service: a skipped row, or a 403 PERMISSION_DENIED)
+    is not an attempt to copy: education@ spent 3 minutes and 9 retries verifying Chat against a scope
+    nobody granted, and ended INCOMPLETE (live, 7 Nov 2026). A real failure still reads as not copied."""
+    from main import _service_unreachable
+    for r in db.conn.execute("SELECT status, error_message FROM audit_log WHERE source_user=? AND item_type IN "
+                             "('chat','chat_space','chat_message')", (user,)):
+        if not (r["status"] or "").startswith("SKIPPED") and not _service_unreachable(r["error_message"] or ""):
+            return True
+    return False
+
+
+def repair_after_user_pending_deploy() -> bool:
+    """True only for the repair backlog (the flag it honours is VERIFY_YIELD_TO_DEPLOY=1, set by the
+    dispatcher); a person's One-to-one run is never cut short by a deploy flag."""
+    if os.getenv("VERIFY_YIELD_TO_DEPLOY", "") != "1":
+        return False
+    import verification_repairs
+    return verification_repairs.deploy_pending()
+
+
 def run(auth, db, settings, users: list[str] | None = None, services=ALL_SERVICES, retry=lambda f: f,
-        progress=print, limit: int | None = None, on_user=None, on_service=None) -> dict:
+        progress=print, limit: int | None = None, on_user=None, on_service=None, services_for=None) -> dict:
     ident = {r["source_email"]: r["target_email"] for r in db.all_identities() if r["entity_type"] == "user"}
     chosen = [u for u in (users or list(ident)) if u in ident]
     services = tuple(s for s in ALL_SERVICES if s in services)
-    # Chat is skipped only when it was never part of this migration: not selected,
-    # nothing mapped and nothing attempted. A chat that failed outright has nothing
-    # mapped either, and must still read as not copied.
-    if "chat" in services and not getattr(settings, "migrate_chat", False) and not any(
-            db.get_target_id(user, sid, "chat_space") for user in chosen
-            for sid, in db.conn.execute("SELECT source_id FROM id_mapping WHERE source_user=? AND type='chat_space' LIMIT 1", (user,))
-    ) and not any(db.conn.execute("SELECT 1 FROM audit_log WHERE source_user=? AND item_type IN "
-                                  "('chat','chat_space','chat_message') LIMIT 1", (user,)).fetchone()
-                  for user in chosen):
-        services = tuple(s for s in services if s != "chat")
+    # Chat is checked per user, and only where it is part of this migration (chat_in_scope). Where it is not,
+    # the user's old Chat verdict and queue rows are retired: 8 verdicts and 41 rows from before Chat went
+    # opt-in kept users INCOMPLETE for a service nobody was migrating (account 3, 8 Nov 2026).
+    no_chat = set()
+    if "chat" in services:
+        no_chat = {u for u in chosen if not chat_in_scope(db, settings, u)}
+        retire_chat(db, no_chat)
+    # Each user's own services: all of them, or (services_for, the repair backlog) only those with something
+    # open -- a user whose findings are all in Drive does not have its whole mailbox re-read before a repair.
+    expected = {}
+    for u in chosen:
+        allowed = tuple(x for x in services if x != "chat" or u not in no_chat)
+        mine = tuple(x for x in allowed if services_for is None or x in set(services_for(u)))
+        expected[u] = mine or allowed
     report = {"generatedAt": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
               "accountId": getattr(settings, "account_id", None),
               "sourceDomain": settings.source_domain, "targetDomain": settings.target_domain,
               "sampleLimit": getattr(settings, "sample_limit", None), "verifyLimit": limit, "services": list(services),
               "users": {}, "evidence": [], "notes": []}
+    import verification_provenance as provenance
+    run_provenance = provenance.begin(HERE, chosen, services, limit=limit)
+    report["provenance"] = run_provenance
     # Users side by side (VERIFY_WORKERS): a check is mostly waiting on Google, and
     # one user at a time made "verify everything" on 300 users a matter of days.
     # Each user is handed to on_user the moment it is done, so the page fills in
@@ -1826,6 +2417,23 @@ def run(auth, db, settings, users: list[str] | None = None, services=ALL_SERVICE
         # intact line so the UI parser and the operator can trust the current state.
         with progress_lock:
             progress(message)
+
+    def stats_line(st: dict, items_done: int, now: float) -> str:
+        """The verifier's own account of itself: verified/identical/different/unverified, what is queued
+        for retry, the document in hand and how long, the last success, the breaker states and the
+        phase -- a live request, a retry wait, a breaker cooldown or between documents -- so a stuck
+        worker reads differently from one that is waiting on purpose."""
+        wall = time.time()
+        since = lambda t: (f"{int(wall - t)}s" if t else "-")
+        return (f"verified={st['verified']} identical={st['identical']} different={st['different']} "
+                f"unverified={st['unverified']} pendingRetry={st['pendingRetry']} phase={st['phase']} "
+                f"retryAttempt={st['retryAttempt']} retryDelay={int(st['retryDelay'])}s "
+                f"lastApiStatus={st['lastApiStatus'] if st['lastApiStatus'] is not None else '-'} "
+                f"circuitBreakerState={','.join(f'{k}:{v}' for k, v in sorted(st['breakers'].items())) or 'closed'} "
+                f"currentDocument={st['currentDocument'] or '-'} currentDocumentMimeType={st['currentMime'] or '-'} "
+                f"currentDocumentElapsed={since(st['currentSince'])} "
+                f"lastSuccessfulDocument={st['lastSuccessfulDocument'] or '-'} "
+                f"lastSuccessfulComparison={since(st['lastSuccessAt'])} ago")
 
     def heartbeat() -> None:
         while not stop_heartbeats.wait(60):
@@ -1854,8 +2462,10 @@ def run(auth, db, settings, users: list[str] | None = None, services=ALL_SERVICE
                           f"| noItemProgress={no_item_progress}s | lastApi={last_api}")
                 if state["in_flight"] and state["last_api_started"] is not None:
                     detail += f" apiOpenFor={int(now - state['last_api_started'])}s"
-                if state["detail"]:
+                if state.get("detail"):
                     detail += f" | currentItem={state['detail']}"
+                if state.get("stats"):
+                    detail += " | " + stats_line(state["stats"], state["items_completed"], now)
                 if state["last_error"]:
                     error_age = int(now - state["last_error_at"])
                     detail += f" | lastError={state['last_error']} ({error_age}s ago)"
@@ -1927,6 +2537,9 @@ def run(auth, db, settings, users: list[str] | None = None, services=ALL_SERVICE
                     state["last_error_at"] = now
                 else:
                     state["last_api_result"] = "ok"
+            elif event == "progress" and "stats" in details:
+                state["stats"] = details["stats"]
+                return
             elif event == "progress":
                 completed = details.get("completed")
                 total = details.get("total")
@@ -1949,6 +2562,11 @@ def run(auth, db, settings, users: list[str] | None = None, services=ALL_SERVICE
 
     def one(u: str) -> None:
         _stop_check()
+        if repair_after_user_pending_deploy():
+            # A deploy is waiting for an idle box: finish the users already under way, take no new one. This
+            # user stays due and is picked up by the next batch.
+            emit(f"verify: {u} not started: a deploy is waiting; it stays due for the next batch")
+            return
         with lock:
             started_users.add(u)
         emit_scheduler()
@@ -1957,21 +2575,23 @@ def run(auth, db, settings, users: list[str] | None = None, services=ALL_SERVICE
                      on_api_attempt=lambda event, **details: activity_event(u, event, **details),
                      on_progress=lambda **details: activity_event(u, "progress", **details))
         per = {}
-        for service_index, svc in enumerate(services, 1):
+        mine = expected[u]
+        for service_index, svc in enumerate(mine, 1):
             _stop_check()
             now = time.monotonic()
             with lock:
                 activity[u] = {"service": svc, "started": now,
                                "service_started": now, "last_heartbeat": now,
-                               "operation": f"{svc} initialising", "api_attempts": 0,
+                               "operation": f"{svc} initialising", "detail": "", "api_attempts": 0,
                                "http_calls": 0, "retry_rounds": 0, "in_flight": 0, "last_api_started": None,
                                "last_api_at": None, "last_api_result": "", "last_error": "",
                                "last_error_at": now,
                                "items_completed": 0, "items_total": None,
                                "last_progress_at": now, "last_logged_bucket": -1}
-            emit(f"verify: {u} | service {service_index} of {len(services)} {svc} started")
+            emit(f"verify: {u} | service {service_index} of {len(mine)} {svc} started")
             v._report_progress(f"{svc} initialising", 0, None)
             service_started = time.monotonic()
+            service_started_at = provenance.utc()
             try:
                 per[svc] = getattr(v, svc)()
                 import verification_coverage as coverage
@@ -1987,6 +2607,8 @@ def run(auth, db, settings, users: list[str] | None = None, services=ALL_SERVICE
                 r = Verifier._blank()
                 r["errors"].append(f"{svc} could not be verified: {type(exc).__name__}: {str(exc)[:160]}")
                 per[svc] = r
+            per[svc]["provenance"] = provenance.for_service(
+                {**run_provenance, "services": list(mine)}, u, ident[u], svc, service_started_at)
             elapsed = time.monotonic() - service_started
             with lock:
                 state = activity.pop(u, {})
@@ -2011,15 +2633,15 @@ def run(auth, db, settings, users: list[str] | None = None, services=ALL_SERVICE
             followup = on_user(u, per)
             if followup is not None:
                 per = followup["users"][u]
-                rechecked = followup.get("recheckedServices", services)
+                rechecked = followup.get("recheckedServices", mine)
                 evidence = ([e for e in evidence if e.get("service") not in rechecked]
                             + followup.get("evidence", []))
         with lock:
             done[u] = (per, evidence)
             finished = len(done)
         emit_scheduler()
-        user_verdict, _ = verdict_of({u: per}, services)
-        user_completion = ("INCOMPLETE" if len(per) != len(services)
+        user_verdict, _ = verdict_of({u: per}, mine)
+        user_completion = ("INCOMPLETE" if len(per) != len(mine)
                            or any(not service_complete(r) for r in per.values()) else "COMPLETE")
         emit(f"verify: [{finished}/{len(chosen)}] {u} checked; completion={user_completion}; "
              f"verdict={user_verdict}")
@@ -2036,16 +2658,17 @@ def run(auth, db, settings, users: list[str] | None = None, services=ALL_SERVICE
             report["evidence"] += done[u][1]
     service_count = sum(len(per) for per in report["users"].values())
     incomplete_users = sum(
-        1 for per in report["users"].values()
-        if len(per) != len(services) or any(not service_complete(r) for r in per.values())
+        1 for u, per in report["users"].items()
+        if len(per) != len(expected.get(u, services)) or any(not service_complete(r) for r in per.values())
     )
     report["coverage"] = {
         "usersExpected": len(chosen), "usersCompleted": len(report["users"]),
-        "servicesExpected": len(chosen) * len(services), "servicesCompleted": service_count,
+        "servicesExpected": sum(len(expected[u]) for u in chosen), "servicesCompleted": service_count,
         "incompleteUsers": incomplete_users,
         "completion": "COMPLETE" if chosen and len(report["users"]) == len(chosen) and not incomplete_users else "INCOMPLETE",
     }
-    report["verdict"], report["reasons"] = verdict_of(report["users"], services)
+    report["provenance"]["finishedAt"] = provenance.utc()
+    report["verdict"], report["reasons"] = _verdict_by_user(report["users"], expected, services)
     for u, per in report["users"].items():
         for svc, r in per.items():
             if r["checked"] == 0 and not r["errors"] and not r.get("emptySource"):
@@ -2102,7 +2725,7 @@ def to_markdown(report: dict) -> str:
                      f"{len(r['duplicates'])} | {len(r['extras'])} | {len(r['notCopied'])} | {len(r['errors'])} |")
         L.append("")
         for svc, r in per.items():
-            for label in ("differences", "missing", "duplicates", "notCopied", "errors"):
+            for label in ("differences", "missing", "duplicates", "notCopied", "extras", "errors"):
                 for item in r[label][:25]:
                     L.append(f"- **{svc} / {label}**: {json.dumps(item, default=str)[:400]}")
             for n in r["notes"][:10]:
@@ -2132,17 +2755,23 @@ def quick_dir(account_id) -> str:
 def save(report: dict, base: str | None = None) -> tuple[str, str]:
     d = base or quick_dir(report.get("accountId"))
     os.makedirs(d, exist_ok=True)
-    stamp = report["generatedAt"].replace(":", "").replace("-", "")
+    from uuid import uuid4
+    stamp = report["generatedAt"].replace(":", "").replace("-", "") + "-" + uuid4().hex[:12]
     jp, mp = os.path.join(d, f"quick-{stamp}.json"), os.path.join(d, f"quick-{stamp}.md")
     with open(jp, "w", encoding="utf-8") as fh:
         json.dump(report, fh, indent=1, default=str)
     with open(mp, "w", encoding="utf-8") as fh:
         fh.write(to_markdown(report))
     for name, src in (("latest.json", jp), ("latest.md", mp)):
-        tmp = os.path.join(d, name + ".tmp")
-        with open(src, "rb") as a, open(tmp, "wb") as b:
-            b.write(a.read())
-        os.replace(tmp, os.path.join(d, name))
+        import tempfile
+        fd, tmp = tempfile.mkstemp(prefix=name + ".", suffix=".tmp", dir=d)
+        try:
+            with open(src, "rb") as a, os.fdopen(fd, "wb") as b:
+                b.write(a.read())
+            os.replace(tmp, os.path.join(d, name))
+        finally:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
     return jp, mp
 
 
@@ -2163,18 +2792,30 @@ def save_user_results(db, report: dict) -> None:
     user's row in a migration can say what was last found without reading a report file."""
     for user, per in report["users"].items():
         import verification_repairs
+        from parity_diagnostics import diagnose
         verification_repairs.enqueue_findings(db, user, per)
         for svc, r in per.items():
             verdict, _ = verdict_of({user: {svc: r}}, (svc,))
             if verdict == "IDENTICAL" and r["checked"] == 0 and not r.get("emptySource"):
                 verdict = "INCOMPLETE"          # nothing checked is not a pass (an empty source is)
+            if svc == "gmail" and verdict == "IDENTICAL" and service_complete(r) and not r.get("sampled") and r.get("sourceCoverage"):
+                started = (r.get("provenance") or {}).get("serviceStartedAt")
+                if started and hasattr(db, "write"):
+                    with db.write() as conn:
+                        if conn.execute("SELECT 1 FROM sqlite_master WHERE name='migration_item_receipts'").fetchone():
+                            conn.execute("UPDATE migration_item_receipts SET status='RECHECKED_BY_FULL_VERIFICATION' "
+                                         "WHERE source_user=? AND service='gmail' AND status='NEEDS_RECHECK' "
+                                         "AND verified_at<=? AND EXISTS (SELECT 1 FROM id_mapping m WHERE "
+                                         "m.source_user=migration_item_receipts.source_user AND m.source_id=migration_item_receipts.source_id "
+                                         "AND m.target_id=migration_item_receipts.target_id AND m.type='message')", (user, started))
             db.save_user_verification(user, svc, verdict, r["checked"], r["identical"],
                                       (r.get("sampled") or {}).get("of"), {
                 "completion": "COMPLETE" if service_complete(r) else "INCOMPLETE",
+                "diagnostics": diagnose(svc, r),
                 "counts": {k: len(r[k]) for k in ("differences", "missing", "duplicates", "extras", "notCopied", "errors")},
                 **{k: r[k][:25] for k in ("differences", "missing", "duplicates", "notCopied", "errors")},
                 "extras": r["extras"][:10], "notes": r["notes"][:10], "sampled": r.get("sampled"),
-                **{key: r.get(key) for key in ("scopeVersion", "coverageComplete", "checks", "sharing", "sourceInventory", "emptySource", "cache", "copyResolutions")}})
+                **{key: r.get(key) for key in ("scopeVersion", "coverageComplete", "checks", "sharing", "sourceInventory", "emptySource", "cache", "copyResolutions", "provenance")}})
 
 
 def verify_user(auth, db, settings, source_user: str, services, limit: int | None, retry=lambda f: f) -> str | None:
@@ -2196,7 +2837,7 @@ def verify_user(auth, db, settings, source_user: str, services, limit: int | Non
 
 def run_and_save(auth, db, settings, users=None, services=ALL_SERVICES, retry=lambda f: f, progress=print,
                  limit: int | None = None, base: str | None = None,
-                 repair_after_user: bool = False) -> dict:
+                 repair_after_user: bool = False, scope_to_findings: bool = False) -> dict:
     # Persist each finished service while a large user is still in progress. If the process
     # is stopped or a later service cannot be checked, completed services remain current in
     # the One-to-one page instead of disappearing with that user's unfinished worker.
@@ -2206,8 +2847,12 @@ def run_and_save(auth, db, settings, users=None, services=ALL_SERVICES, retry=la
         verification_repairs.enable(db)
         callback = lambda user, per: verification_repairs.finished_user(
             auth, db, settings, user, per, limit, retry, progress)
+    services_for = None
+    if scope_to_findings:
+        import verification_repairs
+        services_for = lambda user: verification_repairs.services_to_check(db, user, services)  # noqa: E731
     report = run(auth, db, settings, users, services, retry, progress, limit,
-                 on_user=callback,
+                 on_user=callback, services_for=services_for,
                  on_service=lambda user, service, result: save_user_results(
                      db, {"users": {user: {service: result}}}))
     if repair_after_user:
@@ -2228,6 +2873,12 @@ def run_and_save(auth, db, settings, users=None, services=ALL_SERVICES, retry=la
 
 def main(argv=None) -> int:
     import argparse
+    limit_arenas()      # before any worker thread exists: pools are made per thread as they start
+    # The verifier only reads: a hung request must not hold a worker for the engines' 300 s.
+    os.environ.setdefault("GOOGLE_HTTP_TIMEOUT_SEC", os.getenv("VERIFY_HTTP_TIMEOUT_SEC", "90"))
+    # Reading a large Doc, Slides deck or Sheet takes longer than 90 s; everything else keeps the short bound.
+    for api in ("DOCS", "SLIDES", "SHEETS"):
+        os.environ.setdefault("GOOGLE_HTTP_TIMEOUT_SEC_" + api, os.getenv("VERIFY_NATIVE_HTTP_TIMEOUT_SEC", "200"))
 
     from auth import AuthManager
     from config import Settings
@@ -2238,10 +2889,17 @@ def main(argv=None) -> int:
     ap.add_argument("--user", action="append", help="limit to these source users")
     ap.add_argument("--services", default=",".join(ALL_SERVICES))
     ap.add_argument("--limit", type=int, help="check only this many of each kind of item per user, evenly spread")
+    ap.add_argument("--scope-to-findings", action="store_true",
+                    help="check each user only on services with something open (the repair backlog's own pass)")
     ap.add_argument("--repair-after-user", action="store_true",
                     help="repair supported findings and recheck each user immediately after verification")
     a = ap.parse_args(argv)
-    services = tuple(s.strip() for s in a.services.split(","))
+    services = ALL_SERVICES if a.services.strip() == "all" else tuple(s.strip() for s in a.services.split(","))
+    # An unknown name used to be dropped silently: the A/B's `--services all` checked nothing in any
+    # arm, and each arm read whatever rows some other verify had left.
+    unknown = sorted(set(services) - set(ALL_SERVICES))
+    if unknown:
+        ap.error(f"unknown service(s) {', '.join(unknown)}; choose from {', '.join(ALL_SERVICES)}, or all")
     settings = Settings(account_id=a.account_id)
     # The scopes a credential carries follow these flags (config.source_scopes), and main.py switches
     # them on for the services a run names. Without this, reading contacts or tasks is a 403.
@@ -2254,10 +2912,14 @@ def main(argv=None) -> int:
     migration_main._install_signal_handlers()
     try:
         run_and_save(AuthManager(settings), db, settings, a.user, services,
-                     retry=retry_on_google_error(max_retries=settings.max_retries),
+                     retry=retry_on_google_error(
+                         max_retries=settings.max_retries,
+                         # One document may spend at most this long on retries and waits, a Retry-After
+                         # included: a Docs 503 held info@s. at item 326 of 1,403 for 27 minutes.
+                         max_elapsed=float(os.getenv("VERIFY_RETRY_MAX_ELAPSED_SEC", "180"))),
                      progress=lambda m: print(m, flush=True),
                      limit=a.limit, base=verify_dir(a.account_id),
-                     repair_after_user=a.repair_after_user)
+                     repair_after_user=a.repair_after_user, scope_to_findings=a.scope_to_findings)
     except (VerificationCancelled, KeyboardInterrupt):
         if a.repair_after_user:
             import verification_repairs

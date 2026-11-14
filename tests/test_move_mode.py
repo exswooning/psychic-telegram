@@ -10,6 +10,7 @@ which is what every guard here is about: once it has moved, the target holds the
 from __future__ import annotations
 
 import threading
+import types
 
 import pytest
 
@@ -144,6 +145,7 @@ class TestNothingDeletesTheOnlyCopy:
         assert _tgt(auth).call_count("files.update") == 0
         c = object.__new__(mirror.Cycle)
         c._lock, c.proposed = threading.Lock(), []
+        c.settings = types.SimpleNamespace()      # propose() reads _background_delta off it
         c.propose(**moved)
         c.propose(**{**moved, "item_id": "S1", "target_id": "T1"})
         assert [d["item_id"] for d in c.proposed] == ["S1"]
@@ -242,3 +244,13 @@ class TestWhatFollowsAMoveRun:
         repair.retry_drive_stragglers(auth, db, settings, apply=True,
                                       users=[SRC_USER], _migrate_user=migrate_user)
         assert seen == {SRC_USER: "move"} and settings.transfer_mode == "server_side"
+
+
+def test_a_writable_source_client_is_the_real_one_and_a_default_one_is_read_only(auth, settings, monkeypatch):
+    """a98ead0 returned the read-only wrapper for writable=True as well, so no deliberate writer
+    (the move check, move back, link flip, the contract probe) could write to a sandbox source."""
+    import auth as auth_mod
+    import domain_guard
+    monkeypatch.setattr(domain_guard, "require_not_source", lambda *a, **k: None)   # a declared sandbox
+    assert not isinstance(auth.source_drive("u@tenanta.com", writable=True), auth_mod.ReadOnlyDrive)
+    assert isinstance(auth.source_drive("u@tenanta.com"), auth_mod.ReadOnlyDrive)

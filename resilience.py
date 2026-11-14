@@ -24,8 +24,10 @@ from __future__ import annotations
 import functools
 import json
 import logging
+import os
 import random
 import re
+import sys
 import threading
 import time
 from collections import deque
@@ -74,6 +76,29 @@ T = TypeVar("T")
 
 class PermanentAPIError(Exception):
     """Raised for errors retrying will never fix. Callers should give up."""
+
+
+class RetryBudgetExceeded(RuntimeError):
+    """Retries (or the elapsed budget) spent on a transient Google failure. A RuntimeError, so every
+    existing `except RuntimeError` still catches it; the fields say which status it was, how many
+    attempts it took and how long, so a caller can tell "Google was down" from "this is wrong"."""
+
+    def __init__(self, message: str, status: int | None = None, attempts: int = 0, elapsed: float = 0.0):
+        super().__init__(message)
+        self.status, self.attempts, self.elapsed = status, attempts, elapsed
+
+
+NETWORK_DOWN_BUDGET_SEC = float(os.getenv("NETWORK_DOWN_BUDGET_SEC", "600"))
+NETWORK_DOWN_SIGNS = ("unable to find the server", "name or service not known", "temporary failure in name resolution",
+                      "nodename nor servname", "network is unreachable", "no route to host", "getaddrinfo failed")
+
+
+def network_down(exc: BaseException) -> bool:
+    """The box cannot reach the internet at all (DNS or routing), as opposed to one slow or reset request."""
+    if isinstance(exc, socket.gaierror):
+        return True
+    text = f"{exc} {getattr(exc, '__cause__', '') or ''}".lower()
+    return any(sign in text for sign in NETWORK_DOWN_SIGNS)
 
 
 class TransportExhausted(RuntimeError):
@@ -302,17 +327,40 @@ def _is_permanent(status: int, reason: str, exc: HttpError | None = None) -> boo
     return True
 
 
+# Gmail's per-user limit says WHEN in the error body ("User-rate limit exceeded.  Retry after
+# 2026-10-31T04:53:11.049Z"), 15-30 minutes ahead, and sends no Retry-After header. The ladder
+# (~4 minutes) gave up long before it: live, 729 messages unverifiable and one user's whole mail
+# pass FAILED (sandbox A/B, 2026-10-31). Waits longer than RETRY_AFTER_CAP_SEC still fail the item.
+_RETRY_AFTER_AT = re.compile(r"Retry after (\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?Z)")
+RETRY_AFTER_CAP = float(os.getenv("RETRY_AFTER_CAP_SEC", "1800"))
+
+
 def _retry_after_seconds(exc: HttpError) -> float | None:
+    """Seconds Google asked us to wait: a Retry-After header, or a "Retry after <time>" in the body."""
     resp = getattr(exc, "resp", None)
-    if resp is None:
+    val = resp.get("retry-after") or resp.get("Retry-After") if resp is not None else None
+    if val:
+        try:
+            return float(val)
+        except (TypeError, ValueError):
+            pass
+    m = _RETRY_AFTER_AT.search(str(exc) + " " + str(getattr(exc, "content", b"")[:2000]))
+    if not m:
         return None
-    val = resp.get("retry-after") or resp.get("Retry-After")
-    if not val:
-        return None
-    try:
-        return float(val)
-    except (TypeError, ValueError):
-        return None
+    from datetime import datetime, timezone
+    at = datetime.fromisoformat(m.group(1).replace("Z", "+00:00"))
+    return max((at - datetime.now(timezone.utc)).total_seconds(), 1.0)
+
+
+def _wait(delay: float) -> None:
+    """time.sleep, but a long wait still hears Stop: a Retry-After can be half an hour."""
+    end = time.monotonic() + delay
+    while (left := end - time.monotonic()) > 0:
+        main = sys.modules.get("main")
+        if left > 5 and main is not None and getattr(main, "SHUTDOWN", None) is not None \
+                and main.SHUTDOWN.is_set():
+            raise RuntimeError("stopped while waiting out a Google rate limit")
+        time.sleep(min(left, 5.0))
 
 
 def _ask_hook(before_retry):
@@ -368,8 +416,9 @@ def retry_on_google_error(
     max_retries: int = 6, base_delay: float = 1.0, max_delay: float = 60.0,
     before_retry: Callable[[], T | None] | None = None,
     label: str | None = None,
-    on_quota_rejection: Callable[[], None] | None = None,
+    on_quota_rejection: Callable[[str], None] | None = None,
     quota_reasons: frozenset | None = None,
+    max_elapsed: float | None = None,
 ) -> Callable[[Callable[..., T]], Callable[..., T]]:
     """
     Decorator: retry transient Google API failures with full-jitter exponential
@@ -402,10 +451,19 @@ def retry_on_google_error(
     on_quota_rejection
     -------------------
     Called once per attempt Google rejected for pacing (rateLimitExceeded,
-    userRateLimitExceeded, quotaExceeded) -- immediately, before the sleep.
+    userRateLimitExceeded, quotaExceeded) -- immediately, before the sleep -- with
+    Google's reason, so whoever listens can say WHICH limit pushed back.
     `quota_reasons` narrows which of those it hears: a limiter modelling a
     whole PROJECT must not learn from userRateLimitExceeded, one account's own
     budget (see drive_engine.PROJECT_QUOTA_REASONS).
+
+    max_elapsed
+    -----------
+    A wall-clock budget for one call, all attempts and waits together. None (every engine) keeps
+    the ladders above exactly as they were. The verifier sets one: its ladder honours a Retry-After
+    up to RETRY_AFTER_CAP (30 min) per attempt, so one Docs 503 could hold the single-threaded
+    Drive loop for the better part of an hour. A wait that would end after the budget is not
+    started: RetryBudgetExceeded is raised at once, so the caller can queue the item and go on.
 
     Without it, an AdaptiveRateLimiter only learns a project is overshot when a
     call's own retry ladder finally gives up (drive_engine.py penalises it then,
@@ -424,6 +482,8 @@ def retry_on_google_error(
         @functools.wraps(fn)
         def wrapper(*args, **kwargs) -> T:
             attempt = 0
+            call_started = time.monotonic()
+            network_down_since = None
             while True:
                 # Timed here because every Google call in the engine passes
                 # through this decorator, so instrumenting it needs no change
@@ -495,25 +555,40 @@ def retry_on_google_error(
                         # burst of siblings nothing.
                         if on_quota_rejection is not None and (
                                 quota_reasons is None or reason in quota_reasons):
-                            on_quota_rejection()
+                            on_quota_rejection(reason or "unknown")
                     if attempt > budget:
-                        raise RuntimeError(
+                        raise RetryBudgetExceeded(
                             f"exhausted {budget} retries on HTTP {status} "
-                            f"({reason or 'unknown reason'}): {exc}"
+                            f"({reason or 'unknown reason'}): {exc}",
+                            status=status, attempts=attempt,
+                            elapsed=time.monotonic() - call_started,
                         ) from exc
 
                     retry_after = _retry_after_seconds(exc)
+                    if retry_after is not None and retry_after > RETRY_AFTER_CAP:
+                        raise RuntimeError(
+                            f"HTTP {status} ({reason or 'unknown reason'}): Google asked for "
+                            f"{retry_after:.0f}s, over RETRY_AFTER_CAP_SEC: {exc}") from exc
                     if retry_after is not None:
-                        delay = min(retry_after, max_delay)
+                        # Google's own time, not the ladder's cap: retrying sooner is only refused
+                        # again. A little jitter so every waiting thread does not return at once.
+                        delay = retry_after + random.uniform(0, 1)
                     else:
                         delay = random.uniform(
                             0, min(max_delay, base_delay * (2 ** (attempt - 1)))
                         )
+                    if max_elapsed is not None and (
+                            time.monotonic() - call_started + delay > max_elapsed):
+                        raise RetryBudgetExceeded(
+                            f"HTTP {status} ({reason or 'unknown reason'}): the next wait ({delay:.0f}s) would "
+                            f"pass the {max_elapsed:.0f}s retry budget after {attempt} attempt(s): {exc}",
+                            status=status, attempts=attempt,
+                            elapsed=time.monotonic() - call_started) from exc
                     log.debug(
                         "retrying after HTTP %s (%s): attempt %d/%d in %.2fs",
                         status, reason, attempt, budget, delay,
                     )
-                    time.sleep(delay)
+                    _wait(delay)
                     # A 5xx may have been processed before the error was
                     # generated; a 429 was rejected before it was.
                     if status is not None and status >= 500:
@@ -540,7 +615,14 @@ def retry_on_google_error(
                     # occasional duplicate beats an item that silently is not
                     # there.
                     attempt += 1
-                    if attempt > max_retries:
+                    # The box itself offline (Wi-Fi lost, DNS gone) is not a slow API: six quick retries
+                    # gave up inside about a minute and ended a 16-hour DMS job (account 3, 14 Nov 2026,
+                    # "Unable to find the server" ten minutes after the Wi-Fi dropped). Ride it out.
+                    down = network_down(exc)
+                    if down and network_down_since is None:
+                        network_down_since = time.monotonic()
+                    riding_out = down and time.monotonic() - network_down_since < NETWORK_DOWN_BUDGET_SEC
+                    if attempt > max_retries and not riding_out:
                         # A distinct type, subclassing RuntimeError so every
                         # existing `except RuntimeError` still catches it.
                         # Callers that need to tell "the network died, and the
@@ -552,9 +634,13 @@ def retry_on_google_error(
                             f"exhausted {max_retries} retries on "
                             f"{type(exc).__name__}: {exc}"
                         ) from exc
-                    delay = random.uniform(
-                        0, min(max_delay, base_delay * (2 ** (attempt - 1)))
-                    )
+                    delay = (min(60.0, 5.0 * (2 ** min(attempt - 1, 4))) if down else random.uniform(
+                        0, min(max_delay, base_delay * (2 ** (attempt - 1)))))
+                    if max_elapsed is not None and time.monotonic() - call_started + delay > max_elapsed:
+                        raise RetryBudgetExceeded(
+                            f"{type(exc).__name__} after {attempt} attempt(s), over the "
+                            f"{max_elapsed:.0f}s retry budget: {exc}",
+                            attempts=attempt, elapsed=time.monotonic() - call_started) from exc
                     log.debug("retrying after %s: attempt %d/%d in %.2fs",
                               type(exc).__name__, attempt, max_retries, delay)
                     time.sleep(delay)
@@ -692,6 +778,10 @@ class AdaptiveRateLimiter(RateLimiter):
         self.rate = min(max(self.rate, self.floor), self.ceiling)
         self._last_change = time.monotonic()
         self._rejections = 0
+        # Which limit said no, by Google's reason: "quota pushback" alone could be a
+        # per-project, per-user or sharing limit, and only one of those a quota request fixes.
+        self._by_reason: dict[str, int] = {}
+        self.last_reason: str | None = None
         self._backoffs = 0
         # Calls already in flight when the first rejection in a burst lands keep
         # arriving for a moment after -- every one of them blaming the SAME crossing,
@@ -724,7 +814,7 @@ class AdaptiveRateLimiter(RateLimiter):
             self._events.clear()
         return out
 
-    def penalise(self) -> float:
+    def penalise(self, reason: str | None = None) -> float:
         """Called when the service rejected a call for quota.
 
         Backs off by `decrease`, not by half.
@@ -770,6 +860,8 @@ class AdaptiveRateLimiter(RateLimiter):
         """
         with self._lock:
             self._rejections += 1
+            self.last_reason = reason or "unknown"
+            self._by_reason[self.last_reason] = self._by_reason.get(self.last_reason, 0) + 1
             now = time.monotonic()
             if (self._last_penalty is not None
                     and now - self._last_penalty < self.debounce_window):
@@ -838,6 +930,7 @@ class AdaptiveRateLimiter(RateLimiter):
         with self._lock:
             return {"rate": round(self.rate, 2), "floor": self.floor,
                     "ceiling": self.ceiling, "rejections": self._rejections,
+                    "rejectionsByReason": dict(self._by_reason),
                     "backoffs": self._backoffs, "decrease": self.decrease,
                     "ceilingHint": (round(self._ceiling_hint, 2)
                                     if self._ceiling_hint is not None else None)}

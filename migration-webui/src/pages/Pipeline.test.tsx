@@ -35,7 +35,7 @@ beforeEach(() => {
 describe('Pipeline', () => {
   it('draws every part, in sections, and says how many', async () => {
     view()
-    expect(await screen.findByText(/65 parts in 13 sections/)).toBeInTheDocument()
+    expect(await screen.findByText(/71 parts in 13 sections/)).toBeInTheDocument()
     for (const id of ['src', 'wizard', 'drive', 'gmail', 'lim_tgt', 'id_mapping', 'tgt', 'undo', 'mc'])
       expect(screen.getByTestId(`node-${id}`)).toBeInTheDocument()
     for (const f of ['setup', 'engines', 'ledger', 'verify']) expect(screen.getByTestId(`frame-${f}`)).toBeInTheDocument()
@@ -86,7 +86,7 @@ describe('Pipeline', () => {
       expect(d.getAllByText('gmail_engine.py')).toHaveLength(2)      // subtitle, and the file list
       expect(d.getByText(/runs on: Any machine/)).toBeInTheDocument()
       expect(d.getByText(/Source tenant · Reads/)).toBeInTheDocument()       // comes from
-      expect(d.getByText(/Link rewrite · Messages/)).toBeInTheDocument()     // feeds
+      expect(d.getByText(/Link rewrite · Emails/)).toBeInTheDocument()     // feeds
     })
 
     it('says plainly when nothing is measuring the part live', async () => {
@@ -98,7 +98,7 @@ describe('Pipeline', () => {
     it('follows a neighbour link to the next part', async () => {
       view()
       fireEvent.click(await screen.findByTestId('node-gmail'))
-      fireEvent.click(screen.getByText(/Link rewrite · Messages/))
+      fireEvent.click(screen.getByText(/Link rewrite · Emails/))
       expect(within(screen.getByTestId('pipeline-selected')).getByText('Link rewrite')).toBeInTheDocument()
     })
 

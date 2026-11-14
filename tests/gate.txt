@@ -1,0 +1,27 @@
+# The quick gate: the tests that guard parity, safety and deploys. Run ./gate.sh before every deploy.
+# The full suite (about 21,000 tests, about 2 hours) is for the nightly run. Keep this under 10 minutes.
+tests/test_lint.py
+tests/test_delta_actually_runs.py
+tests/test_migrate_ordered_passes.py
+tests/test_split_mail_safety.py
+tests/test_split_mail_mode.py
+tests/test_dms_pipeline.py
+tests/test_dms_starts_on_its_own.py
+tests/test_dms_action.py
+tests/test_mail_dead_links.py
+tests/test_verify_sample.py
+tests/test_drive_engine.py
+tests/test_drive_finish_item.py
+tests/test_gmail_calendar.py
+tests/test_adaptive_rate.py
+tests/test_run_watch.py
+tests/test_repair_pause_holds.py
+tests/test_destructive_steps_are_guarded.py
+tests/test_wipe_tenant.py
+tests/test_box_routes_are_superadmin_only.py
+tests/test_deploy_config.py
+tests/test_upgrades_never_restart_bitport.py
+tests/test_console_navigation_survives_a_network_drop.py
+tests/test_dms_light_proof.py
+tests/test_dms_label_alignment.py
+tests/test_deep_reconciliation.py

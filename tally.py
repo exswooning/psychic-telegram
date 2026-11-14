@@ -42,7 +42,7 @@ from datetime import datetime, timezone
 from config import DEFERRED_TO_DMS
 
 SERVICES = ("drive_files", "drive_folders", "mail", "calendar", "contacts", "tasks")
-LABEL = {"drive_files": "Drive files", "drive_folders": "Drive folders", "mail": "Mail messages",
+LABEL = {"drive_files": "Drive files", "drive_folders": "Drive folders", "mail": "Emails",
          "calendar": "Calendar events", "contacts": "Contacts", "tasks": "Tasks"}
 # audit_log item_type -> the service whose count it explains
 SKIP_TYPE = {"file": "drive_files", "folder": "drive_folders", "message": "mail",

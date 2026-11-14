@@ -41,7 +41,7 @@ def test_a_run_that_stop_ended_does_not_exit_0(monkeypatch, tmp_path):
 
     import main
     args = types.SimpleNamespace(account_id=None, db=str(tmp_path / "ledger.db"), dry_run=False,
-                                 workers=None, func=lambda a, s, d, au: main.SHUTDOWN.set())
+                                 workers=None, command="", func=lambda a, s, d, au: main.SHUTDOWN.set())
     monkeypatch.setattr(main, "build_parser", lambda: types.SimpleNamespace(parse_args=lambda argv: args))
     monkeypatch.setattr(main, "setup_logging", lambda s: None)
     monkeypatch.setattr(main, "_install_signal_handlers", lambda: None)

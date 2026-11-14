@@ -88,7 +88,7 @@ const defaultActivities: ActivityEvent[] = []
 const defaultVerification: VerificationResult[] = []
 
 const defaultHelpContext: HelpContext = {
-  whatIsHappening: 'The migration is currently copying Gmail messages from the source tenant to the target tenant. This is the largest data type and takes the most time.',
+  whatIsHappening: 'The migration is currently copying email from the source tenant to the target tenant. This is the largest data type and takes the most time.',
   doINeedToDoAnything: "No action is required. You can safely leave this running. The migration will automatically retry if Google rate-limits any API calls.",
 }
 

@@ -1,3 +1,71 @@
+## Pending Claude implementation task
+
+- [ ] Top priority: [Bitport to 10/10: plan and progress](docs/tasks/parity-10-plan.md). The audit's fix plan, the measurable definition of 10/10, and checkboxes kept current. Work it in order; deploy only on an idle box.
+
+- [ ] High priority: [Gmail search-first link rewriting → DMS](docs/tasks/claude-gmail-search-first-dms.md). Use server-side search to fetch only candidate email bodies by default; keep exhaustive scans/full 1:1 optional. This task is queued, not implemented. Respect active-job deployment gates.
+
+## Live-run error rule (operator, 2 Nov 2026)
+
+On account-3 migration runs every error STOPS the run, is fixed (opus allowed), then the run restarts from the UI. See monitor/CHARTER.md and the memory note error-stop-fix-restart.
+
+## Job monitor (unattended error feed)
+
+`monitor/watch.py` reads the box's incident feed (`logs/incidents/feed.log`) and spends model tokens only on news: repeats and kinds `known_issues` fixes on its own cost nothing; the rest goes to a cheap model (`MONITOR_TRIAGE_MODEL`, haiku), and only an "escalate" reaches the strong one (`MONITOR_FIX_MODEL`, opus), which works in its own worktree on `monitor/incident-<id>` and never deploys. One lane per running job (`account:job`). Its memory is `monitor/state.json`; its standing orders are `monitor/CHARTER.md`; its results land in `monitor/INBOX.md` for the operator. A SessionStart hook prints `watch.py --brief`, so a context reset keeps the duty. Caps: `MONITOR_MAX_USD_DAY` ($5), `MONITOR_MAX_ESCALATIONS_DAY` (6), `MONITOR_MAX_ATTEMPTS` (2 per fingerprint). Check it first with `python3 monitor/watch.py --dry-run`; run it with `nohup python3 monitor/watch.py &`.
+
+## Newest handoff — 10–11 November 2026 (account 3, to overall parity)
+
+Read [docs/claude-handoff-2026-11-10.md](docs/claude-handoff-2026-11-10.md) first: the errors met (causes, fixes, status),
+the box's units, and the autopilot's efficacy. This section is the rules and state that must survive a context reset.
+
+**Operator's definitions and rules (binding):**
+- **Parity means overall parity across every service, for every user:** Drive (files, folders, grants, modified times, carried
+  settings, Forms with their responses and Sheets), mail (every message, including what the DMS delivered, labels, extras),
+  calendar, contacts, tasks. Chat is off by default and not part of parity. A user is not "done" until every service passes.
+- **Verify every user**, and when something extra was delivered, find out what it is. Dig into every not-at-parity user;
+  do not accept a count without its cause.
+- **Mail: split/hybrid by default.** The engine moves only mail carrying a Drive link (rewritten, before the DMS); the DMS moves
+  the rest. Never move bulk mail by the engine. Any run that moved mail another way must be reported.
+- **Drive: server-side copy.** Binary files must not fall back to download-and-upload; Apps Script projects are the only
+  expected download-and-upload files.
+- **DMS:** started from the command line for full scope (the web UI limits a fresh import to 5 users). Re-run as a delta until
+  failures are zero (`dms_delta_loop.py`). Verify each user as its mail lands (`dms_user_verify.py`).
+- **Repairs:** ON for verify-and-repair (the operator now wants repair per user, in parallel, after each user's verify). An
+  operator's pause holds against automatic follow-ons. Tally follow-ons never re-move mail automatically.
+- **Never notify external people** about changed links or moved files. An internal notice is an option, off by default.
+- **Approval and teardown** of a migration are an operator's click or word only, never a timer. Teardown of the sandbox: show a
+  dry run first, then clean staging shared drives, the Cloud project and the DWD grant, and verify the old key fails.
+- **Deletes and wipes** are sandbox-only and need the typed confirmation. Before deleting, look at the target.
+- **Token budget is limited:** react to the autopilot's REPORT.md and INBOX, do not poll, keep reports short.
+- **Passwords:** do not store or echo credentials in the repo, memory or logs. The box holds its own (`/etc/bitport/dwd.env`,
+  root-only). The operator shared the source admin password in chat on 10 Nov; recommend rotating it.
+
+**Box and tools:**
+- Box `l3novo@100.79.158.38`, clock UTC (operator is Nepal, +5:45). Root by the operator's SSH password (held by the operator);
+  read-only access via `monitor/box.sh`. Deploy = hash-checked copy to `/tmp/py11`, copy in, `py_compile`, restart only what loads
+  the file, and never while a run is live (a `bitport-api` restart can kill an API-started run).
+- Units: `bitport-parity` (`parity_loop.py`, checks each user as its pass finishes), `bitport-autopilot` (`autopilot.py`: playbook,
+  REPORT.md, INBOX.md), `bitport-dms-fresh` / `bitport-dms-delta-loop` / `bitport-dms-user-verify`, `bitport-post-dms`,
+  Ollama (snap, capped 7 GB / 2 cores; model `qwen2.5-coder:7b`, summaries only, never actions).
+- Checks: `fidelity_audit.py` (every file's grants, modified time, settings), `form_deep_check.py` (Forms, responses, Sheets;
+  `known_differences.json` lists operator-accepted differences), `mail_dead_links.py` (full mail read: link emails, search miss
+  rate, dead links), `dms_link_rewrite.py`, `sharing_report.py` + Sharing panel, `tally.py` (per-service counts).
+- Known limits: Gmail search misses ~79% of link emails (use the full read); the Forms API cannot copy an image it cannot fetch;
+  the box is on Wi-Fi (a wired port `enp1s0` has no link yet); the DMS console reports only totals, so per-user landing is inferred.
+
+**State at the end of 11 Nov (UTC):**
+- Account 3 (s.sarafgloabalexim.com -> t.sarafgloabalexim.com, 45 users) was wiped and remigrated in split mode. Drive is complete:
+  38,513 files and 2,388 folders. The DMS fresh import (45 users) is running; its delta loop waits for it to finish.
+- Verified so far: audit@ and buildingpermit@ identical (mail). Not at parity: admin@ (10 extra messages on the target), it.department@
+  (9 DNS-failed emails), ward10@ and ward11@ (one missing), suchanaadhikari@ (a CATEGORY_PERSONAL label), administration@ and info@
+  (still importing). Mailbox counts for many users read about 100%, but are not yet verified.
+- Parity table caveat: its "gmail count" check counts only what the engine wrote, so it reads 0 for mailboxes that have their mail.
+  Do not trust that line; use mailbox counts and verify results until the check is fixed.
+- Open: the suchanaadhikari Form image (accepted as a known difference); the wired cable; the source admin password rotation.
+
+## Latest operator handoff — 30 October 2026
+
+Read [docs/claude-handoff-2026-10-30.md](docs/claude-handoff-2026-10-30.md) before migration work. It supersedes older defaults below: full mail runs now prefer complete link scan + DMS, routine mail completion uses counts (not 1:1), and full verification remains optional. The operator explicitly resumed the sandbox run on 30 October 2026; see the current-state note in the handoff.
+
 # CLAUDE.md
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
@@ -198,6 +266,51 @@ ignored. Throughput is items written *during the run*, never the ledger total, a
 it divides by the user workers the run could keep busy (`busyWorkers`: the pool, or
 the users it wrote, whichever is smaller) -- never the whole pool.
 
+**The A/B benchmark (`ab_transfer.py`, Benchmarks page) ranks arms by errors, then speed.** Arms run
+side by side by default, each on its own copy of the ledger (`BITPORT_LEDGER`, `ledger_copy`) and
+scratch, then the arm(s) with the fewest errors are re-timed alone -- side-by-side times share one
+box and one Google quota, so they rank errors, not speed. `--sequential` is the old way;
+download_upload + engine is skipped (`--include-slow`); Chat is left out (`ALL_SERVICES`,
+`VERIFY_SERVICES`). `arm_errors` scores failed items + every counted difference, and an arm whose own
+1:1 check did not run (UNVERIFIED) or whose mail import was skipped is never ranked. The winner is
+the default for a new run that names no transfer/mail mode (`api_server.ab_default`). Each arm
+clears its user's `user_verification` first: `verify_sample --services all` was once dropped as an
+unknown name, so every arm read stray rows from other verify jobs.
+
+**What a 1:1 check downloads, and what it does not (measured 2026-10-31, esc.mrc: 84 -> 23 min,
+same verdicts).** Gmail: a message the engine compared byte for byte as it wrote it
+(`migration_item_receipts`, written when `MAIL_COMPLETION_CHECK=full` or for split link mail) is
+checked by labels, read state, date and Message-ID only -- Gmail cannot change a message's content
+after it is written (`Verifier._receipts`, `VERIFY_USE_RECEIPTS=0` reads every body). Drive: equal
+`md5Checksum` and size on both tenants are taken as identical without downloading either file
+(`VERIFY_TRUST_MD5=0` restores the download). A Form is compared by its body through the Forms API
+(`native_fidelity.compare_form`), never by Drive comments, which answer 404 for a Form. Repair's
+retained `.Repair backup -` copies are Bitport's own, not strays. Benchmark arms skip migrate's
+own acceptance check (their 1:1 check is the judge) and register as `ab-migrate`, so they are
+never judged or reported as a migration. `auth.source_drive(writable=True)` returns the real client
+past the protected-source guard (a98ead0 had returned the read-only wrapper, so no deliberate source
+writer worked). `move_probe.py` tries a one-byte move by each route; Move is offered only after a
+direct pass, and a protected source is never written to.
+
+**What no single run watches is watched by `oversight.py`** (the API's `_oversight_loop`, every
+`OVERSIGHT_SEC`=600, 0 = off; `python oversight.py` sweeps once). Nine checks, each a normal incident
+of kind `watch_*` that closes only when the same check runs again and no longer finds it: repairs that
+never converge (a trigger and its handler disagreeing), a file far past its budget or a user with no
+progress, a one-to-one verdict that moved with nothing run in between, failures `known_issues` cannot
+name, `SOURCE_CHANGED` rows, a box with no idle gap for hours (no deploy can land), a tenant that is
+no longer ready (readiness, at most hourly, recently active accounts only), an open Google Workspace
+incident, and one account's ledger or logs naming another account's domain. Deploy drift (box files
+against HEAD, the UI build against the last UI commit) needs git, so it is `monitor/watch.py --drift`
+on the operator's side, hourly in its loop, written to `monitor/INBOX.md` only when it changes.
+
+**A deploy can wait for the repair backlog, so the backlog yields to one** (`verification_repairs.deploy_pending`,
+the file `logs/deploy_pending`). A deploy script that has to wait for an idle box touches it each loop and
+removes it when done; while it is fresh (under six hours) the dispatcher starts no batch, and a backlog job
+(`VERIFY_YIELD_TO_DEPLOY=1`, set only by the dispatcher) takes no new user -- those it already has finish. A
+batch holds `VERIFY_BACKLOG_USERS` (12) users for `VERIFY_MAX_WORKERS` (4) workers, so a freed worker takes the
+next user. Before this, batches of four ran until the slowest finished and the next started within a minute: no
+60-second gap for hours (`watch_box_busy`). `sync_vps.sh` does not touch the flag yet.
+
 **Handling an incident.** Read the brief; reproduce from its evidence; fix on
 a **test sandbox tenant**, never a real one; add a test. **Do not deploy
 unattended**: `sync_vps.sh` restarts services and a webui-launched seed or a
@@ -218,10 +331,11 @@ audit, with a default reason when none is given. Notifications are opt-in via `I
 (the last opens an issue a Claude Code routine can be pointed at); none is set
 by default and a failed send never fails a run.
 
-**Who moves the mail is a per-run choice (`mail_mode`), and the dialog defaults to
-`engine`.** `engine`: this tool moves all mail, and a caller that names no mode gets it
-(`api_server._default_mail_mode`): split is offered as experimental until the DMS's
-overlap with mail already copied is proven per message. `dms`:
+**Who moves the mail is a per-run choice (`mail_mode`), and full mail runs default to
+`split` (30 October operator change; see latest handoff).** `engine` explicitly moves
+all mail; bounded samples and non-mail runs still use it. A full run with no mode
+uses a complete link scan followed by the DMS hybrid. Count completion is not proof
+of rewritten-content, label or overlap fidelity. `dms`:
 Google's Data Migration Service does, and the run migrates everything else.
 `split`: the engine inserts only mail that carries a Drive link and rewrites it;
 the rest is written `SKIPPED_NO_DRIVE_LINK` (`config.DEFERRED_TO_DMS`) and moved by
@@ -687,9 +801,13 @@ A DMS job survives a webui restart; `_EXT_SCRIPTS` lists it so the Jobs page can
 Before building anything browser-driven here, look for the one-off script that already
 did it (`dms_*.py`, `*_probe.py`) -- the approval was rebuilt once from guesses.
 
-**Full scope, always** (`fidelity.py`): every optional pass -- external-owned shares,
-secondary calendars, groups, Gmail settings, calendar ACLs, rooms, comments, chat,
-contacts, tasks, SSO profiles, form links -- defaults ON in config.py. A run mints ONE token for every
+**Full scope, except Chat** (`fidelity.py`): every optional pass -- external-owned shares,
+secondary calendars, groups, Gmail settings, calendar ACLs, rooms, comments,
+contacts, tasks, SSO profiles, form links -- defaults ON in config.py. **Chat is OFF by default
+(operator, 2026-10-31):** `MIGRATE_CHAT` defaults false, `--services all` expands without it
+(`main.resolve_services`, `api_server._expand_all`, both via `config.chat_by_default`), and
+naming `chat` or setting `MIGRATE_CHAT=true` still turns it on. Its findings are Chat API limits
+(DM becomes a group chat, a bot cannot post or join -- `known_issues` chat.*). A run mints ONE token for every
 scope and one ungranted scope fails every call, so: the launch probes each pass's extra
 scopes and writes it on or off (`plan`, named in the launch detail); the run's own gate
 (`main._gate_on_delegation`) tries scope_guard's unattended re-grant first and otherwise

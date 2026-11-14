@@ -149,9 +149,28 @@ class TasksMigrator:
             # about provisioning, so do not turn it into a permanent skip.
             return True
 
+    def _list_is_gone(self, tgt_list: str) -> bool:
+        try:
+            self.limiter.acquire()
+            self._retry(lambda: self.tgt.tasks().list(tasklist=tgt_list, maxResults=1).execute())
+        except Exception as exc:      # noqa: BLE001 - unsure is not gone
+            return "404" in str(exc) or "notFound" in str(exc)
+        return False
+
     def _migrate_list(self, tl: dict) -> None:
         src_id, title = tl["id"], tl.get("title") or "Imported list"
         existing = self.db.get_target_id(self.source_user, src_id, "task_list")
+        if existing and not self.settings.dry_run and self._list_is_gone(existing):
+            # Deleted on the target (a mailbox emptied after the ledger was written): the list and
+            # the tasks it held are made again, not skipped as migrated. Only a 404 counts as gone.
+            try:
+                for t in self._iter_tasks(src_id):
+                    self.db.forget_mapping(self.source_user, t["id"], "task")
+            except (PermanentAPIError, RuntimeError):
+                return
+            self.db.forget_mapping(self.source_user, src_id, "task_list")
+            self.stats["recopied_missing"] = self.stats.get("recopied_missing", 0) + 1
+            existing = None
         if existing:
             tgt_id = existing
             self.stats["skipped"] += 1

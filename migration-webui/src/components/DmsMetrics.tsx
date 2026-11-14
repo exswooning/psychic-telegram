@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import {
-  Box, Button, Chip, Stack, Typography,
+  Box, Button, Chip, LinearProgress, Stack, Typography,
 } from '@mui/material'
 import { Refresh as RefreshIcon } from '@mui/icons-material'
 import { fetchDmsMetrics, runAction, DmsMetricsResponse } from '@/api/client'
@@ -35,7 +35,8 @@ const statusColor = (s: string): 'info' | 'success' | 'warning' | 'default' => {
  * Refresh that re-scrapes. It never invents a value: if nothing has been
  * scraped yet it says so rather than showing zeros.
  */
-const DmsMetrics: React.FC = () => {
+/* accountId: the viewed account -- the refresh reads that tenant's Admin console. */
+const DmsMetrics: React.FC<{ accountId?: number | string }> = ({ accountId }) => {
   const [resp, setResp] = useState<DmsMetricsResponse | null>(null)
   const [refreshing, setRefreshing] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -43,11 +44,11 @@ const DmsMetrics: React.FC = () => {
 
   const load = useCallback(async () => {
     try {
-      setResp(await fetchDmsMetrics())
+      setResp(await fetchDmsMetrics(accountId))
     } catch {
       /* keep the last good values on a dropped poll */
     }
-  }, [])
+  }, [accountId])
 
   useEffect(() => {
     load()
@@ -59,7 +60,7 @@ const DmsMetrics: React.FC = () => {
     setError(null)
     setRefreshing(true)
     try {
-      const r = await runAction('dms_metrics_refresh')
+      const r = await runAction('dms_metrics_refresh', undefined, accountId)
       if (!r.ok) { setError(r.error || 'could not read the console'); return }
       // the scrape is a ~1-minute browser job; re-read a few times as it lands
       for (let i = 0; i < 8; i++) {
@@ -72,7 +73,8 @@ const DmsMetrics: React.FC = () => {
   }
 
   const data = resp?.data
-  const m = data?.metrics || {}
+  const previous = data && Object.keys(data.metrics || {}).length === 0 ? data.lastCounters : undefined
+  const m = previous?.metrics || data?.metrics || {}
   const has = (k: string) => Object.prototype.hasOwnProperty.call(m, k)
 
   const Cell: React.FC<{ label: string }> = ({ label }) => (
@@ -111,6 +113,24 @@ const DmsMetrics: React.FC = () => {
           No metrics read yet — press Refresh to read the counters from the
           Admin console.
         </Typography>
+      )}
+
+      {previous && (
+        <Typography variant="body2" color="warning.main" sx={{ mb: 1 }}>
+          The latest console read had no counters. Showing the last observed counts from{' '}
+          {new Date(previous.read_at * 1000).toLocaleString()}; these do not confirm the current status.
+        </Typography>
+      )}
+
+      {data && has('Emails discovered') && has('Emails imported') && m['Emails discovered'] > 0 && (
+        <Box sx={{ mb: 1 }} data-testid="dms-progress">
+          <Typography variant="body2" sx={{ fontVariantNumeric: 'tabular-nums' }}>
+            {nf.format(m['Emails imported'])} of {nf.format(m['Emails discovered'])} emails imported
+            {has('Emails failed') && m['Emails failed'] > 0 ? ` · ${nf.format(m['Emails failed'])} failed` : ''}
+          </Typography>
+          <LinearProgress variant="determinate" sx={{ height: 8, borderRadius: 1, mt: 0.5 }}
+            value={Math.min(100, (100 * (m['Emails imported'] + (m['Emails skipped'] || 0))) / m['Emails discovered'])} />
+        </Box>
       )}
 
       {data && (

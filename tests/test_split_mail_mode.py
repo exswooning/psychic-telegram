@@ -116,7 +116,7 @@ class TestOwedIsNotDeclined:
         self._ledger(db)
         facts = {"kind": "migration", "ledger": RR._ledger(db.conn), "run": {}}
         steps = RR.next_steps(facts, B.evaluate(facts))
-        assert "97 mail message(s)" in steps[0] and "NOT on the target yet" in steps[0]
+        assert "97 email(s)" in steps[0] and "NOT on the target yet" in steps[0]
         assert "after this run, never before" in steps[0]
 
     def test_a_run_with_nothing_deferred_says_nothing_about_the_dms(self, db):
@@ -180,3 +180,69 @@ class TestWhatThePageIsTold:
         src = open(main.__file__, encoding="utf-8").read()
         assert 'print(f"PASS {i}/{len(plan)} pid={os.getpid()}: ' in src
         assert api_server._PASS_LINE.match("PASS 2/3 pid=4242: calendar,contacts,tasks,chat")
+
+    def test_the_page_counts_the_link_mail_the_engine_wrote_and_what_the_dms_delivered(
+            self, db, settings, identity, monkeypatch):
+        import api_server
+        import config
+        from config import DELIVERED_BY_DMS
+        for i in range(5):
+            db.log_audit(SRC_USER, f"l{i}", "message", "SUCCESS")
+        for i in range(7):
+            db.log_audit(SRC_USER, f"d{i}", "message", DEFERRED_TO_DMS, "left for the DMS pass")
+        db.log_audit(SRC_USER, "x", "message", DELIVERED_BY_DMS)
+        monkeypatch.setattr(config, "Settings", lambda account_id=None: settings)
+        out = api_server._migration_progress(1)
+        assert out["mailWithLinks"] == 5 and out["mailDelivered"] == 1 and out["itemsDeferred"] == 7
+
+    def test_a_run_that_is_not_split_reports_no_link_mail_figure(self, db, settings, identity, monkeypatch):
+        import api_server
+        import config
+        db.log_audit(SRC_USER, "m1", "message", "SUCCESS")
+        monkeypatch.setattr(config, "Settings", lambda account_id=None: settings)
+        assert "mailWithLinks" not in api_server._migration_progress(1)
+
+
+class TestAFailureALaterRunResolvedIsNotAGap:
+    def test_a_failed_row_for_an_item_since_mapped_is_not_counted(self, db, settings, identity, monkeypatch):
+        """Live: 168 of '188 unresolved failures' were old rows for messages info@ had since
+        migrated; they stopped the DMS from starting."""
+        import api_server
+        import config
+        db.log_audit(SRC_USER, "m-fixed", "message", "FAILED_SPLIT", "Pre-delivery link scan: HTTP 404")
+        db.record_mapping(SRC_USER, "m-fixed", "t-fixed", "message")        # a later run migrated it
+        db.log_audit(SRC_USER, "m-open", "message", "FAILED_SPLIT", "Ambiguous destination Message-ID")
+        db.log_audit(SRC_USER, "c-open", "comment", "FAILED", "Existing target comment differs")
+        monkeypatch.setattr(config, "Settings", lambda account_id=None: settings)
+        assert api_server._migration_progress(1)["itemsFailed"] == 2      # the two still open
+
+
+class TestOnlyMailTheDmsWouldMishandleBlocksIt:
+    """8 Nov 2026: account 3's DMS was held by 8 comment failures and 9 messages the operator chose to leave to
+    the DMS. Only unmapped mail the DMS would carry across unrewritten, and that is not owed to it, blocks."""
+
+    def _progress(self, db, settings, monkeypatch):
+        import api_server
+        import config
+        monkeypatch.setattr(config, "Settings", lambda account_id=None: settings)
+        return api_server._migration_progress(1)
+
+    def test_comments_and_owed_link_mail_do_not_block_the_dms(self, db, settings, identity, monkeypatch):
+        db.log_audit(SRC_USER, "m-amb", "message", "FAILED_SPLIT", "Ambiguous destination Message-ID; split delivery blocked")
+        db.log_audit(SRC_USER, "m-unres", "message", "FAILED_SPLIT", "Unresolved Drive link mapping: 1abc")
+        db.log_audit(SRC_USER, "c-open", "comment", "FAILED", "Existing target comment differs")
+        p = self._progress(db, settings, monkeypatch)
+        assert p["mailBlockingDms"] == 0 and p["itemsFailed"] == 3             # still reported, no longer a blocker
+
+    def test_other_unmapped_mail_still_blocks_it(self, db, settings, identity, monkeypatch):
+        db.log_audit(SRC_USER, "m-open", "message", "FAILED_SPLIT", "Split classification incomplete")
+        db.log_audit(SRC_USER, "m-open", "message", "FAILED_SPLIT", "Split classification incomplete")   # same item twice
+        assert self._progress(db, settings, monkeypatch)["mailBlockingDms"] == 1
+
+
+def test_owed_link_mail_is_not_listed_as_not_copied(auth, db, settings, identity):
+    import verify_sample as V
+    db.log_audit(SRC_USER, "m-amb", "message", "FAILED_SPLIT", "Ambiguous destination Message-ID; split delivery blocked")
+    db.log_audit(SRC_USER, "m-open", "message", "FAILED_SPLIT", "Split classification incomplete")
+    v = V.Verifier(auth, db, settings, SRC_USER, "u@t")
+    assert [i["id"] for i in v._failed(("message", "draft", "gmail"))] == ["m-open"]

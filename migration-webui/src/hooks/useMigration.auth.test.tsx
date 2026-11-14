@@ -13,3 +13,18 @@ describe('migration polling after authentication', () => {
     await waitFor(() => expect(calls.users).toHaveBeenCalledTimes(1))
   })
 })
+
+describe('migration polling does not wait for its slowest request', () => {
+  it('shows the users the moment they arrive while another request is still pending', async () => {
+    const { useMigrationStore } = await import('@/store')
+    useMigrationStore.setState({ users: [], isLoading: true })
+    let finishMetrics: (v: unknown) => void = () => {}
+    calls.users.mockResolvedValueOnce([{ email: 'a@example.com' }])
+    const client = await import('@/api/client')
+    ;(client.fetchMetrics as ReturnType<typeof vi.fn>).mockReturnValueOnce(new Promise((r) => { finishMetrics = r }))
+    render(<Harness enabled />)
+    await waitFor(() => expect(useMigrationStore.getState().users).toHaveLength(1))
+    expect(useMigrationStore.getState().isLoading).toBe(false)     // released by the first, not the last
+    finishMetrics({ cpu: 1, ram: { percentage: 1 }, workers: { current: 1 }, uploadQueue: 0, retryQueue: 0 })
+  })
+})

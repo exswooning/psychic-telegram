@@ -57,6 +57,10 @@ def _own(name: str) -> bool:
 @pytest.fixture
 def settings(tmp_path) -> Settings:
     s = Settings()
+    # Legacy fidelity regressions deliberately exercise full checks. New default
+    # counts policy has its own tests and never substitutes for these comparisons.
+    s.mail_completion_check = "full"
+    s.mail_link_scan = "exhaustive"
     s.db_path = str(tmp_path / "migration.db")
     s.scratch_dir = str(tmp_path / "scratch")
     s.source_domain = "tenanta.com"
@@ -106,6 +110,14 @@ def identity(db):
 
     bulk_seed_identities(db, [(SRC_USER, TGT_USER)])
     return db
+
+
+@pytest.fixture(autouse=True)
+def _gmail_quota_state_in_tmp(tmp_path, monkeypatch):
+    """verify_gmail_quota keeps its shared budget under ~/.cache; a test must never read or write the
+    real one (a cooldown left by one run would pace the next)."""
+    import verify_gmail_quota
+    monkeypatch.setattr(verify_gmail_quota.Path, "home", lambda: tmp_path)
 
 
 @pytest.fixture(autouse=True)

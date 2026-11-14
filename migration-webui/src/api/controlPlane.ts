@@ -80,7 +80,10 @@ async function cpFetch<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 async function cpFetchRaw<T>(path: string, init?: RequestInit): Promise<T> {
+  const read = (init?.method ?? 'GET').toUpperCase() === 'GET'
   const res = await fetch(`${CP_BASE}${path}`, {
+    // Reads give up (see client.ts READ_TIMEOUT_MS); a write is never cut short.
+    ...(read && !init?.signal ? { signal: AbortSignal.timeout(20_000) } : {}),
     ...init,
     // Carries the bp_session cookie an account signed in with -- it lives
     // on this server's own origin (CP_BASE), a different one than the page
@@ -93,6 +96,9 @@ async function cpFetchRaw<T>(path: string, init?: RequestInit): Promise<T> {
       'X-Operator': OPERATOR,
       ...(init?.headers ?? {}),
     },
+  }).catch((e) => {
+    if (e instanceof Error && e.name === 'TimeoutError') throw new Error(`${path}: no answer after 20s`)
+    throw e
   })
   if (!res.ok) {
     // FastAPI puts the human-readable cause in `detail`; surfacing the raw
@@ -387,7 +393,7 @@ export const fetchActions = () => cpFetch<OperatorAction[]>('/api/v2/actions')
 // UI convention that a future caller could skip.
 export interface ActionResult { ok: boolean; actionId: number; detail: string }
 
-/** Who moves the mail. `engine` (the API's own default): this tool moves all of
+/** Who moves the mail. `split` is the full-run default; `engine`: this tool moves all of
  *  it. `dms`: Google's Data Migration Service does, and this run does everything
  *  else. `split`: this tool moves only mail that carries a Drive link, rewriting
  *  it, and the DMS moves the rest AFTER the run. */
@@ -416,21 +422,55 @@ export interface MigrationTuning {
   processes?: number
 }
 
+/** Split mail's link scan: Gmail search names the candidates, or every message is read. */
+export type MailLinkScan = 'search' | 'exhaustive'
+
+/** One user's latest split-mail link scan, as the engine recorded it. */
+export interface MailLinkScanReport {
+  source: string; mode: MailLinkScan; state: 'SEARCHING' | 'READING' | 'DONE' | 'BLOCKED' | 'INTERRUPTED'
+  startedAt: string; finishedAt?: string; messages?: number; candidates?: number
+  searches?: Record<string, number>; knownLinkMessages?: number | null; recallMissed?: number | null
+  examined: number; blocked: number; notRead: number; bodiesRead: number; bytesRead: number
+  attachmentReads: number; listCalls: number; searchSeconds?: number; scanSeconds?: number; maxRssMb?: number
+  scanWorkers?: number; scanQps?: number | null
+  /** Links to source files the source answers 404 for: not rewritten, not blocking. */
+  unreachableLinks?: number
+}
+
+/** What the server answers when a start was set for an hour instead of now. */
+export interface ScheduledStart { id: number; runAt: string }
+export interface ScheduledRun { id: number; accountId: number; runAt: string; status: string; detail: string; requestedBy: string }
+/** run_digest.py from the UI: bookmark an experiment's logs, fold what it wrote into a digest. */
+export interface ExperimentRow { name: string; startedAt: string | null; building: boolean; digestAt: string | null }
+export const fetchExperiments = (accountId: number, name?: string) =>
+  cpFetch<{ experiments: ExperimentRow[]; digest?: string }>(
+    `/api/v2/experiments?account_id=${accountId}${name ? `&name=${encodeURIComponent(name)}` : ''}`)
+export const experimentAction = (name: string, action: 'start' | 'digest', accountId: number, reason: string) =>
+  cpFetch<ActionResult>(`/api/v2/experiments/${encodeURIComponent(name)}/${action}`,
+    { method: 'POST', body: JSON.stringify({ reason, account_id: accountId }) })
+
+export const fetchScheduledRuns = (accountId?: number) =>
+  cpFetch<{ runs: ScheduledRun[] }>(`/api/v2/migrate/schedule${accountId ? `?account_id=${accountId}` : ''}`)
+export const cancelScheduledRun = (id: number, accountId?: number) =>
+  cpFetch<{ cancelled: number }>(`/api/v2/migrate/schedule/${id}${accountId ? `?account_id=${accountId}` : ''}`, { method: 'DELETE' })
+
 export const startMigration = (
   reason: string, services: string[], users: string[], dryRun = false,
   accountId?: number, mailMode?: MailMode, sample?: number, dmsAfter?: boolean,
   transferMode?: TransferMode, tuning?: MigrationTuning, redoLinks = false,
-  confirmMove?: string) =>
-  cpFetch<ActionResult>('/api/v2/migrate/start', {
+  confirmMove?: string, mailLinkScan?: MailLinkScan, runAt?: string) =>
+  cpFetch<ActionResult & Partial<ScheduledStart>>(runAt ? '/api/v2/migrate/schedule' : '/api/v2/migrate/start', {
     method: 'POST',
     // accountId is the migration on screen. Without it the server falls back
     // to the caller's own account -- the same trap the delta button hit.
-    // mail_mode omitted means the engine, exactly as before it existed.
+    // Omitted means link scan + DMS for full runs; bounded samples use engine.
     // sample: a quick run that copies only the first N items of each service per
     // user and leaves the users unfinished (see sample_budget.py).
     body: JSON.stringify({ reason, services, users, dry_run: dryRun,
                            account_id: accountId ?? null,
+                           ...(runAt ? { run_at: runAt } : {}),
                            ...(mailMode ? { mail_mode: mailMode } : {}),
+                           ...(mailLinkScan ? { mail_link_scan: mailLinkScan } : {}),
                            ...(sample ? { sample } : {}),
                            // off only when asked; the server starts the DMS on its own otherwise
                            ...(dmsAfter === false ? { dms_after: false } : {}),
@@ -444,6 +484,9 @@ export const startMigration = (
                            ...(tuning?.fullFidelity === false ? { full_fidelity: false } : {}),
                            ...(tuning?.processes !== undefined ? { processes: tuning.processes } : {}) }),
   })
+    .then((r) => (runAt
+      ? { ok: true, actionId: r.id ?? 0, detail: `scheduled for ${new Date(r.runAt ?? runAt).toLocaleString()}` }
+      : r))
 
 export interface OwedGrants {
   migrations: { accountId: number; accountName: string; targetDomain: string; shares: number;
@@ -559,6 +602,48 @@ export interface BenchmarkRunning {
 export const fetchBenchmarkRunning = () =>
   cpFetch<BenchmarkRunning>('/api/v2/benchmark/running')
 
+/** The controlled A/B (ab_transfer.py): one pinned corpus, one arm per transfer mode x mail mode. */
+export interface AbArm {
+  arm: string; seconds: number | null; failed: number | null; clean: boolean
+  /** Failed items + every counted difference. null when the arm is not ranked on it (judged false). */
+  errors?: number | null; judged?: boolean; why?: string | null
+  /** 'alone' = timed with the box to itself; 'side by side' = shared with other arms, so not a speed. */
+  timing?: 'alone' | 'side by side' | null; contendedSeconds?: number | null
+  /** Whose data this arm moved, and how much: arms on different users are compared per item. */
+  corpus?: { user: string; files: number; bytes: number; messages: number | null; items: number } | null
+  errorsPer1k?: number | null; secondsPer100?: number | null
+  verdicts: Record<string, string>
+  dms?: string | null
+  differences?: Record<string, {
+    counts?: Record<string, number> | null; failedChecks?: string[]
+    /** The same findings grouped by known kind, with each kind's cause and whether Bitport fixes it on its own. */
+    kinds?: { kind: string; count: number; title: string; cause?: string | null; fix?: string | null; auto: boolean }[]
+  }>
+}
+export interface AbView {
+  running: boolean
+  progress: {
+    startedAt?: string; finishedAt?: string; updatedAt?: string
+    current?: { mode: string; mailMode: string | null; stage: string } | null
+    /** Every arm in flight: several at once while the arms run side by side. */
+    arms?: { arm: string; stage: string; user?: string }[]; phase?: string | null; skipped?: string[]
+    users?: string[]; corpus?: { files: number; bytes: number }
+    total?: number; done?: number; alive: boolean; armsFinished: number
+    /** Why the run stopped, when it did not finish: a refusal's own words, never a bare 0 of N. */
+    error?: string | null
+    meanArmSeconds: number | null
+    /** Seconds left. null until one arm has finished: one measurement is not a mean. */
+    etaSeconds: number | null; etaNote: string | null
+  } | null
+  results: { runs: unknown[] } | null
+  /** Clean arms first, fastest first; a fast arm that did not finish clean is listed, never hidden. */
+  ranking: AbArm[]
+  /** Fewest errors, then fastest, among arms whose own check ran: what new runs use by default. */
+  best?: { arm: string; mode: string; mailMode: string; errors: number; seconds: number | null
+    errorsPer1k?: number | null; secondsPer100?: number | null } | null
+}
+export const fetchAbBenchmark = () => cpFetch<AbView>('/api/v2/benchmark/ab')
+
 // -- AI diagnostics ---------------------------------------------------------
 export interface AiStatus {
   configured: boolean; keyMask: string; model: string; logFile: string | null
@@ -650,6 +735,7 @@ export interface SetupBillingNotice {
 }
 export interface FullSetupResult {
   side: string; ok: boolean; phases: FullSetupPhase[]
+  dryRun?: boolean
   clientId?: string; missingScopes?: string[]
   actionRequired?: { kind: string; title: string; detail: string; url: string }
   notices?: SetupBillingNotice[]
@@ -684,7 +770,9 @@ export interface FullSetupStatus {
   /** Google kept challenging the server's browser, so this sign-in is finished on the
    *  operator's own device: open `url` there (and, for `signin`, paste back the code
    *  Google shows). Null when the server is doing it itself. */
-  handoff?: { kind: 'signin' | 'dwd'; url: string; clientId?: string; scopes?: string } | null
+  handoff?: { kind: 'signin' | 'dwd' | 'review'; url?: string; clientId?: string; scopes?: string
+    requestId?: string; noticeHash?: string; adminEmail?: string; expiresAt?: number
+    category?: string; title?: string; text?: string; buttonLabel?: string } | null
   /** The running setup's own transcript, newest last -- empty when nothing runs. */
   lines?: string[]
 }
@@ -706,6 +794,12 @@ export const sendFullSetupCode = (side: 'source' | 'target', code: string) =>
   cpFetch<ActionResult>('/api/v2/full-setup/code', {
     method: 'POST',
     body: JSON.stringify({ side, code, reason: 'signed in on own device' }),
+  })
+export const sendFullSetupNotice = (side: 'source' | 'target', requestId: string,
+  noticeHash: string, decision: 'approve' | 'decline') =>
+  cpFetch<ActionResult>('/api/v2/full-setup/notice', {
+    method: 'POST', body: JSON.stringify({ side, request_id: requestId,
+      notice_hash: noticeHash, decision, reason: `Reviewed Google setup notice: ${decision}` }),
   })
 /** Kill a side's running setup (and the browser it drives) so it can be started again. */
 export const stopFullSetup = (side: 'source' | 'target') =>
@@ -777,6 +871,9 @@ export interface MigrationProgress {
   /** Mail left for Google's Data Migration Service (split mode). NOT a skip:
    *  it is owed, and the target does not have it until the DMS delivers it. */
   itemsDeferred?: number
+  /** Split mail: written by the engine because it carries a Drive link / delivered by the DMS since. */
+  mailWithLinks?: number
+  mailDelivered?: number
 }
 
 export interface MigrationRow {
@@ -1601,6 +1698,7 @@ export const runSourceGuard = (action: 'check' | 'baseline', reason: string, acc
  *  each service's method as the running process has it, and done against the source. */
 export interface Movement {
   stage: { pass: number; of: number; services: string } | null
+  driveBaseline?: { done: number; total: number; takenAt: string; scope: string } | null
   drive: { method: string; how: string; filesCopied: number; filesOnSource: number; formsRebuilt: number }
   mail: { method: string; how: string; messagesCopied: number; messagesOnSource: number }
 }
@@ -1608,6 +1706,14 @@ export interface Movement {
 export interface MetricsSnapshot {
   accountId: number
   error: string
+  metricsScope?: string
+  mailCountCheck?: {
+    checkedAt: string; scope: string; blocked: number
+    users: { source: string; target: string; sourceMessages?: number; targetMessages?: number;
+      difference?: number; verdict: string; error?: string }[]
+  }
+  /** Each user's latest split-mail link scan: what was searched, read and left unread. */
+  mailLinkScans?: MailLinkScanReport[]
   movement?: Movement
   volume?: { itemType: string; status: string; count: number }[]
   mappings?: { type: string; count: number }[]
@@ -1806,7 +1912,7 @@ export const quickReportUrl = (accountId?: number) =>
   `${CP_BASE}/api/v2/quick/latest.md${accountId ? `?account_id=${accountId}` : ''}`
 
 /* One-to-one check: each user compared against both tenants as they finish (verify_sample.py). */
-export type OneToOneVerdict = 'IDENTICAL' | 'DIFFERENCES' | 'INCOMPLETE' | 'NOT_VERIFIED'
+export type OneToOneVerdict = 'IDENTICAL' | 'DIFFERENCES' | 'INCOMPLETE' | 'NOT_VERIFIED' | 'EMPTY'
 export interface RetainedCopyResolution {
   source: string
   target: string
@@ -1822,6 +1928,8 @@ export interface RetainedCopyResolution {
   note?: string
 }
 export interface OneToOneService {
+  itemChecksPending?: number
+  diagnostics?: Array<{ code: string; summary: string; nextAction: string }>
   service: string
   itemVerdict?: OneToOneVerdict
   scopeVersion?: number
@@ -1849,6 +1957,7 @@ export interface OneToOneService {
   notes?: string[]
 }
 export interface OneToOneUser {
+  fullCoverageConfirmed?: boolean
   user: string
   target: string | null
   status: string | null
@@ -1901,6 +2010,28 @@ export const runOneToOne = (reason: string, opts: { accountId?: number; users?: 
                            ...(opts.limit !== undefined ? { limit: opts.limit } : {}),
                            ...(opts.repair === false ? { repair: false } : {}) }),
   })
+
+// Error-to-fix workflow: separate from tenant mutation controls.
+export interface ErrorCase {
+  id:number; account_id:number; category:string; service:string; reason:string; title:string; state:string
+  occurrences:number; first_seen:string; last_seen:string; version:string; next_action:string
+  affected_users:number; affected_items:number; candidate_commit:string|null
+}
+export interface ErrorCaseDetail extends ErrorCase {
+  events:Record<string,unknown>[]; affected:Record<string,unknown>[]
+  history:{state:string;detail:string;at:string}[]; attempts:Record<string,unknown>[]
+}
+export interface ErrorResolutionView {
+  cases:ErrorCase[]; policy:{enabled:number;daily_limit:number}
+  runners:{id:number;label:string;enabled:number;last_seen:string|null;detail:string}[]
+  canManage:boolean;canManageGlobal:boolean;collection:string;resolutionRule:string
+}
+export const fetchErrorResolution=()=>cpFetch<ErrorResolutionView>(`/api/v2/error-resolution${chosenMigration()?`?account_id=${chosenMigration()}`:''}`)
+export const fetchErrorCase=(id:number)=>cpFetch<ErrorCaseDetail>(`/api/v2/error-resolution/cases/${id}`)
+export const errorCaseAction=(id:number,action:string,reason:string)=>cpFetch<ActionResult>(`/api/v2/error-resolution/cases/${id}/action`,{method:'POST',body:JSON.stringify({action,reason})})
+export const configureErrorResolution=(enabled:boolean,daily_limit:number,reason:string)=>cpFetch<ActionResult>('/api/v2/error-resolution/policy',{method:'POST',body:JSON.stringify({enabled,daily_limit,reason})})
+export const connectErrorRunner=(reason:string,all_accounts:boolean)=>cpFetch<{runnerId:number;apiUrl:string;token:string}>('/api/v2/error-resolution/runners',{method:'POST',body:JSON.stringify({reason,all_accounts,account_id:chosenMigration()||null})})
+export const revokeErrorRunner=(id:number,reason:string)=>cpFetch<ActionResult>(`/api/v2/error-resolution/runners/${id}/revoke`,{method:'POST',body:JSON.stringify({reason})})
 
 /** Whether this account's findings are repaired on their own when it is idle. */
 export const fetchRepairPolicy = (accountId?: number) =>
@@ -2263,6 +2394,25 @@ export interface CopySafetyReport {
   unattributed: { id: string; name: string; kind: string; modifiedTime: string }[]
   auditReadable: boolean; cleanup: { ok: boolean; error?: string }
 }
+// -- Move route probe --------------------------------------------------------
+export interface MoveProbeResult {
+  route: 'direct' | 'source-drive'; ok: boolean | null; step: string; detail: string
+  status: number | null; testedAt: string
+}
+export interface MoveProbe {
+  accountId: number | null; pair: string; results: MoveProbeResult[]
+  /** A direct pass: the one route a move run moves by. */
+  moveAvailable: boolean
+  /** The shared-drive route worked but the direct one did not: the engine cannot use it yet. */
+  otherRouteOnly: boolean
+}
+export const fetchMoveProbe = (accountId?: number) =>
+  cpFetch<MoveProbe>(`/api/v2/move-probe${accountId ? `?account_id=${accountId}` : ''}`)
+export const startMoveProbe = (reason: string, accountId?: number) =>
+  cpFetch<ActionResult>('/api/v2/move-probe/run', {
+    method: 'POST', body: JSON.stringify({ reason, account_id: accountId ?? null }),
+  })
+
 export const fetchCopySafety = (accountId?: number) =>
   cpFetch<CopySafetyReport | null>(`/api/v2/copy-safety/latest${accountId ? `?account_id=${accountId}` : ''}`)
 export const startCopySafety = (reason: string, user: string, perType: number, settleMin: number, accountId?: number) =>
@@ -2270,3 +2420,40 @@ export const startCopySafety = (reason: string, user: string, perType: number, s
     method: 'POST',
     body: JSON.stringify({ reason, user, per_type: perType, settle_min: settleMin, account_id: accountId ?? null }),
   })
+
+// ---- Sharing: every grant the migration made, inside / outside / public (api_server /api/v2/sharing)
+export type SharingKind = 'external' | 'public' | 'internal' | 'domain'
+export interface SharingGrant {
+  kind: SharingKind; grantee: string; owner: string; file: string; role: string | null
+  sourceId: string; targetId: string | null; sourceUrl: string; targetUrl: string | null
+}
+export interface SharingView {
+  accountId: number; domains: string[]
+  totals: Record<SharingKind, { label: string; grants: number; files: number }>
+  roles: Record<string, number>; notGranted: Record<string, number>
+  externalPeople: { name: string; files: number }[]; externalDomains: { name: string; files: number }[]
+  matched: number; offset: number; limit: number; grants: SharingGrant[]
+}
+const sharingQuery = (accountId: number, kind?: SharingKind | null, q = '') =>
+  `account_id=${accountId}${kind ? `&kind=${kind}` : ''}${q ? `&q=${encodeURIComponent(q)}` : ''}`
+export const fetchSharing = (accountId: number, kind?: SharingKind | null, q = '', offset = 0, limit = 100) =>
+  cpFetch<SharingView>(`/api/v2/sharing?${sharingQuery(accountId, kind, q)}&offset=${offset}&limit=${limit}`)
+export const sharingCsvUrl = (accountId: number, kind?: SharingKind | null, q = '') =>
+  `${getCpBase()}/api/v2/sharing?${sharingQuery(accountId, kind, q)}&format=csv`
+
+// ---- Mail links that cannot be repointed: what the source answers for each file (api_server /api/v2/mail-links)
+export type DeadLinkStatus = 'NOT_FOUND' | 'NO_ACCESS' | 'OUTSIDE' | 'NOT_MIGRATED' | 'OTHER'
+export interface DeadLink {
+  user: string; fileId: string; status: DeadLinkStatus; detail: string; emails: number
+  exampleMessage: string; checkedAt: string; sourceUrl: string
+}
+export interface DeadLinksView {
+  accountId: number; totals: Record<DeadLinkStatus, { label: string; links: number; emails: number }> | Record<string, never>
+  matched: number; offset: number; limit: number; links: DeadLink[]
+}
+const deadLinksQuery = (accountId: number, status?: DeadLinkStatus | null, q = '') =>
+  `account_id=${accountId}${status ? `&status=${status}` : ''}${q ? `&q=${encodeURIComponent(q)}` : ''}`
+export const fetchDeadLinks = (accountId: number, status?: DeadLinkStatus | null, q = '', limit = 100) =>
+  cpFetch<DeadLinksView>(`/api/v2/mail-links?${deadLinksQuery(accountId, status, q)}&limit=${limit}`)
+export const deadLinksCsvUrl = (accountId: number, status?: DeadLinkStatus | null, q = '') =>
+  `${getCpBase()}/api/v2/mail-links?${deadLinksQuery(accountId, status, q)}&format=csv`

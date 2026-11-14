@@ -5,6 +5,7 @@ import MigrationDetail from './MigrationDetail'
 const fetchMigrationDetail = vi.fn()
 
 vi.mock('@/components/RunReports', () => ({ default: () => null }))
+vi.mock('@/components/SharingPanel', () => ({ default: () => null }))
 vi.mock('@/components/QuickVerification', () => ({ default: () => null }))
 vi.mock('@/components/CopySafetyCard', () => ({ default: () => null }))
 vi.mock('@/components/OneToOneSummary', () => ({ default: () => null }))

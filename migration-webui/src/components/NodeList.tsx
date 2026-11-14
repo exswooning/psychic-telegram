@@ -144,6 +144,7 @@ export const NodeList: React.FC = () => {
                       <Switch size="small" disabled={busy === n.node_id}
                               checked={n.takes_work !== 0}
                               data-testid={`takes-${n.node_id}`}
+                              inputProps={{ 'aria-label': `${n.node_id} picks up users` }}
                               onChange={(e) => {
                                 const want = e.target.checked
                                 setBusy(n.node_id)

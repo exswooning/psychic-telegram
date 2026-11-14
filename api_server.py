@@ -83,6 +83,7 @@ import accounts_auth
 import account_context
 import job_admission
 import job_queue
+import scheduled_runs
 import job_supervisor
 import ai_diagnostics
 import control_plane_db as cpdb
@@ -337,14 +338,16 @@ class StartMigration(WriteAction):
     account_id: int | None = None
     dry_run: bool = False
     # Who moves the mail.
-    #   engine  this tool moves all of it. What every caller got before this
-    #           field existed, so it stays the API's own default.
+    #   engine  this tool moves all of it (also used for bounded samples).
     #   dms     Google's Data Migration Service moves all of it; this run
     #           migrates everything else.
-    #   split   experimental: this tool copies changed-link mail, then DMS
-    #           imports the mailbox. Fresh reconciliation checks the overlap.
-    # Left out, it is `engine`; unqualified handoff is never the default.
+    #   split   default for full mail runs: scan all source messages, copy changed-link
+    #           mail, then DMS imports the mailbox. Counts do not prove 1:1 fidelity.
     mail_mode: Literal["engine", "dms", "split"] | None = None
+    # Split mail's link scan: "search" (Gmail's own search names the candidates; only
+    # their bodies are read) or "exhaustive" (every message read). None = this
+    # server's MAIL_LINK_SCAN, "search" unless set. Ignored by engine and dms.
+    mail_link_scan: Literal["search", "exhaustive"] | None = None
     # A SAMPLE run: consider at most this many items of each service per user
     # (the first N found), and leave the users UNFINISHED so the next full
     # migration still copies the rest. For a quick copy small enough to check one to
@@ -388,6 +391,20 @@ class StartMigration(WriteAction):
     # OS processes each pass is split across (MIGRATE_PROCESSES): past the
     # interpreter lock that holds one process to ~1.1 cores.
     processes: int | None = Field(default=None, ge=1, le=8)
+    # "full": every email the engine writes is read back and compared while its source is still in
+    # memory, and a receipt kept (migration_checks.verify_written_mail) -- so the later 1:1 check reads
+    # labels and headers only (info@: 40,290 emails in 165 s). The benchmark's winning arm ran this
+    # way. None = this server's MAIL_COMPLETION_CHECK ("counts").
+    mail_completion_check: Literal["counts", "full"] | None = None
+    # True: no 1:1 check inside the run (FIRST_PASS_ACCEPTANCE and VERIFY_ON_COMPLETE off); run the
+    # check as its own job afterwards. 45 users at once, each checked in-process as it finished,
+    # filled 19 GB RAM + 5 GB swap (account 3, 9 Nov 2026) -- a native Sheet's compare reads it whole.
+    checks_after_run: bool | None = None
+    # Mail inside ONE mailbox: workers and calls a second. The defaults (4 workers, 3/s) hold a mailbox to
+    # about 1 email a second -- 35 of Gmail's 250 quota units a second; info@ (40,180 emails) alone was
+    # an 11-hour tail on account 3 (9 Nov 2026). 15/s is about 5 emails a second, 175 units.
+    mail_workers: int | None = Field(default=None, ge=1, le=16)
+    per_user_qps: float | None = Field(default=None, ge=1, le=40)
     # Turn on every optional pass whose scopes are granted (fidelity.py): each
     # one off is data a whole-tenant run leaves behind. Checked per launch with
     # a token mint, because one ungranted scope fails every call in the run.
@@ -400,7 +417,12 @@ def _tuning_env(body: StartMigration, env: dict | None) -> dict | None:
         ("USER_WORKERS", body.user_workers),
         ("DRIVE_FILE_WORKERS", body.drive_file_workers),
         ("MAPPING_CACHE_USER_CAP", body.mapping_cache_user_cap),
-        ("MIGRATE_PROCESSES", body.processes)) if val is not None}
+        ("MIGRATE_PROCESSES", body.processes),
+        ("MAIL_COMPLETION_CHECK", body.mail_completion_check),
+        ("MAIL_WORKERS", body.mail_workers),
+        ("PER_USER_QPS", body.per_user_qps),
+        ("FIRST_PASS_ACCEPTANCE", "false" if body.checks_after_run else None),
+        ("VERIFY_ON_COMPLETE", "false" if body.checks_after_run else None)) if val is not None}
     return {**(env or os.environ), **extra} if extra else env
 
 
@@ -884,7 +906,15 @@ async def lifespan(_: FastAPI):
     mirrors = asyncio.create_task(_mirror_loop())
     ends = asyncio.create_task(_lifecycle_loop())
     owed = asyncio.create_task(_owed_grants_loop())
+    scheduled = asyncio.create_task(_scheduled_runs_loop())
     housekeep = asyncio.create_task(_housekeeping_loop())
+    try:
+        import job_queue
+        job_queue.scrub_secrets()      # passwords stored in queued payloads before they were stripped
+    except Exception:                  # noqa: BLE001 - a scrub that fails must not stop the API
+        log.warning("could not scrub secrets from the job queue", exc_info=True)
+    oversee = asyncio.create_task(_oversight_loop())
+    dms_retry = asyncio.create_task(_dms_retry_loop())
     guard = asyncio.create_task(_source_guard_loop())
     guard_fast = asyncio.create_task(_source_guard_fast_loop())
     verification_repairs_task = asyncio.create_task(_verification_repair_loop())
@@ -893,6 +923,8 @@ async def lifespan(_: FastAPI):
     finally:
         verification_repairs_task.cancel()
         housekeep.cancel()
+        oversee.cancel()
+        dms_retry.cancel()
         guard.cancel()
         guard_fast.cancel()
         task.cancel()
@@ -901,6 +933,7 @@ async def lifespan(_: FastAPI):
         mirrors.cancel()
         ends.cancel()
         owed.cancel()
+        scheduled.cancel()
 
 
 app = FastAPI(title="Migration Command Center", version="1.0", lifespan=lifespan)
@@ -1633,6 +1666,12 @@ async def get_active_jobs(op: Operator = Depends(operator)):
         if t is not None and t.is_alive():
             rows = list(rows) + [{"account_id": aid, "job_name": "repair", "pid": None,
                                   "started_at": prog.get("startedAt"), "progress": dict(prog)}]
+    if op.login_id is not None and not op.is_superadmin:      # a signed-in client; the operator's own token is not one
+        # A capacity refusal caused by someone else's run still has to be explainable, so the row stays;
+        # its pid and its step (which names users and files of that tenant) do not.
+        mine = {op.account_id, op.login_id, *accounts_auth.owned_migrations(op.login_id)} - {None}
+        rows = [r if r.get("account_id") in mine else
+                {k: v for k, v in r.items() if k not in ("pid", "progress")} for r in rows]
     return rows
 
 
@@ -1763,6 +1802,12 @@ def _child_output(job_name: str, account_id: int | None):
     # (live, a migrate card's log opened on the previous day's run).
     fh.write(f"=== run started {_dt.datetime.now(_dt.timezone.utc):%Y-%m-%dT%H:%M:%SZ}: "
              f"{job_name} ===\n".encode())
+    try:
+        version = open(os.path.join(HERE, 'DEPLOYED_COMMIT'), encoding='utf-8').read().strip()
+    except OSError:
+        version = 'unknown'
+    fh.write((json.dumps({'bitport_event': 1, 'kind': 'run_started', 'version': version,
+        'run_id': _dt.datetime.now(_dt.timezone.utc).isoformat(), 'operation': job_name})+'\n').encode())
     return fh
 
 
@@ -1804,6 +1849,8 @@ def _run_admitted(argv: list[str], account_id: int | None, job_name: str,
     does rather than something the client is asked to do.
     """
     admitted, msg = job_admission.try_admit(account_id, job_name)
+    if not admitted and msg.startswith(job_admission.ALREADY_RUNNING):
+        return False, "Not started: " + msg[len(job_admission.ALREADY_RUNNING):]
     if not admitted:
         # Queued, not refused. A client whose migration came back "capacity
         # is full -- try again shortly" was being asked to poll a page that
@@ -1918,6 +1965,10 @@ def _start_admitted(argv: list[str], account_id: int | None, job_name: str,
     """Spawn into a slot admission has already granted. `then` names what to do once it
     has exited cleanly (see _follow_on) -- one kind, or several, run in the order given;
     it travels with a queued job so a job that waited for a slot still does it."""
+    import account_isolation
+    why = account_isolation.refusal(account_id, env)
+    if why:
+        return False, why
     out = _child_output(job_name, account_id)
     try:
         proc = subprocess.Popen(argv, cwd=HERE, stdout=out,
@@ -2033,6 +2084,13 @@ def _account_argv(account_id: int | None) -> list[str]:
 _ALL_SERVICES = ("drive", "gmail", "calendar", "chat", "contacts", "tasks")
 
 
+def _expand_all(services: list[str]) -> list[str]:
+    """`all` as the engine reads it: every service, Chat only when MIGRATE_CHAT turns it on."""
+    from config import chat_by_default
+    return [s for s in _ALL_SERVICES if s != "chat" or chat_by_default()] \
+        if "all" in services else list(services)
+
+
 def _mail_plan(services: list[str], mail_mode: str, rewrite: bool = True) -> tuple[list[str], dict | None, bool]:
     """(services, env, ordered) for who moves the mail.
 
@@ -2053,7 +2111,7 @@ def _mail_plan(services: list[str], mail_mode: str, rewrite: bool = True) -> tup
     unrewritten content; post-import reconciliation detects overlap, duplicate
     identities and label drift instead of trusting DMS completion counters.
     """
-    wanted = list(_ALL_SERVICES) if "all" in services else list(services)
+    wanted = _expand_all(services)
     env = None
     if mail_mode == "dms":
         # Excluding mail is the whole point: running both inserts every message
@@ -2068,12 +2126,17 @@ def _mail_plan(services: list[str], mail_mode: str, rewrite: bool = True) -> tup
 
 
 def _default_mail_mode(body: "StartMigration") -> str:
-    """DMS mailbox overlap is not a proven per-message handoff.
+    """Full mail runs scan/rewrite link mail first, then hand off to DMS.
 
-    Keep split available as an explicit choice while sandbox qualification is
-    incomplete. Callers omitting a mode get the tracked engine.
+    A bounded sample must remain a bounded engine job. Counts are accounting,
+    not a release of any outstanding full-verification findings.
     """
-    return "engine"
+    wanted = set(_expand_all(body.services))
+    # Without Drive in the run there is nothing to rewrite links against.
+    if body.sample is not None or not {"gmail", "drive"} <= wanted:
+        return "engine"
+    best = ab_default()       # the benchmark's verified winner, when there is one
+    return (best or {}).get("mailMode") or "split"
 
 
 def _export_identities_csv(account_id: int | None) -> tuple[str, int]:
@@ -2087,7 +2150,9 @@ def _export_identities_csv(account_id: int | None) -> tuple[str, int]:
     rows = [(r["source_email"], r["target_email"]) for r in db.all_identities() if r["entity_type"] == "user"]
     d = os.path.join(HERE, "logs", "dms", "_none" if account_id is None else str(account_id))
     os.makedirs(d, exist_ok=True)
-    path = os.path.join(d, "identities.csv")
+    import hashlib
+    tag = hashlib.sha256("\n".join(",".join(r) for r in sorted(rows)).encode()).hexdigest()[:8]
+    path = os.path.join(d, f"identities-{len(rows)}u-{tag}.csv")      # named by content: see dms_migrate
     with open(path, "w", newline="", encoding="utf-8") as fh:
         w = csv.writer(fh)
         w.writerow(("source_email", "target_email"))
@@ -2122,12 +2187,10 @@ def _start_dms(account_id: int | None, *, require_clean: bool, why: str) -> tupl
         return False, reason
 
     if require_clean:
+        # Per user, not all or nothing (operator, 13 Nov 2026): dms_pipeline holds back only a user whose
+        # mail the DMS could carry unrewritten (unfinished, failed link mail, new mail with a Drive link)
+        # and starts the rest -- one user no longer holds every mailbox. What stays here: nobody finished.
         p = _migration_progress(account_id)
-        if p["failed"] or p["running"] or p["blocked"]:
-            return decline(f"{p['failed']} user(s) failed, {p['running']} still running, "
-                           f"{p['blocked']} blocked on something outside the tool")
-        if p.get("itemsFailed", 0):
-            return decline(f"{p['itemsFailed']} unresolved item failures; split handoff is incomplete")
         if not p["done"] and not p.get("awaitingDms", 0):
             return decline("no user finished")
     st = Settings(account_id=account_id)
@@ -2146,13 +2209,21 @@ def _start_dms(account_id: int | None, *, require_clean: bool, why: str) -> tupl
     csv_path, n = _export_identities_csv(account_id)
     if not n:
         return decline("there are no users to map")
-    argv = [PY, "dms_migrate.py", "--apply", "--watch", "720", "--until-done", "4320", "--timeout", "200",
-            "--identities", csv_path,
-            "--source-domain", st.source_domain, "--target-admin", st.target_admin]
+    dms_args = ["--watch", "720", "--until-done", "4320", "--timeout", "200",
+                "--source-domain", st.source_domain, "--target-admin", st.target_admin]
     if st.source_admin:
-        argv += ["--source-admin", st.source_admin]
+        dms_args += ["--source-admin", st.source_admin]
+    then = None
+    if account_id is None:
+        argv = [PY, "dms_migrate.py", "--apply", "--identities", csv_path] + dms_args
+    else:
+        # The whole procedure (operator, 13 Nov 2026): hold/ready decision recorded first, the import for the
+        # ready users, confirmed to have started, then deltas until zero failed -- and after it, a verify of
+        # every item with repair (the verify-after-dms follow-on), as its own job so its progress shows.
+        argv = [PY, "dms_pipeline.py", "--account-id", str(account_id), "--identities", csv_path] + dms_args
+        then = ["verify-after-dms"]
     action = cpdb.begin_action("auto", "system", "dms.start", why, st.target_domain, {"users": n}, None, account_id)
-    ok, detail = _run_admitted(argv, account_id, "dms", env=env)
+    ok, detail = _run_admitted(argv, account_id, "dms", env=env, **({"then": then} if then else {}))
     cpdb.finish_action(action, "OK" if ok else "FAILED", detail)
     return ok, detail
 
@@ -2246,8 +2317,11 @@ def _fix_after_tally(account_id: int | None, users: list[str] | None = None) -> 
             if u["verdict"] not in ("SHORT", "DIFFERS") or db.autofixed_since(who, AUTOFIX_EVERY_HOURS):
                 continue
             if u["verdict"] == "SHORT":
+                # Mail is never re-moved here: a tally counts mail owed to the DMS as missing, and an
+                # engine re-run of it is the mode the operator chose against (10 Nov 2026: environment@
+                # was re-migrated by the engine automatically). Mail gaps are reported, not auto-fixed.
                 gaps = {TALLY_FIXES_WITH[s] for s, v in (u.get("services") or {}).items()
-                        if s in TALLY_FIXES_WITH and isinstance(v, dict)
+                        if s in TALLY_FIXES_WITH and s != "mail" and isinstance(v, dict)
                         and v.get("expected") is not None and v.get("target") is not None
                         and v["target"] < v["expected"]}
                 if gaps:
@@ -2260,6 +2334,9 @@ def _fix_after_tally(account_id: int | None, users: list[str] | None = None) -> 
     finally:
         db.close()
     did = []
+    # An operator's pause of automatic repairs holds for every automatic follow-on, not only the
+    # backlog dispatcher (10 Nov 2026: a tally's follow-on started a repair with repairs paused).
+    repairs_on = _repair_policy(account_id)
     if short:
         services = sorted(set().union(*short.values()))
         svc, env, ordered = _mail_plan(services, "engine")
@@ -2269,9 +2346,9 @@ def _fix_after_tally(account_id: int | None, users: list[str] | None = None) -> 
         for who in sorted(short):
             argv += ["--user", who]
         ok, detail = _run_admitted(argv, account_id, "migrate", **({"env": env} if env else {}),
-                                   then=["repair", _tally_follow("tally", sorted(short))])
+                                   then=(["repair"] if repairs_on else []) + [_tally_follow("tally", sorted(short))])
         did.append(f"{len(short)} short user(s) migrated again for {', '.join(services)}: {detail}")
-    if differs:
+    if differs and repairs_on:
         _start_repair(account_id, why=f"started automatically: the tally found {len(differs)} "
                                       "user(s) whose items differ from the source")
         _start_tally_after_repair(account_id, differs)
@@ -2384,20 +2461,34 @@ def _dispatch_verification_repairs():
     import verification_repairs
     if job_queue.waiting():
         return  # operator requests take priority over historical backfill
+    if verification_repairs.deploy_pending():
+        return  # a deploy is waiting for an idle box: start nothing that would hold it for hours
     for acct in accounts_auth.list_accounts():
         aid = acct.get("id") if isinstance(acct, dict) else acct
         path = _account_db_path(aid)
         t = _REPAIR_THREADS.get(aid)
         if not path or not os.path.isfile(path) or (t is not None and t.is_alive()):
             continue
+        if _ab_running_for(aid):
+            continue
         d = MigrationDB(path)
         try:
+            try:
+                # Rows the ledger alone can close (mapped since, owed to the DMS): no Google read, every pass.
+                closed = verification_repairs.reconcile_ledger(d)
+                if closed:
+                    log.info("verification queue account %s: %d row(s) closed on ledger evidence", aid, closed)
+            except Exception as exc:      # noqa: BLE001 - housekeeping; never stops the dispatcher
+                log.warning("verification queue reconcile failed for account %s: %s", aid, exc)
             if not verification_repairs.enabled(d):
                 with cpdb.ro() as conn:
                     globally_idle = conn.execute("SELECT 1 FROM active_jobs LIMIT 1").fetchone() is None
                 if globally_idle:
                     verification_repairs.reconcile_stopped_verification(d)
-            users = verification_repairs.due_users(d)[:4]
+            # More users than workers (VERIFY_MAX_WORKERS): each worker takes the next user the moment it
+            # frees up, so one big mailbox no longer holds three finished slots idle for hours (info@'s
+            # 40,000 messages kept the batch open 90 minutes after the other three users were done).
+            users = verification_repairs.due_users(d)[:BACKLOG_USERS]
         finally:
             d.close()
         if not users:
@@ -2405,17 +2496,35 @@ def _dispatch_verification_repairs():
         admitted, _ = job_admission.try_admit(aid, "verify")
         if not admitted:
             continue
-        argv = [PY, "verify_sample.py"] + _account_argv(aid) + ["--repair-after-user"]
+        # Only the services with something open: a backlog repair of Drive findings never re-reads the mailbox.
+        argv = [PY, "verify_sample.py"] + _account_argv(aid) + ["--repair-after-user", "--scope-to-findings"]
         for user in users:
             argv += ["--user", user]
         try:
-            ok, detail = _start_admitted(argv, aid, "verify", dict(os.environ, VERIFY_WORKERS="auto"))
+            ok, detail = _start_admitted(argv, aid, "verify",
+                                         dict(os.environ, VERIFY_WORKERS="auto", VERIFY_YIELD_TO_DEPLOY="1"))
             if not ok:
                 job_admission.release(aid, "verify")
             log.info("verification repair backlog account %s: %s", aid, detail)
         except Exception:
             job_admission.release(aid, "verify")
             raise
+
+
+def _ab_running_for(account_id, progress_path: str | None = None) -> bool:
+    """Is a same-user A/B (ab_transfer.py) alive for this account? It is not an admitted job, so
+    between its own steps the account looks idle and the backlog verifier slipped in: it repaired
+    (copied mail into) the user under test and overwrote its verification rows mid-comparison.
+    A progress file with no account (written before it carried one) holds every account back."""
+    try:
+        with open(progress_path or os.path.join(HERE, "logs", "ab_progress.json")) as fh:
+            p = json.load(fh)
+        if not p.get("running") or not p.get("pid"):
+            return False
+        os.kill(int(p["pid"]), 0)
+    except (OSError, ValueError):
+        return False
+    return p.get("accountId") in (None, account_id)
 
 
 async def _verification_repair_loop():
@@ -2429,6 +2538,28 @@ async def _verification_repair_loop():
 
 def _follow_users(kind: str) -> list[str] | None:
     return [u for u in kind.split("@", 1)[1].split(",") if u] if "@" in kind else None
+
+
+VERIFY_AFTER_DMS_SERVICES = "drive,gmail,calendar,contacts,tasks"      # Chat is out of scope by default
+
+
+def _start_verify_after_dms(account_id: int | None) -> tuple[bool, str]:
+    """After the DMS reports zero failed emails: a verify of every item of every user, each user repaired
+    as it is checked (operator, 13 Nov 2026: report AND repair, with its progress shown). Its own admitted
+    job, named verify, so the Jobs page shows it and its [n/total] progress; repairs are switched on for
+    the account first, by the operator's standing choice -- a later pause from the UI still holds."""
+    from db import MigrationDB
+    import verification_repairs
+    d = MigrationDB(_account_db_path(account_id))
+    try:
+        verification_repairs.enable(d, operator=True)
+    finally:
+        d.close()
+    argv = [PY, "verify_sample.py"] + _account_argv(account_id) + [
+        "--services", VERIFY_AFTER_DMS_SERVICES, "--limit", "0", "--repair-after-user"]
+    ok, detail = _run_admitted(argv, account_id, "verify")
+    log.info("verify after the DMS (account %s): %s %s", account_id, "started" if ok else "not started", detail)
+    return ok, detail
 
 
 def _follow_on(kind: str, account_id: int | None) -> None:
@@ -2451,6 +2582,8 @@ def _follow_on(kind: str, account_id: int | None) -> None:
     elif kind == "dms":
         _start_dms(account_id, require_clean=True, why="started automatically: the split migration finished cleanly, "
                                                        "so the mail it left for the DMS is now owed")
+    elif kind == "verify-after-dms":
+        _start_verify_after_dms(account_id)
     elif kind.split("@")[0] == "tally":
         _start_tally_after_repair(account_id, _follow_users(kind))
     elif kind.split("@")[0] == "tally_fix":
@@ -2468,6 +2601,11 @@ async def migrate_start(body: StartMigration, op: Operator = Depends(operator)):
     # Resolved once and written back, so the audit row and the DMS follow-on below both see
     # what this run actually does rather than "not said".
     body.mail_mode = body.mail_mode or _default_mail_mode(body)
+    # server_side is the default (operator, 2026-11-01): no bytes cross this host, so a slow or
+    # unreliable line can't bound a run. The benchmark's winner still sets the MAIL mode above;
+    # an operator who names a transfer mode keeps it.
+    if not body.transfer_mode:
+        body.transfer_mode = "server_side"
     if body.sample is not None and body.mail_mode != "engine":
         # Split leaves the rest of the mail to the DMS and dms takes all of it, so
         # either way the mail could not be compared one to one -- the reason to
@@ -2504,6 +2642,8 @@ async def migrate_start(body: StartMigration, op: Operator = Depends(operator)):
         env = {**(env or os.environ), "TRANSFER_MODE": body.transfer_mode}
     if body.redo_links:
         env = {**(env or os.environ), "REDO_UNREWRITTEN_LINKS": "true", "REWRITE_DRIVE_LINKS": "true"}
+    if body.mail_link_scan and body.mail_mode == "split":
+        env = {**(env or os.environ), "MAIL_LINK_SCAN": body.mail_link_scan}
     env = _tuning_env(body, env)
     left_off: list[str] = []
     if not body.dry_run:
@@ -2634,7 +2774,11 @@ def _verification_view(account_id: int | None) -> dict:
         except sqlite3.OperationalError:
             repairs = []
     verifications = db_module.parse_user_verification_rows(rows)
-    rollup = db_module.verification_rollup(users, verifications)
+    with cpdb.ro(path) as receipt_conn:
+        pending = db_module.pending_mail_checks(receipt_conn)
+        expected_services = db_module.expected_verification_services(receipt_conn)
+        pending_diagnostics = db_module.pending_mail_diagnostics(receipt_conn)
+    rollup = db_module.verification_rollup(users, verifications, pending_items=pending, expected_services=expected_services, pending_diagnostics=pending_diagnostics)
     latest_repairs = {}
     for r in repairs:
         latest_repairs.setdefault(r["source_user"], dict(r))
@@ -2664,7 +2808,7 @@ def _repair_policy(aid: int, enabled: bool | None = None) -> bool:
     d = MigrationDB(path)
     try:
         if enabled is True:
-            verification_repairs.enable(d)
+            verification_repairs.enable(d, operator=True)      # the operator's switch: overrides a pause
         elif enabled is False:
             verification_repairs.pause(d)
         return verification_repairs.enabled(d)
@@ -2930,6 +3074,45 @@ async def copy_safety_latest(account_id: int | None = None, op: Operator = Depen
             return None
         with open(found[-1]) as fh:
             return {**_json.load(fh), "file": os.path.basename(found[-1])}
+    return await _off_loop(_read)
+
+
+# -- Move route probe (move_probe.py) ---------------------------------------------------
+class MoveProbeStart(WriteAction):
+    account_id: int | None = None
+
+
+@app.post("/api/v2/move-probe/run")
+async def move_probe_run(body: MoveProbeStart, op: Operator = Depends(operator)):
+    """Try moving a one-byte file between the two tenants through a shared drive, by each route a
+    move could use (move_probe.py). An admitted job named `move-probe`; it writes to the source
+    only when that is a declared sandbox, and says so when it is not."""
+    account_id = _resolve_account(body, op)
+    argv = [PY, "move_probe.py"] + _account_argv(account_id)
+    return await _gated(op, "move_probe.run", body, "move-probe",
+                        lambda: _run_admitted(argv, account_id, "move-probe"))
+
+
+@app.get("/api/v2/move-probe")
+async def move_probe_latest(account_id: int | None = None, op: Operator = Depends(operator)):
+    """What the last probe of THIS pair found, per route, and whether a move run may be offered:
+    only a direct pass, the one route the engine moves by."""
+    require_login(op)
+    aid = account_id if account_id is not None else op.account_id
+    _require_account_access(aid, op)
+
+    def _read():
+        import move_probe
+        from config import Settings
+        from db import MigrationDB
+        st = Settings(account_id=aid)
+        path = _ledger_path(aid)
+        results = move_probe.latest(MigrationDB(path), st) if os.path.isfile(path) else []
+        by = {r["route"]: r for r in results}
+        return {"accountId": aid, "pair": move_probe.pair_key(st), "results": results,
+                "moveAvailable": bool((by.get("direct") or {}).get("ok")),
+                "otherRouteOnly": bool((by.get("source-drive") or {}).get("ok")
+                                       and not (by.get("direct") or {}).get("ok"))}
     return await _off_loop(_read)
 
 
@@ -3264,6 +3447,81 @@ async def quick_latest_markdown(account_id: int | None = None, op: Operator = De
         raise HTTPException(404, "no quick migration has been verified yet")
     return FileResponse(path, media_type="text/markdown", filename=f"quick-verification-{aid}.md",
                         content_disposition_type="attachment")
+
+
+class ScheduleMigration(StartMigration):
+    # ISO time with an offset or Z ("2026-11-03T02:00:00+05:45"); never a bare local time.
+    run_at: str
+
+
+@app.post("/api/v2/migrate/schedule")
+async def schedule_add(body: ScheduleMigration, op: Operator = Depends(operator)):
+    """Start a migration at a chosen hour. Stores the body the Start dialog would have sent;
+    the loop below sends it through migrate_start when the time comes, so every gate, audit
+    row and queue rule applies then, not now."""
+    require_admin(op)
+    account_id = _resolve_account(body, op)
+    try:
+        when = scheduled_runs.to_utc_iso(body.run_at)
+    except ValueError as exc:
+        raise HTTPException(400, f"run_at: {exc}") from exc
+    if when <= scheduled_runs.now_iso(60):
+        raise HTTPException(400, "run_at must be at least a minute from now")
+    payload = body.model_dump(exclude={"run_at"})
+    payload["account_id"] = account_id
+    run_id = await _off_loop(scheduled_runs.add, account_id, when, payload, op.name)
+    return {"id": run_id, "runAt": when}
+
+
+@app.get("/api/v2/migrate/schedule")
+async def schedule_list(account_id: int | None = None, op: Operator = Depends(operator)):
+    require_login(op)
+    aid = account_id if account_id is not None else op.account_id
+    _require_account_access(aid, op)
+    return {"runs": await _off_loop(scheduled_runs.listing, aid)}
+
+
+@app.delete("/api/v2/migrate/schedule/{run_id}")
+async def schedule_cancel(run_id: int, account_id: int | None = None, op: Operator = Depends(operator)):
+    require_admin(op)
+    aid = account_id if account_id is not None else op.account_id
+    _require_account_access(aid, op)
+    if not await _off_loop(scheduled_runs.cancel, run_id, aid):
+        raise HTTPException(404, "no pending scheduled run with that id")
+    return {"cancelled": run_id}
+
+
+SCHEDULE_POLL_SEC = 30
+
+
+async def _start_due_runs() -> None:
+    due, missed = await _off_loop(scheduled_runs.claim_due)
+    if missed:
+        log.warning("scheduled runs: %d missed their hour", missed)
+    for run in due:
+        # The operator who scheduled it, as far as the audit trail goes; the account is the one
+        # it was scheduled for, so migrate_start's own account check passes.
+        op = Operator(name=f"scheduled by {run['requestedBy']}", role="admin",
+                      account_id=run["accountId"], login_id=run["accountId"], is_superadmin=True)
+        try:
+            body = StartMigration(**run["payload"])
+            res = await migrate_start(body, op)
+            await _off_loop(scheduled_runs.finish, run["id"], True, str(res)[:300])
+        except HTTPException as exc:
+            await _off_loop(scheduled_runs.finish, run["id"], False, f"{exc.status_code}: {exc.detail}")
+        except Exception as exc:      # noqa: BLE001 - one bad run must not stop the next
+            await _off_loop(scheduled_runs.finish, run["id"], False, repr(exc))
+
+
+async def _scheduled_runs_loop() -> None:
+    while True:
+        try:
+            await asyncio.sleep(SCHEDULE_POLL_SEC)
+            await _start_due_runs()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:      # noqa: BLE001 - the loop must outlive a bad pass
+            log.warning("scheduled-run sweep failed: %r", exc)
 
 
 @app.post("/api/v2/migrate/delta")
@@ -3793,6 +4051,86 @@ async def identities_auto_map(body: BuildIdentityMap,
     return await _gated(op, "identities.auto_map", body, "identity_map", _launch)
 
 
+class ExperimentAction(WriteAction):
+    account_id: int | None = None
+
+
+_EXPERIMENT_NAME = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")
+
+
+def _experiment_dir(name: str) -> str:
+    if not _EXPERIMENT_NAME.match(name or ""):
+        raise HTTPException(400, "an experiment name is 1-40 lowercase letters, digits or dashes")
+    return os.path.join(HERE, "logs", "experiments", name)
+
+
+@app.post("/api/v2/experiments/{name}/start")
+async def experiment_start(name: str, body: ExperimentAction, op: Operator = Depends(operator)):
+    """Bookmark every log and the ledger now (run_digest.py start), so the digest built later reads
+    only what this experiment wrote. Read-only on everything but its own folder."""
+    _experiment_dir(name)
+    aid = _resolve_account(body, op)
+
+    def _launch() -> tuple[bool, str]:
+        out = subprocess.run([PY, "run_digest.py", "start", "--account", str(aid), "--name", name],
+                             cwd=HERE, capture_output=True, text=True, timeout=120)
+        return out.returncode == 0, (out.stdout or out.stderr).strip()[-300:]
+    return await _gated(op, "experiment.start", body, name, _launch)
+
+
+@app.post("/api/v2/experiments/{name}/digest")
+async def experiment_digest(name: str, body: ExperimentAction, op: Operator = Depends(operator)):
+    """Fold what the experiment appended into digest.md/json, detached: reading a long run's logs
+    takes longer than a request should hold, and it must not take the account's job slot."""
+    d = _experiment_dir(name)
+    aid = _resolve_account(body, op)
+    if not os.path.isfile(os.path.join(d, "bookmark.json")):
+        raise HTTPException(409, "bookmark this experiment first")
+
+    def _launch() -> tuple[bool, str]:
+        with open(os.path.join(d, "digest.log"), "wb") as fh:
+            proc = subprocess.Popen([PY, "run_digest.py", "digest", "--account", str(aid), "--name", name],
+                                    cwd=HERE, stdout=fh, stderr=subprocess.STDOUT,
+                                    stdin=subprocess.DEVNULL, start_new_session=True)
+        return True, f"building the digest, pid {proc.pid}"
+    return await _gated(op, "experiment.digest", body, name, _launch)
+
+
+@app.get("/api/v2/experiments")
+async def experiments(account_id: int | None = None, name: str | None = None,
+                      op: Operator = Depends(operator)):
+    """This account's experiments, and with `name` that one's digest page."""
+    require_login(op)
+    aid = account_id if account_id is not None else op.account_id
+    _require_account_access(aid, op)
+
+    def _read() -> dict:
+        root = os.path.join(HERE, "logs", "experiments")
+        rows = []
+        for n in sorted(os.listdir(root)) if os.path.isdir(root) else []:
+            try:
+                with open(os.path.join(root, n, "bookmark.json"), encoding="utf-8") as fh:
+                    mark = json.load(fh)
+            except (OSError, ValueError):
+                continue
+            if mark.get("account") != aid:
+                continue
+            dj = os.path.join(root, n, "digest.json")
+            building = any(f"run_digest.py digest --account {aid} --name {n}" in ln for ln in
+                           subprocess.run(["ps", "-eo", "args="], capture_output=True, text=True).stdout.splitlines())
+            rows.append({"name": n, "startedAt": mark.get("startedAt"), "building": building,
+                         "digestAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(os.path.getmtime(dj)))
+                         if os.path.isfile(dj) else None})
+        out: dict = {"experiments": rows}
+        if name:
+            md = os.path.join(_experiment_dir(name), "digest.md")
+            if os.path.isfile(md) and any(r["name"] == name for r in rows):
+                with open(md, encoding="utf-8") as fh:
+                    out["digest"] = fh.read()
+        return out
+    return await _off_loop(_read)
+
+
 @app.get("/api/v2/identities/status")
 async def identities_status(account_id: int | None = None, op: Operator = Depends(operator)):
     """How many users are mapped, and how the last build went."""
@@ -4010,6 +4348,108 @@ async def benchmark_running(op: Operator = Depends(operator)):
                       "progress": cpdb.drive_migrated_counts(since_iso=since)})
         return found
     return await _off_loop(_check)
+
+
+def ab_view(progress_path: str, results_path: str, now: float | None = None) -> dict:
+    """The controlled A/B (ab_transfer.py): live progress, a real ETA, and the ranked results.
+
+    The ETA exists because this run's total is known before it starts (arms = transfer modes x
+    mail modes), unlike benchmark_run.py's open-ended walk. It is mean(finished arms) for the
+    arms still to go, less what the current one has already used -- and absent until one arm
+    has finished, because one measurement is the least a mean can be made of.
+    """
+    now = time.time() if now is None else now
+    out: dict = {"running": False, "progress": None, "results": None, "ranking": []}
+    try:
+        with open(progress_path) as fh:
+            p = json.load(fh)
+    except (OSError, ValueError):
+        p = None
+    if p:
+        alive = False
+        if p.get("running") and p.get("pid"):
+            try:
+                os.kill(int(p["pid"]), 0)
+                alive = True
+            except (OSError, ValueError):
+                alive = False        # a hard kill leaves running=true behind
+        durations = [d for d in (p.get("durations") or []) if isinstance(d, (int, float))]
+        total, done = int(p.get("total") or 0), int(p.get("done") or 0)
+        eta = None
+        if alive and p.get("parallel") and p.get("phase") == "side by side":
+            pass        # arms overlap, so a mean of their durations says nothing about the finish
+        elif alive and durations and total > done:
+            mean = sum(durations) / len(durations)
+            used = max(0.0, now - float(p.get("armStartedAt") or now))
+            eta = round(max(mean - used, 0.0) + mean * (total - done - 1))
+        out["running"] = alive
+        out["progress"] = {**{k: p.get(k) for k in ("startedAt", "finishedAt", "updatedAt", "current",
+                                                      "users", "corpus", "total", "done", "error")},
+                           "alive": alive, "etaSeconds": eta, "armsFinished": len(durations),
+                           "meanArmSeconds": round(sum(durations) / len(durations)) if durations else None,
+                           "arms": p.get("arms") or [], "phase": p.get("phase"),
+                           "skipped": p.get("skipped") or [],
+                           "etaNote": None if eta is not None else (
+                               "arms run side by side; the slowest sets the finish, then the leader is re-timed alone"
+                               if alive and p.get("parallel") and p.get("phase") == "side by side" else
+                               "no estimate until one arm has finished" if alive else None)}
+    try:
+        with open(results_path) as fh:
+            res = json.load(fh)
+    except (OSError, ValueError):
+        res = None
+    if res:
+        runs = res.get("runs") or []
+        out["results"] = {"source": res.get("source"), "runs": runs}
+        # Fast only counts if it also finished clean. A Drive-only arm has no 1:1 verdict, so it
+        # is "clean" when nothing failed and the target kept every file it was compared on.
+        def clean(r):
+            if "clean" in r and r.get("mailMode"):
+                return bool(r["clean"])
+            f = r.get("fidelity") or {}
+            return r.get("exit") == 0 and not r.get("failed") and not f.get("missing_on_target")
+        out["ranking"] = sorted(
+            ({"arm": r["mode"] + (" + " + r["mailMode"] if r.get("mailMode") else ""),
+              "mode": r["mode"], "mailMode": r.get("mailMode"),
+              "seconds": r.get("seconds"), "failed": r.get("failed"), "clean": clean(r),
+              "timing": r.get("timing"), "contendedSeconds": r.get("contendedSeconds"),
+              "corpus": r.get("corpus"), "_key": _ab_rank_key(r),
+              **ab_errors(r),
+              "verdicts": r.get("verdicts") or {},
+              "differences": r.get("differences") or {}, "dms": r.get("dms")} for r in runs),
+            key=lambda a: a.pop("_key"))
+        best = next((a for a in out["ranking"] if a["judged"] and a["mailMode"]), None)
+        out["best"] = best and {k: best.get(k) for k in ("arm", "mode", "mailMode", "errors", "seconds",
+                                                         "errorsPer1k", "secondsPer100")}
+        out["finishedAt"] = (p or {}).get("finishedAt") if not out["running"] else None
+        out["skipped"] = res.get("skipped") or []
+    return out
+
+
+def ab_errors(r: dict) -> dict:
+    import ab_transfer
+    return ab_transfer.arm_errors(r)
+
+
+def _ab_rank_key(r: dict) -> tuple:
+    import ab_transfer
+    return ab_transfer.rank_key(r)
+
+
+AB_RESULTS = os.path.join(HERE, "logs", "ab_results.md.json")
+
+
+def ab_default(results_path: str = AB_RESULTS) -> dict | None:
+    """The benchmark's winner -- fewest errors, then fastest, among arms whose own check ran --
+    which new runs use when they name no transfer or mail mode (operator, 2026-10-31: "set the
+    default now"). None while no arm qualifies, and runs keep the configured defaults."""
+    return ab_view(os.devnull, results_path).get("best")
+
+
+@app.get("/api/v2/benchmark/ab")
+async def benchmark_ab(op: Operator = Depends(operator)):
+    require_reader(op)
+    return await _off_loop(ab_view, os.path.join(HERE, "logs", "ab_progress.json"), AB_RESULTS)
 
 
 # ======================================================================
@@ -4733,6 +5173,34 @@ class FullSetupCode(WriteAction):
                       exclude=True)
 
 
+class FullSetupNotice(WriteAction):
+    account_id: int | None = None
+    side: Literal["source", "target"]
+    request_id: str = Field(pattern=r"^[a-f0-9]{48}$")
+    notice_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
+    decision: Literal["approve", "decline"]
+
+
+@app.post("/api/v2/full-setup/notice")
+async def full_setup_notice(body: FullSetupNotice, op: Operator = Depends(operator)):
+    """Audited, account/run-specific approval, never a saved blanket acceptance."""
+    require_admin(op)
+    aid = _resolve_account(body, op)
+
+    def _respond() -> tuple[bool, str]:
+        if _full_setup_pid(body.side, aid) is None:
+            return False, f"no {body.side} setup is running"
+        import setup_notices
+        try:
+            setup_notices.write_decision(
+                _full_setup_state_path(body.side, aid) + ".progress",
+                body.request_id, body.notice_hash, body.decision)
+        except (OSError, ValueError, KeyError) as exc:
+            return False, str(exc)
+        return True, "Notice response recorded for this setup only; Google must still confirm the next step."
+    return await _gated(op, "full_setup.notice", body, body.side, _respond)
+
+
 @app.post("/api/v2/full-setup/code")
 async def full_setup_code(body: FullSetupCode, op: Operator = Depends(operator)):
     """The code Google showed the operator after they signed in on their own device,
@@ -5213,6 +5681,39 @@ async def source_guard_run(body: SourceGuardAction, op: Operator = Depends(opera
     return await _gated(op, f"source_guard.{body.action}", body, f"account:{aid}", _go)
 
 
+DMS_RETRY_SEC = int(os.getenv("DMS_RETRY_SEC", "3600"))
+
+
+def _retry_declined_dms() -> list:
+    """Ask again, for every account whose DMS was declined (an open dms_not_started incident). The gate was
+    decided once, at the end of the split run, and never again: repairs cut account 3's blockers from 188 to
+    9 and nothing started it (8 Nov 2026). The same gate decides; only the moment changes."""
+    import run_watch
+    started = []
+    for inc in run_watch.list_incidents("open", limit=200) + run_watch.list_incidents("acknowledged", limit=200):
+        if inc.get("kind") != "dms_not_started" or inc.get("account_id") is None:
+            continue
+        ok, detail = _start_dms(inc["account_id"], require_clean=True,
+                                why="started automatically: the split handoff now passes its gate")
+        if ok:
+            started.append(inc["account_id"])
+        log.info("DMS retry for account %s: %s", inc["account_id"], detail)
+    return started
+
+
+async def _dms_retry_loop() -> None:
+    if DMS_RETRY_SEC <= 0:
+        return
+    while True:
+        try:
+            await asyncio.sleep(DMS_RETRY_SEC)
+            await _off_loop(_retry_declined_dms)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:      # noqa: BLE001 - the loop must outlive any one attempt
+            log.warning("DMS retry failed: %s", exc)
+
+
 async def _owed_grants_loop() -> None:
     """Grant an owed share as soon as its colleague has a target account, however the
     account came to exist. Every run's repair already does this, but only after a
@@ -5230,6 +5731,29 @@ async def _owed_grants_loop() -> None:
 
 
 HOUSEKEEPING_SEC = 900
+OVERSIGHT_SEC = int(os.getenv("OVERSIGHT_SEC", "600"))
+BACKLOG_USERS = max(1, int(os.getenv("VERIFY_BACKLOG_USERS", "12") or 12))
+
+
+async def _oversight_loop() -> None:
+    """Every 10 minutes: the checks no single run makes (oversight.py) -- repairs that never
+    converge, a file far past its budget, a verdict that moved with nothing run, failures nobody has
+    named, the source changing under a run, a box too busy to deploy to, a tenant no longer ready,
+    an open Google incident, one account's data naming another's domain. Each opens and closes an
+    incident like any other. OVERSIGHT_SEC=0 switches it off."""
+    import oversight
+    if OVERSIGHT_SEC <= 0:
+        return
+    while True:
+        try:
+            await asyncio.sleep(OVERSIGHT_SEC)
+            r = await _off_loop(oversight.run_once)
+            if r["found"] or r["closed"] or r["failed"]:
+                log.info("oversight: %d holding, closed %s, failed %s", r["found"], r["closed"], r["failed"])
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:      # noqa: BLE001 - the loop must outlive any one sweep
+            log.warning("oversight sweep failed: %s", exc)
 
 
 async def _housekeeping_loop() -> None:
@@ -5587,9 +6111,12 @@ def _migration_progress(account_id: int | None) -> dict:
              # Waiting on something outside the tool (a Workspace licence),
              # not broken. Counted apart so a failure list keeps meaning
              # "investigate this".
-             "blocked": 0, "items": 0, "itemsFailed": 0}
+             "blocked": 0, "items": 0, "itemsFailed": 0,
+             # What stops the DMS: unmapped MAIL failures it would carry across unrewritten. A comment or a
+             # Drive file that failed says nothing about mail (8 comment failures held account 3's DMS).
+             "mailBlockingDms": 0}
     try:
-        from config import DEFERRED_TO_DMS, Settings
+        from config import DEFERRED_TO_DMS, DELIVERED_BY_DMS, Settings
         path = Settings(account_id=account_id).db_path
     except Exception:      # noqa: BLE001
         return empty
@@ -5621,10 +6148,25 @@ def _migration_progress(account_id: int | None) -> dict:
                 # from a superseded run, so a clean 199-user migration read as
                 # "4 failed, 2 retried on the next migration" against people
                 # who cannot be retried because they are gone.
+                #
+                # Not an item a later run mapped: its FAILED row is history, not a gap. Live
+                # (account 3, 2026-11-03): 168 of "188 unresolved failures" were 30 October rows for
+                # info@'s messages that had since been migrated, and they stopped the DMS starting.
                 "SELECT COUNT(*) n FROM audit_log a WHERE a.status LIKE 'FAILED%' "
                 "AND EXISTS (SELECT 1 FROM identity_map m "
-                "            WHERE m.source_email = a.source_user)"
+                "            WHERE m.source_email = a.source_user) "
+                "AND NOT EXISTS (SELECT 1 FROM id_mapping mp WHERE mp.source_user = a.source_user "
+                "                AND mp.source_id = a.item_id AND mp.type = a.item_type)"
             ).fetchone()["n"]
+            from config import DMS_OWED_FAILURES
+            out["mailBlockingDms"] = conn.execute(
+                "SELECT COUNT(DISTINCT a.source_user || '|' || a.item_id) n FROM audit_log a "
+                "WHERE a.status LIKE 'FAILED%' AND a.item_type IN ('message','draft') "
+                "AND EXISTS (SELECT 1 FROM identity_map m WHERE m.source_email = a.source_user) "
+                "AND NOT EXISTS (SELECT 1 FROM id_mapping mp WHERE mp.source_user = a.source_user "
+                "                AND mp.source_id = a.item_id AND mp.type = a.item_type) "
+                + "".join(" AND COALESCE(a.error_message,'') NOT LIKE ?" for _ in DMS_OWED_FAILURES),
+                tuple(f"%{m}%" for m in DMS_OWED_FAILURES)).fetchone()["n"]
             # Skips were invisible: the page showed migrated and failed with
             # nothing between them, while 56,975 items on a live tenant were
             # neither. A skip is a decision the tool made -- a draft it will
@@ -5650,6 +6192,15 @@ def _migration_progress(account_id: int | None) -> dict:
                 "AND EXISTS (SELECT 1 FROM identity_map m "
                 "            WHERE m.source_email = a.source_user)", (DEFERRED_TO_DMS,)
             ).fetchone()["n"]
+            # Split mail, both halves: what the engine wrote because it carries a Drive link,
+            # and what the DMS has delivered since. Only meaningful beside itemsDeferred.
+            if out["itemsDeferred"] or conn.execute(
+                    "SELECT 1 FROM audit_log WHERE status=? LIMIT 1", (DELIVERED_BY_DMS,)).fetchone():
+                for key, status in (("mailWithLinks", "SUCCESS"), ("mailDelivered", DELIVERED_BY_DMS)):
+                    out[key] = conn.execute(
+                        "SELECT COUNT(*) n FROM audit_log a WHERE a.status = ? AND a.item_type='message' "
+                        "AND EXISTS (SELECT 1 FROM identity_map m WHERE m.source_email = a.source_user)",
+                        (status,)).fetchone()["n"]
             return out
     except Exception:      # noqa: BLE001 - a ledger mid-migration, or absent
         return empty
@@ -5763,6 +6314,81 @@ def _relinks(conn) -> list[dict]:
         out.append({"user": r["source_user"], "formName": form_name, "formTargetId": form_tgt,
                     "sheetName": sheet_name, "sheetTargetId": sheet_tgt})
     return out
+
+
+@app.get("/api/v2/sharing")
+async def sharing(account_id: int | None = None, kind: str | None = None, q: str = "",
+                  limit: int = 200, offset: int = 0, format: str = "json",
+                  op: Operator = Depends(operator)):
+    """Every sharing grant the migration made for this account: inside the organisation, outside
+    it, or anyone with the link -- totals, the outside people and domains ranked by files, and a
+    page of grants (or all of them as CSV). The ledger only; no Google call."""
+    require_login(op)
+    aid = account_id if account_id is not None else op.account_id
+    _require_account_access(aid, op)
+    if kind is not None and kind not in ("external", "public", "internal", "domain"):
+        raise HTTPException(400, "kind must be external, public, internal or domain")
+    limit = max(1, min(int(limit), 1000))
+
+    def _read():
+        import sharing_report
+        own = [(accounts_auth.get_tenant_config(aid, side) or {}).get("domain") for side in ("source", "target")]
+        path = _ledger_path(aid)
+        if not os.path.isfile(path):
+            return None
+        with cpdb.ro(path) as conn:
+            if format == "csv":
+                return sharing_report.to_csv(conn, own, kind=kind, q=q)
+            return {"accountId": aid, "domains": [d for d in own if d],
+                    **sharing_report.report(conn, own, kind=kind, q=q, limit=limit, offset=max(0, int(offset)))}
+    data = await _off_loop(_read)
+    if data is None:
+        raise HTTPException(404, "this migration has no ledger yet")
+    if format == "csv":
+        return PlainTextResponse(data, media_type="text/csv", headers={
+            "Content-Disposition": f'attachment; filename="sharing-{aid}-{kind or "all"}.csv"'})
+    return data
+
+
+@app.get("/api/v2/mail-links")
+async def mail_links(account_id: int | None = None, status: str | None = None, q: str = "",
+                     limit: int = 200, offset: int = 0, format: str = "json",
+                     op: Operator = Depends(operator)):
+    """Drive links in this account's mail that could not be repointed (no copy on the target), with
+    what the source answers for each file -- the list behind the scan's "N links answer 404" count.
+    Written by mail_dead_links.py; read from the ledger only."""
+    require_login(op)
+    aid = account_id if account_id is not None else op.account_id
+    _require_account_access(aid, op)
+    if status is not None and status not in ("NOT_FOUND", "NO_ACCESS", "OUTSIDE", "NOT_MIGRATED", "OTHER"):
+        raise HTTPException(400, "status must be NOT_FOUND, NO_ACCESS, OUTSIDE, NOT_MIGRATED or OTHER")
+    limit = max(1, min(int(limit), 1000))
+
+    def _read():
+        import csv
+        import io
+        import mail_dead_links
+        path = _ledger_path(aid)
+        if not os.path.isfile(path):
+            return None
+        with cpdb.ro(path) as conn:
+            if format != "csv":
+                return {"accountId": aid, **mail_dead_links.report(conn, status=status, q=q, limit=limit,
+                                                                    offset=max(0, int(offset)))}
+            out = io.StringIO()
+            w = csv.writer(out)
+            w.writerow(["user", "status", "emails", "fileId", "detail", "exampleMessage", "sourceUrl"])
+            for r in mail_dead_links.report(conn, status=status, q=q, limit=10 ** 9)["links"]:
+                w.writerow([r["user"], r["status"], r["emails"], r["fileId"], r["detail"],
+                            r["exampleMessage"], r["sourceUrl"]])
+            return out.getvalue()
+    data = await _off_loop(_read)
+    if data is None:
+        raise HTTPException(404, "this migration has no ledger yet")
+    if format == "csv":
+        return PlainTextResponse(data, media_type="text/csv", headers={
+            "Content-Disposition": f'attachment; filename="mail-links-{aid}.csv"'})
+    return data
 
 
 @app.get("/api/v2/owed-grants")
@@ -5982,9 +6608,9 @@ def _movement(conn, account_id, run_users=(), qs="") -> dict:
         "server_side": f"copied by Google straight into {tgt} -- no bytes pass through this server",
         "move": f"moved out of {src} into {tgt} -- one file, not a copy",
     }.get(mode, mode)
-    mail_how = (f"messages carrying a Drive link inserted into {tgt} by this tool, links repointed; "
+    mail_how = (f"emails carrying a Drive link inserted into {tgt} by this tool, links repointed; "
                 "the rest by Google's Data Migration Service after the run") if split else (
-                f"each message read from {src} and inserted into {tgt} by this tool, "
+                f"each email read from {src} and inserted into {tgt} by this tool, "
                 "with its labels, read state, date and thread")
     where = (f" AND source_user IN ({qs})" if run_users else "")
     args = tuple(run_users)
@@ -6008,7 +6634,8 @@ def _movement(conn, account_id, run_users=(), qs="") -> dict:
                 stage = {"pass": int(m.group(1)), "of": int(m.group(2)), "services": m.group(3).strip()}
     except Exception:      # noqa: BLE001 - no log: no stage, never a guess
         stage = None
-    return {"stage": stage,
+    from migration_progress import drive_baseline_coverage
+    return {"stage": stage, "driveBaseline": drive_baseline_coverage(conn, run_users),
             "drive": {"method": mode, "how": drive_how, "filesCopied": files,
                       "filesOnSource": exp["f"] if exp else 0, "formsRebuilt": forms},
             "mail": {"method": "split" if split else "engine", "how": mail_how,
@@ -6289,7 +6916,7 @@ def _repair_payload(d, account_id: int, since: str | None = None) -> dict:
             ("acl_quota", "share grants refused for rate limits",
              "checked against the target"),
             ("gmail_invalid_label",
-             "messages rejected — label pointed at a deleted mailbox",
+             "emails rejected — label pointed at a deleted mailbox",
              "retried on the next migration"),
             ("drive_scope_403",
              "files refused — the token was briefly short a scope",
@@ -6638,6 +7265,7 @@ async def _watch_runs() -> None:
         try:
             await asyncio.sleep(WATCH_POLL_SEC)
             await _off_loop(watcher.tick)
+            await _off_loop(error_resolution_api.dispatch_rechecks, sys.modules[__name__])
         except asyncio.CancelledError:
             raise
         except Exception as exc:      # noqa: BLE001 - the watcher must outlive any single bad look
@@ -6958,7 +7586,9 @@ async def migration_metrics(account_id: int, history: int = 60, users: str = "",
             return out
         samples = _this_run(samples)
 
-        latest = samples[0]
+        from migration_progress import reporting_process
+        latest = reporting_process(samples)
+        out["metricsScope"] = "busiest fresh reporting process; item totals include all processes"
         out["latest"] = {
             "recordedAt": latest.get("recordedAt"),
             "elapsedSec": latest.get("elapsed_sec", 0),
@@ -7101,6 +7731,16 @@ async def migration_metrics(account_id: int, history: int = 60, users: str = "",
                                          "bytesMovedTotal": moved, "expectedBytes": exp["b"],
                                          "remainingBytes": max(0, exp["b"] - moved) if exp["b"] else 0}
                 out["movement"] = _movement(conn, account_id, run_users, qs)
+                if conn.execute("SELECT 1 FROM sqlite_master WHERE name='mail_count_checks'").fetchone():
+                    counts = conn.execute("SELECT report FROM mail_count_checks ORDER BY checked_at DESC LIMIT 1").fetchone()
+                    if counts:
+                        out["mailCountCheck"] = json.loads(counts[0])
+                if conn.execute("SELECT 1 FROM sqlite_master WHERE name='mail_link_scans'").fetchone():
+                    # The latest scan per user: search-first or exhaustive, what it read.
+                    out["mailLinkScans"] = [{"source": r[0], **json.loads(r[1])} for r in conn.execute(
+                        "SELECT source_user, report FROM mail_link_scans s WHERE started_at = "
+                        "(SELECT MAX(started_at) FROM mail_link_scans WHERE source_user=s.source_user) "
+                        "ORDER BY source_user").fetchall()]
                 # Same grouped-by-cause failures the Migrations detail page already shows
                 # as a table (see _migration_detail, same query) -- reused here for the
                 # Metrics page's pie chart, so both name the same causes the same way and
@@ -9033,6 +9673,10 @@ async def heartbeat(hb: Heartbeat, _: None = Depends(node_auth)):
                     **hb.model_dump(exclude={"node_id"}))
     await HUB.broadcast(_envelope("NODE_HEARTBEAT", hb.model_dump()))
     return {"ok": True}
+
+
+import error_resolution_api
+error_resolution_api.register(app, sys.modules[__name__])
 
 
 def main(argv: list[str] | None = None) -> int:

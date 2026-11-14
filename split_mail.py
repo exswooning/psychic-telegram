@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+import os
+
 import base64
 from link_rewrite import DRIVE_ID
 
@@ -21,15 +24,37 @@ def decode_part(value):
         raise ClassificationIncomplete("Gmail text body could not be decoded") from exc
 
 
-def classify_payload(message, lookup, fetch_text_attachment=None, unknown=None):
+def ids_in_raw(raw: bytes) -> set:
+    """Drive ids in every text part of a whole RFC 822 message, attached messages included --
+    for what Gmail's `full` format leaves unexpanded. Binary parts are never read."""
+    import email
+    from email import policy
+    msg = email.message_from_bytes(raw, policy=policy.default)
+    ids = set()
+    for part in msg.walk():
+        mime = part.get_content_type().lower()
+        if mime in ("multipart/encrypted", "application/pkcs7-mime", "application/x-pkcs7-mime"):
+            raise ClassificationIncomplete("Encrypted MIME content cannot be classified for link rewriting")
+        if part.is_multipart() or not mime.startswith("text/"):
+            continue
+        body = part.get_payload(decode=True) or b""
+        ids.update(m.group(1).decode("ascii") for m in DRIVE_ID.finditer(body))
+    return ids
+
+
+def classify_payload(message, lookup, fetch_text_attachment=None, unknown=None, fetch_raw=None):
     """Inspect decoded text parts only. Never fetch binary attachments.
 
     unknown(id) returns 'external' only with positive ownership evidence;
-    inaccessible and internal unmapped links block the handoff.
+    inaccessible and internal unmapped links block the handoff. fetch_raw() returns the
+    whole message's bytes, read when Gmail left a part unexpanded (an attached message
+    inside a bounce report): every text part is then scanned from those bytes instead.
     """
     if not isinstance(message.get("payload"), dict):
         raise ClassificationIncomplete("Gmail full response has no MIME payload")
     ids = set()
+    unexpanded = []
+    encrypted = []
 
     def walk(part, depth=0):
         if depth > 60:
@@ -41,19 +66,30 @@ def classify_payload(message, lookup, fetch_text_attachment=None, unknown=None):
             "application/pkcs7-mime",
             "application/x-pkcs7-mime",
         ):
-            raise ClassificationIncomplete(
-                "Encrypted MIME content cannot be classified for link rewriting"
-            )
+            # Nobody can read its links, so no route can rewrite them: it goes as it is, recorded.
+            encrypted.append(mime)
+            return
         if mime.startswith("multipart/") or (mime.startswith("message/") and children):
             if not children:
-                raise ClassificationIncomplete("Multipart body has no readable parts")
+                # Gmail's `full` format does not expand an attached message's own parts (live:
+                # bounce reports blocked two mailboxes' whole hand-off). Unread is not empty:
+                # without the raw bytes this still blocks.
+                if fetch_raw is None:
+                    raise ClassificationIncomplete("Multipart body has no readable parts")
+                unexpanded.append(mime)
+                return
             for child in children:
                 walk(child, depth + 1)
             return
         if mime.startswith("message/"):
-            raise ClassificationIncomplete(
-                "Encapsulated message needs explicit inspection"
-            )
+            # A forwarded or attached email whose parts Gmail did not expand (shiv@, 10 messages,
+            # account 3, 2026-11-02): its text is scanned from the whole message's raw bytes.
+            if fetch_raw is None:
+                raise ClassificationIncomplete(
+                    "Encapsulated message needs explicit inspection"
+                )
+            unexpanded.append(mime)
+            return
         if not mime.startswith("text/"):
             if not mime:
                 raise ClassificationIncomplete("MIME type is unavailable")
@@ -73,6 +109,15 @@ def classify_payload(message, lookup, fetch_text_attachment=None, unknown=None):
         )
 
     walk(message["payload"])
+    if encrypted:
+        return {"route": "DMS", "changed": {}, "unresolved": [], "linkIds": [], "encrypted": True,
+                "why": "encrypted MIME: its links cannot be read by anyone, so it goes to the DMS as it is"}
+    if unexpanded:
+        try:
+            ids |= ids_in_raw(fetch_raw())
+        except ClassificationIncomplete:
+            return {"route": "DMS", "changed": {}, "unresolved": [], "linkIds": [], "encrypted": True,
+                    "why": "encrypted MIME inside an attached message: its links cannot be read"}
     changed = {}
     unresolved = []
     for source in sorted(ids):
@@ -81,6 +126,10 @@ def classify_payload(message, lookup, fetch_text_attachment=None, unknown=None):
             changed[source] = target
         elif not target and (unknown is None or unknown(source) != "external"):
             unresolved.append(source)
+    # A link to an internal file with no mapping still BLOCKS: the DMS imports the whole mailbox and
+    # would carry it unrewritten, and such a file belongs in the migration -- live (account 3,
+    # 2026-11-03) the "unmigrated" files were it.department@'s own, copied once but with their
+    # mappings lost; main._reopen_lost_mappings now re-walks such a user so the links resolve.
     return {
         "route": "BLOCKED" if unresolved else "ENGINE" if changed else "DMS",
         "changed": changed,
@@ -89,26 +138,50 @@ def classify_payload(message, lookup, fetch_text_attachment=None, unknown=None):
     }
 
 
-def reconcile_dms(auth, db, settings, progress=print):
+from resilience import RateLimiter  # noqa: E402
+
+
+def reconcile_tuning() -> tuple[int, float]:
+    """(threads per mailbox, reads a second per mailbox) for the DMS reconciliation.
+
+    It only reads: one raw read on each tenant and one search per message. Two threads behind the
+    engine's 4-calls-a-second limiter gave about 2 messages a second (account 3, 13 Nov 2026: 14,000 in
+    two hours, a projected 20 hours for 141,000), under a tenth of what one Gmail user allows.
+    DMS_RECONCILE_WORKERS (8, at most 16) and DMS_RECONCILE_QPS (20, at most 40) tune it."""
+    def read(name, default, lo, hi, kind):
+        try:
+            return max(lo, min(hi, kind(os.getenv(name, str(default)))))
+        except ValueError:
+            return kind(default)
+    return read("DMS_RECONCILE_WORKERS", 8, 1, 16, int), read("DMS_RECONCILE_QPS", 20, 1.0, 40.0, float)
+
+
+def reconcile_dms(auth, db, settings, progress=None, users=None):
     """Inspect exact deferred IDs; Google completion counters alone prove nothing.
 
     Also recheck engine link copies after DMS to detect overwritten content,
     labels, or overlap. No tenant data is written by this function.
     """
-    from config import DEFERRED_TO_DMS, DELIVERED_BY_DMS
+    if progress is None:
+        progress = lambda message: print(message, flush=True)
     from gmail_engine import GmailMigrator
     from migration_checks import verify_written_mail
     from link_rewrite import rewrite_raw
     from verify_sample import _stop_check
+    import threading
+    import dms_light_proof
 
     verified_items = []
-    users = [dict(r) for r in db.all_identities() if r["entity_type"] == "user"]
+    reused = 0
+    wanted = {u.lower() for u in users} if users else None
+    users = [dict(r) for r in db.all_identities() if r["entity_type"] == "user"
+             and (wanted is None or r["source_email"].lower() in wanted)]
     out = {
         "checked": 0,
         "verified": 0,
         "blocked": 0,
         "errors": [],
-        "scope": "fresh message content and labels; no tenant writes",
+        "scope": "fresh email content and labels; no tenant writes",
     }
     for row in users:
         source, target = row["source_email"], row["target_email"]
@@ -118,6 +191,8 @@ def reconcile_dms(auth, db, settings, progress=print):
         ):
             raise ValueError("DMS identity is outside the configured tenant pair")
         gm = GmailMigrator(auth, db, settings, source, target)
+        workers, qps = reconcile_tuning()
+        gm.limiter = RateLimiter(qps)       # shared by every thread's migrator below
         # New DMS-created labels are mapped by name, without creating labels.
         src_labels = gm._retry(
             lambda: gm.src.users().labels().list(userId="me").execute()
@@ -131,15 +206,75 @@ def reconcile_dms(auth, db, settings, progress=print):
                 db.record_label(
                     source, label["id"], by_name[label["name"]], label["name"]
                 )
-        rows = db.conn.execute(
-            "SELECT item_id,status FROM audit_log WHERE source_user=? AND item_type='message' AND status IN (?, ?, 'SUCCESS') ORDER BY item_id",
-            (source, DEFERRED_TO_DMS, DELIVERED_BY_DMS),
-        ).fetchall()
+        from mail_reconciliation import Checkpoint, outcome
+        checkpoint = Checkpoint(gm)
+        # Audit rows only describe what the engine saw. DMS may carry every
+        # other message, including mail arriving after discovery.
+        from mail_reconciliation import inventory
+        live, drafts = inventory(gm)
+        excluded_chat = {r[0] for r in db.conn.execute(
+            "SELECT item_id FROM audit_log WHERE source_user=? AND item_type='message' AND status='SKIPPED_CHAT'", (source,))}
+        rows = [{"item_id": sid} for sid in sorted(live - drafts - excluded_chat)]
+        out.setdefault("inventories", []).append({"user": source, "sourceMessages": len(live),
+                                                  "draftMessages": len(drafts), "selected": len(rows)})
+
+        user_start = out["checked"]
+        light = dms_light_proof.enabled()
+        sampled = dms_light_proof.sample([r["item_id"] for r in rows]) if light else set()
+        degraded = threading.Event()
+        progress(f"DMS reconciliation: {source} | starting {len(rows)} email checks"
+                 + (f" (light proof; {len(sampled)} sampled in full)" if light else ""))
+
+        import threading
+        local = threading.local()
+        base_gm = gm
+
+        def resolve_findings(mid):
+            """Resolve only this phase's own error findings after fresh success."""
+            with db.write() as c:
+                if c.execute(
+                    "SELECT 1 FROM sqlite_master WHERE name='verification_repair_queue'"
+                ).fetchone():
+                    for finding in c.execute(
+                        "SELECT finding_key,detail FROM verification_repair_queue WHERE source_user=? AND service='gmail' AND category='errors' AND item_id=?",
+                        (source, mid),
+                    ).fetchall():
+                        if (
+                            json.loads(finding["detail"]).get("phase")
+                            == "dms-reconciliation"
+                        ):
+                            from db import utc_now
+
+                            c.execute(
+                                "UPDATE verification_repair_queue SET state='RESOLVED',resolved_at=? WHERE source_user=? AND service='gmail' AND finding_key=?",
+                                (utc_now(), source, finding["finding_key"]),
+                            )
 
         def inspect(item):
+            if not hasattr(local, "gm"):
+                local.gm = GmailMigrator(auth, db, settings, source, target)
+                local.gm.limiter = base_gm.limiter
+            gm = local.gm
             _stop_check()
             mid = item["item_id"]
+            tid = None
             try:
+                cached = checkpoint.get(mid)
+                if cached:
+                    return (source, mid, cached), None
+                if light and mid not in sampled and not degraded.is_set() and dms_light_proof.eligible(db, source, mid):
+                    mapped = db.get_target_id(source, mid, "message")
+                    verdict, ltid, evidence = dms_light_proof.check(gm, db, source, mid, mapped)
+                    if verdict != "unknown":
+                        tid = ltid
+                        dms_light_proof.record(db, source, mid, tid, verdict, evidence)
+                        if not mapped:
+                            db.adopt_message_mapping(source, mid, tid)
+                        if verdict == "labels":
+                            raise RuntimeError("DMS destination content or labels did not match")
+                        checkpoint.save(mid, tid, "VERIFIED", evidence)
+                        resolve_findings(mid)
+                        return (source, mid, tid), None
                 full = gm._retry(
                     lambda: (
                         gm.src.users()
@@ -196,41 +331,39 @@ def reconcile_dms(auth, db, settings, progress=print):
                         raise RuntimeError(
                             "DMS overlap changed the mapped destination identity"
                         )
+                conflict = db.conn.execute(
+                    "SELECT 1 FROM id_mapping WHERE source_user=? AND type='message' AND target_id=? AND source_id!=? LIMIT 1",
+                    (source, tid, mid)).fetchone()
+                if conflict:
+                    raise RuntimeError("DMS destination identity is already mapped to another source message")
+                from gmail_engine import SYSTEM_LABELS
+                unmapped_labels = set(full.get("labelIds") or []) - SYSTEM_LABELS - set(db.get_label_map(source))
+                if unmapped_labels:
+                    raise RuntimeError("Source user labels have no destination label mapping; label parity incomplete")
                 if not verify_written_mail(
                     gm, mid, tid, expected, gm._map_label_ids(full.get("labelIds", []))
                 ):
-                    raise RuntimeError(
-                        "DMS destination content or labels did not match"
-                    )
+                    receipt = db.conn.execute(
+                        "SELECT evidence FROM migration_item_receipts WHERE source_user=? AND source_id=? AND target_id=? AND service='gmail'",
+                        (source, mid, tid)).fetchone()
+                    proof = json.loads(receipt[0]) if receipt else {}
+                    if (proof.get("contentProven") is True and not proof.get("findings", {}).get("errors")
+                            and proof.get("labelDifferences") and not mapped):
+                        db.adopt_message_mapping(source, mid, tid)
+                    raise RuntimeError("DMS destination content or labels did not match")
+                checkpoint.save(mid, tid, "VERIFIED", {"scope": "content and labels", "target": tid})
                 if not mapped:
-                    db.record_mapping(source, mid, tid, "message")
-                # Resolve only this phase's own error findings after fresh success.
-                import json
-
-                with db.write() as c:
-                    if c.execute(
-                        "SELECT 1 FROM sqlite_master WHERE name='verification_repair_queue'"
-                    ).fetchone():
-                        for finding in c.execute(
-                            "SELECT finding_key,detail FROM verification_repair_queue WHERE source_user=? AND service='gmail' AND category='errors' AND item_id=?",
-                            (source, mid),
-                        ).fetchall():
-                            if (
-                                json.loads(finding["detail"]).get("phase")
-                                == "dms-reconciliation"
-                            ):
-                                from db import utc_now
-
-                                c.execute(
-                                    "UPDATE verification_repair_queue SET state='RESOLVED',resolved_at=? WHERE source_user=? AND service='gmail' AND finding_key=?",
-                                    (utc_now(), source, finding["finding_key"]),
-                                )
+                    db.adopt_message_mapping(source, mid, tid)
+                resolve_findings(mid)
                 return (source, mid, tid), None
             except Exception as exc:
                 # A stale prior pass cannot remain fresh evidence after failure.
                 import verification_repairs
 
                 error = str(exc)[:220]
+                if light and mid in sampled:
+                    degraded.set()      # a sampled message failed: no light proof for this mailbox
+                checkpoint.save(mid, tid, outcome(error), {"error": error})
                 verification_repairs.enqueue_findings(
                     db,
                     source,
@@ -243,7 +376,7 @@ def reconcile_dms(auth, db, settings, progress=print):
                                     "error": error,
                                 }
                             ],
-                            "sampled": {"checked": 1, "of": max(2, len(rows))},
+                            "checked": 1, "itemScope": True,
                         }
                     },
                 )
@@ -259,11 +392,16 @@ def reconcile_dms(auth, db, settings, progress=print):
 
         from concurrent.futures import ThreadPoolExecutor
 
-        workers = max(1, min(2, int(getattr(settings, "mail_workers", 1) or 1)))
         with ThreadPoolExecutor(
             max_workers=workers, thread_name_prefix="dms-reconcile"
         ) as pool:
-            for verified, error in pool.map(inspect, rows):
+            first = [r for r in rows if r["item_id"] in sampled]
+            rest = [r for r in rows if r["item_id"] not in sampled]
+
+            def phased():      # the sample finishes (and can switch light proof off) before the rest starts
+                yield from pool.map(inspect, first)
+                yield from pool.map(inspect, rest)
+            for verified, error in phased():
                 out["checked"] += 1
                 if error:
                     out["blocked"] += 1
@@ -273,8 +411,13 @@ def reconcile_dms(auth, db, settings, progress=print):
                     verified_items.append(verified)
                 if out["checked"] % 25 == 0:
                     progress(
-                        f"DMS reconciliation: {out['checked']} checked, {out['verified']} verified, {out['blocked']} unresolved"
+                        f"DMS reconciliation: {source} | items={out['checked'] - user_start}/{len(rows)} | "
+                        f"{out['checked']} checked, {out['verified']} verified, {out['blocked']} unresolved"
                     )
+        progress(f"DMS reconciliation: {source} | item checks finished {out['checked'] - user_start}/{len(rows)}; "
+                 "mailbox completion still requires coverage checks")
+        reused += checkpoint.reused
+    out["reusedComparisons"] = reused
     out["recordedDelivered"] = db.mark_dms_delivered(verified_items)
     # The original migration remains AWAITING_DMS until fresh full source
     # coverage passes. New mail arriving during DMS cannot disappear here.

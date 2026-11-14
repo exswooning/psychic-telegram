@@ -393,6 +393,60 @@ def _group_members(svc, address):
         seen.add(token)
 
 
+def repair_parent_folders(auth, db, settings, user, result, apply=False):
+    """Move a file into the target folder its source folder maps to, when it sits in a DIFFERENT
+    folder with the same name (a duplicate the target already had). Live (account 3, 5 Nov 2026):
+    35 files sat in the second of two identical "for website" folders, created 16 Dec 2025 before
+    this migration, while the ledger mapped the first. Only a same-name duplicate is moved; a file
+    whose folder has another name is left and reported. Nothing is deleted; the move is verified
+    by reading the file back, and recorded per file."""
+    out = {"candidates": 0, "changed": 0, "verified": 0, "errors": [], "left": []}
+    target = _target(db, settings, user)
+    src, tgt = auth.source_drive(user), auth.target_drive(target)
+    for item in result.get("differences", []):
+        if not any(d == "mapped parent folder IDs differ" for d in item.get("diffs", [])):
+            continue
+        sid, tid = item.get("source"), item.get("target")
+        if not sid or not tid or sid == tid:
+            continue
+        out["candidates"] += 1
+        try:
+            sf = src.files().get(fileId=sid, supportsAllDrives=True, fields="parents").execute()
+            tf = tgt.files().get(fileId=tid, supportsAllDrives=True,
+                                 fields="id,name,parents,ownedByMe,trashed,mimeType").execute()
+            parents = sf.get("parents") or []
+            if len(parents) != 1 or tf.get("trashed"):
+                out["left"].append({"target": tid, "why": "source has no single parent, or the copy is trashed"})
+                continue
+            expected = db.get_target_id(user, parents[0], "folder") or db.target_for_source_id(parents[0])
+            current = tf.get("parents") or []
+            if not expected or current == [expected]:
+                out["verified"] += 1
+                continue
+            want = tgt.files().get(fileId=expected, supportsAllDrives=True, fields="id,name,trashed").execute()
+            here = [tgt.files().get(fileId=p, supportsAllDrives=True, fields="id,name").execute() for p in current]
+            if want.get("trashed") or not here or any(h.get("name") != want.get("name") for h in here):
+                out["left"].append({"target": tid, "name": tf.get("name"),
+                                    "why": "not a same-name duplicate of the mapped folder"})
+                record(db, user, "drive-parent", tid, "NEEDS_ATTENTION",
+                       {"expected": expected, "current": current})
+                continue
+            if not apply or settings.dry_run:
+                continue
+            tgt.files().update(fileId=tid, addParents=expected, removeParents=",".join(current),
+                               supportsAllDrives=True, fields="id").execute()
+            after = tgt.files().get(fileId=tid, supportsAllDrives=True, fields="parents").execute()
+            if (after.get("parents") or []) != [expected]:
+                raise RuntimeError("move did not leave the file in its mapped folder")
+            record(db, user, "drive-parent", tid, "MOVED",
+                   {"from": current, "to": expected, "name": tf.get("name")})
+            out["changed"] += 1
+            out["verified"] += 1
+        except Exception as exc:      # noqa: BLE001 - one file failing must not stop the rest
+            out["errors"].append(f"{tid}: {error_detail(exc)}")
+    return out
+
+
 def repair_drive(auth, db, settings, user, result, apply=False):
     from verify_sample import _stop_check
 
@@ -467,11 +521,78 @@ def repair_drive(auth, db, settings, user, result, apply=False):
                 "NEEDS_ATTENTION",
                 {"target": tid, "error": message},
             )
+    out["parent_folders"] = repair_parent_folders(auth, db, settings, user, result, apply)
     duplicates = quarantine_duplicates(auth, db, settings, user, result, apply)
     out["duplicates"] = duplicates
     out["candidates"] += duplicates["candidates"]
     out["changed"] += duplicates["changed"]
     out["errors"].extend(duplicates["errors"])
+    return out
+
+
+# Operator policy (6 Nov 2026): a duplicate on the target is QUARANTINED, never deleted, and the
+# person who uses the file keeps access to it at all times. In code that means:
+#   - a rename only: same folder, same owner, same sharing -- nothing is moved, trashed or unshared;
+#   - the original (the copy the ledger maps) is never touched;
+#   - sharing is read before and after, and a rename that left it different is undone at once;
+#   - the original name and location are recorded, so the rename can be reversed exactly.
+QUARANTINE_POLICY = ("rename-only", "same-parent", "sharing-unchanged", "original-untouched", "reversible")
+
+
+def _access(tgt, fid) -> list:
+    """Who can open the file, as a comparable list: the policy's proof that access did not change."""
+    rows = _pages(tgt.permissions(), fileId=fid, supportsAllDrives=True, pageSize=100,
+                  fields="nextPageToken,permissions(id,type,role,emailAddress,domain,deleted)")
+    return sorted((r.get("id"), r.get("type"), r.get("role"), r.get("emailAddress") or r.get("domain") or "")
+                  for r in rows if not r.get("deleted"))
+
+
+def _same_named_parents(tgt, a, b) -> bool:
+    """The two copies sit in different folders with the SAME name: the target already had a folder twice
+    (account 3: 163 of environment@'s duplicates sit in the second copy of a folder). The rename keeps
+    the file in its own folder, so this only decides whether the two really are the same item."""
+    pa, pb = a.get("parents") or [], b.get("parents") or []
+    if len(pa) != 1 or len(pb) != 1:
+        return False
+    name = lambda fid: tgt.files().get(fileId=fid, supportsAllDrives=True, fields="name").execute().get("name")
+    return name(pa[0]) == name(pb[0])
+
+
+def recopy_gone_items(auth, db, settings, user, per) -> dict:
+    """Copy again what the check found GONE from the target: a task list, a contact, a draft the ledger
+    still maps. Only a migration pass did this (audit@, account 3: 2 task lists, 1 contact, 23 drafts
+    stayed missing through every repair). The engines confirm each one is gone (a 404 for that very
+    item) before forgetting its mapping, and write only to the target."""
+    out = {"candidates": 0, "changed": 0, "errors": [], "recopied": []}
+    if settings.dry_run:
+        return out
+    target = _target(db, settings, user)
+    tasks = per.get("tasks") or {}
+    contacts = per.get("contacts") or {}
+    drafts = [{"source": m["source"], "target": m["target"], "type": "draft"}
+              for m in (per.get("gmail") or {}).get("missing", [])
+              if "draft not on the target" in str(m.get("why"))]
+    jobs = []
+    if any("task list" in str(e) and "404" in str(e) for e in tasks.get("errors", [])):
+        jobs.append(("tasks", lambda: __import__("tasks_engine").TasksMigrator(auth, db, settings, user, target).run()))
+    if any("not on the target" in str(m.get("why")) for m in contacts.get("missing", [])):
+        jobs.append(("contacts", lambda: __import__("contacts_engine").ContactsMigrator(auth, db, settings, user, target).run()))
+    if drafts:
+        def run_drafts():
+            from migration_checks import reopen_missing_messages
+            if reopen_missing_messages(db, auth.target_gmail(target), user, drafts):
+                return __import__("gmail_engine").GmailMigrator(auth, db, settings, user, target).run()
+            return {}
+        jobs.append(("drafts", run_drafts))
+    for name, job in jobs:
+        out["candidates"] += 1
+        try:
+            stats = job() or {}
+            out["recopied"].append(name)
+            out["changed"] += int(stats.get("recopied_missing", 0) or 0) + int(stats.get("drafts", 0) or 0) \
+                + int(stats.get("tasks", 0) or 0) + int(stats.get("contacts", 0) or 0)
+        except Exception as exc:      # noqa: BLE001 - one service failing must not stop the others
+            out["errors"].append(f"{name}: {error_detail(exc)}")
     return out
 
 
@@ -516,18 +637,28 @@ def quarantine_duplicates(auth, db, settings, user, result, apply=False):
             if not provenance and not legacy_inventory_checked:
                 _source_drive_fully_paired(auth, db, user)
                 legacy_inventory_checked = True
-            if (
-                em.get("mimeType") != cm.get("mimeType")
-                or em.get("name") != cm.get("name")
-                or em.get("parents") != cm.get("parents")
-            ):
+            if em.get("mimeType") != cm.get("mimeType") or em.get("name") != cm.get("name"):
+                raise RuntimeError("Candidate name or type differs from the canonical copy")
+            if em.get("parents") != cm.get("parents") and not _same_named_parents(tgt, em, cm):
                 raise RuntimeError(
-                    "Candidate name, type or location differs from the canonical copy"
+                    "Candidate location differs from the canonical copy and is not a same-name folder"
                 )
             if em.get("mimeType", "").startswith("application/vnd.google-apps."):
-                if not _native_duplicate_equal(
-                    auth, target, extra, canonical, em["mimeType"]
-                ):
+                try:
+                    equal = _native_duplicate_equal(
+                        auth, target, extra, canonical, em["mimeType"]
+                    )
+                except RuntimeError as exc:
+                    # Too big to snapshot (17 on account 3). Both copies carrying Bitport's tag for
+                    # the SAME source file is the proof instead: Bitport made them both from it.
+                    cprov = cm.get("appProperties", {})
+                    if ("exceeds the bounded comparison size" not in str(exc)
+                            or cprov.get("bitportSourceId") != owner["source_id"]
+                            or cprov.get("bitportSourceUser") != user
+                            or not provenance):
+                        raise
+                    equal = True
+                if not equal:
                     raise RuntimeError(
                         "Native snapshots differ or cannot establish duplicate equivalence"
                     )
@@ -542,23 +673,24 @@ def quarantine_duplicates(auth, db, settings, user, result, apply=False):
                     max(int(em.get("size") or 0), int(cm.get("size") or 0))
                     > MAX_COMPARE_BYTES
                 ):
-                    raise RuntimeError(
-                        "Binary duplicate needs bounded streaming comparison before quarantine"
+                    # Too big to hold in memory: Drive's own content checksum (equal above) plus an
+                    # equal size is the proof, the same one the one-to-one check trusts.
+                    if not em.get("size") or em.get("size") != cm.get("size"):
+                        raise RuntimeError("Large duplicate binaries differ in size")
+                else:
+                    a = (
+                        tgt.files()
+                        .get_media(fileId=extra, supportsAllDrives=True)
+                        .execute()
                     )
-                a = (
-                    tgt.files()
-                    .get_media(fileId=extra, supportsAllDrives=True)
-                    .execute()
-                )
-                b = (
-                    tgt.files()
-                    .get_media(fileId=canonical, supportsAllDrives=True)
-                    .execute()
-                )
-                if hashlib.sha256(a).digest() != hashlib.sha256(b).digest():
-                    raise RuntimeError("Duplicate binary SHA256 values differ")
-            if not etag:
-                raise RuntimeError("Duplicate ETag unavailable")
+                    b = (
+                        tgt.files()
+                        .get_media(fileId=canonical, supportsAllDrives=True)
+                        .execute()
+                    )
+                    if hashlib.sha256(a).digest() != hashlib.sha256(b).digest():
+                        raise RuntimeError("Duplicate binary SHA256 values differ")
+            access_before = _access(tgt, extra)
             quarantine_name = (
                 ".Quarantined duplicate " + extra[:8] + " - " + em.get("name", extra)
             )
@@ -585,7 +717,15 @@ def quarantine_duplicates(auth, db, settings, user, result, apply=False):
                 body={"name": quarantine_name, "appProperties": props},
                 fields="id,parents",
             )
-            _conditional(req, etag)
+            if etag:
+                _conditional(req, etag)
+            else:
+                # Some files (native Docs) come back with no ETag. The same guard, by version: the
+                # file must be exactly as it was read a moment ago, or it is left alone.
+                now, _ = _meta(tgt, extra)
+                if (now.get("version"), now.get("modifiedTime")) != (em.get("version"), em.get("modifiedTime")):
+                    raise RuntimeError("Duplicate changed while it was being checked; left alone")
+                req.execute()
             after, _ = _meta(tgt, extra)
             if (
                 after.get("parents") != em.get("parents")
@@ -593,6 +733,11 @@ def quarantine_duplicates(auth, db, settings, user, result, apply=False):
                 or after.get("md5Checksum") != em.get("md5Checksum")
             ):
                 raise RuntimeError("Quarantine readback failed")
+            if _access(tgt, extra) != access_before:
+                tgt.files().update(fileId=extra, supportsAllDrives=True,
+                                   body={"name": em.get("name"), "appProperties": proof},
+                                   fields="id").execute()
+                raise RuntimeError("Quarantine changed who can open the file; the rename was undone")
             record(
                 db,
                 user,
@@ -720,8 +865,14 @@ def _native_duplicate_equal(auth, user, extra, canonical, mime):
             "revisionId",
             "spreadsheetUrl",
             "responderUri",
+            # The Drive name, not content: the quarantine renames the copy, so with the title in the snapshot no
+            # quarantined copy ever matched its original again, and every such user's Drive read INCOMPLETE for
+            # good (education@, shiv@: 8 Nov 2026). A Form's own title (info.title) is content and stays.
+            "title",
         ):
             value.pop(key, None)
+        (value.get("properties") or {}).pop("title", None)          # a Sheet's name
+        (value.get("info") or {}).pop("documentTitle", None)        # a Form's Drive name
         return value
 
     return read(extra) == read(canonical)
