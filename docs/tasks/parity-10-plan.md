@@ -160,3 +160,16 @@ the meter itself; the operator's screenshots are the only measurements.
   where mail with no category label shows anyway, and tabs apply to the Inbox only. Claude's earlier
   statement that it "moves the message to the Personal tab" was wrong. PROPOSED (operator to confirm):
   the comparer treats "no category on the source" and "CATEGORY_PERSONAL on the target" as equal.
+
+## State, 14 Nov afternoon
+- Label alignment finished on account 3 (7 users with content-proven label drift): 4,295 aligned, 0 errors;
+  2,857 left "differs" -- by the earlier sample, CATEGORY_PERSONAL that Gmail puts back. Waiting on the
+  operator's decision to treat CATEGORY_PERSONAL as "no category" (the Primary tab).
+- DMS reconciliation still running inside the default pipeline (nothing deployed: an API restart would
+  kill it). 19,325 checked at 00:36 UTC, 33,875 at 06:23 UTC: about 0.7 messages a second on the Wi-Fi.
+- Priority item 2 (verifier memory): the run keeps every user's full results and one evidence record per
+  checked item until it ends, but the whole report is 47 MB on disk, too small to explain 11 GB. Measuring
+  before changing: unit `bitport-memprobe` verifies info@'s Drive alone (read-only, one worker) and writes
+  RSS every 15 s beside the item and document in hand to logs/jobs/3/memprobe/rss.log. Next session: find
+  the step where RSS climbs, fix that, re-run the probe to show the fix.
+| 14 Nov afternoon | not read | not read | not read | Claude cannot read the meter: please send a screenshot |
