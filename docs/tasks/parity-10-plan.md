@@ -238,4 +238,9 @@ repo says, as a user who knows nothing. Found and fixed in Bitport (ddfb6e6, 72f
 - TUI on a fresh box showed a blank dashboard: now a welcome screen with the next steps; launching actions refused with a reason.
 Verified in the VM: install end-to-end, `bitport` as a non-root user, TUI welcome and quit, login with the generated password.
 Not a Bitport defect: the VM's PyPI download ran at 0.05 MB/s (user-mode networking).
-Still to do: a full fresh-disk acceptance install; judge the Setup Wizard's first screen in a browser (BrowserOS was offline).
+Fresh-disk interactive install (15 Nov, pressing Enter at every prompt) found three more, fixed in 8e30f92:
+the generated-password flag was reset by the background run (end screen said "the one you chose", no password file);
+"The install stopped before it finished" printed after success (watched for the wrong words); harden_ssh's
+"password login left on" wording. Re-run on the same VM: password shown and saved, login 200, no false alarm.
+Remaining: judge the Setup Wizard's first screen in a browser; the VM's first (pre-fix) install ran ~75 min, almost all PyPI at 0.05 MB/s.
+Superseded: a full fresh-disk acceptance install; judge the Setup Wizard's first screen in a browser (BrowserOS was offline).
