@@ -27,7 +27,15 @@ YELLOW=$(tput setaf 3 2>/dev/null || true); RESET=$(tput sgr0 2>/dev/null || tru
 CURRENT_STEP="starting"
 step() { CURRENT_STEP="$*"; echo; echo "${BOLD}==> $*${RESET}"; }
 # A step that fails without saying why used to end the install in silence (a first-time user, 14 Nov 2026).
-trap 'echo; echo "${RED}The installer stopped unexpectedly during: ${CURRENT_STEP}.${RESET}"; echo "  Nothing is broken. Run the same command again: it is safe to repeat and carries on where it stopped."; echo "  If it stops here again, send the last 30 lines of ${LOG:-/var/log/bitport-install.log} to whoever supports you."' ERR
+# Only speak when -e is on: best-effort steps run with `set +e` and must stay quiet when a command inside them fails.
+on_unexpected_stop() {
+  case $- in *e*) ;; *) return 0 ;; esac
+  echo
+  echo "${RED}The installer stopped unexpectedly during: ${CURRENT_STEP}.${RESET}"
+  echo "  Nothing is broken. Run the same command again: it is safe to repeat and carries on where it stopped."
+  echo "  If it stops here again, send the last 30 lines of ${LOG:-/var/log/bitport-install.log} to whoever supports you."
+}
+trap on_unexpected_stop ERR
 ok()   { echo "  ${GREEN}✓${RESET} $*"; }
 warn() { echo "  ${YELLOW}!${RESET} $*"; }
 die()  { echo "  ${RED}✗ $*${RESET}" >&2; exit 1; }

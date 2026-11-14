@@ -106,13 +106,22 @@ def test_a_failing_step_stops_its_heartbeat_and_reports_its_status(tmp_path):
     assert r.stdout.count("still working") <= 4, "the heartbeat stopped when the step failed"
 
 
-def test_an_unexpected_stop_says_where_and_what_to_do(tmp_path):
-    trap = re.search(r"^trap '.*' ERR$", INSTALL, re.M).group(0)
+def _stop_harness(body):
     step = re.search(r"^CURRENT_STEP=.*\n^step\(\).*$", INSTALL, re.M).group(0)
-    script = f'set -euo pipefail\nBOLD=; RESET=; RED=\n{step}\n{trap}\nstep "Python environment"\nfalse\necho not-reached'
-    r = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=20)
+    fn = re.search(r"^on_unexpected_stop\(\) \{.*?^\}\n^trap on_unexpected_stop ERR$", INSTALL, re.M | re.S).group(0)
+    script = f"set -euo pipefail\nBOLD=; RESET=; RED=\n{step}\n{fn}\n{body}"
+    return subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=20)
+
+
+def test_an_unexpected_stop_says_where_and_what_to_do():
+    r = _stop_harness('step "Python environment"\nfalse\necho not-reached')
     assert r.returncode != 0 and "not-reached" not in r.stdout
     assert "stopped unexpectedly during: Python environment" in r.stdout and "safe to repeat" in r.stdout
+
+
+def test_a_best_effort_step_that_ignores_failures_stays_quiet():
+    r = _stop_harness('step "Scan"\nset +e\nfalse\nls /nonexistent-dir 2>/dev/null\nset -e\necho carried-on')
+    assert r.returncode == 0 and "carried-on" in r.stdout and "stopped unexpectedly" not in r.stdout
 
 
 def test_pip_is_retried_like_every_other_network_step():
