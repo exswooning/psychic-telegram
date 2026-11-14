@@ -201,3 +201,13 @@ the meter itself; the operator's screenshots are the only measurements.
   compare logs/jobs/3/memprobe/rss.log with logs/jobs/3/memprobe-before/rss.log. The trim part is
   measured after the next deploy.
 | 14 Nov evening | not read | not read | not read | Claude cannot read the meter: please send a screenshot |
+- MEASURED (probe 2, MALLOC_ARENA_MAX=2, same user and scope): 540 MB at file 349 of 1,403 where probe 1
+  held 1,981 MB at the same file -- about a quarter. Probe 3 re-runs on the deployed code (pools limited
+  and malloc_trim built in, no environment setting): compare logs/jobs/3/memprobe/rss.log with
+  memprobe-before/ and memprobe-arena2/.
+- FAILURE, fixed: the DMS pipeline died at 12:29 UTC (incident #74). The Wi-Fi dropped at 12:19 and the
+  reconciliation's label read gave up after six quick retries on "Unable to find the server". Its
+  reconciliation had covered 13 of 45 mailboxes. `resilience.retry_on_google_error` now rides out the box
+  being offline (DNS or no route) for up to NETWORK_DOWN_BUDGET_SEC (600 s) with 5-60 s waits; an ordinary
+  reset still gives up after its retries. Applies to every engine call.
+- [x] Verifier memory (priority item 2): fixed and measured (probe 2); probe 3 confirms the deployed code.

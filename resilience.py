@@ -88,6 +88,19 @@ class RetryBudgetExceeded(RuntimeError):
         self.status, self.attempts, self.elapsed = status, attempts, elapsed
 
 
+NETWORK_DOWN_BUDGET_SEC = float(os.getenv("NETWORK_DOWN_BUDGET_SEC", "600"))
+NETWORK_DOWN_SIGNS = ("unable to find the server", "name or service not known", "temporary failure in name resolution",
+                      "nodename nor servname", "network is unreachable", "no route to host", "getaddrinfo failed")
+
+
+def network_down(exc: BaseException) -> bool:
+    """The box cannot reach the internet at all (DNS or routing), as opposed to one slow or reset request."""
+    if isinstance(exc, socket.gaierror):
+        return True
+    text = f"{exc} {getattr(exc, '__cause__', '') or ''}".lower()
+    return any(sign in text for sign in NETWORK_DOWN_SIGNS)
+
+
 class TransportExhausted(RuntimeError):
     """
     The connection failed repeatedly and we stopped trying.
@@ -470,6 +483,7 @@ def retry_on_google_error(
         def wrapper(*args, **kwargs) -> T:
             attempt = 0
             call_started = time.monotonic()
+            network_down_since = None
             while True:
                 # Timed here because every Google call in the engine passes
                 # through this decorator, so instrumenting it needs no change
@@ -601,7 +615,14 @@ def retry_on_google_error(
                     # occasional duplicate beats an item that silently is not
                     # there.
                     attempt += 1
-                    if attempt > max_retries:
+                    # The box itself offline (Wi-Fi lost, DNS gone) is not a slow API: six quick retries
+                    # gave up inside about a minute and ended a 16-hour DMS job (account 3, 14 Nov 2026,
+                    # "Unable to find the server" ten minutes after the Wi-Fi dropped). Ride it out.
+                    down = network_down(exc)
+                    if down and network_down_since is None:
+                        network_down_since = time.monotonic()
+                    riding_out = down and time.monotonic() - network_down_since < NETWORK_DOWN_BUDGET_SEC
+                    if attempt > max_retries and not riding_out:
                         # A distinct type, subclassing RuntimeError so every
                         # existing `except RuntimeError` still catches it.
                         # Callers that need to tell "the network died, and the
@@ -613,9 +634,8 @@ def retry_on_google_error(
                             f"exhausted {max_retries} retries on "
                             f"{type(exc).__name__}: {exc}"
                         ) from exc
-                    delay = random.uniform(
-                        0, min(max_delay, base_delay * (2 ** (attempt - 1)))
-                    )
+                    delay = (min(60.0, 5.0 * (2 ** min(attempt - 1, 4))) if down else random.uniform(
+                        0, min(max_delay, base_delay * (2 ** (attempt - 1)))))
                     if max_elapsed is not None and time.monotonic() - call_started + delay > max_elapsed:
                         raise RetryBudgetExceeded(
                             f"{type(exc).__name__} after {attempt} attempt(s), over the "
