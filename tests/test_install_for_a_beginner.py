@@ -85,3 +85,36 @@ def test_the_readme_points_a_new_user_at_the_install_guide():
     assert readme.index("INSTALL.md") < readme.index("migration_engine/"), "before anything else"
     guide = open(os.path.join(ROOT, "INSTALL.md")).read()
     assert "sudo bash install.sh" in guide and "cPanel" in guide
+
+
+def test_a_failing_step_stops_its_heartbeat_and_reports_its_status(tmp_path):
+    """set -e used to end the script inside with_heartbeat: no message, and the heartbeat printed for ever."""
+    fn = re.search(r"^with_heartbeat\(\) \{.*?^\}", INSTALL, re.M | re.S).group(0).replace("sleep 30", "sleep 0.2")
+    script = textwrap.dedent(f"""
+        set -euo pipefail
+        DIM=; RESET=
+        {fn}
+        run() {{ eval "$@"; }}
+        rc=0
+        with_heartbeat testing run "sleep 0.5; false" || rc=$?
+        echo "status=$rc"
+        sleep 0.6
+        echo done
+    """)
+    r = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=20)
+    assert "status=1" in r.stdout and r.stdout.rstrip().endswith("done")
+    assert r.stdout.count("still working") <= 4, "the heartbeat stopped when the step failed"
+
+
+def test_an_unexpected_stop_says_where_and_what_to_do(tmp_path):
+    trap = re.search(r"^trap '.*' ERR$", INSTALL, re.M).group(0)
+    step = re.search(r"^CURRENT_STEP=.*\n^step\(\).*$", INSTALL, re.M).group(0)
+    script = f'set -euo pipefail\nBOLD=; RESET=; RED=\n{step}\n{trap}\nstep "Python environment"\nfalse\necho not-reached'
+    r = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=20)
+    assert r.returncode != 0 and "not-reached" not in r.stdout
+    assert "stopped unexpectedly during: Python environment" in r.stdout and "safe to repeat" in r.stdout
+
+
+def test_pip_is_retried_like_every_other_network_step():
+    assert INSTALL.count('with_heartbeat "installing Python packages" runnet') == 2
+    assert "Installing the Python packages failed" in INSTALL

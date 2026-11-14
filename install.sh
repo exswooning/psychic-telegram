@@ -24,7 +24,10 @@ set -euo pipefail
 BOLD=$(tput bold 2>/dev/null || true); DIM=$(tput dim 2>/dev/null || true)
 GREEN=$(tput setaf 2 2>/dev/null || true); RED=$(tput setaf 1 2>/dev/null || true)
 YELLOW=$(tput setaf 3 2>/dev/null || true); RESET=$(tput sgr0 2>/dev/null || true)
-step() { echo; echo "${BOLD}==> $*${RESET}"; }
+CURRENT_STEP="starting"
+step() { CURRENT_STEP="$*"; echo; echo "${BOLD}==> $*${RESET}"; }
+# A step that fails without saying why used to end the install in silence (a first-time user, 14 Nov 2026).
+trap 'echo; echo "${RED}The installer stopped unexpectedly during: ${CURRENT_STEP}.${RESET}"; echo "  Nothing is broken. Run the same command again: it is safe to repeat and carries on where it stopped."; echo "  If it stops here again, send the last 30 lines of ${LOG:-/var/log/bitport-install.log} to whoever supports you."' ERR
 ok()   { echo "  ${GREEN}✓${RESET} $*"; }
 warn() { echo "  ${YELLOW}!${RESET} $*"; }
 die()  { echo "  ${RED}✗ $*${RESET}" >&2; exit 1; }
@@ -60,11 +63,14 @@ ORIG_NONINTERACTIVE="${NONINTERACTIVE:-0}"
 # looks like a frozen installer. Account of a first install over a slow link: 40 minutes of an unchanged screen.
 with_heartbeat() {
   local what="$1"; shift
-  local start=$SECONDS beat rc
+  local start=$SECONDS beat rc=0
   ( while sleep 30; do echo "  ${DIM}... $what: still working, $(( (SECONDS - start) / 60 )) min so far (a slow connection can take 30 min or more)${RESET}"; done ) &
   beat=$!
-  "$@"; rc=$?
-  kill "$beat" 2>/dev/null; wait "$beat" 2>/dev/null
+  # "|| rc=$?": under set -e a failing command would end the script HERE, before the heartbeat is stopped,
+  # leaving it printing for ever and the install dead with no message.
+  "$@" || rc=$?
+  kill "$beat" 2>/dev/null || true
+  wait "$beat" 2>/dev/null || true
   return $rc
 }
 # Is TCP port $1 free on this host right now?
@@ -371,9 +377,11 @@ run "'$INSTALL_DIR/.venv/bin/pip' install -q --upgrade pip"
 # warned on every run and downloaded everything again each time).
 export PIP_CACHE_DIR=/var/cache/bitport-pip PIP_DISABLE_PIP_VERSION_CHECK=1
 install -d -m 755 "$PIP_CACHE_DIR" 2>/dev/null || true
-with_heartbeat "installing Python packages" run "'$INSTALL_DIR/.venv/bin/pip' install -q -r '$INSTALL_DIR/requirements.txt'"
+with_heartbeat "installing Python packages" runnet "'$INSTALL_DIR/.venv/bin/pip' install -q -r '$INSTALL_DIR/requirements.txt'" \
+    || die "Installing the Python packages failed. This is almost always the internet connection. Run the same command again: it is safe to repeat and carries on where it stopped."
 [ -f "$INSTALL_DIR/requirements-control-plane.txt" ] && \
-  with_heartbeat "installing Python packages" run "'$INSTALL_DIR/.venv/bin/pip' install -q -r '$INSTALL_DIR/requirements-control-plane.txt'"
+  with_heartbeat "installing Python packages" runnet "'$INSTALL_DIR/.venv/bin/pip' install -q -r '$INSTALL_DIR/requirements-control-plane.txt'" \
+    || die "Installing the Python packages failed. This is almost always the internet connection. Run the same command again: it is safe to repeat and carries on where it stopped."
 # playwright drives every browser-automation step the Setup Wizard offers
 # (sign-in, domain-wide delegation), imported lazily inside the functions
 # that actually launch a browser -- so a broken install here surfaces days
