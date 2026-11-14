@@ -139,7 +139,7 @@ ask() {  # ask VAR "prompt" "default"
 # to a string printed only as "(generated)". That turns "safe to re-run",
 # which this installer promises at the top, into a lockout.
 PASSWORD_GIVEN=0
-PASSWORD_GENERATED=0
+PASSWORD_GENERATED="${PASSWORD_GENERATED:-0}"   # the first, interactive run hands this to the background run
 ask_secret() {  # ask_secret VAR "prompt"
   local var="$1" prompt="$2" cur="${!1:-}"
   if [ -n "$cur" ]; then PASSWORD_GIVEN=1; echo "  $prompt: ${DIM}(from env)${RESET}"; return; fi
@@ -207,7 +207,7 @@ if [ "$ORIG_NONINTERACTIVE" != 1 ] && [ "$DRY_RUN" != 1 ] && [ "${BITPORT_DAEMON
   echo "  ${DIM}the install keeps going, and you can watch it again with: tail -f $LOG${RESET}"
   echo
   tail -n +1 -f --pid=$! "$LOG" 2>/dev/null
-  grep -q "Bitport installed" "$LOG" 2>/dev/null || { echo; echo "${RED}The install stopped before it finished.${RESET} Read the last lines above, or $LOG."; exit 1; }
+  grep -q "Bitport is installed" "$LOG" 2>/dev/null || { echo; echo "${RED}The install stopped before it finished.${RESET} Read the last lines above, or $LOG."; exit 1; }
   exit 0
 fi
 

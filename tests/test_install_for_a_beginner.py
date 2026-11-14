@@ -127,3 +127,15 @@ def test_a_best_effort_step_that_ignores_failures_stays_quiet():
 def test_pip_is_retried_like_every_other_network_step():
     assert INSTALL.count('with_heartbeat "installing Python packages" runnet') == 2
     assert "Installing the Python packages failed" in INSTALL
+
+
+def test_the_generated_password_flag_survives_the_hand_off_to_the_background_run():
+    # Seen in a fresh VM install: the child reset the flag the parent had exported, so the end screen
+    # said "the one you chose" and no password file was written.
+    assert re.search(r'^PASSWORD_GENERATED="\$\{PASSWORD_GENERATED:-0\}"', INSTALL, re.M)
+
+
+def test_the_hand_off_looks_for_the_exact_words_the_end_screen_prints():
+    watched = re.search(r'grep -q "([^"]+)" "\$LOG"', INSTALL).group(1)
+    banner = re.search(r'GREEN\}(Bitport is installed\.)', INSTALL).group(1)
+    assert watched in banner
