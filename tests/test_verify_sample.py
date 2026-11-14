@@ -873,3 +873,42 @@ class TestTheUserCannotSeeThePrimaryCategory:
 
     def test_a_missing_inbox_still_counts(self):
         assert V.compare_labels({"INBOX"}, {"CATEGORY_PERSONAL"}) == ["labels missing on the target: ['INBOX']"]
+
+
+class TestTheVerifierGivesMemoryBack:
+    """Probe, 14 Nov 2026: info@'s Drive verify alone held 2.1 GB after its walk; four users reached 11 GB."""
+
+    class Libc:
+        def __init__(self):
+            self.calls = []
+
+        def mallopt(self, param, value):
+            self.calls.append(("mallopt", param, value))
+            return 1
+
+        def malloc_trim(self, pad):
+            self.calls.append(("malloc_trim", pad))
+            return 1
+
+    def test_every_content_read_gives_memory_back(self, monkeypatch):
+        libc = self.Libc()
+        monkeypatch.setattr(V, "_LIBC", libc)
+        with V._content_slot():
+            pass
+        assert ("malloc_trim", 0) in libc.calls
+
+    def test_the_pools_are_limited_unless_the_operator_set_them(self, monkeypatch):
+        libc = self.Libc()
+        monkeypatch.setattr(V, "_LIBC", libc)
+        monkeypatch.delenv("MALLOC_ARENA_MAX", raising=False)
+        V.limit_arenas()
+        assert libc.calls == [("mallopt", V.M_ARENA_MAX, 2)]
+        libc.calls.clear()
+        monkeypatch.setenv("MALLOC_ARENA_MAX", "4")
+        V.limit_arenas()
+        assert libc.calls == [], "an explicit setting wins"
+
+    def test_without_glibc_it_does_nothing(self, monkeypatch):
+        monkeypatch.setattr(V, "_LIBC", None)
+        V.limit_arenas()
+        V.give_back_memory()

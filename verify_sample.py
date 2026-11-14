@@ -73,6 +73,33 @@ DRIVE_METADATA_BATCH_SIZE = 25
 _CONTENT_SLOT = threading.BoundedSemaphore(1)
 
 
+def _glibc():
+    try:
+        import ctypes
+        return ctypes.CDLL("libc.so.6")
+    except OSError:      # not Linux/glibc (the dev Mac): nothing to tune
+        return None
+
+
+_LIBC = _glibc()
+M_ARENA_MAX = -8
+
+
+def limit_arenas(n: int = 2) -> None:
+    """glibc gives each thread its own memory pool and keeps every pool's high-water mark. A verify runs
+    dozens of threads (users x file workers), so one large comparison per thread left gigabytes held:
+    info@'s Drive alone held 2.1 GB after its walk (probe, 14 Nov 2026), and four users reached 11 GB
+    (10 Nov). main.py caps its shard processes the same way (MALLOC_ARENA_MAX=2)."""
+    if _LIBC is not None and not os.getenv("MALLOC_ARENA_MAX"):
+        _LIBC.mallopt(M_ARENA_MAX, n)
+
+
+def give_back_memory() -> None:
+    """Return freed memory to the system after a large comparison instead of keeping it as a high-water mark."""
+    if _LIBC is not None:
+        _LIBC.malloc_trim(0)
+
+
 @contextmanager
 def _content_slot():
     while not _CONTENT_SLOT.acquire(timeout=0.25):
@@ -82,6 +109,7 @@ def _content_slot():
         yield
     finally:
         _CONTENT_SLOT.release()
+        give_back_memory()      # every content read can materialise a large document
 
 
 def _drive_file_workers() -> int:
@@ -2845,6 +2873,7 @@ def run_and_save(auth, db, settings, users=None, services=ALL_SERVICES, retry=la
 
 def main(argv=None) -> int:
     import argparse
+    limit_arenas()      # before any worker thread exists: pools are made per thread as they start
     # The verifier only reads: a hung request must not hold a worker for the engines' 300 s.
     os.environ.setdefault("GOOGLE_HTTP_TIMEOUT_SEC", os.getenv("VERIFY_HTTP_TIMEOUT_SEC", "90"))
     # Reading a large Doc, Slides deck or Sheet takes longer than 90 s; everything else keeps the short bound.

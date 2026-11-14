@@ -188,3 +188,16 @@ the meter itself; the operator's screenshots are the only measurements.
       mailbox to full proof. Engine link mail is always proven in full; anything light proof cannot judge
       falls back to full proof. Receipts say `"proof": "light"`. Tested; not deployed; not yet measured.
       To use it on a run: set DMS_PROOF=light in the API's environment (a per-run switch in the UI is TODO).
+
+## State, 14 Nov evening -- verifier memory (priority item 2)
+- MEASURED (probe 1, info@'s Drive alone, one worker, read-only): RSS climbs in steps at single large
+  comparisons -- a Sheet to ~1 GB, a HEIF photo to ~2 GB -- peaks at 2.4 GB and stays at 2.1 GB after the
+  walk: freed memory is not handed back. Content reads are already one at a time across all users and
+  binaries are capped at 25 MB, so the cause is glibc's per-thread pools keeping each pool's peak; a verify
+  runs dozens of threads, which explains 11 GB with four users (10 Nov).
+- [x] Fix: `verify_sample.limit_arenas()` (2 pools, as main.py does for shards) at startup and
+  `give_back_memory()` (malloc_trim) after every content read. Tested; not deployed.
+- Probe 2 is running with MALLOC_ARENA_MAX=2 (same user, same scope) to measure the pool limit alone:
+  compare logs/jobs/3/memprobe/rss.log with logs/jobs/3/memprobe-before/rss.log. The trim part is
+  measured after the next deploy.
+| 14 Nov evening | not read | not read | not read | Claude cannot read the meter: please send a screenshot |
