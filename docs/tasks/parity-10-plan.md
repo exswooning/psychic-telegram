@@ -220,3 +220,22 @@ the meter itself; the operator's screenshots are the only measurements.
   must come from moving fewer bytes, not a faster line: light proof for DMS mail (matched full proof on
   2,429 of 2,429), read each mailbox once, server-side work wherever Google offers it. Reliability rests on
   the outage ride-out (10 min) and resuming from checkpoints. Hosting elsewhere stays an open option.
+
+## Beginner install test, 14-15 Nov (operator: Bitport fixes what a first-time user meets, never the user)
+
+Method: a QEMU VM on the box (Ubuntu 24.04, capped so the live run is undisturbed), following only what the
+repo says, as a user who knows nothing. Found and fixed in Bitport (ddfb6e6, 72f2947), each with a test in
+`tests/test_install_for_a_beginner.py` / `tests/test_tui.py`:
+- No entry point: README now points to `INSTALL.md` (plain steps, question table, what to do when stuck).
+- Generated admin password was never shown: now printed at the end and saved (root-only) in `/root/bitport-admin-password.txt`.
+- `<server-ip>` placeholder in the end screen: now the real address; three next steps printed.
+- Caddy's own port 80 counted as "in use": `port_free` ignores Caddy.
+- SSH hardening reported success while passwords stayed on: now truthful.
+- Silent pip (up to 75 min on a slow line): a "still working" line every 30 s; pip retries like apt; a failed step says where.
+- Installer died silently under `set -e` (heartbeat): fixed; any unexpected stop prints the step and "safe to repeat".
+- Install ran detached with no screen output: progress now follows on screen.
+- No simple command: `bitport ui|url|status|logs|help` (works as non-root, finds the install dir).
+- TUI on a fresh box showed a blank dashboard: now a welcome screen with the next steps; launching actions refused with a reason.
+Verified in the VM: install end-to-end, `bitport` as a non-root user, TUI welcome and quit, login with the generated password.
+Not a Bitport defect: the VM's PyPI download ran at 0.05 MB/s (user-mode networking).
+Still to do: a full fresh-disk acceptance install; judge the Setup Wizard's first screen in a browser (BrowserOS was offline).
