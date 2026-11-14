@@ -295,8 +295,23 @@ SUPERSTARS = {"YELLOW_STAR", "ORANGE_STAR", "RED_STAR", "PURPLE_STAR", "BLUE_STA
               "PURPLE_QUESTION"}
 
 
+CATEGORIES = {"CATEGORY_PERSONAL", "CATEGORY_SOCIAL", "CATEGORY_PROMOTIONS", "CATEGORY_UPDATES", "CATEGORY_FORUMS"}
+
+
+def _primary_is_no_category(names: set[str]) -> set[str]:
+    """CATEGORY_PERSONAL is Gmail's Primary tab, and Primary is also where a message with no category label
+    shows -- so CATEGORY_PERSONAL alone and no category at all look the same to the user. Gmail adds it to
+    inserted and DMS-delivered mail on its own and puts it back when removed (account 3, 14 Nov 2026: 2,857
+    messages). Operator's rule, 14 Nov: a label difference the user cannot see is not a difference. Any OTHER
+    category still counts: Updates or Promotions put a message in a different tab."""
+    if names & CATEGORIES == {"CATEGORY_PERSONAL"}:
+        return names - {"CATEGORY_PERSONAL"}
+    return names
+
+
 def compare_labels(src_names: set[str], tgt_names: set[str]) -> list[str]:
-    src_names, tgt_names = set(src_names) - SUPERSTARS, set(tgt_names) - SUPERSTARS
+    src_names = _primary_is_no_category(set(src_names) - SUPERSTARS)
+    tgt_names = _primary_is_no_category(set(tgt_names) - SUPERSTARS)
     # Gmail label names are Unicode text. Compare canonical forms and
     # normalized whitespace so visually equivalent names (notably labels
     # containing decomposed Nepali text) do not become false deltas.

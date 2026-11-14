@@ -173,3 +173,11 @@ the meter itself; the operator's screenshots are the only measurements.
   RSS every 15 s beside the item and document in hand to logs/jobs/3/memprobe/rss.log. Next session: find
   the step where RSS climbs, fix that, re-run the probe to show the fix.
 | 14 Nov afternoon | not read | not read | not read | Claude cannot read the meter: please send a screenshot |
+
+## Operator's answers, 14 Nov evening
+1. CATEGORY_PERSONAL: "if the user can find no differences, yes". Done: `verify_sample.compare_labels`
+   treats the Primary category alone as no category, both ways; any other category (Updates,
+   Promotions...) still counts, and so does a missing INBOX. Every check uses this one function
+   (inline mail check, DMS label alignment, verify). Not deployed (the DMS pipeline is live).
+2. Lighter proof for DMS mail: explained to the operator; awaiting a yes or no.
+3. Passwords: the operator will not rotate them now. Leave the item open; do not ask again this week.

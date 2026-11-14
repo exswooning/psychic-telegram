@@ -858,3 +858,18 @@ def test_an_unrecorded_copy_with_the_same_name_is_still_a_stray(migrated):
     tgt.add_binary(".Repair backup - notes.txt", data=b"plain notes", mime="text/plain")
     r = verify(migrated, ("drive",))["users"][SRC_USER]["drive"]
     assert [e["name"] for e in r["extras"]] == [".Repair backup - notes.txt"]
+
+
+class TestTheUserCannotSeeThePrimaryCategory:
+    """Operator's rule, 14 Nov 2026: CATEGORY_PERSONAL (the Primary tab) and no category look the same."""
+
+    def test_primary_alone_equals_no_category_either_way(self):
+        assert V.compare_labels({"SENT"}, {"SENT", "CATEGORY_PERSONAL"}) == []
+        assert V.compare_labels({"INBOX", "CATEGORY_PERSONAL"}, {"INBOX"}) == []
+
+    def test_another_category_is_a_different_tab_and_still_counts(self):
+        assert V.compare_labels({"INBOX"}, {"INBOX", "CATEGORY_UPDATES"})
+        assert V.compare_labels({"INBOX", "CATEGORY_PROMOTIONS"}, {"INBOX", "CATEGORY_PERSONAL"})
+
+    def test_a_missing_inbox_still_counts(self):
+        assert V.compare_labels({"INBOX"}, {"CATEGORY_PERSONAL"}) == ["labels missing on the target: ['INBOX']"]
