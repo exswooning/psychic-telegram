@@ -168,8 +168,8 @@ class TestDeltasUntilZero:
         seen = []
         monkeypatch.setattr(dms_pipeline, "_incident", lambda **kw: seen.append(kw))
         m = tmp_path / "m.json"; self._metrics(m, 17)
-        assert dms_pipeline.delta_until_zero(lambda: self._metrics(m, 17), str(m), 5, 3) == 2
-        assert seen and seen[0]["fingerprint"] == "dms_stuck:3"
+        assert dms_pipeline.delta_until_zero(lambda: self._metrics(m, 17), str(m), 5, 3) == dms_pipeline.REMAINDER
+        assert seen and seen[0]["fingerprint"] == "dms_stuck:3", "named in an incident, and the verify still follows"
 
     def test_an_unknown_result_is_never_read_as_zero(self, tmp_path, monkeypatch):
         monkeypatch.setattr(dms_pipeline, "_incident", lambda **kw: None)

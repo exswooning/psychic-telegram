@@ -8,8 +8,11 @@
    DMS_START_CONFIRM_MIN (30) minutes -- a wait for the source admin's approval extends the window
    while it lasts. Never assumed, never read from an earlier run. Otherwise: stopped, incident;
 4. delta: re-run the import (same map, no fresh import) while the console still reports failed emails,
-   at most DMS_DELTA_ATTEMPTS (5) times, stopping with an incident when the count stops falling.
-Exit 0 only when the DMS reports zero failed emails; api_server then starts the full verify with repair.
+   at most DMS_DELTA_ATTEMPTS (5) times, stopping with an incident when the count stops falling;
+5. align the labels of delivered mail whose content the reconciliation proved (dms_label_alignment:
+   no body is read; DMS_ALIGN_LABELS=0 switches it off).
+Exit 0 once the import is finished -- zero failed, or a remainder a delta no longer lowers (an incident
+names it) -- and api_server then starts the full verify with repair. An unknown result is never a finish.
 
     python dms_pipeline.py --account-id 3 --identities logs/dms/3/identities-45u-ab12.csv \
         [--watch 720 --until-done 4320 --timeout 200 --source-domain ... --target-admin ... --source-admin ...]
@@ -29,6 +32,7 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 PY = sys.executable
 CONFIRMED = "import status:"
+REMAINDER = 4      # the import finished and a delta no longer lowers its failed count: named, not unknown
 STILL_WAITING = ("waiting for the source admin to approve", "another import is driving the console")
 
 
@@ -106,7 +110,7 @@ def delta_until_zero(run, metrics_path: str, attempts: int, account_id) -> int:
             _incident(kind="dms_not_started", title="The DMS delta is not reducing failures",
                       summary=f"{prev} -> {n} failed emails after {attempt - 1} delta(s) for account {account_id}",
                       account_id=account_id, job_name="dms", fingerprint=f"dms_stuck:{account_id}", severity="warn")
-            return 2
+            return REMAINDER
         prev = n
         print(f"dms: delta attempt {attempt} for {n} failed email(s)", flush=True)
         run()
@@ -116,7 +120,7 @@ def delta_until_zero(run, metrics_path: str, attempts: int, account_id) -> int:
     _incident(kind="dms_not_started", title="The DMS still has failed emails",
               summary=f"{n} failed after {attempts} deltas for account {account_id}", account_id=account_id,
               job_name="dms", fingerprint=f"dms_stuck:{account_id}", severity="warn")
-    return 2
+    return REMAINDER if status.lower().startswith("complete") else 2
 
 
 def main(argv=None) -> int:
@@ -163,9 +167,20 @@ def main(argv=None) -> int:
     if rc != 0:
         return rc
     delta = base + ([] if "--no-tally" in base else ["--no-tally"])
-    return delta_until_zero(lambda: subprocess.call(delta, cwd=HERE, env=env),
-                            dms_migrate.metrics_path(args.account_id),
-                            int(os.getenv("DMS_DELTA_ATTEMPTS", "5")), args.account_id)
+    rc = delta_until_zero(lambda: subprocess.call(delta, cwd=HERE, env=env),
+                          dms_migrate.metrics_path(args.account_id),
+                          int(os.getenv("DMS_DELTA_ATTEMPTS", "5")), args.account_id)
+    if rc not in (0, REMAINDER):
+        return rc
+    # The import is finished. A few emails Google will not import (17 of 141,977 on account 3) are an open
+    # incident and show as missing in the verify that follows; they must not hold that verify back for ever.
+    if os.getenv("DMS_ALIGN_LABELS", "1").lower() not in ("0", "false", "no"):
+        import dms_label_alignment
+        from db import MigrationDB
+        totals = dms_label_alignment.run(auth, MigrationDB(st.db_path), st,
+                                         progress=lambda m: print(m, flush=True))
+        print(f"dms: labels of delivered mail aligned: {json.dumps(totals)}", flush=True)
+    return 0
 
 
 if __name__ == "__main__":
