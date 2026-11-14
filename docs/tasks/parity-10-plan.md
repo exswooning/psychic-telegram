@@ -216,3 +216,7 @@ the meter itself; the operator's screenshots are the only measurements.
   restarted; incident #76-style retry opened so the API restarts the DMS from its checkpoints. Remove the
   drop-in to return to full proof.
 | 14 Nov 7:51 PM | 37% | 78% | 100% | Fable week used up; Claude now runs one short check-in a day until the Fri 20 Nov reset |
+- Operator, 14 Nov: a wired cable is NOT possible; the box stays on Wi-Fi (about 3 MB/s, drops). So speed
+  must come from moving fewer bytes, not a faster line: light proof for DMS mail (matched full proof on
+  2,429 of 2,429), read each mailbox once, server-side work wherever Google offers it. Reliability rests on
+  the outage ride-out (10 min) and resuming from checkpoints. Hosting elsewhere stays an open option.
