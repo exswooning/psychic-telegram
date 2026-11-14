@@ -126,3 +126,31 @@ the meter itself; the operator's screenshots are the only measurements.
   accepted Form; 100,990 target-only messages are DMS mail awaiting reconciliation; 6 read errors.
 - Google's import at 18:30 UTC: 133,743 of 133,760 imported, 17 failed, 44 of 45 users; info@ (to
   nest@t) had 34,964 of 40,193.
+
+## State, 14 Nov 06:30 Nepal (00:40 UTC)
+- The default DMS pipeline worked live: the API started it for incident #72 at 20:05 UTC, decided
+  45 ready / 0 held, attached to the running import; the incident closed itself. Google's import is
+  COMPLETE: 141,960 of 141,977 imported, 17 failed, 45 users.
+- MEASURED: the reconciliation is bound by the box's line, not by threads. 8 threads at 20 reads/s gave
+  no gain (about 0.5 to 2 messages a second, as before): the Wi-Fi was saturated at 3.03 MB/s down, and
+  each message is downloaded in full twice (source and target). 18,800 of ~141,000 done in about 4 hours;
+  about a day more at this rate. Threads and the search are not the lever; fewer bytes or a faster line are.
+- FINDING: 37% of reconciled DMS mail (7,133 of 19,080) has proven-identical content and label drift only:
+  INBOX missing on the target (3,446), CATEGORY_PERSONAL / CATEGORY_UPDATES / IMPORTANT added by Gmail.
+  administration@ alone: 6,012.
+- [x] `dms_label_alignment.py`: aligns those labels from the reconciliation's own content proof with no
+  body read; wired into `dms_pipeline` after the deltas. Dry run on cao@: 685 of 685 alignable. Running
+  live on account 3 as unit `bitport-dms-labels` (log logs/jobs/3/dms_labels.log); the file was copied to
+  the box alone (the API-started pipeline is live, so no deploy/restart). Not deployed: 7d... (HEAD).
+- [x] `dms_pipeline`: a finished import whose failed remainder a delta no longer lowers still hands over
+  to the verify (incident names the remainder); an unknown result still does not.
+- DECISION FOR THE OPERATOR (blocks the real speed-up): proving every DMS message byte for byte costs two
+  full downloads per message, about a day per run on this line, and the every-item verify after it costs
+  about as much again. Options: (a) wired network on the box (enp1s0 has no link) or a hosted box: same
+  proof, roughly 10x faster; (b) prove DMS mail by identity, headers, size and labels (no body), with a
+  full-content sample per mailbox (say 50) and full proof kept for link mail the engine wrote: minutes
+  instead of a day, at a weaker (statistical) proof for DMS-delivered bodies. Recommended: (a) now if a
+  cable can be fixed, and (b) as a setting, default off until the operator says.
+- Next: item 2 (verify streams results), then the engine fallback for the 17 emails the DMS will not import.
+
+| 14 Nov 06:30 AM | not read | not read | not read | Claude cannot read the meter: please send a screenshot |
