@@ -211,3 +211,8 @@ the meter itself; the operator's screenshots are the only measurements.
   being offline (DNS or no route) for up to NETWORK_DOWN_BUDGET_SEC (600 s) with 5-60 s waits; an ordinary
   reset still gives up after its retries. Applies to every engine call.
 - [x] Verifier memory (priority item 2): fixed and measured (probe 2); probe 3 confirms the deployed code.
+- Operator chose light proof for this run's remaining reconciliation (14 Nov evening). Set as a systemd
+  drop-in on the box: /etc/systemd/system/bitport-api.service.d/dms-proof.conf (DMS_PROOF=light); API
+  restarted; incident #76-style retry opened so the API restarts the DMS from its checkpoints. Remove the
+  drop-in to return to full proof.
+| 14 Nov 7:51 PM | 37% | 78% | 100% | Fable week used up; Claude now runs one short check-in a day until the Fri 20 Nov reset |
