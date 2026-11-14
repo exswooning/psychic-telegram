@@ -154,3 +154,9 @@ the meter itself; the operator's screenshots are the only measurements.
 - Next: item 2 (verify streams results), then the engine fallback for the 17 emails the DMS will not import.
 
 | 14 Nov 06:30 AM | not read | not read | not read | Claude cannot read the meter: please send a screenshot |
+- Label alignment, first 250 of administration@: about half aligned, half still "differs". A sample of 40
+  of those: every one is `CATEGORY_PERSONAL` on the target only (36 on SENT mail, 4 on INBOX mail). Gmail
+  puts that label back; it cannot be removed. It is also invisible: CATEGORY_PERSONAL is the Primary tab,
+  where mail with no category label shows anyway, and tabs apply to the Inbox only. Claude's earlier
+  statement that it "moves the message to the Personal tab" was wrong. PROPOSED (operator to confirm):
+  the comparer treats "no category on the source" and "CATEGORY_PERSONAL on the target" as equal.
