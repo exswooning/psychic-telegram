@@ -1204,6 +1204,9 @@ class _GmailMessages:
         if id not in self.s.messages:
             raise http_error(404, "notFound", id)
         out = copy.deepcopy(self.s.messages[id])
+        if "sizeEstimate" not in out and out.get("raw"):      # the real API always reports it
+            r = out["raw"]
+            out["sizeEstimate"] = len(base64.urlsafe_b64decode(r + "=" * (-len(r) % 4)))
         if format in ("metadata", "minimal", "full"):
             # What the real API returns for these: the headers parsed out, not the
             # raw bytes. Enough for callers that ask only for a header.

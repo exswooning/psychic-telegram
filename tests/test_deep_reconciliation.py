@@ -10,7 +10,7 @@ from split_mail import reconcile_dms
 
 def test_label_difference_maps_proven_identity_without_repair(db,auth,settings,identity):
     sid=auth.source_gmail(SRC_USER).add_message(PLAIN,['INBOX'])
-    tid=auth.target_gmail(TGT_USER).add_message(PLAIN,['INBOX','CATEGORY_PERSONAL'])
+    tid=auth.target_gmail(TGT_USER).add_message(PLAIN,['INBOX','CATEGORY_UPDATES'])
     db.log_audit(SRC_USER,sid,'message',DEFERRED_TO_DMS)
     out=reconcile_dms(auth,db,settings,progress=lambda _:None)
     assert out['blocked'] and db.get_target_id(SRC_USER,sid,'message')==tid

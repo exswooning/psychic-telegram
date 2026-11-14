@@ -22,3 +22,6 @@ tests/test_box_routes_are_superadmin_only.py
 tests/test_deploy_config.py
 tests/test_upgrades_never_restart_bitport.py
 tests/test_console_navigation_survives_a_network_drop.py
+tests/test_dms_light_proof.py
+tests/test_dms_label_alignment.py
+tests/test_deep_reconciliation.py

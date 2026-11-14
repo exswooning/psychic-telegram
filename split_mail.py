@@ -168,6 +168,8 @@ def reconcile_dms(auth, db, settings, progress=None, users=None):
     from migration_checks import verify_written_mail
     from link_rewrite import rewrite_raw
     from verify_sample import _stop_check
+    import threading
+    import dms_light_proof
 
     verified_items = []
     reused = 0
@@ -217,11 +219,36 @@ def reconcile_dms(auth, db, settings, progress=None, users=None):
                                                   "draftMessages": len(drafts), "selected": len(rows)})
 
         user_start = out["checked"]
-        progress(f"DMS reconciliation: {source} | starting {len(rows)} email checks")
+        light = dms_light_proof.enabled()
+        sampled = dms_light_proof.sample([r["item_id"] for r in rows]) if light else set()
+        degraded = threading.Event()
+        progress(f"DMS reconciliation: {source} | starting {len(rows)} email checks"
+                 + (f" (light proof; {len(sampled)} sampled in full)" if light else ""))
 
         import threading
         local = threading.local()
         base_gm = gm
+
+        def resolve_findings(mid):
+            """Resolve only this phase's own error findings after fresh success."""
+            with db.write() as c:
+                if c.execute(
+                    "SELECT 1 FROM sqlite_master WHERE name='verification_repair_queue'"
+                ).fetchone():
+                    for finding in c.execute(
+                        "SELECT finding_key,detail FROM verification_repair_queue WHERE source_user=? AND service='gmail' AND category='errors' AND item_id=?",
+                        (source, mid),
+                    ).fetchall():
+                        if (
+                            json.loads(finding["detail"]).get("phase")
+                            == "dms-reconciliation"
+                        ):
+                            from db import utc_now
+
+                            c.execute(
+                                "UPDATE verification_repair_queue SET state='RESOLVED',resolved_at=? WHERE source_user=? AND service='gmail' AND finding_key=?",
+                                (utc_now(), source, finding["finding_key"]),
+                            )
 
         def inspect(item):
             if not hasattr(local, "gm"):
@@ -235,6 +262,19 @@ def reconcile_dms(auth, db, settings, progress=None, users=None):
                 cached = checkpoint.get(mid)
                 if cached:
                     return (source, mid, cached), None
+                if light and mid not in sampled and not degraded.is_set() and dms_light_proof.eligible(db, source, mid):
+                    mapped = db.get_target_id(source, mid, "message")
+                    verdict, ltid, evidence = dms_light_proof.check(gm, db, source, mid, mapped)
+                    if verdict != "unknown":
+                        tid = ltid
+                        dms_light_proof.record(db, source, mid, tid, verdict, evidence)
+                        if not mapped:
+                            db.adopt_message_mapping(source, mid, tid)
+                        if verdict == "labels":
+                            raise RuntimeError("DMS destination content or labels did not match")
+                        checkpoint.save(mid, tid, "VERIFIED", evidence)
+                        resolve_findings(mid)
+                        return (source, mid, tid), None
                 full = gm._retry(
                     lambda: (
                         gm.src.users()
@@ -314,31 +354,15 @@ def reconcile_dms(auth, db, settings, progress=None, users=None):
                 checkpoint.save(mid, tid, "VERIFIED", {"scope": "content and labels", "target": tid})
                 if not mapped:
                     db.adopt_message_mapping(source, mid, tid)
-                # Resolve only this phase's own error findings after fresh success.
-                with db.write() as c:
-                    if c.execute(
-                        "SELECT 1 FROM sqlite_master WHERE name='verification_repair_queue'"
-                    ).fetchone():
-                        for finding in c.execute(
-                            "SELECT finding_key,detail FROM verification_repair_queue WHERE source_user=? AND service='gmail' AND category='errors' AND item_id=?",
-                            (source, mid),
-                        ).fetchall():
-                            if (
-                                json.loads(finding["detail"]).get("phase")
-                                == "dms-reconciliation"
-                            ):
-                                from db import utc_now
-
-                                c.execute(
-                                    "UPDATE verification_repair_queue SET state='RESOLVED',resolved_at=? WHERE source_user=? AND service='gmail' AND finding_key=?",
-                                    (utc_now(), source, finding["finding_key"]),
-                                )
+                resolve_findings(mid)
                 return (source, mid, tid), None
             except Exception as exc:
                 # A stale prior pass cannot remain fresh evidence after failure.
                 import verification_repairs
 
                 error = str(exc)[:220]
+                if light and mid in sampled:
+                    degraded.set()      # a sampled message failed: no light proof for this mailbox
                 checkpoint.save(mid, tid, outcome(error), {"error": error})
                 verification_repairs.enqueue_findings(
                     db,
@@ -371,7 +395,13 @@ def reconcile_dms(auth, db, settings, progress=None, users=None):
         with ThreadPoolExecutor(
             max_workers=workers, thread_name_prefix="dms-reconcile"
         ) as pool:
-            for verified, error in pool.map(inspect, rows):
+            first = [r for r in rows if r["item_id"] in sampled]
+            rest = [r for r in rows if r["item_id"] not in sampled]
+
+            def phased():      # the sample finishes (and can switch light proof off) before the rest starts
+                yield from pool.map(inspect, first)
+                yield from pool.map(inspect, rest)
+            for verified, error in phased():
                 out["checked"] += 1
                 if error:
                     out["blocked"] += 1

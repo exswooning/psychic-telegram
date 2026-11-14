@@ -181,3 +181,10 @@ the meter itself; the operator's screenshots are the only measurements.
    (inline mail check, DMS label alignment, verify). Not deployed (the DMS pipeline is live).
 2. Lighter proof for DMS mail: explained to the operator; awaiting a yes or no.
 3. Passwords: the operator will not rotate them now. Leave the item open; do not ask again this week.
+- [x] Light proof for DMS mail (operator said yes, 14 Nov): `dms_light_proof.py`, used by the DMS
+      reconciliation when `DMS_PROOF=light` (default `full`). Per DMS message: Message-ID match, Date,
+      Subject, From, To, Cc equal, target size within 16 KB of the source, labels compared; no body read.
+      A per-mailbox sample (DMS_LIGHT_SAMPLE, 50) is proven in full FIRST; one failed sample sends the whole
+      mailbox to full proof. Engine link mail is always proven in full; anything light proof cannot judge
+      falls back to full proof. Receipts say `"proof": "light"`. Tested; not deployed; not yet measured.
+      To use it on a run: set DMS_PROOF=light in the API's environment (a per-run switch in the UI is TODO).
