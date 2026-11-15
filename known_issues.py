@@ -182,6 +182,12 @@ ISSUES = [
      "Drive cannot write a comment as its author, mark one resolved on create, or anchor it "
      "to the same text in a rebuilt Office file.",
      "None automatic beyond what the copy carried. Listed in the final report.", False),
+    ("drive.comment_quote_escaped", "drive", lambda t: "comment quote escaped twice" in t,
+     "A comment's quoted text shows extra '&amp;' escaping",
+     "Drive HTML-escapes a comment's quote when it is written, and the engine posted the quote as read "
+     "(already escaped), so each copy made before 15 Nov 2026 shows one more level.",
+     "New copies send the quote un-escaped once (migration_comments.for_writing). Existing copies keep it: "
+     "a quote cannot be edited, only the comment deleted and written again.", False),
     # Taken from s.sarafgloabalexim.com -> t. (2026-11-01): findings the check reported as
     # "unclassified" until each was traced to its cause.
     ("gmail.link_scan_fixed", "gmail", lambda t: "Pre-delivery link scan: HTTP 404" in t

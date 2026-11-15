@@ -189,3 +189,23 @@ def test_an_attempt_on_the_same_file_still_waits_for_a_person(db, settings, monk
     with pytest.raises(RuntimeError, match="Prior uncertain"):
         MC.reconcile(migrator, "src-file", "tgt-file-new")
     assert created == []
+
+
+AMP = {"mimeType": "text/html", "value": "a &amp;#247; b"}
+
+
+def test_a_quote_drive_escaped_once_more_is_named_not_called_missing():
+    """health@, ward4@ (15 Nov 2026): three threads with one text were told apart by their quotes, and every
+    copied quote had one more '&amp;' level, so all three read 'missing or ambiguous'."""
+    src = [{**_src(A1, "2026-10-25T01:44:41Z"), "quotedFileContent": AMP},
+           {**_src(A2, "2026-10-25T01:44:38Z"), "quotedFileContent": {"mimeType": "text/html", "value": ""}}]
+    tgt = [{**_tgt(A1), "quotedFileContent": {"mimeType": "text/html", "value": "a &amp;amp;#247; b"}},
+           _tgt(A2)]
+    assert differences(src, tgt, lambda fid: None) == [
+        "comment quote escaped twice (Drive escapes on write; copy made before the fix)"]
+
+
+def test_a_quote_is_sent_un_escaped_once_so_drive_stores_the_source_text():
+    from migration_comments import for_writing, quote_match
+    assert for_writing(AMP)["value"] == "a &#247; b"
+    assert quote_match({"value": ""}, None) == "same" and quote_match(AMP, {"mimeType": "text/html", "value": "x"}) == "differs"

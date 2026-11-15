@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import html
 from collections import Counter
 from link_rewrite import rewrite_text
 from db import utc_now
@@ -44,15 +45,39 @@ def _text(value):
     return "" if value is None else value
 
 
+def _quote(q):
+    """A quote as (mimeType, value); an empty one and none at all are the same (Drive drops an empty quote)."""
+    value = q.get("value") if isinstance(q, dict) else None
+    return (q.get("mimeType"), value) if value else None
+
+
+def quote_match(source, target) -> str:
+    """'same', 'escaped' or 'differs'. Drive HTML-escapes a quote when a comment is written, and the engine
+    used to post the value as read (already escaped), so every copy made before 15 Nov 2026 carries one more
+    level ('&amp;' -> '&amp;amp;'; health@, ward4@ on account 3). 'escaped' names exactly that and nothing else."""
+    a, b = _quote(source), _quote(target)
+    if a == b:
+        return "same"
+    if a and b and a[0] == b[0] and html.escape(a[1], quote=False) == b[1]:
+        return "escaped"
+    return "differs"
+
+
+def for_writing(quoted):
+    """The quote as it must be sent so Drive stores what the source shows: one level un-escaped."""
+    return {**quoted, "value": html.unescape(quoted["value"])} if _quote(quoted) else quoted
+
+
 def _body_matches(found, body):
-    # Only comment text has Drive's trailing-whitespace normalization.
-    # quotedFileContent is an object; anchors/actions and quote fields must
-    # retain exact equality so target edits are never mistaken for our copy.
-    return all(
-        _text(found.get(key)) == _text(value)
-        if key == "content" else found.get(key) == value
-        for key, value in body.items()
-    )
+    # Only comment text has Drive's trailing-whitespace normalization. A quote matches exactly or with the one
+    # extra escaping level of an older copy of ours; any other change is a target edit and is preserved.
+    def same(key, value):
+        if key == "content":
+            return _text(found.get(key)) == _text(value)
+        if key == "quotedFileContent":
+            return quote_match(value, found.get(key)) != "differs"
+        return found.get(key) == value
+    return all(same(key, value) for key, value in body.items())
 
 
 def content(row, lookup):
@@ -81,8 +106,8 @@ def differences(source, target, lookup):
         if len(candidates) > 1:
             # Two threads with the same words on different spots (live, finance@s.: one PDF,
             # "[FINANCE, 2023-01-13]" twice): the anchor tells them apart, as delivery does.
-            candidates = [c for c in candidates
-                          if all(c.get(f) == comment.get(f) for f in ("anchor", "quotedFileContent"))]
+            candidates = [c for c in candidates if c.get("anchor") == comment.get("anchor")
+                          and quote_match(comment.get("quotedFileContent"), c.get("quotedFileContent")) != "differs"]
         if len(candidates) != 1:
             diffs.append("comment thread missing or ambiguous")
             continue
@@ -90,9 +115,13 @@ def differences(source, target, lookup):
         remaining.remove(found)
         if bool(comment.get("resolved")) != bool(found.get("resolved")):
             diffs.append("comment resolution differs")
-        for field in ("anchor", "quotedFileContent"):
-            if comment.get(field) != found.get(field):
-                diffs.append("comment " + field + " differs")
+        if comment.get("anchor") != found.get("anchor"):
+            diffs.append("comment anchor differs")
+        quoted = quote_match(comment.get("quotedFileContent"), found.get("quotedFileContent"))
+        if quoted == "escaped":
+            diffs.append("comment quote escaped twice (Drive escapes on write; copy made before the fix)")
+        elif quoted == "differs":
+            diffs.append("comment quotedFileContent differs")
         want = Counter(
             (_text(content(r, lookup)), r.get("action", ""))
             for r in comment.get("replies", [])
@@ -215,7 +244,9 @@ def reconcile(migrator, sid, tid):
             body,
             target,
             lambda: migrator.tgt.comments().create(
-                fileId=tid, body=body, fields=FIELDS
+                fileId=tid, fields=FIELDS,
+                body={**body, **({"quotedFileContent": for_writing(body["quotedFileContent"])}
+                                 if "quotedFileContent" in body else {})},
             ),
         )
         found = next((c for c in target if c["id"] == cid), {})

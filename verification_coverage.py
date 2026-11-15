@@ -40,9 +40,12 @@ COMMENT_WINDOW = 50      # files whose threads are read side by side before the 
 
 
 def _is_form(svc, fid, execute=lambda fn: fn()) -> bool:
+    """A type Drive keeps no comments for (a Form, an Apps Script project -- it.department@, 15 Nov 2026 -- ...):
+    the API answers 404 for its threads, which means no comments, not an unreadable file."""
+    from drive_engine import DriveMigrator
     try:
-        return execute(lambda: svc.files().get(fileId=fid, fields="mimeType",
-                                               supportsAllDrives=True).execute()).get("mimeType") == FORM_MIME
+        return execute(lambda: svc.files().get(fileId=fid, fields="mimeType", supportsAllDrives=True)
+                       .execute()).get("mimeType") in DriveMigrator.NO_COMMENTS_API
     except Exception:      # noqa: BLE001 - unknown type: let the original error stand
         return False
 

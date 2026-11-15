@@ -33,7 +33,8 @@ class _Svc:
         return self._f
 
 
-@pytest.mark.parametrize("mime, form", [(FORM_MIME, True), ("application/pdf", False)])
+@pytest.mark.parametrize("mime, form", [(FORM_MIME, True), ("application/vnd.google-apps.script", True),
+                                        ("application/pdf", False)])
 def test_the_check_recognises_a_form_by_its_type_not_by_the_404(mime, form):
     assert VC._is_form(_Svc(mime), "x") is form
 
