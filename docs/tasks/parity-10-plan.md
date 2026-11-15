@@ -304,3 +304,4 @@ Superseded: a full fresh-disk acceptance install; judge the Setup Wizard's first
   (DMS_PROOF=full turns it off) and the reconciliation runs 16 threads at 40 reads a second per mailbox (47e1f4d).
   Swapped onto the box 06:23 UTC (operator: "swap"), hash-checked, while the relaunched job was still in Google's delta
   import: split_mail is imported only when the reconciliation starts, and this run had no checkpoints yet to lose.
+| 15 Nov ~noon | 47% | 92% | 100% | read from the operator's screenshot; the day's speed-up, difference hunt and fixes cost ~14% of the week. 8% left until Fri 20 Nov 9:44 AM: check-ins only (one ssh read each), no code unless the run is blocked |
