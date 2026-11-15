@@ -74,6 +74,26 @@ class TestSheets:
             "includeFormulas": True, "allSheets": True}}]
 
 
+    def test_a_cells_own_hyperlink_and_rich_text_links_are_repointed(self):
+        url, other = f"https://drive.google.com/open?id={SRC}", f"https://drive.google.com/open?id={OTHER}"
+        text = f"see {url} now"
+        doc = {"sheets": [{"properties": {"sheetId": 7}, "data": [{"startRow": 1, "startColumn": 2, "rowData": [{"values": [
+            {"userEnteredValue": {"stringValue": url}, "userEnteredFormat": {"textFormat": {"link": {"uri": url}}}},
+            {"userEnteredValue": {"stringValue": text}, "textFormatRuns": [
+                {"format": {}}, {"startIndex": 4, "format": {"link": {"uri": url}}}, {"startIndex": 4 + len(url), "format": {}}]},
+            {"userEnteredValue": {"stringValue": other}, "userEnteredFormat": {"textFormat": {"link": {"uri": other}}}},
+        ]}]}]}]}
+        reqs = [r["updateCells"] for r in L.sheet_link_requests(doc, lookup)]
+        assert len(reqs) == 2, "the unmapped link is left alone"
+        assert reqs[0]["range"] == {"sheetId": 7, "startRowIndex": 1, "endRowIndex": 2, "startColumnIndex": 2, "endColumnIndex": 3}
+        assert reqs[0]["rows"][0]["values"][0]["userEnteredFormat"]["textFormat"]["link"]["uri"] == url.replace(SRC, TGT)
+        cell = reqs[1]["rows"][0]["values"][0]
+        new_url = url.replace(SRC, TGT)
+        assert cell["userEnteredValue"]["stringValue"] == f"see {new_url} now"
+        assert [r["startIndex"] for r in cell["textFormatRuns"]] == [0, 4, 4 + len(new_url)]
+        assert cell["textFormatRuns"][1]["format"]["link"]["uri"] == new_url
+
+
 class _Exec:
     def __init__(self, result, log, what):
         self.result, self.log, self.what = result, log, what
@@ -106,7 +126,7 @@ class TestRewriteNative:
         class Sheets:
             def spreadsheets(self): return self
             def values(self): return self
-            def get(self, spreadsheetId, fields):
+            def get(self, spreadsheetId, fields, includeGridData=False):
                 return _Exec({"sheets": [{"properties": {"title": "Q1 'plan'"}}]}, log, "get")
             def batchGet(self, spreadsheetId, ranges, valueRenderOption):
                 log.append(("ranges", ranges, valueRenderOption))
@@ -261,14 +281,14 @@ class TestItIsPacedToGooglesQuotas:
         class Sheets:
             def spreadsheets(self): return self
             def values(self): return self
-            def get(self, spreadsheetId, fields):
+            def get(self, spreadsheetId, fields, includeGridData=False):
                 return _Exec({"sheets": [{"properties": {"title": "A"}}]}, [], "get")
             def batchGet(self, spreadsheetId, ranges, valueRenderOption):
                 return _Exec({"valueRanges": [{"values": [[f'=IMPORTRANGE("{SRC}","A1")']]}]}, [], "bg")
             def batchUpdate(self, spreadsheetId, body): return _Exec({}, [], "u")
 
         L.rewrite_native("sheets", Sheets(), "T1", lookup, pace=seen.append)
-        assert seen == ["read", "read", "write"]
+        assert seen == ["read", "read", "read", "write"], "tabs, formulas, cell links -- then one write"
 
     def test_the_rates_are_ninety_percent_of_googles_published_quotas(self):
         import drive_engine as D
