@@ -78,7 +78,7 @@ def box(tmp_path):
     def deploy(changed: list[str], **env):
         would.write_text("\n".join(changed) + ("\n" if changed else ""))
         log.write_text("")
-        e = {**os.environ, "PATH": f"{bindir}:{os.environ['PATH']}", "FAKE_LOG": str(log),
+        e = {**os.environ, "SKIP_GATE": "1", "SKIP_UI_BUILD": "1", "PATH": f"{bindir}:{os.environ['PATH']}", "FAKE_LOG": str(log),
              "FAKE_WOULD": str(would), **{k: str(v) for k, v in env.items()}}
         r = subprocess.run(["bash", SCRIPT, "root@box", "/srv/app"], capture_output=True, text=True, env=e, cwd=ROOT)
         return r, log.read_text()

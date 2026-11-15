@@ -125,6 +125,31 @@ try_rsync() {
 #    and shipped as dist/. It was 432 MB of dead weight on a small disk.
 SRC_DIR="$(cd "$(dirname "$0")" && pwd)"
 
+# Ship only a tree the quick gate passed (gate.sh records it in .gate-passed): the 13 Nov lint failure reached
+# HEAD because the full suite is too slow to run before every deploy. SKIP_GATE=1 is the explicit override.
+if [[ "${SKIP_GATE:-0}" != "1" ]]; then
+  if [[ "$(cat "$SRC_DIR/.gate-passed" 2>/dev/null)" != "$("$SRC_DIR/gate.sh" --tree-id)" ]]; then
+    echo "REFUSING to deploy: this tree has not passed ./gate.sh (run it; SKIP_GATE=1 overrides)." >&2
+    exit 3
+  fi
+  echo "  gate: this tree passed ./gate.sh"
+fi
+
+# Build the frontend when its source changed since the last build. dist/ is not in git, and a stale one
+# shipped silently -- the box served the 9 Nov build for days. The empty VITE_CP_BASE is required, or every
+# API call in production goes to localhost:8090.
+UI_HASH="$( { git -C "$SRC_DIR" ls-files -s migration-webui; git -C "$SRC_DIR" diff HEAD -- migration-webui; } \
+  | shasum -a 256 | cut -c1-40)"
+if [[ "${SKIP_UI_BUILD:-0}" != "1" && -d "$SRC_DIR/migration-webui" \
+      && "$(cat "$SRC_DIR/migration-webui/dist/.source-hash" 2>/dev/null)" != "$UI_HASH" ]]; then
+  echo "  frontend source changed since the last build: building it"
+  ( cd "$SRC_DIR/migration-webui" && VITE_CP_BASE="" npm run build >/dev/null ) \
+    || { echo "REFUSING to deploy: the frontend build failed (cd migration-webui && npm run build)." >&2; exit 3; }
+  n="$(cat "$SRC_DIR"/migration-webui/dist/assets/*.js | grep -c 'localhost:8090' || true)"
+  [[ "$n" -le 1 ]] || { echo "REFUSING to deploy: the built frontend calls localhost:8090 ($n times)." >&2; exit 3; }
+  echo "$UI_HASH" > "$SRC_DIR/migration-webui/dist/.source-hash"
+fi
+
 # One line per deploy on the box (logs/deploys.jsonl), read by the Deploy page's
 # "This server" card -- before this, the box knew only its current commit, and the
 # page said "No deploys recorded" after five deploys in a day. Best-effort: a failed

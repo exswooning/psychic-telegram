@@ -27,3 +27,4 @@ tests/test_dms_label_alignment.py
 tests/test_deep_reconciliation.py
 tests/test_parity_gate.py
 tests/test_kill_then_rerun_converges.py
+tests/test_deploy_needs_the_gate.py
