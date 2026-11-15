@@ -175,6 +175,43 @@ def report(result: dict) -> str:
     return "\n".join(out)
 
 
+def _accepted_list() -> list[dict]:
+    try:
+        return json.loads((HERE / "known_differences.json").read_text()).get("accepted", [])
+    except (OSError, ValueError):
+        return []
+
+
+def record(account_id: int, db_path: str) -> dict:
+    """Run the gate for an account and put the verdict where an operator looks: the report folder
+    (parity-gate-<time>.json and parity-gate-latest.json) and an incident while it is not PARITY, closed by
+    the first PARITY verdict. Called by api_server once the verify after the DMS exits cleanly."""
+    import datetime
+    import run_watch
+    conn = sqlite3.connect(Path(db_path).resolve().as_uri() + "?mode=ro", uri=True, timeout=30)
+    try:
+        result = assess(conn, _accepted_list(), _dms_failed(account_id))
+    finally:
+        conn.close()
+    result["asOf"] = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    out = HERE / "logs" / "reports" / str(account_id)
+    out.mkdir(parents=True, exist_ok=True)
+    text = json.dumps(result, indent=1, ensure_ascii=False)
+    (out / f"parity-gate-{result['asOf'].replace(':', '')}.json").write_text(text)
+    (out / "parity-gate-latest.json").write_text(text)
+    fingerprint = f"parity_gate:{account_id}"
+    if result["verdict"] == "PARITY":
+        for inc in run_watch.list_incidents("open", account_id=account_id):
+            if inc.get("fingerprint") == fingerprint:
+                run_watch.resolve(inc["id"], f"the parity gate read PARITY at {result['asOf']}")
+    else:
+        run_watch.open_incident(
+            kind="parity_gate", title=f"Not at parity: {result['verdict']}",
+            summary=report(result)[:1500], account_id=account_id, job_name="verify",
+            fingerprint=fingerprint, severity="warn", brief_text=report(result))
+    return result
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--account-id", type=int)
@@ -183,10 +220,7 @@ def main(argv=None) -> int:
     args = ap.parse_args(argv)
     db = args.db or (HERE / "data" / "accounts" / str(args.account_id) / "migration.db" if args.account_id
                      else os.getenv("MIGRATION_DB", "migration.db"))
-    try:
-        accepted = json.loads((HERE / "known_differences.json").read_text()).get("accepted", [])
-    except (OSError, ValueError):
-        accepted = []
+    accepted = _accepted_list()
     conn = sqlite3.connect(Path(db).resolve().as_uri() + "?mode=ro", uri=True, timeout=30)
     try:
         result = assess(conn, accepted, _dms_failed(args.account_id) if args.account_id else None)

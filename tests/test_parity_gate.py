@@ -101,3 +101,20 @@ def test_the_report_reads_plainly():
     text = G.report(G.assess(_ledger(_all(U1, drive="DIFFERENCES"),
                                      [(U1, "drive", "differences", "f1", "x", "drive.grant_missing")])))
     assert text.startswith("PARITY GATE: NOT_PARITY") and "Bitport repairs it" in text
+
+
+def test_record_writes_the_verdict_and_opens_then_closes_an_incident(tmp_path, monkeypatch):
+    import run_watch
+    monkeypatch.setattr(G, "HERE", tmp_path)
+    opened, closed = [], []
+    monkeypatch.setattr(run_watch, "open_incident", lambda **kw: opened.append(kw) or (1, True))
+    monkeypatch.setattr(run_watch, "list_incidents", lambda *a, **k: [{"id": 9, "fingerprint": "parity_gate:3"}])
+    monkeypatch.setattr(run_watch, "resolve", lambda i, why: closed.append(i))
+    db = tmp_path / "ledger.db"
+    src = _ledger(_all(U1, drive="DIFFERENCES"), [(U1, "drive", "differences", "f1", "x", "unclassified")])
+    src.commit(); src.backup(dst := sqlite3.connect(db)); dst.close()
+    assert G.record(3, str(db))["verdict"] == "NOT_PARITY"
+    assert opened and opened[0]["fingerprint"] == "parity_gate:3" and not closed
+    assert (tmp_path / "logs" / "reports" / "3" / "parity-gate-latest.json").exists()
+    src2 = _ledger(_all(U1)); src2.commit(); db.unlink(); src2.backup(dst := sqlite3.connect(db)); dst.close()
+    assert G.record(3, str(db))["verdict"] == "PARITY" and closed == [9]

@@ -2557,7 +2557,8 @@ def _start_verify_after_dms(account_id: int | None) -> tuple[bool, str]:
         d.close()
     argv = [PY, "verify_sample.py"] + _account_argv(account_id) + [
         "--services", VERIFY_AFTER_DMS_SERVICES, "--limit", "0", "--repair-after-user"]
-    ok, detail = _run_admitted(argv, account_id, "verify")
+    # Then the parity gate (the 10/10 plan): its verdict lands in the reports and, unless PARITY, an incident.
+    ok, detail = _run_admitted(argv, account_id, "verify", then=["parity-gate"])
     log.info("verify after the DMS (account %s): %s %s", account_id, "started" if ok else "not started", detail)
     return ok, detail
 
@@ -2584,6 +2585,10 @@ def _follow_on(kind: str, account_id: int | None) -> None:
                                                        "so the mail it left for the DMS is now owed")
     elif kind == "verify-after-dms":
         _start_verify_after_dms(account_id)
+    elif kind == "parity-gate":
+        import parity_gate
+        verdict = parity_gate.record(account_id, _account_db_path(account_id))["verdict"]
+        log.info("parity gate for account %s: %s", account_id, verdict)
     elif kind.split("@")[0] == "tally":
         _start_tally_after_repair(account_id, _follow_users(kind))
     elif kind.split("@")[0] == "tally_fix":
