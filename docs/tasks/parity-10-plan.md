@@ -296,3 +296,7 @@ Superseded: a full fresh-disk acceptance install; judge the Setup Wizard's first
 - Accepted: suchanaadhikari Form 15/16 items (unfetchable image); 2 orphaned grants (deleted accounts, no email).
 - 53 FALLBACK rows are all Forms rebuilt through the Forms API (download_upload -> native_api), as designed; no binary fell back.
 - info@ FAILED is a stale 12 Nov "link scan interrupted" row; a later scan finished (13 Nov) and the DMS took the user.
+- DONE 15 Nov (operator: "yes to both"): deployed link_rewrite.py (7bafe56) and native_repair.py (72cd3e7) by hash-checked
+  copy, no restart. Re-ran the native link rewrite on the five Sheets: 11 + 6 + 7 + 2 + 2 requests, 0 links left naming the
+  source, modifiedTime restored. Trashed the 4 duplicate DMS copies (kept each mapped engine copy; recoverable 30 days).
+  The verifier now treats LINKED and unset link display as one state (Sheets sets LINKED itself).
