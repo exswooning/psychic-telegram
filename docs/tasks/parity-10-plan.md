@@ -65,15 +65,26 @@ A run scores 10 when all hold with nobody involved between Start and the final r
 - [ ] Mail verify reuses the bulk index for the extras check (ward14@: 45 min for 53 mapped messages).
 
 ## Phase 4: operations
-- [ ] `sync_vps.sh` builds the frontend and publishes the `/next` bundle (box still serves the 9 Nov build).
+- [x] `sync_vps.sh` builds the frontend when its source changed (production build, localhost check) and refuses a
+      tree `./gate.sh` did not pass (22fa9ba). The `/next` bundle question is still open.
 - [ ] One log file per run; DMS console readings appended to a history, never overwritten.
-- [ ] Every verdict carries an "as of" time; a defined final delta and freeze for cutover (the source is live).
+- [~] Every verdict carries an "as of" time: the parity gate reads a check older than the user's last change to
+      that service as STALE, never a pass, and stamps its own verdict (asOf). Still open: a defined final delta and
+      freeze for cutover (the source is live).
 
 ## Beyond the fixes (8 -> 10)
-- [ ] Parity gate: one command gives the final verdict from a full verify; any unexplained difference fails the run.
-- [ ] Fault-injection tests: kill mid-copy, DNS drop, rate limits, full disk; the rerun converges.
+- [x] Parity gate: `parity_gate.py --account-id N` (41758cc..82cb6f9): PARITY / NOT_PARITY / UNVERIFIED, every
+      difference named (auto repair or a person), accepted kinds and known_differences.json, the explained remainder.
+      Runs on its own after verify-after-dms (verdict in logs/reports/<id>/, an incident until PARITY). The
+      follow-on needs an API restart to take effect (next idle deploy).
+- [~] Fault-injection tests: kill after a write the ledger never recorded, then rerun (Drive and mail, 64965f6 --
+      mail inserted duplicates, fixed with an insert-intent row); DNS drop and rate limits were already covered
+      (test_network_outage_is_ridden_out, test_rate_limit_gets_time). Still open: full disk.
 - [ ] Nightly end-to-end run on the sandbox with a morning report.
-- [ ] Each known difference fixed or formally accepted (sent-mail label, orphaned grants, Form image).
+- [~] Each known difference fixed or formally accepted. Fixed 15 Nov: Sheet cell hyperlinks (7bafe56), comment
+      quotes escaped twice (a499435), Apps Script comments 404, the LINKED display noise, files that ran out of
+      verify time (retry with more time). Accepted: Form image, orphaned grants (the gate's remainder). Open: why
+      the DMS imported its own copy of 4 engine link mails.
 - [x] Quick test gate: `./gate.sh` runs the files in `tests/gate.txt` (lint, status, split mail, DMS,
       verify, Drive, deploy, safety guards) in about 5 minutes. Run it before every deploy.
       TODO: have `sync_vps.sh` refuse without a passing gate; the full suite (~21,000 tests, ~2 h) nightly.
@@ -305,3 +316,12 @@ Superseded: a full fresh-disk acceptance install; judge the Setup Wizard's first
   Swapped onto the box 06:23 UTC (operator: "swap"), hash-checked, while the relaunched job was still in Google's delta
   import: split_mail is imported only when the reconciliation starts, and this run had no checkpoints yet to lose.
 | 15 Nov ~noon | 47% | 92% | 100% | read from the operator's screenshot; the day's speed-up, difference hunt and fixes cost ~14% of the week. 8% left until Fri 20 Nov 9:44 AM: check-ins only (one ssh read each), no code unless the run is blocked |
+
+## 15 Nov afternoon: 10/10 work (operator: "run whatever needs to run to get 10/10")
+- DMS reconciliation after the fix: 830 messages a minute (13.8/s) against 0.76/s before -- 18x; ~3 h for 141,978.
+- Committed, tested, not yet on the box (next idle deploy, which now needs ./gate.sh): api_server.py (gate follow-on),
+  gmail_engine.py (insert intent). On the box already: parity_gate.py, migration_comments.py, verification_coverage.py,
+  known_issues.py, verify_sample.py, link_rewrite.py, native_repair.py, split_mail.py, dms_light_proof.py.
+- Pre-existing failing test, not caused by this work: tests/test_missing_mail_recovery.py::
+  test_orphaned_verification_is_interrupted_only_when_disabled_and_owner_dead (fails at 2fb7af3~1 too).
+- The acceptance test (three wipe-and-migrate runs on account 3) needs the operator's typed wipe confirmation.
