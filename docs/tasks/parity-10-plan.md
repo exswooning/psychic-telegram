@@ -244,3 +244,22 @@ the generated-password flag was reset by the background run (end screen said "th
 "password login left on" wording. Re-run on the same VM: password shown and saved, login 200, no false alarm.
 Remaining: judge the Setup Wizard's first screen in a browser; the VM's first (pre-fix) install ran ~75 min, almost all PyPI at 0.05 MB/s.
 Superseded: a full fresh-disk acceptance install; judge the Setup Wizard's first screen in a browser (BrowserOS was offline).
+
+## Check-in, 15 Nov 10:00 Nepal (04:14 UTC)
+- DMS pipeline alive, running 12.5 h, no restart by the API ("DMS retry" 0 in 14 h). Reconciliation started with light
+  proof on all 13 mailboxes so far; 12 of 45 done, info@ (40,260) at 16,833. 58,475 checked, 51,794 verified, 6,681
+  unresolved (info@: almost all labels Gmail added on the target -- INBOX, IMPORTANT, CATEGORY_UPDATES -- for the label alignment).
+- Rate 0.76 msg/s (03:01 -> 04:14 UTC), Wi-Fi saturated at 3.0 MB/s: light proof turned itself off from ecodev@ on, so
+  mailboxes 7-13 run the full check (bodies from both tenants).
+  Cause: any failed sampled message (a label difference, a network error) degraded the whole mailbox. Fixed in 0c3796b
+  (only a content difference degrades); not deployed -- a code change invalidates the reconciliation checkpoints.
+- MEASURED on Google (read-only probe, administration@, msg/s): light 0.6 / 6.0 / 11.0 / 22.6 at 1 / 8 / 16 / 32 workers,
+  no errors; full check 0.1 / 0.6 / 0.5 at 1 / 8 / 16 (line-bound: more workers is slower). The open-findings lookup
+  per verified message scans 67k rows, 83 ms inside the write lock; an index makes it 0.02 ms (not yet added).
+- Options put to the operator (awaiting a choice): keep going (~20 h); B = deploy the fix + 16 workers/40 qps, re-check
+  all 141,977 lightly with the 50-message samples (~5-11 h); A' = env only, DMS_LIGHT_SAMPLE=0 + 16 workers (~3-7 h,
+  drops the per-mailbox full sample for mailboxes 13-45).
+- Label alignment and verify-after-dms: not run yet (they follow the reconciliation).
+- Memory probe 3 (deployed code: 2 pools + trim): peak 1,630 MB, end 476 MB; probe 1 (before) peak 2,536 MB, end
+  2,230 MB; probe 2 (pools only) peak 548 MB. Memory is now handed back; probe 3's higher peak is one large document.
+| 15 Nov 10:00 AM | not read | not read | not read | Claude cannot read the meter: please send a screenshot |
