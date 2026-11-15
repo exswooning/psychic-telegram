@@ -263,3 +263,18 @@ Superseded: a full fresh-disk acceptance install; judge the Setup Wizard's first
 - Memory probe 3 (deployed code: 2 pools + trim): peak 1,630 MB, end 476 MB; probe 1 (before) peak 2,536 MB, end
   2,230 MB; probe 2 (pools only) peak 548 MB. Memory is now handed back; probe 3's higher peak is one large document.
 | 15 Nov 10:00 AM | not read | not read | not read | Claude cannot read the meter: please send a screenshot |
+
+## Deep check, 15 Nov 05:30 UTC (after deploying 0c3796b + 2fb7af3 and relaunching the DMS, 16 workers / 40 qps)
+- DMS relaunched 04:25 UTC as admitted job `dms` (unit bitport-dms-relaunch; verify-after-dms chained on a clean exit).
+  Google delta import in progress: 41/45 users, 104,118 skipped (already there), 1 imported, 16 failed. Reconciliation next.
+- Box runtime code = HEAD except bitport-cli.sh, harden_ssh.sh, tui.py, install.sh (beginner install; no service loads them).
+- Users: 42 DONE; administration@, suchanaadhikari@ AWAITING_DMS; info@ FAILED (one INTERRUPTED mail item, one
+  encrypted message in the link scan).
+- Drive verify: 35 identical, 8 differences, 2 incomplete. Differences: Form-response Sheets "cell content/style differs"
+  (buildingpermit x2, it.department, mayor, info, ward14 -- not yet classified); suchanaadhikari Form 15/16 items (accepted:
+  unfetchable image); comments (health quotedFileContent, ward4 threads, it.department 404). Incomplete: a file's time
+  budget ran out (ward18, ward19, suchanaadhikari); info@ one Sheet answered 503.
+- Gmail verify: all 45 DIFFERENCES until reconciliation + label alignment finish. Open findings: 29,822 unclassified
+  (mostly the Wi-Fi drop's read errors, re-checked by this pass), 20,823 labels added, 3,355 labels missing, 5 duplicates.
+- 53 Drive items FALLBACK (download-and-upload); the operator expects only Apps Script there -- types not yet checked.
+- Open incidents: #76 box busy (expected), #74 dms crash 14 Nov (closes on a clean exit), #70, #8, #9 (older runs).
