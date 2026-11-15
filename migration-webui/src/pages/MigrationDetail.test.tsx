@@ -14,6 +14,7 @@ vi.mock('@/components/RunReports', () => ({
   default: ({ accountId }: { accountId?: number }) => <div data-testid="reports-panel">{accountId}</div>,
 }))
 vi.mock('@/components/CopySafetyCard', () => ({ default: () => null }))
+vi.mock('@/components/ParityGateCard', () => ({ default: () => null }))
 vi.mock('@/components/OneToOneSummary', () => ({
   default: ({ accountId }: { accountId: number }) => <div data-testid="one-to-one-summary-panel">{accountId}</div>,
 }))

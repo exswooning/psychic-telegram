@@ -8,6 +8,7 @@ vi.mock('@/components/RunReports', () => ({ default: () => null }))
 vi.mock('@/components/SharingPanel', () => ({ default: () => null }))
 vi.mock('@/components/QuickVerification', () => ({ default: () => null }))
 vi.mock('@/components/CopySafetyCard', () => ({ default: () => null }))
+vi.mock('@/components/ParityGateCard', () => ({ default: () => null }))
 vi.mock('@/components/OneToOneSummary', () => ({ default: () => null }))
 vi.mock('@/api/controlPlane', () => ({
   fetchSourceGuard: () => Promise.resolve({ snapshotTakenAt: null, snapshotUsers: 0, latest: null }),

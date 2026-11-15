@@ -2909,6 +2909,37 @@ async def set_repair_policy(body: SetRepairPolicy, op: Operator = Depends(operat
                         f"account {aid}", go)
 
 
+@app.get("/api/v2/parity-gate")
+async def parity_gate_view(account_id: int | None = None, op: Operator = Depends(operator)):
+    """The parity gate's verdict for this migration, computed now from the ledger (read-only): PARITY,
+    NOT_PARITY or UNVERIFIED, what fails it by kind, what is accepted, what was not migrated and why."""
+    require_login(op)
+    aid = account_id if account_id is not None else op.account_id
+    if not aid:
+        return {"accountId": None, "verdict": "UNVERIFIED", "users": 0}
+    _require_account_access(aid, op)
+
+    def read():
+        import parity_gate
+        path = _ledger_path(aid)
+        if not os.path.isfile(path):
+            return {"accountId": aid, "verdict": "UNVERIFIED", "users": 0, "usersAtParity": 0,
+                    "unverified": [], "differences": [], "accepted": [], "remainder": []}
+        with cpdb.ro(path) as conn:
+            result = parity_gate.assess(conn, parity_gate._accepted_list(), parity_gate._dms_failed(aid))
+        kinds = {}
+        for d in result["differences"]:
+            k = kinds.setdefault(d["kind"], {"kind": d["kind"], "how": d["how"], "count": 0, "users": set()})
+            k["count"] += 1
+            k["users"].add(d["user"])
+        result["differenceKinds"] = sorted(({**k, "users": sorted(k["users"])} for k in kinds.values()),
+                                           key=lambda k: -k["count"])
+        result["differences"] = result["differences"][:50]     # the kinds carry the totals
+        result.pop("perUser", None)
+        return {"accountId": aid, **result}
+    return await _off_loop(read)
+
+
 @app.get("/api/v2/known-issues")
 async def known_issues_view(account_id: int | None = None, op: Operator = Depends(operator)):
     """Every kind of one-to-one finding: why it happens, how it is fixed, whether that

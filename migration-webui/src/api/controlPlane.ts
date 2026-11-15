@@ -1996,6 +1996,21 @@ export interface KnownIssues {
   kinds: KnownIssueKind[]
   recent: { fixedAt: string; user: string; service: string; issue: string; item: string | null }[]
 }
+/** The parity gate (parity_gate.py): one verdict for the migration, computed from the ledger. */
+export interface ParityGate {
+  accountId: number | null
+  verdict: 'PARITY' | 'NOT_PARITY' | 'UNVERIFIED'
+  users: number
+  usersAtParity?: number
+  unverified?: { user: string; service: string; verdict: string }[]
+  differenceKinds?: { kind: string; how: 'auto' | 'person'; count: number; users: string[] }[]
+  accepted?: { user: string; service: string; kind: string; why: string }[]
+  remainder?: { status: string; count: number; why: string }[]
+}
+
+export const fetchParityGate = (accountId?: number) =>
+  cpFetch<ParityGate>(`/api/v2/parity-gate${accountId ? `?account_id=${accountId}` : ''}`)
+
 export const fetchKnownIssues = (accountId?: number) =>
   cpFetch<KnownIssues>(`/api/v2/known-issues${accountId ? `?account_id=${accountId}` : ''}`)
 
