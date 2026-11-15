@@ -44,8 +44,11 @@ A run scores 10 when all hold with nobody involved between Start and the final r
       chain (/var/lib/bitport-sched/post_migration_chain2.py on the box, a copy in the 13 Nov scratchpad)
       is superseded by `dms_pipeline.py` + the `verify-after-dms` follow-on (deployed b0adcb8, not yet
       proven live): prove it on the next run, then delete the box script.
-- [ ] One run record with phases (wipe, drive, mail, dms, reconcile, verify, review); a restart resumes
+- [~] One run record with phases (wipe, drive, mail, dms, reconcile, verify, review); a restart resumes
       from the recorded phase; nothing else can start the same phase twice.
+      Done 15 Nov (c9b05e6): the chain survives an API restart -- jobs record their own exit (job_exit), admission
+      rows keep their follow-ons, the API reattaches at startup and runs them only on a recorded exit 0. Still open:
+      one record per run listing its phases for the UI.
 - [x] Upgrades never restart Bitport units. The 06:54 UTC restart on 13 Nov was needrestart after an
       unattended upgrade: it restarted every bitport-* unit (the API too) and the DMS import died.
       `systemd/needrestart-bitport.conf`, installed on l3novo and by every deploy.
@@ -58,10 +61,18 @@ A run scores 10 when all hold with nobody involved between Start and the final r
 ## Phase 3: speed (measure before and after)
 - [ ] Read each mailbox once: the mail pass takes candidates from the link inventory
       (`mail_link_messages`) and reads only messages newer than it (129,800 reads were repeated).
+      MEASURED 15 Nov (account 3 ledger): NOT safe as the inventory stands. It missed 7 link emails the mail pass
+      rewrote (buildingpermit 2, info 2, it.department 1, mayor 1, ward14 1) and covers 35 of 45 users. Next: the
+      inventory must use the mail pass's own detector (_split_classify) and record a complete mailbox (ids and an
+      as-of history id); only then may the pass skip what it proved link-free.
 - [ ] Bulk DMS reconciliation: list the target once with Message-ID headers, match in memory, read content
       only for link mail and mismatches (today ~3 calls per message).
-- [ ] One target write per file: merge the move out of staging with the modifiedTime restore. Inferred
-      from ward14@/ward16@ at 1.5 files/s under the fixed 3 writes/s limit; test on one large user first.
+- [~] One target write per file. The move out of staging already carries modifiedTime (one call); the extra
+      write left is the restore after sharing grants. PROBED LIVE 15 Nov on t. (throwaway drive, cleaned up): a grant
+      made while the file is still in the staging drive survives the move to My Drive, and the move's modifiedTime
+      holds. Design: comments, then grants, in staging, then the move -- comments must stay before grants (Drive mails
+      a file's collaborators about new comments) and a grant the staging drive refuses falls back to after the move.
+      Not built: it changes the core copy path, so it needs a sandbox A/B run first.
 - [ ] Mail verify reuses the bulk index for the extras check (ward14@: 45 min for 53 mapped messages).
 
 ## Phase 4: operations
