@@ -1,4 +1,4 @@
-"""Light proof for DMS-delivered mail (operator's choice, 14 Nov 2026; DMS_PROOF=light, off by default)."""
+"""Light proof for DMS-delivered mail (operator's choice, 14 Nov 2026; on by default since 15 Nov, DMS_PROOF=full turns it off)."""
 import pytest
 
 from config import DEFERRED_TO_DMS
@@ -27,8 +27,14 @@ def _raw_reads(auth):
     return auth.source_gmail(SRC_USER).call_count("messages.get") , auth.target_gmail(TGT_USER).call_count("messages.get")
 
 
-def test_off_by_default_every_message_is_proven_in_full(db, auth, settings, identity, monkeypatch):
+def test_on_by_default(monkeypatch):
+    import dms_light_proof
     monkeypatch.delenv("DMS_PROOF", raising=False)
+    assert dms_light_proof.enabled()
+
+
+def test_full_proof_when_asked_every_message_is_proven_in_full(db, auth, settings, identity, monkeypatch):
+    monkeypatch.setenv("DMS_PROOF", "full")
     for n in range(3):
         _pair(auth, db, n)
     out = reconcile_dms(auth, db, settings, progress=lambda _: None)

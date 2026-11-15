@@ -152,13 +152,16 @@ def reconcile_tuning() -> tuple[int, float]:
     It only reads: one raw read on each tenant and one search per message. Two threads behind the
     engine's 4-calls-a-second limiter gave about 2 messages a second (account 3, 13 Nov 2026: 14,000 in
     two hours, a projected 20 hours for 141,000), under a tenth of what one Gmail user allows.
-    DMS_RECONCILE_WORKERS (8, at most 16) and DMS_RECONCILE_QPS (20, at most 40) tune it."""
+    Defaults are the caps since 15 Nov 2026: measured on Google (read-only, administration@), light proof
+    does 6 messages a second with 8 threads and 11 with 16, with no errors; 40 reads a second is 200 of
+    the 250 quota units a Gmail user allows. DMS_RECONCILE_WORKERS (16, at most 16) and DMS_RECONCILE_QPS
+    (40, at most 40) lower it."""
     def read(name, default, lo, hi, kind):
         try:
             return max(lo, min(hi, kind(os.getenv(name, str(default)))))
         except ValueError:
             return kind(default)
-    return read("DMS_RECONCILE_WORKERS", 8, 1, 16, int), read("DMS_RECONCILE_QPS", 20, 1.0, 40.0, float)
+    return read("DMS_RECONCILE_WORKERS", 16, 1, 16, int), read("DMS_RECONCILE_QPS", 40, 1.0, 40.0, float)
 
 
 def reconcile_dms(auth, db, settings, progress=None, users=None):

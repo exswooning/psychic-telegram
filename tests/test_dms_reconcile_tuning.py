@@ -7,11 +7,11 @@ such reads a second, so it has its own threads and its own rate."""
 import split_mail
 
 
-def test_defaults_are_several_times_the_old_two_threads(monkeypatch):
+def test_defaults_are_the_measured_caps(monkeypatch):
     monkeypatch.delenv("DMS_RECONCILE_WORKERS", raising=False)
     monkeypatch.delenv("DMS_RECONCILE_QPS", raising=False)
     workers, qps = split_mail.reconcile_tuning()
-    assert workers == 8 and qps == 20.0
+    assert workers == 16 and qps == 40.0
 
 
 def test_the_operator_can_tune_it_within_bounds(monkeypatch):
@@ -20,4 +20,4 @@ def test_the_operator_can_tune_it_within_bounds(monkeypatch):
     assert split_mail.reconcile_tuning() == (16, 40.0), "never past what one Gmail user allows"
     monkeypatch.setenv("DMS_RECONCILE_WORKERS", "0")
     monkeypatch.setenv("DMS_RECONCILE_QPS", "junk")
-    assert split_mail.reconcile_tuning() == (1, 20.0)
+    assert split_mail.reconcile_tuning() == (1, 40.0)

@@ -1,4 +1,5 @@
-"""Lighter proof for DMS-delivered mail (operator's choice, 14 Nov 2026; off unless DMS_PROOF=light).
+"""Lighter proof for DMS-delivered mail (operator's choice, 14 Nov 2026; the default since 15 Nov -- DMS_PROOF=full
+turns it off).
 
 Full proof downloads every message from both tenants and compares the bytes: about a day for 141,000
 messages on account 3's 3 MB/s line. Light proof, per DMS-delivered message:
@@ -24,7 +25,7 @@ DEFERRED = ("SKIPPED_NO_DRIVE_LINK",)
 
 
 def enabled() -> bool:
-    return (os.getenv("DMS_PROOF", "full") or "full").strip().lower() == "light"
+    return (os.getenv("DMS_PROOF", "light") or "light").strip().lower() != "full"
 
 
 def sample(ids, n: int | None = None) -> set:
