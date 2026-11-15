@@ -371,3 +371,12 @@ def test_a_copy_a_stopped_run_left_due_its_rewrite_gets_it_next_run(
     assert rewritten == [db.get_target_id(SRC_USER, fid, "file")]
     assert not db.links_pending(SRC_USER, fid)
     assert db.get_audit(SRC_USER, fid, "link_rewrite")["status"] == "SUCCESS"
+
+
+def test_linked_and_unset_link_display_are_the_same_cell():
+    from native_repair import _same_display
+    link = {"textFormat": {"link": {"uri": "https://x"}}}
+    assert _same_display({"userEnteredFormat": {**link, "hyperlinkDisplayType": "LINKED"}}) == {"userEnteredFormat": link}
+    assert _same_display({"userEnteredFormat": {"hyperlinkDisplayType": "LINKED"}}) == {}
+    plain = {"userEnteredFormat": {"hyperlinkDisplayType": "PLAIN_TEXT"}}
+    assert _same_display(plain) == plain, "plain text is a real difference"

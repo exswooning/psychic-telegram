@@ -29,6 +29,16 @@ def _rewrite(value, lookup):
     return value
 
 
+def _same_display(cell):
+    """A URL in a cell shows as a link whether hyperlinkDisplayType is LINKED or unset, and Sheets sets LINKED on its
+    own when a link is written into a copy (account 3, 15 Nov 2026). Unset and LINKED are one state."""
+    fmt = cell.get('userEnteredFormat')
+    if isinstance(fmt, dict) and fmt.get('hyperlinkDisplayType') == 'LINKED':
+        fmt = {k: v for k, v in fmt.items() if k != 'hyperlinkDisplayType'}
+        cell = {**cell, 'userEnteredFormat': fmt} if fmt else {k: v for k, v in cell.items() if k != 'userEnteredFormat'}
+    return cell
+
+
 def read_sheet(svc, fid, cell_budget=None, pace=lambda: None):
     """Read native structures and bounded grid windows, including every tab. `pace` is called
     before each request: a big sheet is many requests, and Google allows 60 reads a minute per user."""
@@ -541,7 +551,7 @@ def compare_sheets_streamed(source, target, sid, tid, lookup=lambda fid: None,
             row0,col0=grid.get('startRow',0),grid.get('startColumn',0)
             for ri,row in enumerate(grid.get('rowData',[])):
                 for ci,cell in enumerate(row.get('values',[])):
-                    if cell:values[f'{row0+ri}:{col0+ci}']=cell
+                    if cell:values[f'{row0+ri}:{col0+ci}']=_same_display(cell)
         return values
     for sa,sb in zip(a.get('sheets',[]),b.get('sheets',[])):
         props=sa['properties'];grid=props.get('gridProperties',{})
