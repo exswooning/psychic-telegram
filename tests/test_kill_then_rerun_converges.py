@@ -62,3 +62,33 @@ def test_mail_rerun_after_a_kill_has_every_message_exactly_once(auth, db, settin
     mapped = db.conn.execute("SELECT COUNT(*) FROM id_mapping WHERE source_user=? AND type='message'",
                              (SRC_USER,)).fetchone()[0]
     assert mapped == 6, "the rerun adopted the copies it found instead of leaving them unknown"
+
+
+def test_a_full_disk_fails_some_files_and_the_rerun_converges(auth, db, settings, quota, identity, monkeypatch, tmp_path):
+    """Download-and-upload stages bytes on this box; a full disk (ENOSPC) must not fail the run or lose a file,
+    and a rerun must copy nothing twice."""
+    settings.rewrite_drive_links = False
+    settings.scratch_dir = str(tmp_path / "scratch")
+    sd = auth.source_drive(SRC_USER)
+    for n in range(6):
+        fid = sd.add_binary(f"doc{n}.pdf", data=f"payload {n} ".encode() * 30)
+        sd.store[fid]["createdTime"] = f"2024-02-0{n + 1}T00:00:00.000Z"
+    real = drive_engine.DriveMigrator._download_via
+    full = {"left": 2}
+
+    def disk_full(self, request_factory):
+        if full["left"]:
+            full["left"] -= 1
+            raise OSError(28, "No space left on device")
+        return real(self, request_factory)
+    monkeypatch.setattr(drive_engine.DriveMigrator, "_download_via", disk_full)
+    drive_engine.DriveMigrator(auth, db, settings, SRC_USER, TGT_USER, quota).run()
+    td = auth.target_drive(TGT_USER)
+    names = lambda: sorted(f["name"] for f in _live_files(td.store))      # noqa: E731
+    # Measured: a download that dies on a full disk falls back to Drive's own server-side copy, which needs
+    # no disk here -- the two files are not even failed.
+    assert names() == [f"doc{n}.pdf" for n in range(6)]
+    assert full["left"] == 0, "the disk really was full for two downloads"
+
+    drive_engine.DriveMigrator(auth, db, settings, SRC_USER, TGT_USER, quota).run()
+    assert names() == [f"doc{n}.pdf" for n in range(6)], "the rerun copies nothing twice"
