@@ -80,9 +80,9 @@ A run scores 10 when all hold with nobody involved between Start and the final r
 - [x] `sync_vps.sh` builds the frontend when its source changed (production build, localhost check) and refuses a
       tree `./gate.sh` did not pass (22fa9ba). The `/next` bundle question is still open.
 - [ ] One log file per run; DMS console readings appended to a history, never overwritten.
-- [~] Every verdict carries an "as of" time: the parity gate reads a check older than the user's last change to
-      that service as STALE, never a pass, and stamps its own verdict (asOf). Still open: a defined final delta and
-      freeze for cutover (the source is live).
+- [x] Every verdict carries an "as of" time: the parity gate reads a check older than the user's last change to
+      that service as STALE, never a pass, and stamps its own verdict (asOf). Cutover procedure: docs/CUTOVER.md
+      (freeze, final delta without mail, MX, DMS delta, verify, gate).
 
 ## Beyond the fixes (8 -> 10)
 - [x] Parity gate: `parity_gate.py --account-id N` (41758cc..82cb6f9): PARITY / NOT_PARITY / UNVERIFIED, every
