@@ -57,6 +57,13 @@ def test_a_check_older_than_the_last_change_is_stale_never_a_pass():
     c.execute("INSERT INTO mail_reconciliation_items VALUES(?, '2026-11-15T11:00:00Z')", (U1,))
     r = G.assess(c)
     assert r["verdict"] == "UNVERIFIED" and r["unverified"][0]["verdict"].startswith("STALE")
+    assert [u["service"] for u in r["unverified"]] == ["gmail"], "a mail change leaves the other services' checks standing"
+
+
+def test_a_change_nobody_can_place_makes_every_service_stale():
+    c = _ledger(_all(U1))
+    c.execute("INSERT INTO audit_log VALUES(?, 'mystery', 'SUCCESS', '', '2026-11-15T11:00:00Z')", (U1,))
+    assert len(G.assess(c)["unverified"]) == len(G.SERVICES)
 
 
 def test_a_kind_no_api_can_carry_is_accepted():

@@ -25,6 +25,14 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 SERVICES = ("drive", "gmail", "calendar", "contacts", "tasks", "directory")
 
+# Which service an audit row's item type belongs to (account 3's ledger, 15 Nov 2026). Unknown types make
+# every service of that user stale: a change nobody can place is a change to all of it.
+SERVICE_OF = {**dict.fromkeys(("file", "folder", "acl", "comment", "shortcut", "fallback", "transfer_route",
+                               "link_rewrite", "shared_drive", "shared_drive_member", "form_link"), "drive"),
+              **dict.fromkeys(("message", "message_link", "draft", "filter", "signature", "gmail", "label"), "gmail"),
+              **dict.fromkeys(("event", "calendar", "calendar_acl"), "calendar"),
+              "contact": "contacts", **dict.fromkeys(("task", "tasklist"), "tasks"),
+              **dict.fromkeys(("group", "group_member", "profile"), "directory")}
 # Kinds no API can carry, each named in the final report (known_issues says why for every one).
 ACCEPTED_KINDS = {"chat.attributed", "chat.space_type", "chat.members", "chat.sender", "chat.not_migrated",
                   "drive.form_relinked", "drive.ab_test_residue", "gmail.link_scan_encrypted"}
@@ -61,12 +69,16 @@ def assess(conn, accepted: list[dict] | None = None, dms_failed: int | None = No
               (_rows(conn, "SELECT source_user, service, verdict, verified_at, payload FROM user_verification") or [])}
     # As of: a check older than the user's last write by the run or the DMS reconciliation describes a state
     # that no longer exists, so it cannot pass (the source is live; a verdict needs its moment).
-    last_write = {}
-    for sql in ("SELECT source_user, MAX(timestamp) FROM audit_log GROUP BY source_user",
-                "SELECT source_user, MAX(checked_at) FROM mail_reconciliation_items GROUP BY source_user"):
-        for u, t in _rows(conn, sql) or []:
-            if t and t > last_write.get(u, ""):
-                last_write[u] = t
+    last_write = {}       # (user, service) -> last change; service None = an item type that names no service
+
+    def note(user, service, t):
+        if t and t > last_write.get((user, service), ""):
+            last_write[(user, service)] = t
+    for u, kind, t in _rows(conn, "SELECT source_user, item_type, MAX(timestamp) FROM audit_log "
+                                  "GROUP BY source_user, item_type") or []:
+        note(u, SERVICE_OF.get(kind), t)
+    for u, t in _rows(conn, "SELECT source_user, MAX(checked_at) FROM mail_reconciliation_items GROUP BY source_user") or []:
+        note(u, "gmail", t)
     opened = {}
     for r in _rows(conn, "SELECT source_user, service, category, item_id, detail, issue FROM verification_repair_queue "
                          "WHERE state!='RESOLVED'") or []:
@@ -81,8 +93,9 @@ def assess(conn, accepted: list[dict] | None = None, dms_failed: int | None = No
         for svc in SERVICES:
             row = checks.get((user, svc))
             verdict = row["verdict"] if row else "NOT_VERIFIED"
-            if row and (row["verified_at"] or "") < last_write.get(user, ""):
-                verdict = f"STALE (checked {row['verified_at']}, changed {last_write[user]})"
+            changed = max(last_write.get((user, svc), ""), last_write.get((user, None), ""))
+            if row and (row["verified_at"] or "") < changed:
+                verdict = f"STALE (checked {row['verified_at']}, changed {changed})"
             if verdict == "IDENTICAL":
                 continue
             if verdict != "DIFFERENCES":
