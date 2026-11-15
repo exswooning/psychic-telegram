@@ -967,7 +967,13 @@ class Verifier:
                 ev2: dict = {}
                 self._publish_stats(currentDocument=sid, currentMime=ctx["sm"].get("mimeType"),
                                     currentSince=time.time(), phase="compare", retryAttempt=n)
-                self._file_deadline = time.monotonic() + float(os.getenv("VERIFY_RETRY_FILE_BUDGET_SEC", "120"))
+                # A file that ran out of its time budget is not helped by a SHORTER one: ward18@ and ward19@'s 3.6 MB
+                # Sheets failed 300 s, then twice 120 s, and stayed unverified (account 3, 15 Nov 2026). It gets
+                # double the document budget on each pass; a transient error keeps the short retry budget.
+                slow = "time budget ran out" in str(ctx.get("err") or "")
+                self._file_deadline = time.monotonic() + (
+                    float(os.getenv("VERIFY_DOC_BUDGET_SEC", "300")) * 2 ** n if slow
+                    else float(os.getenv("VERIFY_RETRY_FILE_BUDGET_SEC", "120")))
                 try:
                     content = self._content(src, tgt, sid, ctx["tid"], ctx["sm"], ctx["tm"], ev2)
                 finally:

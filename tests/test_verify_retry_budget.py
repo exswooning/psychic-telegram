@@ -86,3 +86,20 @@ def test_the_sheet_cell_budget_can_be_raised_for_a_qualified_sheet(monkeypatch):
         native_repair.read_sheet(Svc(), "x")                      # 3,000,000 allocated cells > 2,000,000
     monkeypatch.setenv("VERIFY_SHEET_CELL_BUDGET", "5000000")
     native_repair.read_sheet(Svc(), "x")                          # no longer refused for size
+
+
+@pytest.mark.parametrize("err, budget", [("file x: this file's time budget ran out; recorded as unverified", 600),
+                                         ("HTTP 503 (UNAVAILABLE)", 120)])
+def test_a_file_that_ran_out_of_time_is_retried_with_more_time_not_less(db, settings, monkeypatch, err, budget):
+    v = _verifier(db, settings)
+    seen = []
+    monkeypatch.setattr(v, "_content", lambda *a: seen.append(v._file_deadline - time.monotonic()) or [])
+    monkeypatch.setenv("VERIFY_RETRY_WAIT_SEC", "0")
+    monkeypatch.setenv("VERIFY_RETRY_PASSES", "1")
+    monkeypatch.setenv("VERIFY_DOC_BUDGET_SEC", "300")
+    v._retry_ctx = {"f1": {"sm": {}, "tm": {}, "tid": "t", "row": {"mime": "x"}, "err": err, "ev": {}, "entry": None}}
+    try:
+        v._retry_unverified({"unverified": [], "errors": [], "differences": [], "identical": 0, "notCopied": []}, object(), object())
+    except Exception:
+        pass
+    assert seen and budget - 5 < seen[0] <= budget
