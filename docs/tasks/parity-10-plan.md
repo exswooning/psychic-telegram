@@ -301,6 +301,6 @@ Superseded: a full fresh-disk acceptance install; judge the Setup Wizard's first
   source, modifiedTime restored. Trashed the 4 duplicate DMS copies (kept each mapped engine copy; recoverable 30 days).
   The verifier now treats LINKED and unset link display as one state (Sheets sets LINKED itself).
 - Defaults (operator, 15 Nov: "make the current progress as default"), commit after a344f49: light proof is on by default
-  (DMS_PROOF=full turns it off) and the reconciliation runs 16 threads at 40 reads a second per mailbox. NOT deployed:
-  split_mail.py is in the reconciliation's checkpoint fingerprint, so deploying it mid-run would restart the check from
-  zero; deploy with the next idle-box deploy. The running job already has these settings (relaunch env).
+  (DMS_PROOF=full turns it off) and the reconciliation runs 16 threads at 40 reads a second per mailbox (47e1f4d).
+  Swapped onto the box 06:23 UTC (operator: "swap"), hash-checked, while the relaunched job was still in Google's delta
+  import: split_mail is imported only when the reconciliation starts, and this run had no checkpoints yet to lose.
