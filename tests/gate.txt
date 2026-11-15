@@ -25,3 +25,4 @@ tests/test_console_navigation_survives_a_network_drop.py
 tests/test_dms_light_proof.py
 tests/test_dms_label_alignment.py
 tests/test_deep_reconciliation.py
+tests/test_parity_gate.py
