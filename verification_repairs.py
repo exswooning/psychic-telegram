@@ -28,6 +28,10 @@ def ensure(db):
             category TEXT NOT NULL, item_id TEXT, state TEXT NOT NULL,
             detail TEXT NOT NULL, first_seen TEXT NOT NULL, last_seen TEXT NOT NULL,
             resolved_at TEXT, PRIMARY KEY(source_user,service,finding_key))""")
+        # Every verified DMS message looks up its own open findings by item (split_mail.resolve_findings), inside
+        # the write lock: without this a 67,000-row scan, 83 ms each (account 3, 15 Nov 2026); with it 0.02 ms.
+        conn.execute("CREATE INDEX IF NOT EXISTS ix_vrq_item ON verification_repair_queue"
+                     "(source_user, service, category, item_id)")
         import known_issues
         known_issues.ensure(conn)
 

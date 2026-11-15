@@ -104,3 +104,12 @@ def test_engine_link_mail_is_always_proven_in_full(db, auth, settings, identity,
     assert not dms_light_proof.eligible(db, SRC_USER, sid)
     db.log_audit(SRC_USER, "deferred", "message", DEFERRED_TO_DMS)
     assert dms_light_proof.eligible(db, SRC_USER, "deferred") and dms_light_proof.eligible(db, SRC_USER, "new")
+
+
+def test_the_per_message_findings_lookup_uses_an_index(db):
+    import verification_repairs
+    verification_repairs.ensure(db)
+    plan = " ".join(str(r[-1]) for r in db.conn.execute(
+        "EXPLAIN QUERY PLAN SELECT finding_key,detail FROM verification_repair_queue "
+        "WHERE source_user=? AND service='gmail' AND category='errors' AND item_id=?", ("u", "m")))
+    assert "ix_vrq_item" in plan, plan
