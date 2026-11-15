@@ -184,4 +184,5 @@ def main(argv=None) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    import job_exit
+    job_exit.run(main)      # the exit is known even if the API that started this restarted

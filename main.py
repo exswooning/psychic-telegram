@@ -3453,4 +3453,5 @@ STOPPED_RC = 130
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    import job_exit
+    job_exit.run(main)      # the exit is known even if the API that started this restarted

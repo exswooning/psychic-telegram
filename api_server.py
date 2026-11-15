@@ -586,6 +586,66 @@ log = logging.getLogger("api_server")
 _OWNED_JOB_NAMES = account_context.OWNED_JOB_NAMES
 
 
+REATTACH_POLL_SEC = 30
+
+
+def _alive_as(pid: int, argv: list[str]) -> bool:
+    """`pid` is running AND is still this job: a pid is reused, so its command line must name the job's script."""
+    script = next((a for a in argv if a.endswith(".py")), None)
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            cmd = f.read().replace(b"\0", b" ").decode(errors="replace")
+    except OSError:                  # no /proc (macOS): ask ps
+        cmd = subprocess.run(["ps", "-p", str(pid), "-o", "args="], capture_output=True, text=True).stdout
+    return bool(script) and script in cmd
+
+
+def _finish_reattached(row: dict) -> None:
+    """A job whose waiter died with the last API process has ended: record it, free its slot, and run its
+    follow-ons -- only on an exit code the job itself recorded as 0 (job_exit). Unknown is never clean."""
+    import job_exit
+    import run_watch
+    started = 0.0
+    try:
+        started = datetime.fromisoformat(str(row["started_at"]).replace("Z", "+00:00")).timestamp()
+    except (TypeError, ValueError):
+        pass
+    rc = job_exit.read(row["pid"], since=started)
+    try:
+        run_watch.record_finished(row["account_id"], row["job_name"], rc, row["pid"])
+    except Exception as exc:      # noqa: BLE001 - recording must never block the release
+        print(f"could not record the exit of reattached {row['job_name']!r}: {exc}", flush=True)
+    job_admission.release(row["account_id"], row["job_name"])
+    if rc != 0:
+        print(f"reattached {row['job_name']!r} (pid {row['pid']}) ended rc={rc}: its follow-ons "
+              f"{row['then']} were not started", flush=True)
+        return
+    for kind in row["then"]:
+        try:
+            _follow_on(kind, row["account_id"])
+        except Exception as exc:      # noqa: BLE001 - one failing does not block the next
+            print(f"follow-on {kind!r} after reattached {row['job_name']!r} failed: {exc}", flush=True)
+
+
+def _reattach_follow_ons(poll: float | None = None) -> int:
+    """Startup: every admitted job with follow-ons whose waiter died with the last API process. One that has
+    ended is finished now; one still running gets a waiter that watches its pid. Returns how many were found."""
+    rows = job_admission.with_follow_ons()
+    for row in rows:
+        if not _alive_as(row["pid"], row["argv"]):
+            _finish_reattached(row)
+            continue
+
+        def watch(row=row):
+            while _alive_as(row["pid"], row["argv"]):
+                time.sleep(poll or REATTACH_POLL_SEC)
+            _finish_reattached(row)
+        threading.Thread(target=watch, daemon=True, name=f"reattach-{row['job_name']}-{row['pid']}").start()
+        print(f"reattached to {row['job_name']!r} (pid {row['pid']}); follow-ons {row['then']} run when it "
+              "ends cleanly", flush=True)
+    return len(rows)
+
+
 def _reconcile_active_jobs() -> None:
     """Startup only, mirrors webui.py's own function of the same name: a
     fresh process has admitted nothing itself, so any job_admission.py row
@@ -896,6 +956,8 @@ async def lifespan(_: FastAPI):
     # runs against a given migration.db. Must come after apply_migrations,
     # not before -- it writes into tables that migration just created.
     await _off_loop(accounts_auth.bootstrap_legacy_account)
+    # Before the orphan sweep below, which would free a finished job's slot and forget its follow-ons.
+    await _off_loop(_reattach_follow_ons)
     await _off_loop(_reconcile_active_jobs)
     await _off_loop(_reconcile_inventory_scans)
     await _off_loop(_reconcile_full_setup_state)
@@ -1985,7 +2047,8 @@ def _start_admitted(argv: list[str], account_id: int | None, job_name: str,
     # without the command that started it nothing can put it back. The API
     # process that knew the argv is usually long restarted by the time a
     # stall is noticed.
-    job_admission.record_launch(account_id, job_name, proc.pid, argv, HERE)
+    job_admission.record_launch(account_id, job_name, proc.pid, argv, HERE,
+                                 then=([then] if isinstance(then, str) else then) or None)
     started = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
     def _wait_then_release() -> None:

@@ -184,8 +184,13 @@ def record_pid(account_id: int | None, job_name: str, pid: int) -> None:
 MAX_RESUMES = int(os.getenv("JOB_MAX_RESUMES", "3"))
 
 
+def _ensure_then_column(conn) -> None:
+    if "then_json" not in {r[1] for r in conn.execute("PRAGMA table_info(active_jobs)")}:
+        conn.execute("ALTER TABLE active_jobs ADD COLUMN then_json TEXT")
+
+
 def record_launch(account_id: int | None, job_name: str, pid: int,
-                  argv: list[str], cwd: str) -> None:
+                  argv: list[str], cwd: str, then: list[str] | None = None) -> None:
     """Store what it would take to start this job again.
 
     The supervisor can kill a wedged run and free its slot, but until this
@@ -203,6 +208,23 @@ def record_launch(account_id: int | None, job_name: str, pid: int,
             "  SELECT id FROM active_jobs WHERE account_id IS ? "
             "   AND job_name=? AND (pid IS NULL OR pid=?) ORDER BY id LIMIT 1)",
             (pid, json.dumps(list(argv)), cwd, account_id, job_name, pid))
+        if then:
+            # What runs after it, kept with the job: the API's waiter thread dies with the API, and a job
+            # still running after a restart is reattached from this (api_server._reattach_follow_ons).
+            _ensure_then_column(conn)
+            conn.execute("UPDATE active_jobs SET then_json=? WHERE pid=? AND job_name=?",
+                         (json.dumps(list(then)), pid, job_name))
+
+
+def with_follow_ons() -> list[dict]:
+    """Every admitted job that has follow-ons waiting on it: account, name, pid, argv, start, follow-ons."""
+    with cpdb.rw() as conn:
+        _ensure_then_column(conn)
+        rows = conn.execute("SELECT account_id, job_name, pid, argv, started_at, then_json FROM active_jobs "
+                            "WHERE then_json IS NOT NULL AND pid IS NOT NULL").fetchall()
+    return [{"account_id": r["account_id"], "job_name": r["job_name"], "pid": r["pid"],
+             "argv": json.loads(r["argv"] or "[]"), "started_at": r["started_at"],
+             "then": json.loads(r["then_json"])} for r in rows]
 
 
 def resumable(job: dict) -> tuple[list[str] | None, str | None]:
