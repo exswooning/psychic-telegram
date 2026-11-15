@@ -358,6 +358,29 @@ class GmailMigrator:
             raise RuntimeError("Ambiguous destination Message-ID; split delivery blocked")
         return found[0] if found else None
 
+    # A kill between Gmail accepting an insert and the ledger recording it left a copy the next run could
+    # not see, and in engine mode it inserted a second (the 10/10 plan's kill-then-rerun test, 15 Nov 2026).
+    # An intent row is written just before each insert -- local, no API call -- and only a message with an
+    # intent and no mapping is looked up by Message-ID first. Split and recovery runs already always look.
+    def _note_insert_intent(self, source_id: str | None) -> None:
+        if not source_id:
+            return
+        with self.db.write() as c:
+            c.execute("CREATE TABLE IF NOT EXISTS mail_insert_intent (source_user TEXT NOT NULL, "
+                      "source_id TEXT NOT NULL, at TEXT NOT NULL, PRIMARY KEY(source_user, source_id))")
+            c.execute("INSERT OR REPLACE INTO mail_insert_intent VALUES(?,?,datetime('now'))",
+                      (self.source_user, source_id))
+
+    def _may_have_landed(self, source_id: str | None) -> bool:
+        if not source_id:
+            return False
+        try:
+            hit = self.db.conn.execute("SELECT 1 FROM mail_insert_intent WHERE source_user=? AND source_id=?",
+                                       (self.source_user, source_id)).fetchone()
+        except Exception:      # no table yet: nothing was ever attempted
+            return False
+        return bool(hit) and not self.db.get_target_id(self.source_user, source_id, "message")
+
     def _insert_once(self, body: dict, media, raw: str,
                      replacing: str | None = None, source_id: str | None = None) -> dict:
         """
@@ -450,10 +473,12 @@ class GmailMigrator:
                     raise RuntimeError("Missing-ID delivery requires a source identity and qualified non-split path")
                 from mail_identity import insert_without_message_id
                 return insert_without_message_id(self, source_id, raw, insert)
-            if getattr(self, "recover_unmapped", False) or self.settings.mail_only_with_links:
+            if (getattr(self, "recover_unmapped", False) or self.settings.mail_only_with_links
+                    or self._may_have_landed(source_id)):
                 adopted = adopt_if_already_delivered()
                 if adopted is not None:
                     return adopted
+            self._note_insert_intent(source_id)
             return self._retry(insert, before_retry=adopt_if_already_delivered,
                                label="gmail.messages.insert")
         except TransportExhausted:
