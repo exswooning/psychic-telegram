@@ -88,9 +88,10 @@ A run scores 10 when all hold with nobody involved between Start and the final r
       difference named (auto repair or a person), accepted kinds and known_differences.json, the explained remainder.
       Runs on its own after verify-after-dms (verdict in logs/reports/<id>/, an incident until PARITY). The
       follow-on needs an API restart to take effect (next idle deploy).
-- [~] Fault-injection tests: kill after a write the ledger never recorded, then rerun (Drive and mail, 64965f6 --
+- [x] Fault-injection tests: kill after a write the ledger never recorded, then rerun (Drive and mail, 64965f6 --
       mail inserted duplicates, fixed with an insert-intent row); DNS drop and rate limits were already covered
-      (test_network_outage_is_ridden_out, test_rate_limit_gets_time). Still open: full disk.
+      (test_network_outage_is_ridden_out, test_rate_limit_gets_time). Full disk (955ff86): a download that dies
+      on ENOSPC falls back to Drive's server-side copy -- no file lost, the rerun copies nothing twice.
 - [ ] Nightly end-to-end run on the sandbox with a morning report.
 - [~] Each known difference fixed or formally accepted. Fixed 15 Nov: Sheet cell hyperlinks (7bafe56), comment
       quotes escaped twice (a499435), Apps Script comments 404, the LINKED display noise, files that ran out of
