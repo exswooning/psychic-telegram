@@ -164,3 +164,51 @@ def test_the_scan_has_its_own_limiter_and_worker_count(mailbox, db, settings):
     migrator._scan_split_before_delivery("")
     assert migrator.scan_limiter.rate == 77.0
     assert (migrator._link_scan["scanWorkers"], migrator._link_scan["scanQps"]) == (9, 77.0)
+
+
+def test_read_once_the_pass_skips_what_the_inventory_proved_link_free(mailbox, db, settings):
+    """The 10/10 plan's read-once item: the inventory beside the Drive pass already read the mailbox with the
+    pass's own classifier, so a whole-mailbox exhaustive scan reads only what carries a link or arrived later."""
+    import mail_dead_links
+    migrator, src, ids = mailbox
+    settings.mail_link_scan = "exhaustive"
+    mail_dead_links.inventory_user(migrator, workers=2, say=lambda *_: None)
+    late = src.add_message(_msg(99))                       # arrived after the inventory: never proven
+    src.reset_calls()
+    migrator.run()
+    read = set(_reads(src))
+    for must in ("linked", "attached", "hidden"):
+        assert ids[must] in read, f"{must} carries a link: always read"
+    assert late in read, "a message the inventory never saw is read"
+    assert ids["plain"] not in read, "proven link-free: not read again"
+    assert _report(db)["inventoryProven"] >= 30
+    assert db.get_target_id(SRC_USER, ids["linked"], "message"), "link mail is still delivered, rewritten"
+    assert db.get_audit(SRC_USER, ids["plain"], "message")["status"] == DEFERRED_TO_DMS
+
+
+def test_read_once_the_inventory_finds_every_link_the_pass_finds(mailbox, db, settings):
+    """It missed 7 on account 3 with its own text-part read; with the pass's classifier it matches exactly."""
+    import mail_dead_links
+    migrator, src, ids = mailbox
+    mail_dead_links.inventory_user(migrator, workers=2, say=lambda *_: None)
+    proven = mail_dead_links.proven(db, SRC_USER)
+    must_read = {m for m, k in proven.items() if k == mail_dead_links.READ}
+    assert {ids["linked"], ids["attached"], ids["hidden"]} <= must_read
+    assert proven[ids["draft"]] == mail_dead_links.DRAFT
+
+
+def test_read_once_an_inventory_that_did_not_finish_proves_nothing(mailbox, db, settings, monkeypatch):
+    import mail_dead_links
+    migrator, src, ids = mailbox
+    real = migrator._split_classify
+    seen = []
+
+    def partial(mid):
+        seen.append(mid)
+        if len(seen) == 3:
+            raise RuntimeError("the read failed")
+        return real(mid)
+    monkeypatch.setattr(migrator, "_split_classify", partial)
+    with pytest.raises(RuntimeError):
+        mail_dead_links.inventory_user(migrator, workers=1, say=lambda *_: None)
+    assert mail_dead_links.proven(db, SRC_USER) is None

@@ -907,6 +907,16 @@ class GmailMigrator:
             log.info("[%s] mail link search: %d candidates (%s); %s known link messages missed by search",
                      self.source_user, len(candidates), json.dumps(searches),
                      "n/a" if query else len(missed))
+        # Read each mailbox once (the 10/10 plan): the link inventory beside the Drive pass already read this
+        # mailbox with this same classifier. A whole-mailbox exhaustive scan skips what it proved free of Drive
+        # links -- Gmail never changes a message's content -- and reads the rest: links, the unjudged, and
+        # anything that arrived after it. A delta window or no complete inventory reads everything as before.
+        known_free = None
+        if mode == "exhaustive" and not query:
+            import mail_dead_links
+            known_free = mail_dead_links.proven(self.db, self.source_user)
+            if known_free is not None:
+                self._link_scan.update(inventoryProven=sum(1 for k in known_free.values() if k == mail_dead_links.FREE))
         self._link_scan["state"] = "READING"
         self._save_link_scan()
         refs = []
@@ -946,6 +956,15 @@ class GmailMigrator:
                         raise RuntimeError("Mail link scan interrupted; DMS handoff not ready")
                     refs.append(ref)
                     mid = ref["id"]
+                    if known_free is not None and known_free.get(mid, 1) != 1:
+                        import mail_dead_links
+                        kind = known_free[mid]
+                        labels = ["DRAFT"] if kind == mail_dead_links.DRAFT else ["CHAT"] if kind == mail_dead_links.CHAT else None
+                        self._split_scan[mid] = (({"labelIds": labels}, None) if labels else
+                                                 ({"labelIds": []}, {"route": "DMS", "changed": {}, "unresolved": [],
+                                                  "linkIds": [], "why": "proved free of Drive links by the link inventory"}))
+                        self._scan_count("notRead", 1)
+                        continue
                     if candidates is not None and mid not in candidates:
                         labels = ["DRAFT"] if mid in drafts else ["CHAT"] if mid in chats else None
                         self._split_scan[mid] = (({"labelIds": labels}, None) if labels else

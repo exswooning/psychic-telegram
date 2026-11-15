@@ -34,6 +34,28 @@ LINK_SCHEMA = """CREATE TABLE IF NOT EXISTS mail_link_messages (
     source_user TEXT NOT NULL, message_id TEXT NOT NULL, file_ids TEXT NOT NULL, by_search INTEGER NOT NULL,
     checked_at TEXT NOT NULL, PRIMARY KEY (source_user, message_id))"""
 
+# Every message the inventory examined, with what the mail pass needs to know without reading it again:
+# 0 proven free of Drive links, 1 must be read (a link, encrypted, or not judged), 2 a draft, 3 a chat.
+# A row in mail_link_inventories says the user's whole mailbox was examined (the read-once plan item).
+SEEN_SCHEMA = """CREATE TABLE IF NOT EXISTS mail_link_seen (
+    source_user TEXT NOT NULL, message_id TEXT NOT NULL, kind INTEGER NOT NULL,
+    PRIMARY KEY (source_user, message_id))"""
+INVENTORIES_SCHEMA = """CREATE TABLE IF NOT EXISTS mail_link_inventories (
+    source_user TEXT PRIMARY KEY, completed_at TEXT NOT NULL, examined INTEGER NOT NULL)"""
+FREE, READ, DRAFT, CHAT = 0, 1, 2, 3
+
+
+def proven(db, source_user: str) -> dict | None:
+    """{message id: kind} from the user's last COMPLETE inventory, or None when there is none."""
+    try:
+        if not db.conn.execute("SELECT 1 FROM mail_link_inventories WHERE source_user=?", (source_user,)).fetchone():
+            return None
+        return dict(db.conn.execute("SELECT message_id, kind FROM mail_link_seen WHERE source_user=?",
+                                    (source_user,)).fetchall())
+    except Exception:      # no tables yet
+        return None
+
+
 SCHEMA = """CREATE TABLE IF NOT EXISTS mail_dead_links (
     source_user TEXT NOT NULL, file_id TEXT NOT NULL, status TEXT NOT NULL, detail TEXT NOT NULL DEFAULT '',
     emails INTEGER NOT NULL, example_message TEXT NOT NULL DEFAULT '', checked_at TEXT NOT NULL,
@@ -105,16 +127,30 @@ def inventory_user(gm, workers: int = 8, say=print) -> dict:
         checkpoint()
         by_search |= gm._list_ids(term)
 
+    kinds: dict = {}                       # message id -> FREE / READ / DRAFT / CHAT (mail_link_seen)
+    if not hasattr(gm, "_link_scan"):
+        gm._link_scan = {}                 # _split_classify counts its reads into it
+
     def read(mid: str) -> tuple[str, set]:
         checkpoint()
-        gm.scan_limiter.acquire()
+        # The mail pass's own classifier (_split_classify: text parts, text attachments, attached messages,
+        # encrypted mail), so what this proves link-free the pass may skip. The plain text-part read used
+        # before missed 7 link emails the pass found (account 3, 15 Nov 2026). It paces itself (scan_limiter).
+        # gm.src inside it: AuthManager builds one client per thread (httplib2 is not thread-safe).
+        from split_mail import ClassificationIncomplete
+        try:
+            full, plan = gm._split_classify(mid)
+        except ClassificationIncomplete:
+            kinds[mid] = READ                                   # not judged: the pass reads it
+            return mid, set()
         checkpoint()
-        # gm.src, not the `src` above: AuthManager builds one client per thread, and httplib2 is not
-        # thread-safe (a shared client aborted fidelity_audit, 9 Nov 2026).
-        full = gm._retry(lambda: gm.src.users().messages().get(userId="me", id=mid, format="full").execute(),
-                         label="gmail.dead_links.get")
-        checkpoint()
-        return mid, text_ids(full.get("payload") or {})
+        labels = set(full.get("labelIds") or [])
+        if plan is None:
+            kinds[mid] = DRAFT if "DRAFT" in labels else CHAT
+            return mid, set()
+        ids = set(plan.get("linkIds") or [])
+        kinds[mid] = READ if ids or plan.get("encrypted") else FREE
+        return mid, ids
     with futures.ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
         remaining = iter(ids)
         pending = {pool.submit(read, mid) for mid in islice(remaining, max(1, workers) * 2)}
@@ -162,6 +198,15 @@ def inventory_user(gm, workers: int = 8, say=print) -> dict:
         c.execute("DELETE FROM mail_link_messages WHERE source_user=?", (gm.source_user,))
         c.executemany("INSERT INTO mail_link_messages VALUES (?,?,?,?,?)",
                       [(gm.source_user, m, ",".join(sorted(f)), int(m in by_search), now) for m, f in linked.items()])
+        c.execute(SEEN_SCHEMA)
+        c.execute(INVENTORIES_SCHEMA)
+        c.execute("DELETE FROM mail_link_seen WHERE source_user=?", (gm.source_user,))
+        c.executemany("INSERT INTO mail_link_seen VALUES (?,?,?)", [(gm.source_user, m, k) for m, k in kinds.items()])
+        # Complete only when every listed message was judged: a stop or a failed read leaves it incomplete.
+        if len(kinds) == len(ids):
+            c.execute("INSERT OR REPLACE INTO mail_link_inventories VALUES (?,?,?)", (gm.source_user, now, len(ids)))
+        else:
+            c.execute("DELETE FROM mail_link_inventories WHERE source_user=?", (gm.source_user,))
     by = collections.Counter(r[2] for r in rows)
     missed = sum(1 for m in linked if m not in by_search)
     files = set().union(*linked.values()) if linked else set()

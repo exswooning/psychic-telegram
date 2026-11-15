@@ -74,7 +74,7 @@ def test_stop_inside_a_mailbox_does_not_drain_queued_reads_or_replace_complete_e
     retry=gmail_migrator._retry;reads=[]
     def stopping_read(call,**kw):
         result=retry(call,**kw)
-        if kw.get('label')=='gmail.dead_links.get':
+        if kw.get('label')=='gmail.split.text':      # the inventory reads with the mail pass's classifier
             reads.append(1);main.SHUTDOWN.set()
         return result
     monkeypatch.setattr(gmail_migrator,'_retry',stopping_read)
