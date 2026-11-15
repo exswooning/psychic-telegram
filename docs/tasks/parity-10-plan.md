@@ -59,12 +59,13 @@ A run scores 10 when all hold with nobody involved between Start and the final r
       Open question for the run record: should the UI refuse a full verify while the DMS is importing?
 
 ## Phase 3: speed (measure before and after)
-- [ ] Read each mailbox once: the mail pass takes candidates from the link inventory
+- [x] Read each mailbox once (b7febc9, not yet measured live): the mail pass takes candidates from the link inventory
       (`mail_link_messages`) and reads only messages newer than it (129,800 reads were repeated).
       MEASURED 15 Nov (account 3 ledger): NOT safe as the inventory stands. It missed 7 link emails the mail pass
       rewrote (buildingpermit 2, info 2, it.department 1, mayor 1, ward14 1) and covers 35 of 45 users. Next: the
-      inventory must use the mail pass's own detector (_split_classify) and record a complete mailbox (ids and an
-      as-of history id); only then may the pass skip what it proved link-free.
+      inventory must use the mail pass's own detector (_split_classify) and record a complete mailbox; only then may
+      the pass skip what it proved link-free. DONE b7febc9: mail_link_seen + mail_link_inventories; measure on the
+      next run (bodies read by the mail pass, against 129,800).
 - [ ] Bulk DMS reconciliation: list the target once with Message-ID headers, match in memory, read content
       only for link mail and mismatches (today ~3 calls per message).
 - [~] One target write per file. The move out of staging already carries modifiedTime (one call); the extra
