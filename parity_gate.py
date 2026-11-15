@@ -58,7 +58,15 @@ def assess(conn, accepted: list[dict] | None = None, dms_failed: int | None = No
     auto = {i[0] for i in known_issues.ISSUES if i[6]}
     users = [r[0] for r in (_rows(conn, "SELECT source_email FROM identity_map WHERE entity_type='user'") or [])]
     checks = {(r["source_user"], r["service"]): r for r in
-              (_rows(conn, "SELECT source_user, service, verdict, verified_at FROM user_verification") or [])}
+              (_rows(conn, "SELECT source_user, service, verdict, verified_at, payload FROM user_verification") or [])}
+    # As of: a check older than the user's last write by the run or the DMS reconciliation describes a state
+    # that no longer exists, so it cannot pass (the source is live; a verdict needs its moment).
+    last_write = {}
+    for sql in ("SELECT source_user, MAX(timestamp) FROM audit_log GROUP BY source_user",
+                "SELECT source_user, MAX(checked_at) FROM mail_reconciliation_items GROUP BY source_user"):
+        for u, t in _rows(conn, sql) or []:
+            if t and t > last_write.get(u, ""):
+                last_write[u] = t
     opened = {}
     for r in _rows(conn, "SELECT source_user, service, category, item_id, detail, issue FROM verification_repair_queue "
                          "WHERE state!='RESOLVED'") or []:
@@ -73,16 +81,27 @@ def assess(conn, accepted: list[dict] | None = None, dms_failed: int | None = No
         for svc in SERVICES:
             row = checks.get((user, svc))
             verdict = row["verdict"] if row else "NOT_VERIFIED"
+            if row and (row["verified_at"] or "") < last_write.get(user, ""):
+                verdict = f"STALE (checked {row['verified_at']}, changed {last_write[user]})"
             if verdict == "IDENTICAL":
                 continue
-            if verdict not in ("DIFFERENCES",):
+            if verdict != "DIFFERENCES":
                 unverified.append({"user": user, "service": svc, "verdict": verdict})
                 state = "UNVERIFIED" if state == "PARITY" else state
                 continue
             found = opened.get((user, svc), [])
-            if not found:       # a difference with no named finding is not explained
-                differs.append({"user": user, "service": svc, "kind": "unnamed", "how": "person",
-                                "detail": "the check found differences but recorded no finding"})
+            if not found:       # no queued finding: name it from the check's own result, or call it unexplained
+                try:
+                    saved = json.loads(row["payload"] or "{}")
+                except (TypeError, ValueError):
+                    saved = {}
+                named = [k for k in ("missing", "extras", "differences", "duplicates", "notCopied", "errors")
+                         if saved.get(k)]
+                for k in named or ["unnamed"]:
+                    n = len(saved[k]) if k in saved and isinstance(saved[k], list) else saved.get(k)
+                    differs.append({"user": user, "service": svc, "kind": f"{svc}.{k}" if named else "unnamed",
+                                    "how": "person", "detail": f"{n} in the saved check" if named else
+                                    "the check found differences but recorded no finding"})
                 state = "NOT_PARITY"
             for f in found:
                 op = _accepted_by_operator(f, accepted)

@@ -10,15 +10,17 @@ def _ledger(verdicts, findings=(), audit=()):
     c = sqlite3.connect(":memory:")
     c.executescript("""
         CREATE TABLE identity_map(source_email TEXT, entity_type TEXT);
-        CREATE TABLE user_verification(source_user TEXT, service TEXT, verdict TEXT, verified_at TEXT);
+        CREATE TABLE user_verification(source_user TEXT, service TEXT, verdict TEXT, verified_at TEXT, payload TEXT);
+        CREATE TABLE mail_reconciliation_items(source_user TEXT, checked_at TEXT);
         CREATE TABLE verification_repair_queue(source_user TEXT, service TEXT, category TEXT, item_id TEXT,
             detail TEXT, issue TEXT, state TEXT);
-        CREATE TABLE audit_log(source_user TEXT, item_type TEXT, status TEXT, error_message TEXT);""")
+        CREATE TABLE audit_log(source_user TEXT, item_type TEXT, status TEXT, error_message TEXT, timestamp TEXT);""")
     users = {u for u, _, _ in verdicts}
     c.executemany("INSERT INTO identity_map VALUES(?, 'user')", [(u,) for u in users])
-    c.executemany("INSERT INTO user_verification VALUES(?,?,?, 'now')", verdicts)
+    c.executemany("INSERT INTO user_verification VALUES(?,?,?, '2026-11-15T10:00:00Z', ?)",
+                  [(u, s, v, '{"extras": [1, 2]}') for u, s, v in verdicts])
     c.executemany("INSERT INTO verification_repair_queue VALUES(?,?,?,?,?,?, 'OPEN')", findings)
-    c.executemany("INSERT INTO audit_log VALUES(?,?,?,?)", audit)
+    c.executemany("INSERT INTO audit_log VALUES(?,?,?,?, '2026-11-15T09:00:00Z')", audit)
     return c
 
 
@@ -44,8 +46,17 @@ def test_an_unexplained_difference_fails_and_is_named():
     assert r["differences"][0]["kind"] == "unclassified" and r["differences"][0]["how"] == "person"
 
 
-def test_a_difference_with_no_finding_is_not_explained():
-    assert G.assess(_ledger(_all(U1, gmail="DIFFERENCES")))["verdict"] == "NOT_PARITY"
+def test_a_difference_with_no_finding_is_named_from_the_saved_check():
+    r = G.assess(_ledger(_all(U1, gmail="DIFFERENCES")))
+    assert r["verdict"] == "NOT_PARITY" and r["differences"][0]["kind"] == "gmail.extras"
+    assert r["differences"][0]["detail"] == "2 in the saved check"
+
+
+def test_a_check_older_than_the_last_change_is_stale_never_a_pass():
+    c = _ledger(_all(U1))
+    c.execute("INSERT INTO mail_reconciliation_items VALUES(?, '2026-11-15T11:00:00Z')", (U1,))
+    r = G.assess(c)
+    assert r["verdict"] == "UNVERIFIED" and r["unverified"][0]["verdict"].startswith("STALE")
 
 
 def test_a_kind_no_api_can_carry_is_accepted():
