@@ -278,3 +278,21 @@ Superseded: a full fresh-disk acceptance install; judge the Setup Wizard's first
   (mostly the Wi-Fi drop's read errors, re-checked by this pass), 20,823 labels added, 3,355 labels missing, 5 duplicates.
 - 53 Drive items FALLBACK (download-and-upload); the operator expects only Apps Script there -- types not yet checked.
 - Open incidents: #76 box busy (expected), #74 dms crash 14 Nov (closes on a clean exit), #70, #8, #9 (older runs).
+
+## Every open difference explained (15 Nov, read on both tenants)
+- REAL DEFECT, fixed in 7bafe56 (not deployed): native Sheet link rewrite used findReplace only, which rewrites cell
+  text/formulas but not the cell's own hyperlink (userEnteredFormat.textFormat.link) or rich-text run links. Five target
+  Sheets show the target id but open the SOURCE on a click: buildingpermit x2 and it.department (Form file-upload
+  answers), mayor and info (a self-link). Repair after deploy: re-run the native link rewrite on those five.
+- REAL, small: 4 SENT messages exist twice on the target (legal 1, health 2, procurement 1): the engine's link-mail copy
+  plus a DMS copy (the extra carries CATEGORY_PERSONAL). info@ 192c2b06 (CAHQ-HAwO...) is on the source and missing on
+  the target -- likely one of the 16 DMS failures. Removing the 4 extras is a target delete: operator's word first.
+- Verifier noise (no data wrong): ward14 Sheet now identical (stale finding); ward4 comments: same 30 threads and 40
+  replies, matched ambiguously (two threads with identical text; "resolve" actions are kept as the resolved flag, not a
+  reply); health comments: 15/15 threads, the quoted text of a PDF differs; it.department comments 404 on an Apps Script
+  project (no comments API).
+- Unverified, re-check needed: three large Sheets ran out of their time budget (ward18/ward19 "Sunsari-1" 3.6 MB,
+  suchanaadhikari 50 KB); info@ "रातो किताब" Doc answered 503.
+- Accepted: suchanaadhikari Form 15/16 items (unfetchable image); 2 orphaned grants (deleted accounts, no email).
+- 53 FALLBACK rows are all Forms rebuilt through the Forms API (download_upload -> native_api), as designed; no binary fell back.
+- info@ FAILED is a stale 12 Nov "link scan interrupted" row; a later scan finished (13 Nov) and the DMS took the user.
