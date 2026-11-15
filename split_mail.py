@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import os
 
 import base64
@@ -139,6 +140,10 @@ def classify_payload(message, lookup, fetch_text_attachment=None, unknown=None, 
 
 
 from resilience import RateLimiter  # noqa: E402
+
+
+class ContentDiffers(RuntimeError):
+    """A DMS copy whose content (not only its labels) did not prove identical."""
 
 
 def reconcile_tuning() -> tuple[int, float]:
@@ -343,14 +348,18 @@ def reconcile_dms(auth, db, settings, progress=None, users=None):
                 if not verify_written_mail(
                     gm, mid, tid, expected, gm._map_label_ids(full.get("labelIds", []))
                 ):
-                    receipt = db.conn.execute(
-                        "SELECT evidence FROM migration_item_receipts WHERE source_user=? AND source_id=? AND target_id=? AND service='gmail'",
-                        (source, mid, tid)).fetchone()
+                    try:
+                        receipt = db.conn.execute(
+                            "SELECT evidence FROM migration_item_receipts WHERE source_user=? AND source_id=? AND target_id=? AND service='gmail'",
+                            (source, mid, tid)).fetchone()
+                    except sqlite3.OperationalError:     # no receipts table yet: nothing proven
+                        receipt = None
                     proof = json.loads(receipt[0]) if receipt else {}
-                    if (proof.get("contentProven") is True and not proof.get("findings", {}).get("errors")
-                            and proof.get("labelDifferences") and not mapped):
+                    labels_only = (proof.get("contentProven") is True and not proof.get("findings", {}).get("errors")
+                                   and proof.get("labelDifferences"))
+                    if labels_only and not mapped:
                         db.adopt_message_mapping(source, mid, tid)
-                    raise RuntimeError("DMS destination content or labels did not match")
+                    raise (RuntimeError if labels_only else ContentDiffers)("DMS destination content or labels did not match")
                 checkpoint.save(mid, tid, "VERIFIED", {"scope": "content and labels", "target": tid})
                 if not mapped:
                     db.adopt_message_mapping(source, mid, tid)
@@ -361,8 +370,12 @@ def reconcile_dms(auth, db, settings, progress=None, users=None):
                 import verification_repairs
 
                 error = str(exc)[:220]
-                if light and mid in sampled:
-                    degraded.set()      # a sampled message failed: no light proof for this mailbox
+                # Only a sampled message whose CONTENT differs says light proof cannot be trusted here. A label
+                # difference (Gmail filing DMS mail under INBOX, ~38% of info@) is compared the same way by light
+                # proof, and a network error says nothing about it: both used to send every mailbox from the
+                # seventh on (15 Nov, account 3) to the slow full check.
+                if light and mid in sampled and isinstance(exc, ContentDiffers):
+                    degraded.set()
                 checkpoint.save(mid, tid, outcome(error), {"error": error})
                 verification_repairs.enqueue_findings(
                     db,

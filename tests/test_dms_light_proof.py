@@ -61,6 +61,34 @@ def test_a_failed_sample_sends_the_whole_mailbox_to_full_proof(db, auth, setting
     assert not any('"proof": "light"' in p for p in proofs), "after a failed sample nothing is proven lightly"
 
 
+def test_a_sample_that_differs_only_in_labels_keeps_light_proof_on(db, auth, settings, identity, light, monkeypatch):
+    import dms_light_proof
+    pairs = [_pair(auth, db, n) for n in range(4)]
+    bad = pairs[0][0]
+    auth.target_gmail(TGT_USER).messages[pairs[0][1]]["labelIds"] = ["INBOX", "IMPORTANT"]
+    monkeypatch.setattr(dms_light_proof, "sample", lambda ids, n=None: {bad})
+    out = reconcile_dms(auth, db, settings, progress=lambda _: None)
+    proofs = [r[0] for r in db.conn.execute("SELECT evidence FROM migration_item_receipts")]
+    assert out["blocked"] == 1, "the label difference is still reported"
+    assert sum('"proof": "light"' in p for p in proofs) == 3, "the rest of the mailbox is still proven lightly"
+
+
+def test_a_network_error_in_the_sample_keeps_light_proof_on(db, auth, settings, identity, light, monkeypatch):
+    import dms_light_proof, migration_checks
+    pairs = [_pair(auth, db, n) for n in range(4)]
+    bad = pairs[0][0]
+    monkeypatch.setattr(dms_light_proof, "sample", lambda ids, n=None: {bad})
+    real = migration_checks.verify_written_mail
+    def flaky(gm, mid, *a, **k):
+        if mid == bad:
+            raise OSError("Unable to find the server at gmail.googleapis.com")
+        return real(gm, mid, *a, **k)
+    monkeypatch.setattr(migration_checks, "verify_written_mail", flaky)
+    reconcile_dms(auth, db, settings, progress=lambda _: None)
+    proofs = [r[0] for r in db.conn.execute("SELECT evidence FROM migration_item_receipts")]
+    assert sum('"proof": "light"' in p for p in proofs) == 3
+
+
 def test_differing_facts_are_never_a_light_pass(db, auth, settings, identity, light, monkeypatch):
     monkeypatch.setenv("DMS_LIGHT_SAMPLE", "0")
     sid, tid = _pair(auth, db, 1, target_body=(MSG % (1, 1, 1)).replace(b"Subject: s1", b"Subject: other"))
