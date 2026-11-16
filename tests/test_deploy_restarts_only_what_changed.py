@@ -176,5 +176,6 @@ class TestWhatIsShipped:
     def test_secrets_and_machine_state_are_still_excluded(self, box):
         r, log = box(["api_server.py"])
         real = next(l for l in log.splitlines() if l.startswith("rsync:") and "--partial" in l)
-        for name in ("keys/", "oauth/", "env.sh", "run_state.json", "migration.db*", "unprotected_domains.json"):
+        for name in ("keys/", "oauth/", "env.sh", "run_state.json", "migration.db*", "unprotected_domains.json",
+                     "dms_metrics.json", ".gate-passed"):     # the box's own DMS reading; this machine's gate stamp
             assert f"--exclude {name}" in real, name

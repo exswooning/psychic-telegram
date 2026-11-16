@@ -172,7 +172,7 @@ SYNC_EXCLUDES=(
   --exclude 'unprotected_domains.json'
   --exclude '*.log' --exclude 'sandbox_manifest*.json' --exclude 'identities*.csv'
   --exclude 'keys/' --exclude 'oauth/' --exclude 'env.sh'
-  --exclude 'run_state.json'
+  --exclude 'run_state.json' --exclude 'dms_metrics.json' --exclude '.gate-passed'
   --exclude 'logs/' --exclude 'node_modules/'
   --exclude '._*' --exclude '.DS_Store'
 )
