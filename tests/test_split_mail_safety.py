@@ -175,12 +175,21 @@ def test_dms_overlap_detects_duplicate_rewritten_and_original(
     rewritten, _ = rewrite_raw(raw, lambda x: TGT_FILE)
     target = auth.target_gmail(TGT_USER)
     tid = target.add_message(base64.urlsafe_b64decode(rewritten), ["INBOX"])
-    target.add_message(LINKED, ["INBOX"])
+    original = target.add_message(LINKED, ["INBOX"])
     db.record_mapping(SRC_USER, mid, tid, "message")
     db.log_audit(SRC_USER, mid, "message", "SUCCESS")
-    out = reconcile_dms(auth, db, settings, progress=lambda m: None)
+    import os
+    os.environ["DMS_TRASH_DUPLICATES"] = "0"            # detection alone, as before the operator's choice
+    try:
+        out = reconcile_dms(auth, db, settings, progress=lambda m: None)
+    finally:
+        del os.environ["DMS_TRASH_DUPLICATES"]
     assert out["blocked"] == 1 and out["verified"] == 0
     assert "ambiguous" in out["errors"][0]["error"]
+    # Operator, 16 Nov 2026: keep the better copy -- the rewritten one; the DMS's original goes to the trash.
+    out = reconcile_dms(auth, db, settings, progress=lambda m: None)
+    assert out["blocked"] == 0 and out["verified"] == 1
+    assert "TRASH" in target.messages[original]["labelIds"] and "TRASH" not in target.messages[tid]["labelIds"]
 
 
 def test_reconciliation_rejects_legacy_success_with_unmapped_internal_link(

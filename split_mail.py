@@ -152,6 +152,28 @@ class LabelsDiffer(RuntimeError):
     could run (15 Nov 2026)."""
 
 
+def trash_dms_duplicate(gm, db, source: str, mid: str, source_raw: str, other: str) -> None:
+    """Trash the DMS's copy that sits beside the mapped one, if and only if it is the unrewritten source byte for
+    byte. Already in the trash: nothing to do. Anything else raises -- a person decides. DMS_TRASH_DUPLICATES=0
+    turns it off; a dry run never writes. Target only, and recorded in the ledger."""
+    import base64
+    from verify_sample import compare_message
+    got = gm._retry(lambda: gm.tgt.users().messages().get(userId="me", id=other, format="raw").execute())
+    if "TRASH" in (got.get("labelIds") or []):
+        return
+    decode = lambda r: base64.urlsafe_b64decode(r + "=" * (-len(r) % 4))  # noqa: E731
+    if compare_message(decode(source_raw), decode(got.get("raw", "")))[0] == "different":
+        raise RuntimeError("DMS destination match is absent or ambiguous: a second copy differs from the source")
+    if os.getenv("DMS_TRASH_DUPLICATES", "1") == "0" or gm.settings.dry_run:
+        raise RuntimeError("DMS destination match is absent or ambiguous: the DMS's duplicate is kept (not trashed)")
+    from domain_guard import require_not_source
+    require_not_source(gm.target_user.rsplit("@", 1)[-1], gm.settings.source_domain)
+    gm.limiter.acquire()
+    gm._retry(lambda: gm.tgt.users().messages().trash(userId="me", id=other).execute())
+    db.log_audit(source, mid, "dms_duplicate", "TRASHED",
+                 f"kept the mapped copy; trashed {other}, the DMS's unrewritten copy (recoverable 30 days)")
+
+
 def reconcile_tuning() -> tuple[int, float]:
     """(threads per mailbox, reads a second per mailbox) for the DMS reconciliation.
 
@@ -337,6 +359,14 @@ def reconcile_dms(auth, db, settings, progress=None, users=None):
                         )
                     )
                     matches = found.get("messages", [])
+                    if (len(matches) == 2 and not found.get("nextPageToken") and mapped
+                            and mapped in {m["id"] for m in matches}):
+                        # Two copies: ours (mapped, links rewritten) and one the DMS imported beside it anyway (4
+                        # sent emails on account 3, 15 Nov 2026). Keep the better copy -- ours -- and trash the other
+                        # only when it is byte-for-byte the unrewritten source (operator, 16 Nov 2026).
+                        other = next(m["id"] for m in matches if m["id"] != mapped)
+                        trash_dms_duplicate(gm, db, source, mid, full["raw"], other)
+                        matches = [{"id": mapped}]
                     if len(matches) != 1 or found.get("nextPageToken"):
                         raise RuntimeError(
                             "DMS destination match is absent or ambiguous"

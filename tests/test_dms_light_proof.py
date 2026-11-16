@@ -133,3 +133,28 @@ def test_a_label_only_difference_never_stops_the_pipeline_but_a_content_one_does
     assert status == "NEEDS_RECHECK", "the receipt the label alignment works from is still written"
     sid2, _ = _pair(auth, db, 2, target_body=(MSG % (2, 2, 2)).replace(b"Subject: s2", b"Subject: other"))
     assert reconcile_dms(auth, db, settings, progress=lambda _: None)["blocked"] == 1
+
+
+@pytest.mark.parametrize("case", ["duplicate", "differs", "switched_off"])
+def test_the_dms_copy_beside_ours_is_trashed_only_when_it_is_the_unrewritten_source(db, auth, settings, identity, monkeypatch, case):
+    """Operator, 16 Nov 2026: keep the better copy. Ours is the mapped one; the DMS's is trashed only when it
+    equals the source byte for byte -- anything else stays for a person."""
+    raw = MSG % (5, 5, 5)
+    sid = auth.source_gmail(SRC_USER).add_message(raw, ["SENT"])
+    tg = auth.target_gmail(TGT_USER)
+    ours = tg.add_message(raw, ["SENT"])
+    theirs = tg.add_message(raw if case != "differs" else raw.replace(b"body 5", b"body edited"), ["SENT"])
+    db.record_mapping(SRC_USER, sid, ours, "message")
+    db.log_audit(SRC_USER, sid, "message", "SUCCESS")              # engine link mail: always proven in full
+    if case == "switched_off":
+        monkeypatch.setenv("DMS_TRASH_DUPLICATES", "0")
+    out = reconcile_dms(auth, db, settings, progress=lambda _: None)
+    trashed = "TRASH" in tg.messages[theirs]["labelIds"]
+    assert "TRASH" not in tg.messages[ours]["labelIds"], "ours is never touched"
+    if case == "duplicate":
+        assert trashed and out["blocked"] == 0 and out["verified"] == 1
+        assert db.get_audit(SRC_USER, sid, "dms_duplicate")["status"] == "TRASHED"
+        again = reconcile_dms(auth, db, settings, progress=lambda _: None)
+        assert again["blocked"] == 0, "a rerun sees the trashed copy and is not ambiguous again"
+    else:
+        assert not trashed and out["blocked"] == 1

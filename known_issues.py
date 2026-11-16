@@ -215,8 +215,10 @@ ISSUES = [
      "In split mode the engine writes the link mail with its links rewritten, and Google's "
      "import, run after, can bring the same email again with the original links (19 on "
      "finance@s., 2026-11-01). The import's copy still points at the source.",
-     "Kept on purpose: nothing is trashed. Each copy stays where it is and is listed, so the "
-     "operator can decide which to remove.", False),
+     "Automatic (operator, 16 Nov 2026: keep the better copy): the DMS check keeps the mapped copy with its "
+     "links rewritten and trashes the import's copy -- only when it is byte for byte the unrewritten source "
+     "(split_mail.trash_dms_duplicate; recoverable 30 days, DMS_TRASH_DUPLICATES=0 turns it off). Any other "
+     "second copy is left and listed.", True),
     ("gmail.rate_limited", "gmail", lambda t: "HTTP 429" in t or "rateLimitExceeded" in t,
      "Gmail refused a read during the check",
      "Gmail's per-user limit: a check reading the same mailbox as a running migration or "
