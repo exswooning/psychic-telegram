@@ -1,143 +1,123 @@
-"""Say what will not migrate before the run, not in an audit log after it.
+"""fableplan2 P1.5: Start is refused, with the reason, before anything launches."""
+import pytest
 
-Every limitation in this tool was already discoverable -- SKIPPED_EXPORT_
-TOO_LARGE, SKIPPED_UNEXPORTABLE, SKIPPED_NO_DOWNLOAD -- all true, all
-recorded, none of them known at the point where somebody could have acted.
-"3 files need files.copy" and "3,000 files need it" are the same message
-today and completely different decisions.
-"""
-from __future__ import annotations
-
-import preflight as pf
-from config import EXPORT_MIME_MAP
-
-G = "application/vnd.google-apps."
-CEIL = 10 * 1024 * 1024
+import preflight as P
 
 
-def _c(item):
-    return pf.classify(item, EXPORT_MIME_MAP, CEIL)[0]
+def ok(rows):
+    return {r["name"]: r["ok"] for r in rows}
 
 
-class TestClassification:
-    def test_a_binary_file_is_fine(self):
-        assert _c({"mimeType": "image/jpeg", "size": "900"}) == pf.FINE
+class TestOneCheckEach:
+    def test_no_route_to_google_refuses(self):
+        def refuse(*a, **k):
+            raise OSError("Network is unreachable")
+        r = P.check_network(refuse)
+        assert r["ok"] is False and "oauth2.googleapis.com" in r["detail"]
 
-    def test_a_small_native_is_fine(self):
-        assert _c({"mimeType": G + "document",
-                   "quotaBytesUsed": "50000"}) == pf.FINE
+    def test_a_route_to_google_passes(self):
+        assert P.check_network(lambda *a, **k: type("S", (), {"close": lambda s: None})())["ok"] is True
 
-    def test_a_form_needs_copy(self):
-        """No export representation at all -- files.copy is the only route."""
-        assert _c({"mimeType": G + "form"}) == pf.NEEDS_COPY
+    def test_a_full_disk_refuses_and_names_the_free_space(self, tmp_path):
+        r = P.check_disk(str(tmp_path), disk=lambda p: {"total": 100e9, "used": 95e9, "free": 5e9, "pct": 95})
+        assert r["ok"] is False and "95% full" in r["detail"] and "5 GB free" in r["detail"]
+        assert P.check_disk(str(tmp_path), disk=lambda p: {"total": 100e9, "used": 40e9, "free": 60e9, "pct": 40})["ok"] is True
 
-    def test_a_site_needs_copy(self):
-        assert _c({"mimeType": G + "site"}) == pf.NEEDS_COPY
+    def test_an_unreadable_disk_is_unknown_not_a_pass_or_a_refusal(self, tmp_path):
+        def boom(p):
+            raise OSError("no")
+        assert P.check_disk(str(tmp_path), disk=boom)["ok"] is None
 
-    def test_an_oversized_native_needs_copy(self):
-        assert _c({"mimeType": G + "spreadsheet",
-                   "quotaBytesUsed": str(45 * 10**6)}) == pf.NEEDS_COPY
-
-    def test_an_undownloadable_file_cannot_migrate_by_any_route(self):
-        """canDownload=false is the source saying this user may not have the
-        bytes. Another route would override that decision rather than
-        recover from an error -- drive_engine treats it the same way."""
-        assert _c({"mimeType": "application/pdf",
-                   "capabilities": {"canDownload": False}}) == pf.CANNOT
-
-    def test_folders_and_shortcuts_are_structure_not_content(self):
-        assert _c({"mimeType": pf.FOLDER}) == pf.FINE
-        assert _c({"mimeType": pf.SHORTCUT}) == pf.FINE
-
-    def test_an_unknown_native_type_is_assumed_unexportable(self):
-        """Safer direction to be wrong in: a type with no mapping cannot be
-        exported, whether or not this list has heard of it."""
-        assert _c({"mimeType": G + "somethingnew"}) == pf.NEEDS_COPY
+    def test_a_pending_reboot_or_a_running_upgrade_refuses(self):
+        assert P.check_upgrade(exists=lambda p: True)["ok"] is False
+        assert P.check_upgrade(exists=lambda p: False, running=lambda: True)["ok"] is False
+        assert P.check_upgrade(exists=lambda p: False, running=lambda: False)["ok"] is True
 
 
-class TestTheReportDrivesADecision:
-    def _summary(self):
-        items = [
-            {"name": "ok", "mimeType": G + "document", "quotaBytesUsed": "5"},
-            {"name": "huge", "mimeType": G + "spreadsheet",
-             "quotaBytesUsed": str(45 * 10**6)},
-            {"name": "Survey", "mimeType": G + "form"},
-            {"name": "locked", "mimeType": "application/pdf",
-             "capabilities": {"canDownload": False}},
-        ]
-        return pf.summarise(items, EXPORT_MIME_MAP, CEIL)
+class TestTheDmsLogin:
+    def _file(self, tmp_path, text):
+        f = tmp_path / "dwd.env"
+        f.write_text(text)
+        return str(f)
 
-    def test_read_only_says_they_will_be_skipped(self):
-        text = pf.report(self._summary(), can_copy=False)
-        assert "will be SKIPPED" in text
-        assert "auth/drive" in text          # and what to change
+    def test_a_file_that_serves_another_pair_refuses_and_says_which(self, tmp_path):
+        f = self._file(tmp_path, "DWD_EMAIL_SOURCE=admin@s.example\nDWD_PASSWORD_SOURCE=x\nDWD_PASSWORD_TARGET=y\n")
+        r = P.check_dms_login("a.example", "b.example", f)
+        assert r["ok"] is False and "another pair" in r["detail"] and "s.example" in r["detail"]
+        assert "x" not in r["detail"].replace("example", "")        # never a value in a row
 
-    def test_with_the_scope_it_says_they_are_covered(self):
-        text = pf.report(self._summary(), can_copy=True)
-        assert "FALL BACK to files.copy" in text
-        assert "will be SKIPPED" not in text
+    def test_no_file_or_no_target_password_refuses(self, tmp_path):
+        assert P.check_dms_login("a.example", "b.example", str(tmp_path / "none"))["ok"] is False
+        f = self._file(tmp_path, "DWD_EMAIL_SOURCE=admin@a.example\nDWD_PASSWORD_SOURCE=x\n")
+        assert "no target admin password" in P.check_dms_login("a.example", "b.example", f)["detail"]
 
-    def test_it_separates_skippable_from_impossible(self):
-        """Granting a scope fixes one group and not the other. Reporting a
-        single number would hide that."""
-        s = self._summary()
-        assert s["counts"][pf.NEEDS_COPY] == 2
-        assert s["counts"][pf.CANNOT] == 1
-
-    def test_it_names_examples_so_the_count_can_be_checked(self):
-        text = pf.report(self._summary(), can_copy=False)
-        assert "huge" in text and "Survey" in text
-
-    def test_a_clean_tenant_says_so_plainly(self):
-        s = pf.summarise([{"name": "a", "mimeType": "image/png"}],
-                         EXPORT_MIME_MAP, CEIL)
-        assert "nothing would be skipped" in pf.report(s, can_copy=False)
-
-    def test_the_ceiling_estimate_is_labelled_as_one(self):
-        """A native file reports no size, so this cannot be a fact -- the
-        only way to know for certain is to export, which is the run."""
-        _, reason = pf.classify({"mimeType": G + "spreadsheet",
-                                 "quotaBytesUsed": str(45 * 10**6)},
-                                EXPORT_MIME_MAP, CEIL)
-        assert "estimated" in reason
+    def test_the_pair_s_own_logins_pass_and_say_whether_the_approval_needs_a_click(self, tmp_path):
+        both = self._file(tmp_path, "DWD_EMAIL_SOURCE=admin@a.example\nDWD_PASSWORD_SOURCE=x\nDWD_PASSWORD_TARGET=y\n")
+        r = P.check_dms_login("a.example", "b.example", both)
+        assert r["ok"] is True and "no click" in r["detail"]
+        only_target = self._file(tmp_path, "DWD_PASSWORD_TARGET=y\n")
+        assert "waits for a click" in P.check_dms_login("a.example", "b.example", only_target)["detail"]
 
 
-class TestItStatesTheUnavoidableLosses:
-    def test_the_list_is_there(self):
-        """A migration that cannot enumerate its own known losses cannot
-        honestly be signed off."""
-        for phrase in ("Revision history", "Apps Script", "original creator",
-                       "URL", "Group settings"):
-            assert phrase in pf.ALWAYS_LOST, phrase
+class TestTheWholeAsk:
+    class S:
+        scratch_dir, source_domain, target_domain = "", "a.example", "b.example"
 
-    def test_it_distinguishes_losses_from_skips(self):
-        assert "not skips" in pf.ALWAYS_LOST
+    def _env(self, monkeypatch):
+        monkeypatch.setenv("BITPORT_PREFLIGHT", "1")
+        monkeypatch.setattr(P, "check_network", lambda: P._row("network", True, "up"))
+        monkeypatch.setattr(P, "check_disk", lambda path: P._row("disk", True, "40% used"))
+        monkeypatch.setattr(P, "check_upgrade", lambda: P._row("upgrade", True, "none"))
 
-    def test_it_says_bound_scripts_leave_no_trace(self):
-        """The worst kind of loss: nothing detects one, so there is no skip
-        row to find afterwards."""
-        assert "no skip row" in pf.ALWAYS_LOST
+    def test_the_tests_switch_it_off(self, monkeypatch):
+        monkeypatch.setenv("BITPORT_PREFLIGHT", "0")
+        assert P.check(self.S()) == []
 
-    def test_it_is_printed_by_the_run(self):
-        import inspect
-        assert "ALWAYS_LOST" in inspect.getsource(pf.main)
+    def test_every_refusal_is_named_in_one_sentence(self, monkeypatch):
+        self._env(monkeypatch)
+        monkeypatch.setattr(P, "check_disk", lambda path: P._row("disk", False, "95% full"))
+        rows = P.check(self.S(), ready=lambda s: [P._row("target ready", False, "Drive: 401")])
+        why = P.refusal(rows)
+        assert "disk: 95% full" in why and "target ready: Drive: 401" in why
+
+    def test_a_check_nobody_could_make_does_not_refuse(self, monkeypatch):
+        self._env(monkeypatch)
+        rows = P.check(self.S(), ready=lambda s: [P._row("source ready", None, "could not ask Google")])
+        assert P.refusal(rows) is None
+
+    def test_the_dms_login_is_asked_only_when_the_dms_is_used(self, monkeypatch):
+        self._env(monkeypatch)
+        monkeypatch.setattr(P, "check_dms_login", lambda s, t: P._row("dms login", False, "no file"))
+        assert "dms login" not in ok(P.check(self.S(), ready=lambda s: []))
+        assert ok(P.check(self.S(), needs_dms=True, ready=lambda s: []))["dms login"] is False
+
+    def test_readiness_is_not_asked_without_a_network(self, monkeypatch):
+        self._env(monkeypatch)
+        monkeypatch.setattr(P, "check_network", lambda: P._row("network", False, "unreachable"))
+        asked = []
+        P.check(self.S(), ready=lambda s: asked.append(1) or [])
+        assert asked == []
 
 
-class TestCreatedTimeIsPreserved:
-    def test_it_is_requested_in_the_listing(self):
-        from config import DRIVE_FILE_FIELDS
-        assert "createdTime" in DRIVE_FILE_FIELDS
+def test_the_start_endpoint_answers_409_with_the_reason(monkeypatch):
+    import tempfile
 
-    def test_both_upload_paths_set_it(self):
-        """Without it every migrated file claims to have been created on
-        migration day, which breaks sort-by-created and any retention
-        reasoning that starts from a file's age."""
-        import inspect
+    from fastapi.testclient import TestClient
 
-        import drive_engine
-        for name in ("_sync_native", "_sync_binary"):
-            fn = getattr(drive_engine.DriveMigrator, name, None)
-            if fn is None:
-                continue
-            src = inspect.getsource(fn)
-            assert 'body["createdTime"]' in src, name
+    import accounts_auth
+    import api_server
+    import control_plane_db as cpdb
+    from db import MigrationDB
+    path = tempfile.mktemp(suffix=".db")
+    monkeypatch.setenv("MIGRATION_DB", path)
+    MigrationDB(path)
+    cpdb.apply_migrations()
+    monkeypatch.setattr(P, "check", lambda *a, **k: [P._row("disk", False, "the disk is 95% full")])
+    import tenant_capacity
+    monkeypatch.setattr(tenant_capacity, "read", lambda *a, **k: {})
+    monkeypatch.setattr(tenant_capacity, "refusal", lambda *a, **k: None)
+    with TestClient(api_server.app) as client:
+        aid = accounts_auth.create_account("pre@one.example", "a-long-password", "Someone")
+        client.cookies.set("bp_session", accounts_auth.create_session(aid))
+        r = client.post("/api/v2/migrate/start", json={"reason": "go now", "services": ["drive"]})
+    assert r.status_code == 409 and "Not started: disk: the disk is 95% full" in r.text

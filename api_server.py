@@ -2693,6 +2693,20 @@ async def migrate_start(body: StartMigration, op: Operator = Depends(operator)):
             why = None
         if why:
             raise HTTPException(409, f"Not started: {why}.")
+        # The host and the pair, asked before anything starts (preflight.py): disk, route to Google, an
+        # upgrade in flight, the DMS login, readiness of both tenants. A failure is named, nothing launches.
+        import preflight
+        try:
+            st = Settings(account_id=account_id)
+            rows = await _off_loop(lambda: preflight.check(
+                st, needs_dms=body.mail_mode in ("split", "dms") and body.dms_after and not body.users
+                and body.sample is None))
+            why = preflight.refusal(rows)
+        except Exception as exc:      # noqa: BLE001 - a broken check never costs a start
+            log.warning("preflight could not run: %s", exc)
+            why = None
+        if why:
+            raise HTTPException(409, f"Not started: {why}.")
     services, env, ordered = _mail_plan(body.services, body.mail_mode,
                                         Settings(account_id=account_id).rewrite_drive_links)
     if body.sample is not None:
