@@ -1,5 +1,9 @@
 # dharan.gov.np → a.sarafgloabalexim.com, with dharan untouched
 
+**Withdrawn, 16 Nov 2026.** The operator can no longer read dharan.gov.np. Nothing below was run
+against a tenant. The two code fixes stay. The work continues in
+[synthetic-10-plan.md](synthetic-10-plan.md).
+
 Operator, 16 Nov 2026: remigrate dharan.gov.np into the brand-new a.sarafgloabalexim.com. dharan is a
 real government tenant, never a sandbox; a. is a sandbox. **Nothing on dharan may change.**
 (It replaces account 7's target, s., whose subscription lapsed on 16 Nov.)

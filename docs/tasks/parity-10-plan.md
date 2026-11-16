@@ -1,5 +1,9 @@
 # Bitport to 10/10: plan and progress
 
+**Superseded, 16 Nov 2026.** Account 3's tenants lapsed. The meaning of 10/10 and the open code
+items below continue in [synthetic-10-plan.md](synthetic-10-plan.md), on the fresh tenants a. and
+b. This file is kept as the record of the account 3 runs.
+
 Operator's goal (13 Nov 2026): parity at every run; the most efficient, fast and reliable migration tool.
 Work one item at a time: code, a test, commit, push. Deploy to l3novo only when no migration, DMS,
 reconcile or verify job is live. Update the checkboxes here in the same commit. Audit behind this plan:

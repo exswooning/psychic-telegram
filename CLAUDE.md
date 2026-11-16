@@ -1,14 +1,16 @@
 ## Pending Claude implementation task
 
-- [ ] Top priority (16 Nov): [dharan.gov.np → a.sarafgloabalexim.com, dharan untouched](docs/tasks/dharan-to-a.md). dharan is a real government source: nothing on it may change. Work it in order; deploy only on an idle box.
+- [ ] Top priority (16 Nov): [Bitport to 10/10 on synthetic tenants: a. → b.](docs/tasks/synthetic-10-plan.md). The operator no longer has the old tenants' data; a.sarafgloabalexim.com (source) and b.sarafgloabalexim.com (target) are fresh sandboxes. Synthetic data for every benchmark, error and failure, then a seeder that simulates real data for 300 users, then every open code item. Executed by Sonnet, Opus where marked, never Fable. Work it in order; deploy only on an idle box. Never delete account 3's ledger on the box: it holds the only surviving shape statistics of real data.
 
-- [ ] Parked (account 3's tenants s./t. lapsed 16 Nov): [Bitport to 10/10: plan and progress](docs/tasks/parity-10-plan.md). The audit's fix plan, the measurable definition of 10/10, and checkboxes kept current. Work it in order; deploy only on an idle box.
+- Withdrawn (16 Nov, dharan can no longer be read): [dharan.gov.np → a.sarafgloabalexim.com](docs/tasks/dharan-to-a.md). Its safeguards for a government source stay in the code.
 
-- [ ] High priority: [Gmail search-first link rewriting → DMS](docs/tasks/claude-gmail-search-first-dms.md). Use server-side search to fetch only candidate email bodies by default; keep exhaustive scans/full 1:1 optional. This task is queued, not implemented. Respect active-job deployment gates.
+- Superseded by the synthetic plan (account 3's tenants s./t. lapsed 16 Nov): [Bitport to 10/10: plan and progress](docs/tasks/parity-10-plan.md). Its meaning of 10/10 and its open code items are carried into the synthetic plan; its history stays.
+
+- [ ] Queued, now Phase 6 of the synthetic plan and only if the link scan binds the mail pass: [Gmail search-first link rewriting → DMS](docs/tasks/claude-gmail-search-first-dms.md). Use server-side search to fetch only candidate email bodies by default; keep exhaustive scans/full 1:1 optional. Not implemented. Respect active-job deployment gates.
 
 ## Live-run error rule (operator, 2 Nov 2026)
 
-On account-3 migration runs every error STOPS the run, is fixed (opus allowed), then the run restarts from the UI. See monitor/CHARTER.md and the memory note error-stop-fix-restart.
+On account-3 migration runs, and on the a. → b. account's runs, every error STOPS the run, is fixed (opus allowed), then the run restarts from the UI. See monitor/CHARTER.md and the memory note error-stop-fix-restart.
 
 ## Job monitor (unattended error feed)
 
