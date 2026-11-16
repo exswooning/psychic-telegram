@@ -5,19 +5,32 @@ map (a delta: the console keeps the map, so it only retries what did not land). 
 after each attempt and stops when it is zero. Limits: 5 attempts; if the count stops falling it escalates to
 Claude (logs/autopilot/INBOX.md) and stops, rather than repeating the same failure. Never deletes an import.
 """
-import json, subprocess, sys, time
+import argparse, json, os, subprocess, sys, time
 import fcntl
 import uuid
 
-ROOT = "/opt/bitport"
-CSV = f"{ROOT}/logs/dms/3/identities-fresh-45.csv"
-LOG = f"{ROOT}/logs/jobs/3/dms_delta_loop.log"
-INBOX = f"{ROOT}/logs/autopilot/INBOX.md"
+ROOT = os.path.dirname(os.path.abspath(__file__))        # /opt/bitport on the box
+ACCOUNT = int(os.getenv("BITPORT_ACCOUNT_ID") or 0)      # set by --account-id; 0 = none chosen
+CSV = LOG = INBOX = LOCK = ""
 MAX_ATTEMPTS = 5
+
+
+def configure(account_id: int, identities: str | None = None) -> None:
+    """Point every path at ONE account's folders (it was account 3's, written in)."""
+    global ACCOUNT, CSV, LOG, INBOX, LOCK
+    ACCOUNT = int(account_id)
+    CSV = identities or f"{ROOT}/logs/dms/{ACCOUNT}/identities.csv"
+    LOG = f"{ROOT}/logs/jobs/{ACCOUNT}/dms_delta_loop.log"
+    INBOX = f"{ROOT}/logs/autopilot/INBOX.md"
+    LOCK = f"{ROOT}/logs/jobs/{ACCOUNT}/dms-delta-scheduler.lock"
+
+
+configure(ACCOUNT)
 
 
 def say(msg):
     line = f"{time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime())} {msg}"
+    os.makedirs(os.path.dirname(LOG), exist_ok=True)
     with open(LOG, "a", encoding="utf-8") as fh:
         fh.write(line + "\n")
     print(line, flush=True)
@@ -29,7 +42,7 @@ def unit_active(name):
 
 def failed_count():
     try:
-        m = json.load(open(f"{ROOT}/logs/dms/3/metrics.json"))
+        m = json.load(open(f"{ROOT}/logs/dms/{ACCOUNT}/metrics.json"))
         return int(m["metrics"].get("Emails failed", -1)), m.get("status", "?")
     except Exception:      # noqa: BLE001 - unknown is not zero
         return -1, "?"
@@ -42,7 +55,7 @@ def wait_done(unit):
 
 def run_delta(attempt):
     unit = f"bitport-dms-delta-{attempt}-{uuid.uuid4().hex[:10]}"
-    code = (f"import sys,subprocess,webui;env=webui._dms_env(3);env['MIGRATION_DB']='{ROOT}/data/accounts/3/migration.db';"
+    code = (f"import sys,subprocess,webui;env=webui._dms_env({ACCOUNT});env['MIGRATION_DB']='{ROOT}/data/accounts/{ACCOUNT}/migration.db';"
             f"sys.exit(subprocess.call(['{ROOT}/.venv/bin/python','dms_migrate.py','--apply','--watch','120',"
             f"'--until-done','4320','--timeout','200','--identities','{CSV}','--no-tally'],env=env,cwd='{ROOT}'))")
     subprocess.run(["systemctl", "reset-failed", unit], capture_output=True)
@@ -80,9 +93,16 @@ def _main():
     return 1
 
 
-def main():
+def main(argv=None):
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--account-id", type=int, default=ACCOUNT or None, required=not ACCOUNT)
+    ap.add_argument("--identities", help="the identity CSV the fresh import used "
+                                         "(default: logs/dms/<id>/identities.csv)")
+    args = ap.parse_args(argv)
+    configure(args.account_id, args.identities)
     # A scheduler restart cannot create a second loop beside this one.
-    with open(f"{ROOT}/logs/jobs/3/dms-delta-scheduler.lock", "a") as lock:
+    os.makedirs(os.path.dirname(LOCK), exist_ok=True)
+    with open(LOCK, "a") as lock:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:

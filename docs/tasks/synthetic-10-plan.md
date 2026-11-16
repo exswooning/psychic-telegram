@@ -166,16 +166,16 @@ Phase 1 and the code of Phase 2 need no tenant. Start them while Phase 0 is open
     enables, claims, then pauses.
   Both files and the new tests are in `tests/gate.txt`; the gate passed. Still open, so the box stays
   unticked: the full `tests/` and `data-generator/` runs, and the skip count in State.
-- [ ] P1.2 Box scripts work for any account. `dms_delta_loop.py` and `dms_user_verify.py` hard-code
-  account 3 and `/opt/bitport`; `autopilot.py` and `parity_loop.py` take `--account-id` already.
-  Add unit templates `systemd/bitport-autopilot@.service` and `systemd/bitport-parity@.service`
-  (the instance is the account id): the repo has none, and the box runs a hand-made unit for
-  account 3. Done when a grep for `accounts/3` and `account_id=3` in the four files finds nothing,
-  with a test.
-- [ ] P1.3 `coverage_audit.py` takes `--account-id`. It is the only check tool without it (read
-  16 Nov: `fidelity_audit.py`, `form_deep_check.py`, `mail_dead_links.py`, `tally.py`,
-  `parity_gate.py` and `readiness.py` have it). `sharing_report.py` is not a command: its numbers
-  are read on the Sharing page.
+- [x] P1.2 (16 Nov) Box scripts work for any account. `dms_delta_loop.py` and `dms_user_verify.py`
+  take `--account-id` (and the delta loop `--identities`); their paths, ledger, logs and lock follow
+  it; the install path is the file's own folder, not `/opt/bitport`. Units
+  `systemd/bitport-autopilot@.service` and `systemd/bitport-parity@.service` (the instance is the
+  account id; deploy installs them, enables none). `tests/test_account_scripts.py`, in the gate.
+  The delta loop still waits on the unit `bitport-dms-fresh`, a name shared by all accounts.
+- [x] P1.3 (16 Nov) `coverage_audit.py` takes `--account-id`. It was also launched by the API
+  (`/api/v2/coverage/start`) with no account, so it read the legacy ledger whoever pressed the
+  button; the API now passes the caller's account. Tested both ways (the API test fails without it).
+  `sharing_report.py` is not a command: its numbers are read on the Sharing page.
 - [ ] P1.4 Wipe safety, from the 16 Nov half-wipe:
   - a wipe refuses to start unless readiness reads Ready for that side and one real read per
     requested service succeeds as the admin and as every user it will touch. All or nothing; each
@@ -514,6 +514,9 @@ old keys from root's `authorized_keys`; decide on rewriting the git history that
 
 ## 11. State (newest first)
 
+- 16 Nov 2026, ~18:30 UTC (Sonnet, working in the worktree `../calude-workspace-fp2`, branch
+  `fableplan2-work`, while the full suite runs in the main tree): P1.2 and P1.3 done and tested in
+  isolation; not yet gated or deployed. Merge into the main branch after the full run ends.
 - 16 Nov 2026, 17:50 UTC (Sonnet): P1.1 fixed and gated; the two named tests pass (the first was a
   one-second timestamp tie, not a missing feature). The full-suite run is the one thing left on P1.1.
 - 16 Nov 2026, 17:00 UTC (Sonnet): P1.0 done on the box (autopilot for account 3 stopped; no job

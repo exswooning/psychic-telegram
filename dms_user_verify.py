@@ -11,14 +11,23 @@ import sys
 import time
 from uuid import uuid4
 
-ROOT = "/opt/bitport"
+ROOT = os.path.dirname(os.path.abspath(__file__))        # /opt/bitport on the box
+ACCOUNT = int(os.getenv("BITPORT_ACCOUNT_ID") or 0)      # set by --account-id; 0 = none chosen
 MAX_PARALLEL = 3
 SHARE = 0.99
-LOG = f"{ROOT}/logs/jobs/3/dms_user_verify.log"
+LOG = f"{ROOT}/logs/jobs/{ACCOUNT}/dms_user_verify.log"
+
+
+def configure(account_id: int) -> None:
+    """Point the log at ONE account's folder (it was account 3's, written in)."""
+    global ACCOUNT, LOG
+    ACCOUNT = int(account_id)
+    LOG = f"{ROOT}/logs/jobs/{ACCOUNT}/dms_user_verify.log"
 
 
 def say(msg):
     line = f"{time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime())} {msg}"
+    os.makedirs(os.path.dirname(LOG), exist_ok=True)
     with open(LOG, "a", encoding="utf-8") as fh:
         fh.write(line + "\n")
     print(line, flush=True)
@@ -44,7 +53,7 @@ def verify_mailbox(auth, db, settings, user):
         return 1
 
     # Parallel workers must not replace one another's report or latest pointer.
-    report_dir = os.path.join(verify_dir(3), "dms", uuid4().hex)
+    report_dir = os.path.join(verify_dir(ACCOUNT), "dms", uuid4().hex)
     report = run_and_save(
         auth, db, settings, [user], ("gmail",),
         retry=retry_on_google_error(
@@ -63,7 +72,7 @@ def dispatch(user):
     """Return the exit status of the worker, including launch errors."""
     with open(LOG, "a", encoding="utf-8") as log:
         result = subprocess.run(
-            [sys.executable, "-u", os.path.abspath(__file__), f"--verify-user={user}"],
+            [sys.executable, "-u", os.path.abspath(__file__), f"--account-id={ACCOUNT}", f"--verify-user={user}"],
             cwd=ROOT, stdout=log, stderr=subprocess.STDOUT,
         )
     return result.returncode
@@ -122,16 +131,18 @@ def watch_mailboxes(auth, users):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--account-id", type=int, default=ACCOUNT or None, required=not ACCOUNT)
     parser.add_argument("--verify-user", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
+    configure(args.account_id)
     os.chdir(ROOT)
-    os.environ.setdefault("MIGRATION_DB", f"{ROOT}/data/accounts/3/migration.db")
+    os.environ.setdefault("MIGRATION_DB", f"{ROOT}/data/accounts/{ACCOUNT}/migration.db")
     os.environ.setdefault("GOOGLE_HTTP_TIMEOUT_SEC", os.getenv("VERIFY_HTTP_TIMEOUT_SEC", "90"))
     from auth import AuthManager
     from config import Settings
     from db import MigrationDB
 
-    settings = Settings(account_id=3)
+    settings = Settings(account_id=ACCOUNT)
     db = MigrationDB(settings.db_path)
     try:
         auth = AuthManager(settings)
@@ -139,7 +150,7 @@ def main(argv=None):
                  if r["entity_type"] == "user"]
         if args.verify_user:
             if args.verify_user not in dict(users):
-                parser.error("mailbox is outside account 3's identity map")
+                parser.error(f"mailbox is outside account {ACCOUNT}'s identity map")
             return verify_mailbox(auth, db, settings, args.verify_user)
         return watch_mailboxes(auth, users)
     finally:

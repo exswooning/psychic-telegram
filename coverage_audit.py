@@ -506,6 +506,8 @@ def render(rows: list[dict], totals: dict) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[3])
+    ap.add_argument("--account-id", type=int, default=None,
+                    help="the Bitport account whose ledger and keys to use (default: the legacy one)")
     ap.add_argument("--user", action="append",
                     help="limit to specific source user(s)")
     ap.add_argument("--json", action="store_true")
@@ -513,7 +515,7 @@ def main(argv: list[str] | None = None) -> int:
                     help="report gaps but still exit 0")
     args = ap.parse_args(argv)
 
-    settings = Settings()
+    settings = Settings(account_id=args.account_id)
     auth = AuthManager(settings)
     db = MigrationDB(settings.db_path)
     users = args.user or [r["source_email"] for r in db.all_identities()

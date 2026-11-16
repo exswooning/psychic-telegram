@@ -1,0 +1,15 @@
+[Unit]
+Description=Bitport parity loop for account %i (parity_loop.py: checks each user as its pass finishes)
+After=network.target bitport-api.service
+
+[Service]
+WorkingDirectory=/root/migration
+EnvironmentFile=-/etc/bitport/node.env
+ExecStart=/root/migration/.venv/bin/python -u parity_loop.py --account-id %i
+Restart=on-failure
+RestartSec=30
+KillMode=process
+
+# Not enabled by deploy. Start one per account: systemctl enable --now bitport-parity@<account-id>
+[Install]
+WantedBy=multi-user.target

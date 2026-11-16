@@ -4713,11 +4713,15 @@ def _coverage_log_dir() -> str:
 
 @app.post("/api/v2/coverage/start")
 async def coverage_start(body: StartCoverage, op: Operator = Depends(operator)):
+    aid = _resolve_account(body, op)
+
     def _launch() -> tuple[bool, str]:
         stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
         out = os.path.join(_coverage_log_dir(), f"coverage-{stamp}.json")
         err = os.path.join(_coverage_log_dir(), f"coverage-{stamp}.err")
         argv = [PY, "coverage_audit.py", "--json", "--allow-absent"]
+        if aid is not None:        # the caller's own ledger, never the legacy one (an account's source is not the default's)
+            argv += ["--account-id", str(aid)]
         with open(out, "wb") as o, open(err, "wb") as e:
             proc = subprocess.Popen(argv, cwd=HERE, stdout=o, stderr=e,
                                     stdin=subprocess.DEVNULL,
