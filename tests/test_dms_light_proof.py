@@ -75,7 +75,7 @@ def test_a_sample_that_differs_only_in_labels_keeps_light_proof_on(db, auth, set
     monkeypatch.setattr(dms_light_proof, "sample", lambda ids, n=None: {bad})
     out = reconcile_dms(auth, db, settings, progress=lambda _: None)
     proofs = [r[0] for r in db.conn.execute("SELECT evidence FROM migration_item_receipts")]
-    assert out["blocked"] == 1, "the label difference is still reported"
+    assert out["labelsOnly"] == 1 and out["blocked"] == 0, "the label difference is recorded for the alignment, not a block"
     assert sum('"proof": "light"' in p for p in proofs) == 3, "the rest of the mailbox is still proven lightly"
 
 
@@ -119,3 +119,17 @@ def test_the_per_message_findings_lookup_uses_an_index(db):
         "EXPLAIN QUERY PLAN SELECT finding_key,detail FROM verification_repair_queue "
         "WHERE source_user=? AND service='gmail' AND category='errors' AND item_id=?", ("u", "m")))
     assert "ix_vrq_item" in plan, plan
+
+
+def test_a_label_only_difference_never_stops_the_pipeline_but_a_content_one_does(db, auth, settings, identity, light, monkeypatch):
+    """Account 3, 15 Nov 2026: 13,907 label-only differences made the reconciliation return 'blocked', so the
+    pipeline stopped before the label alignment that fixes them -- and before the verify and the gate."""
+    monkeypatch.setenv("DMS_LIGHT_SAMPLE", "0")
+    sid, tid = _pair(auth, db, 1)
+    auth.target_gmail(TGT_USER).messages[tid]["labelIds"] = ["INBOX", "IMPORTANT"]
+    out = reconcile_dms(auth, db, settings, progress=lambda _: None)
+    assert (out["labelsOnly"], out["blocked"]) == (1, 0)
+    status = db.conn.execute("SELECT status FROM migration_item_receipts WHERE source_id=?", (sid,)).fetchone()[0]
+    assert status == "NEEDS_RECHECK", "the receipt the label alignment works from is still written"
+    sid2, _ = _pair(auth, db, 2, target_body=(MSG % (2, 2, 2)).replace(b"Subject: s2", b"Subject: other"))
+    assert reconcile_dms(auth, db, settings, progress=lambda _: None)["blocked"] == 1

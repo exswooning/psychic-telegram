@@ -13,7 +13,7 @@ def test_label_difference_maps_proven_identity_without_repair(db,auth,settings,i
     tid=auth.target_gmail(TGT_USER).add_message(PLAIN,['INBOX','CATEGORY_UPDATES'])
     db.log_audit(SRC_USER,sid,'message',DEFERRED_TO_DMS)
     out=reconcile_dms(auth,db,settings,progress=lambda _:None)
-    assert out['blocked'] and db.get_target_id(SRC_USER,sid,'message')==tid
+    assert out['labelsOnly']==1 and not out['blocked'] and db.get_target_id(SRC_USER,sid,'message')==tid  # the alignment's work, not a block
     assert db.get_audit(SRC_USER,sid,'message')['status']==DEFERRED_TO_DMS
     assert auth.target_gmail(TGT_USER).call_count('messages.modify')==0
     proof=json.loads(db.conn.execute('SELECT evidence FROM migration_item_receipts').fetchone()[0])

@@ -146,6 +146,12 @@ class ContentDiffers(RuntimeError):
     """A DMS copy whose content (not only its labels) did not prove identical."""
 
 
+class LabelsDiffer(RuntimeError):
+    """A DMS copy proven identical in content whose labels differ: owed to the label alignment that follows,
+    not a block. Counted apart (labelsOnly) -- 13,907 of them stopped account 3's pipeline before that alignment
+    could run (15 Nov 2026)."""
+
+
 def reconcile_tuning() -> tuple[int, float]:
     """(threads per mailbox, reads a second per mailbox) for the DMS reconciliation.
 
@@ -188,6 +194,7 @@ def reconcile_dms(auth, db, settings, progress=None, users=None):
         "checked": 0,
         "verified": 0,
         "blocked": 0,
+        "labelsOnly": 0,        # content proven, labels differ: the label alignment's work, not a block
         "errors": [],
         "scope": "fresh email content and labels; no tenant writes",
     }
@@ -279,7 +286,7 @@ def reconcile_dms(auth, db, settings, progress=None, users=None):
                         if not mapped:
                             db.adopt_message_mapping(source, mid, tid)
                         if verdict == "labels":
-                            raise RuntimeError("DMS destination content or labels did not match")
+                            raise LabelsDiffer("DMS destination content or labels did not match")
                         checkpoint.save(mid, tid, "VERIFIED", evidence)
                         resolve_findings(mid)
                         return (source, mid, tid), None
@@ -362,7 +369,7 @@ def reconcile_dms(auth, db, settings, progress=None, users=None):
                                    and proof.get("labelDifferences"))
                     if labels_only and not mapped:
                         db.adopt_message_mapping(source, mid, tid)
-                    raise (RuntimeError if labels_only else ContentDiffers)("DMS destination content or labels did not match")
+                    raise (LabelsDiffer if labels_only else ContentDiffers)("DMS destination content or labels did not match")
                 checkpoint.save(mid, tid, "VERIFIED", {"scope": "content and labels", "target": tid})
                 if not mapped:
                     db.adopt_message_mapping(source, mid, tid)
@@ -404,7 +411,8 @@ def reconcile_dms(auth, db, settings, progress=None, users=None):
                             "UPDATE migration_item_receipts SET status='NEEDS_RECHECK' WHERE source_user=? AND service='gmail' AND source_id=?",
                             (source, mid),
                         )
-                return None, {"user": source, "id": mid, "error": error}
+                return None, {"user": source, "id": mid, "error": error,
+                              **({"labelsOnly": True} if isinstance(exc, LabelsDiffer) else {})}
 
         from concurrent.futures import ThreadPoolExecutor
 
@@ -419,7 +427,9 @@ def reconcile_dms(auth, db, settings, progress=None, users=None):
                 yield from pool.map(inspect, rest)
             for verified, error in phased():
                 out["checked"] += 1
-                if error:
+                if error and error.get("labelsOnly"):
+                    out["labelsOnly"] += 1      # recorded (finding, receipt) for the alignment, not a block
+                elif error:
                     out["blocked"] += 1
                     out["errors"].append(error)
                 else:
