@@ -364,3 +364,18 @@ Superseded: a full fresh-disk acceptance install; judge the Setup Wizard's first
 - Each run after the wipe: POST /api/v2/migrate/start for account 3 (full, split, DMS after) -- then repair, DMS,
   mail check, label alignment, verify with repair and the parity gate run on their own. Record per run: Drive and
   mail pass times, DMS check rate, mail-pass bodies read (read-once), verdict and failing kinds.
+
+## Acceptance run 1 (16 Nov): the wipe of t. did NOT complete -- blocked by Google grants, not by Bitport
+- Operator allowed the command ("Allow the command for this session"); wipe_tenant.py --side target ran as unit
+  bitport-acc1-wipe, 06:15-06:21 UTC. Result: NOT WIPED on t. for drive, calendar, tasks, chat, shared drives.
+- Cause (measured, read-only): with the target key (target-sa.json, admin nest@t.), Drive returns 401 and
+  Calendar 403 "user must be signed up" and Chat 403 "insufficient" for EVERY user, the admin included. Gmail works.
+  The admin-level grant check (wipe_tenant.granted) still says True for all four, so it does not match what Google
+  does per user. Needs a person in the Admin console (domain-wide delegation scopes for t., and Calendar/Chat set up
+  for the users) before any wipe can succeed. Nothing was deleted.
+- Ledger: intact after the run (38,513 file and 70,288 message mappings). The wipe log line "Ledger reset for drive,
+  gmail, calendar, contacts, tasks, chat on 45 user(s)" contradicts its own "NOT WIPED ... ledger is kept" line; it
+  must be fixed before any acceptance run trusts a wipe.
+- Identity statuses after the last DMS check: 44 users BLOCKED, 1 FAILED (set by the earlier reconciliation). A migration
+  start may refuse them; to be checked before run 1.
+- Acceptance runs 1-3 NOT started. The next step is a grant fix on t. by the operator, then a dry wipe check.
