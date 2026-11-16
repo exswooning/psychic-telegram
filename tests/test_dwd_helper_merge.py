@@ -212,3 +212,20 @@ class TestTheTargetLoginIsTheTargetsOwn:
         admin_secrets.save_teardown_login(5, "target", "admin@mdharan.example", "own-pw")
         assert scope_guard._console_login(settings, "target") == {
             "DWD_EMAIL": "admin@mdharan.example", "DWD_PASSWORD": "own-pw"}
+
+    def test_a_government_sources_console_is_never_signed_in_to(self, settings, monkeypatch, tmp_path):
+        """Operator, 16 Nov 2026: nothing on dharan.gov.np may change -- no unattended re-grant,
+        narrowing or seed key, even with its admin's login on file."""
+        import admin_secrets
+        import scope_guard
+        settings.source_domain, settings.account_id = "dharan.gov.np", 7
+        monkeypatch.setattr(admin_secrets, "LOGIN_DIR", str(tmp_path))
+        monkeypatch.setenv("DWD_EMAIL_SOURCE", "admin@dharan.gov.np")
+        monkeypatch.setenv("DWD_PASSWORD_SOURCE", "gov-pw")
+        admin_secrets.save_teardown_login(7, "source", "admin@dharan.gov.np", "gov-pw")
+        assert scope_guard._console_login(settings, "source") == {}
+        assert scope_guard.can_repair(settings, "source") is False
+        # Only a government source: a sandbox source still gets its own login.
+        settings.source_domain = "s.sandbox.example"
+        monkeypatch.setenv("DWD_EMAIL_SOURCE", "admin@s.sandbox.example")
+        assert scope_guard._console_login(settings, "source")["DWD_EMAIL_SOURCE"] == "admin@s.sandbox.example"

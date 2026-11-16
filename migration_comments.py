@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import html
+import re
 from collections import Counter
 from link_rewrite import rewrite_text
 from db import utc_now
@@ -34,14 +35,25 @@ def list_threads(svc, fid, execute=lambda fn: fn()):
         seen.add(token)
 
 
+# "+name@x" (or "@name@x") in a comment mentions that person, and writing it can make Google email
+# them -- from dharan.gov.np, a new message in a SOURCE mailbox. A copy names them as plain text and
+# mails nobody (operator, 16 Nov 2026: the source must not change at all). "a+b@x" is an address.
+_MENTION = re.compile(r"(?<![\w.+-])[+@](?=[\w.%+'-]+@[\w-]+(?:\.[\w-]+)+)")
+
+
+def _unmention(text):
+    return _MENTION.sub("", text)
+
+
 def _text(value):
     # Drive keeps a comment's text without the trailing space the engine writes after the
     # "[Author, date]" prefix, so an exact comparison called every action-only reply
     # (empty body) "differs" and refused it. Trailing whitespace is not a difference.
     # Only text is trimmed: quotedFileContent is an object ({"mimeType", "value"}), and trimming it
     # failed health@, ward15@ and ward4@ with "'dict' object has no attribute 'rstrip'" (7 Nov 2026).
+    # Nor is a mention's "+": a copy made before 16 Nov kept it and is the same comment.
     if isinstance(value, str):
-        return value.rstrip()
+        return _unmention(value).rstrip()
     return "" if value is None else value
 
 
@@ -88,7 +100,7 @@ def content(row, lookup):
         + ", "
         + (row.get("createdTime") or "")[:10]
         + "] "
-        + rewrite_text(row.get("content", ""), lookup)[0]
+        + _unmention(rewrite_text(row.get("content", ""), lookup)[0])
     )
 
 

@@ -30,16 +30,17 @@ already on dharan from migration 5 (19 Oct) and are not new:
 
 ## Gaps to close before the run (code; no tenant needed)
 
-- [ ] **Setup and the scope check can change a source's Admin console on their own.**
-  - `full_setup._allow_project_creation` and `_allow_drive_sdk` turn settings on when refused.
-  - `scope_guard.ensure` re-grants a source's delegation unattended.
+- [x] (16 Nov) **Setup and the scope check could change a source's Admin console on their own.**
+  - `full_setup._allow_project_creation` and `_allow_drive_sdk` turned settings on when refused.
+  - `scope_guard.ensure` re-granted a source's delegation unattended.
 
-  On a government source these must refuse and name what you'd do by hand. Today they only
-  fail because dharan's password isn't on the box.
-- [ ] **Comment text is copied as is** (`migration_comments.content` rewrites only links). A
-  `+name@dharan.gov.np` mention may make Google email that person, which would be a new message
-  in a dharan mailbox. Write mentions as plain text, apply the same rule in the comparison, and
-  test it on a. first.
+  Fixed: `project_creation.run` refuses to switch a government tenant's setting on, and setup
+  names the checkbox instead. `scope_guard._console_login` offers no login for a government
+  source, so no re-grant, narrowing or seed key signs in there.
+- [x] (16 Nov) **Comment text was copied as is.** A `+name@dharan.gov.np` mention may make Google
+  email that person, which would be a new message in a dharan mailbox. Fixed: `migration_comments`
+  writes `+name@x` and `@name@x` as plain `name@x`, and the comparison ignores the sign, so older
+  copies still match. Still to see live: the pilot's copied mentions email nobody.
 
 ## Steps
 

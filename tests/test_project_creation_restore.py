@@ -81,3 +81,15 @@ def test_nothing_owed_is_refused(cp):
     _signed_in(cp, "op@three.example")
     r = cp.post("/api/v2/project-creation/restore", json={"reason": "nothing to do", "side": "source"}).json()
     assert r["ok"] is False and "nothing owed" in r["detail"]
+
+
+def test_a_government_tenants_setting_is_never_switched_on(monkeypatch):
+    """Operator, 16 Nov 2026: Bitport never turns a setting on for dharan.gov.np by itself; setup names
+    the checkbox for a person to tick instead. Refused before any browser opens."""
+    import dwd_helper
+    import project_creation
+    monkeypatch.setattr(dwd_helper, "_open_dwd_console", lambda *a, **k: pytest.fail("opened the console"))
+    monkeypatch.setenv("DWD_EMAIL", "admin@dharan.gov.np")
+    for setting in ("project_creation", "drive_sdk"):
+        with pytest.raises(RuntimeError, match="government"):
+            project_creation.run(True, setting=setting)

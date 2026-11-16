@@ -209,3 +209,18 @@ def test_a_quote_is_sent_un_escaped_once_so_drive_stores_the_source_text():
     from migration_comments import for_writing, quote_match
     assert for_writing(AMP)["value"] == "a &#247; b"
     assert quote_match({"value": ""}, None) == "same" and quote_match(AMP, {"mimeType": "text/html", "value": "x"}) == "differs"
+
+
+def test_a_mention_is_copied_as_plain_text_and_an_older_copy_is_still_the_same():
+    """Written as is, "+name@x" can make Google email that person -- from dharan.gov.np, a message in
+    a SOURCE mailbox (operator, 16 Nov 2026: nothing on the source may change). The copy names them as
+    plain text; a copy made before keeps its "+" and is still the same comment."""
+    from migration_comments import content
+    src = {"content": "+ram@dharan.gov.np please check, cc a+b@x.org", "createdTime": "2024-01-02T00:00:00Z",
+           "author": {"displayName": "Sita"},
+           "replies": [{"content": "@sita@dharan.gov.np done", "createdTime": "2024-01-03T00:00:00Z",
+                        "author": {"displayName": "Ram"}}]}
+    assert content(src, lambda fid: None) == "[Sita, 2024-01-02] ram@dharan.gov.np please check, cc a+b@x.org"
+    old = {"content": "[Sita, 2024-01-02] +ram@dharan.gov.np please check, cc a+b@x.org",
+           "replies": [{"content": "[Ram, 2024-01-03] @sita@dharan.gov.np done"}]}
+    assert differences([src], [old], lambda fid: None) == []

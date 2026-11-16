@@ -29,3 +29,6 @@ tests/test_parity_gate.py
 tests/test_kill_then_rerun_converges.py
 tests/test_deploy_needs_the_gate.py
 tests/test_follow_ons_survive_an_api_restart.py
+tests/test_comment_differences.py
+tests/test_dwd_helper_merge.py
+tests/test_project_creation_restore.py
