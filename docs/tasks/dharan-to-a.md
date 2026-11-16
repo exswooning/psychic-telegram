@@ -44,18 +44,26 @@ already on dharan from migration 5 (19 Oct) and are not new:
 
 ## Steps
 
-- [ ] 0. Get the box back online. Tailscale has shown l3novo offline since about 08:30 UTC on 16 Nov.
+- [x] 0. (16 Nov) l3novo is back. It was a network outage; the box had been up for 19 days and was
+  idle. The run happens here. The old VPS is never used (12 Nov handoff).
 - [ ] 1. Check a.: at least 45 licences, storage of at least dharan's Drive, and nothing in it yet.
 - [ ] 2. In Bitport, create a new account, "dharan.gov.np → a.sarafgloabalexim.com". It gets its own
   ledger, and account 7's history stays.
-- [ ] 3. Source: Admin → Accounts → "Use a key…" with dharan's existing read-only key (account 7's).
-  This makes no change on dharan. Setup → Check again must read Ready. If it doesn't, stop: any
-  fix in dharan's console is yours to make, by hand.
+- [ ] 3. Source: dharan's read-only key exists only on the old VPS (account 7, `keys/7/source-sa.json`).
+  l3novo has no dharan account, so "Use a key…" has nothing to offer. Bring that one file over once,
+  through Setup → source → upload key (`/api/v2/setup/credentials`). This makes no change on dharan:
+  the delegation follows the key's client ID. Do not make a new key: that would add a project and a
+  delegation line on dharan. Setup → Check again must read Ready. If it doesn't, stop: any fix in
+  dharan's console is yours to make, by hand.
 - [ ] 4. Target: run Setup for a. (project, key and delegation, all on a.). Declare a. a sandbox. The
   capacity check must pass. Identities: 45 users, matched by the part before the @.
-- [ ] 5. On the box, read which dharan settings are still owed back OFF, whether the 12 copies are
-  still there, and readiness.
-- [ ] 6. Deploy the gap fixes once the box is idle.
+- [ ] 5. The owed settings (Drive SDK and project creation, ON on dharan since October) are recorded
+  only on the old VPS. Record them again for the new account on l3novo
+  (`project_creation.remember`). This writes a file on l3novo and touches nothing on dharan; it
+  makes the Final Report list them. You confirm they are still on. The 12 copies become part of
+  the Source guard's baseline. Then check readiness.
+- [x] 6. (16 Nov) ed3d325 deployed to l3novo while it was idle. The API and web UI restarted, with
+  no job running.
 - [ ] 7. Source guard → Take baseline.
 - [ ] 8. Pilot shiv@, livestock@ and audit@. Pass means:
   - Source guard shows 0 changes
