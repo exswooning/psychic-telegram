@@ -36,3 +36,5 @@ tests/test_first_pass_pipeline.py
 tests/test_missing_mail_recovery.py
 tests/test_failed_items_since_copied.py
 tests/test_account_scripts.py
+tests/test_wipe_preflight.py
+tests/test_destructive_launchers_wait_for_a_ready_tenant.py

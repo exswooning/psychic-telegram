@@ -176,14 +176,20 @@ Phase 1 and the code of Phase 2 need no tenant. Start them while Phase 0 is open
   (`/api/v2/coverage/start`) with no account, so it read the legacy ledger whoever pressed the
   button; the API now passes the caller's account. Tested both ways (the API test fails without it).
   `sharing_report.py` is not a command: its numbers are read on the Sharing page.
-- [ ] P1.4 Wipe safety, from the 16 Nov half-wipe:
-  - a wipe refuses to start unless readiness reads Ready for that side and one real read per
-    requested service succeeds as the admin and as every user it will touch. All or nothing; each
-    refusal named; `--allow-partial` for a deliberate partial wipe;
-  - its summary says what was removed and what was not, per service with user counts, and what the
-    ledger forgot and kept;
-  - wipe, reset, seed and "Run the DMS again" refuse while a `watch_tenant_ready` incident is open
-    for that side.
+- [x] P1.4 (16 Nov) Wipe safety, from the 16 Nov half-wipe. Done in `wipe_tenant.py`, `oversight.py`,
+  `webui.py`, `api_server.py`:
+  - the wipe refuses (exit 2, "NOT WIPED -- refused: nothing was deleted") unless readiness reads Ready
+    for that side, every scope is granted, and a real read per service (Drive, Gmail, Calendar,
+    Contacts, Tasks) succeeds as the admin (Drive) and as every user. Chat has no read under its
+    delete-only scope and Groups is one admin call, so both stay token checks. `--allow-partial`
+    wipes what answers;
+  - the summary says per service how many users were emptied and how many items, and the ledger line
+    says what it forgot ("Ledger reset: forgot drive for 44 of 45 user(s) ...");
+  - seed, reset target, wipe source, wipe target, remove setup (wipe, remove, delete users) and "Run
+    the DMS again" answer 409 while a `watch_tenant_ready` incident is open for that side
+    (`oversight.tenant_not_ready`). An unreadable incident list lets the action through: the wipe's
+    own preflight is the hard guard.
+  Tests: `tests/test_wipe_preflight.py`, `tests/test_destructive_launchers_wait_for_a_ready_tenant.py`.
 - [ ] P1.5 Preflight before Start. Refuse with the reason when any of these fails: both tenants
   ready, quota, network, the DMS login and authorisation, disk, a pending upgrade.
 - [ ] P1.6 The seeder is repeatable. It seeds its random numbers from `hash(user)`, which Python
@@ -514,7 +520,7 @@ old keys from root's `authorized_keys`; decide on rewriting the git history that
 
 ## 11. State (newest first)
 
-- 16 Nov 2026, ~18:30 UTC (Sonnet, working in the worktree `../calude-workspace-fp2`, branch
+- 16 Nov 2026, ~19:00 UTC (Sonnet: P1.4 done in the worktree too, tested in isolation) (earlier note follows) (Sonnet, working in the worktree `../calude-workspace-fp2`, branch
   `fableplan2-work`, while the full suite runs in the main tree): P1.2 and P1.3 done and tested in
   isolation; not yet gated or deployed. Merge into the main branch after the full run ends.
 - 16 Nov 2026, 17:50 UTC (Sonnet): P1.1 fixed and gated; the two named tests pass (the first was a

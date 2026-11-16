@@ -636,6 +636,27 @@ def sweep(ctx: Context, *, open_incident=None, open_incidents=None, resolve=None
     return {"found": len(found), "closed": closed, "ran": sorted(ran), "failed": failed}
 
 
+def tenant_not_ready(account_id, side: str, *, incidents=None) -> str | None:
+    """A refusal sentence while a `watch_tenant_ready` incident is open for this account's side, else None.
+    Wipe, reset, seed and "Run the DMS again" ask this before they start: on 16 Nov 2026 a wipe started on
+    two tenants that had stopped serving (incidents #77/#78 had been open an hour) and deleted only the mail.
+    `incidents` is injectable for tests; an unreadable incident list returns None -- wipe_tenant's own
+    preflight is the hard guard, this one names the cause early."""
+    try:
+        if incidents is None:
+            import run_watch
+            incidents = (run_watch.list_incidents("open", account_id=account_id, limit=500)
+                         + run_watch.list_incidents("acknowledged", account_id=account_id, limit=500))
+    except Exception as exc:      # noqa: BLE001 - see the docstring
+        log.warning("could not read the open incidents for the not-ready gate: %s", exc)
+        return None
+    for inc in incidents:
+        if inc.get("kind") == "watch_tenant_ready" and str(inc.get("fingerprint") or "").endswith(f":{side}"):
+            return (f"the {side} tenant is not ready -- incident #{inc.get('id')} is open ({inc.get('title')}). "
+                    f"Fix it first (Setup, Check again); it closes itself once the tenant is ready.")
+    return None
+
+
 def fetch_google_status(url: str = STATUS_URL, timeout: int = 15) -> list:
     import urllib.request
     with urllib.request.urlopen(url, timeout=timeout) as resp:

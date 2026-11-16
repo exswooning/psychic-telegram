@@ -359,6 +359,48 @@ def granted(key_path: str, admin: str, service: str) -> bool:
         return False
 
 
+# One real read per service, as the user. A read that works means the service answers for that
+# user; a token alone (granted) does not -- on 16 Nov 2026 every token still minted while Drive,
+# Calendar and Tasks answered 401/403/404, and a wipe that started deleted 72,132 Gmail messages
+# and nothing else. Chat has no read under its delete-only scope, so it is checked by granted() alone.
+READ_PROBES = {
+    "drive": lambda c: c.files().list(pageSize=1, fields="files(id)").execute(),
+    "gmail": lambda c: c.users().messages().list(userId="me", maxResults=1).execute(),
+    "calendar": lambda c: c.calendarList().list(maxResults=1).execute(),
+    "contacts": lambda c: c.people().connections().list(
+        resourceName="people/me", pageSize=1, personFields="names").execute(),
+    "tasks": lambda c: c.tasklists().list(maxResults=1).execute(),
+}
+
+
+def preflight(users: list[str], clients: Callable[[str, str], object], admin: str,
+              services: tuple[str, ...], workers: int = 8) -> list[str]:
+    """Every reason the wipe must not start; [] when each service answered a read for the admin
+    (Drive: shared drives) and for every user. All or nothing: nothing has been deleted yet."""
+    work = [(admin, "drive")] if "drive" in services else []
+    work += [(u, s) for u in users for s in services if s in READ_PROBES]
+
+    def probe(item):
+        user, service = item
+        try:
+            READ_PROBES[service](clients(service, user))
+            return None
+        except Exception as exc:      # noqa: BLE001 - the refusal IS the result
+            return f"{user} {service}: {type(exc).__name__}: {str(exc)[:120]}"
+    with futures.ThreadPoolExecutor(max_workers=max(1, min(workers, len(work) or 1))) as pool:
+        return sorted(r for r in pool.map(probe, work) if r)
+
+
+def readiness_problems(settings: Settings, side: str) -> list[str]:
+    """Why readiness does not read Ready for this side. A check nobody could make is not ready."""
+    import readiness
+    out = readiness.check(settings, side, "seed" if side == "source" else "migrate")
+    if out.get("ready") is True:
+        return []
+    bad = [f"{c.get('name')}: {c.get('detail', '')}"[:200] for c in out.get("checks", []) if c.get("ok") is not True]
+    return bad or ["readiness could not be established"]
+
+
 def wipe(users: list[str], clients: Callable[[str, str], object], admin: str,
          services: tuple[str, ...] = SERVICES, workers: int = 8,
          shared_drives: bool = True, groups_domain: Optional[str] = None, out=print) -> dict:
@@ -431,11 +473,14 @@ def reset_ledger(db, emptied: list[str], shared_drives_gone: bool,
              if r["entity_type"] == "user"]
     users = [u for u, _ in pairs]
     kept: dict = {}
+    forgot: dict = {}
     for u, tgt in pairs:
         mine = tuple(s for s in ledger_services
                      if failed is None or tgt not in {x.lower() for x in failed.get(s, [])})
         for s in set(ledger_services) - set(mine):
             kept.setdefault(s, []).append(u)
+        for s in mine:
+            forgot[s] = forgot.get(s, 0) + 1
         if mine:
             rdl.reset_service_ledger(db, u, mine)
     rows = 0
@@ -446,13 +491,31 @@ def reset_ledger(db, emptied: list[str], shared_drives_gone: bool,
         with db.write() as conn:
             rows += conn.execute("DELETE FROM id_mapping WHERE type='shared_drive'").rowcount
             rows += conn.execute("DELETE FROM audit_log WHERE item_type='shared_drive'").rowcount
-    out(f"Ledger reset for {', '.join(ledger_services) or 'nothing'} on {len(users)} user(s)"
+    # What the ledger forgot, per service and with user counts -- not the services merely tried (the 16 Nov
+    # summary "reset for drive, gmail, calendar ... on 45 user(s)" read as a full reset after a half-wipe).
+    out("Ledger reset: forgot " + (", ".join(f"{s} for {n} of {len(users)} user(s)" for s, n in sorted(forgot.items())) or "nothing")
         + "".join(f"; {s} KEPT for {len(v)} user(s) it could not empty: {', '.join(v[:5])}"
                   for s, v in sorted(kept.items()))
         + (f"; {rows} shared drive row(s) forgotten" if shared_drives_gone else "")
         + ("; groups forgotten" if groups_gone else ""), flush=True)
-    return {"users": len(users), "services": list(ledger_services), "shared_drive_rows": rows,
-            "groups": groups_gone, "kept": kept}
+    return {"users": len(users), "services": list(ledger_services), "forgot": forgot,
+            "shared_drive_rows": rows, "groups": groups_gone, "kept": kept}
+
+
+def summary_lines(result: dict, services: tuple[str, ...], n_users: int, domain: str = "") -> list[str]:
+    """What the wipe removed, per service with user counts, one "Removed ..." line each (the Jobs page keeps
+    those as the job's result). A service it never ran (not requested, scope not granted) is not listed;
+    one it could not empty for some users says so, and main() prints NOT WIPED for it."""
+    lines = []
+    for s in services:
+        bad = result["failed"].get(s, [])
+        lines.append(f"Removed {s}: emptied for {n_users - len(bad)} of {n_users} user(s), "
+                     f"{result['totals'].get(s, 0)} item(s)")
+    if result["shared_drives"] is not None:
+        lines.append(f"Removed shared drives: {result['shared_drives']}")
+    if result["groups"] is not None:
+        lines.append(f"Removed groups: {result['groups']}")
+    return lines
 
 
 def _users(settings: Settings, side: str, db) -> list[str]:
@@ -486,6 +549,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--confirm-domain", required=True)
     ap.add_argument("--yes", action="store_true")
     ap.add_argument("--workers", type=int, default=8)
+    ap.add_argument("--allow-partial", action="store_true",
+                    help="wipe what answers and leave the rest; without it the wipe refuses unless "
+                         "readiness is Ready and every service answers a read for every user")
     args = ap.parse_args(argv)
 
     settings = Settings()
@@ -496,12 +562,29 @@ def main(argv: Optional[list[str]] = None) -> int:
     db = MigrationDB(settings.db_path)
     users = _users(settings, args.side, db)
     services = []
+    problems: list[str] = []
     for s in SERVICES + ("groups",):
         if granted(key, admin, s):
             services.append(s)
         else:
             print(f"  {s}: its scope ({SCOPES[s][0]}) is not granted on {domain} -- NOT wiped. "
                   f"Grant it in the Admin console to wipe {s} too.", flush=True)
+            problems.append(f"{s}: its scope ({SCOPES[s][0]}) is not granted")
+    if not args.allow_partial:
+        # All or nothing, decided before anything is deleted (16 Nov 2026: a wipe on a tenant whose
+        # Drive, Calendar and Tasks had stopped answering deleted only the mail).
+        problems += readiness_problems(settings, args.side)
+        if not problems:
+            problems += preflight(users, key_clients(key), admin, tuple(s for s in services if s != "groups"),
+                                  args.workers)
+        if problems:
+            print(f"NOT WIPED -- refused: nothing was deleted on {domain}. {len(problems)} problem(s):", flush=True)
+            for line in problems[:25]:
+                print(f"  - {line}", flush=True)
+            if len(problems) > 25:
+                print(f"  ... and {len(problems) - 25} more", flush=True)
+            print("Fix them, or wipe only what answers with --allow-partial.", flush=True)
+            return 2
     print(f"About to DELETE {', '.join(services)} and every shared drive for "
           f"{len(users)} user(s) in {domain}.", flush=True)
     wipe_groups_too = "groups" in services
@@ -512,9 +595,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     result = wipe(users, key_clients(key), admin, tuple(services), args.workers,
                   shared_drives="drive" in services,
                   groups_domain=domain if wipe_groups_too else None)
-    print("Removed: " + ", ".join(f"{v} {s}" for s, v in result["totals"].items())
-          + f", {result['shared_drives'] or 0} shared drive(s), {result['groups'] or 0} group(s).",
-          flush=True)
+    for line in summary_lines(result, tuple(services), len(users), domain):
+        print(line, flush=True)
     kept = [s for s in SERVICES if s not in result["emptied"]]
     if result["groups"] is None:
         kept.append("groups")

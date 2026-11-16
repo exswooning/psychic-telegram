@@ -3125,6 +3125,11 @@ async def dms_start(body: DmsStart, op: Operator = Depends(operator)):
     followed by the verify with repair and the parity gate. For a cutover's final mail and for a run whose
     DMS was stopped. Refused while one is already running (job admission)."""
     account_id = _resolve_account(body, op)
+    import oversight
+    for side in ("target", "source"):      # the import reads the source and writes the target
+        why = oversight.tenant_not_ready(account_id, side)
+        if why:
+            raise HTTPException(409, why)
     return await _gated(op, "dms.start", body, f"account:{account_id}",
                         lambda: _start_dms(account_id, require_clean=False,
                                            why=f"started by {op.name}: {body.reason}"))

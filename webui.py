@@ -1579,6 +1579,12 @@ def launch_or_queue(account_id: int | None, label: str, argv: list[str],
                       f"{row['position']}; it will start on its own")
 
 
+def _not_ready(account_id, side: str) -> str | None:
+    """Why a destructive action on this account's side must wait: an open watch_tenant_ready incident."""
+    import oversight
+    return oversight.tenant_not_ready(account_id, side)
+
+
 def _subscription_ok(account_id: int | None) -> bool:
     """The manual v1 billing gate -- webui.py's side of
     api_server.py's require_active_subscription(). No _gated()-equivalent
@@ -5959,6 +5965,10 @@ class Handler(BaseHTTPRequestHandler):
         if not _subscription_ok(account_id):
             self._json({"ok": False, "error": "subscription inactive"}, 402)
             return
+        not_ready = _not_ready(account_id, "source")
+        if not_ready:
+            self._json({"ok": False, "error": not_ready}, 409)
+            return
         if not _seed_ok(account_id):
             self._json({"ok": False, "error": "seeding is not enabled on this account"}, 403)
             return
@@ -6134,6 +6144,10 @@ class Handler(BaseHTTPRequestHandler):
         if side not in ("source", "target"):
             self._json({"ok": False, "error": "side must be source or target"})
             return
+        not_ready = _not_ready(account_id, side)
+        if not_ready and (body.get("mode") or "remove").strip() in ("wipe", "remove", "delete_users"):
+            self._json({"ok": False, "error": not_ready}, 409)
+            return
         # Imported here, not relied on from the enclosing scope. Another
         # branch of this same method does `from config import Settings`
         # inside its own `if`, which makes Settings a LOCAL of do_POST
@@ -6234,6 +6248,10 @@ class Handler(BaseHTTPRequestHandler):
         if not _subscription_ok(account_id):
             self._json({"ok": False, "error": "subscription inactive"}, 402)
             return
+        not_ready = _not_ready(account_id, "target")
+        if not_ready:
+            self._json({"ok": False, "error": not_ready}, 409)
+            return
         argv, env, err = reset_target_argv(body, account_id)
         if err:
             self._json({"ok": False, "error": err}, 400)
@@ -6255,6 +6273,10 @@ class Handler(BaseHTTPRequestHandler):
             return
         if not _subscription_ok(account_id):
             self._json({"ok": False, "error": "subscription inactive"}, 402)
+            return
+        not_ready = _not_ready(account_id, "source")
+        if not_ready:
+            self._json({"ok": False, "error": not_ready}, 409)
             return
         argv, env, err = wipe_source_argv(body, account_id)
         if err:
@@ -6279,6 +6301,10 @@ class Handler(BaseHTTPRequestHandler):
             return
         if not _subscription_ok(account_id):
             self._json({"ok": False, "error": "subscription inactive"}, 402)
+            return
+        not_ready = _not_ready(account_id, "target")
+        if not_ready:
+            self._json({"ok": False, "error": not_ready}, 409)
             return
         argv, env, err = wipe_target_argv(body, account_id)
         if err:
