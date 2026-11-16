@@ -15,6 +15,14 @@ import job_exit
 
 @pytest.fixture
 def follow(monkeypatch, tmp_path):
+    # Its own control-plane database: after other tests ran, the shared path held no active_jobs table.
+    import control_plane_db as cpdb
+    from db import MigrationDB
+    path = str(tmp_path / "cp.db")
+    monkeypatch.setenv("MIGRATION_DB", path)
+    monkeypatch.delenv("CONTROL_PLANE_DB", raising=False)
+    MigrationDB(path)
+    cpdb.apply_migrations()
     monkeypatch.setattr(job_exit, "DIR", tmp_path / "exits")
     ran, recorded = [], []
     monkeypatch.setattr(api_server, "_follow_on", lambda kind, a: ran.append((kind, a)))

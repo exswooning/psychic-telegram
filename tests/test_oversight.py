@@ -29,14 +29,14 @@ def test_repair_loop_found_after_three_runs_not_before(db, tmp_path):
              "detail,first_seen,last_seen,issue) VALUES(?,?,?,?,?,?,?,?,?,?)")
         c.execute(q, (SRC_USER, "gmail", "k1", "differences", "m1", "OPEN", "{}", "2026-11-01T00:00:00Z",
                       "2026-11-07T00:00:00Z", "gmail.labels_added"))
-        c.execute(q, ("kept@s.example", "gmail", "k2", "duplicates", "m2", "OPEN", "{}", "2026-11-01T00:00:00Z",
-                      "2026-11-07T00:00:00Z", "gmail.duplicate"))
+        c.execute(q, ("kept@s.example", "gmail", "k2", "differences", "m2", "OPEN", "{}", "2026-11-01T00:00:00Z",
+                      "2026-11-07T00:00:00Z", "drive.comments"))      # no automatic fix (gmail.duplicate has one since 16 Nov)
         for i in range(2):
             c.execute("INSERT INTO verification_repairs VALUES(?,?,?,?,?,?,?)",
                       (SRC_USER, f"fp{i}", "DONE", None, "2026-11-02T00:00:00Z", f"2026-11-0{i + 2}T01:00:00Z", ""))
     assert O.watch_repair_loop(ctx(db, tmp_path)) == []
     with db.write() as c:
-        for i in range(3):          # a finding no repair is meant to clear (kept duplicate) never counts
+        for i in range(3):          # a finding no repair is meant to clear (a kind with no automatic fix) never counts
             c.execute("INSERT INTO verification_repairs VALUES(?,?,?,?,?,?,?)",
                       ("kept@s.example", f"k{i}", "DONE", None, "x", f"2026-11-0{i + 2}T01:00:00Z", ""))
         c.execute("INSERT INTO verification_repairs VALUES(?,?,?,?,?,?,?)",

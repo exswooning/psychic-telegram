@@ -498,7 +498,7 @@ def test_bar_and_truncate():
     assert tui.bar(0.0, 10) == "." * 10
     assert tui.bar(1.0, 10) == "#" * 10
     assert tui.bar(0.5, 10) == "#####....."
-    assert tui.bar(None, 5) == "?????"      # unknown, not zero
+    assert tui.bar(None, 5) == "....."      # unknown: an empty bar, not a row of "?" (a fault to a first-time user, 14 Nov)
     assert tui.bar(2.0, 4) == "####"        # clamped
     assert tui.truncate("abcdefgh", 5) == "abcd\u2026"
     assert tui.fmt_duration(3725) == "01:02:05"

@@ -525,6 +525,17 @@ old keys from root's `authorized_keys`; decide on rewriting the git history that
 
 ## 11. State (newest first)
 
+- 16 Nov 2026, ~22:30 UTC (Sonnet): STOPPED at 93% of the session window (the operator's screenshot;
+  weekly 27%, Fable 23%, session resets 2:55 AM Nepal). Done tonight, all on branch `fableplan2-work`
+  merged into the main branch: P1.0 to P1.6, the seeder half of P1.7, P2.1 (no live driver), P2.2.
+  P1.1's full-suite run found 14 failures, all test-side: stale expectations (tui.bar, a fake db
+  without fetchall, gmail.duplicate now automatic), and one control-plane-db order leak in the
+  follow-on tests; fixed in tests. The data-generator suite finished with the failures listed in
+  this commit's message, if any. The full runs were NOT repeated after the fixes (one file group
+  each was run). NEXT, in order: (1) run the full `tests/` and `data-generator/` once more and write
+  the skip count (6 skips so far, all "macOS OS-isolation") here, then tick P1.1; (2) P2.3 failpoints
+  **[opus]**; (3) P2.4 fixture registry and the cohort file; (4) P1.7 engine half **[opus]**. Nothing
+  here is deployed to the box. Phase 0 (the operator's four items) still blocks every tenant step.
 - 16 Nov 2026, ~21:00 UTC (Sonnet): P2.1 (registry and runner, no live driver) and P2.2 done in the
   worktree. Next: merge the branch into the main tree when the full run ends, gate, push; then P1.1's
   remaining full-suite failures.
