@@ -365,17 +365,41 @@ Superseded: a full fresh-disk acceptance install; judge the Setup Wizard's first
   mail check, label alignment, verify with repair and the parity gate run on their own. Record per run: Drive and
   mail pass times, DMS check rate, mail-pass bodies read (read-once), verdict and failing kinds.
 
-## Acceptance run 1 (16 Nov): the wipe of t. did NOT complete -- blocked by Google grants, not by Bitport
-- Operator allowed the command ("Allow the command for this session"); wipe_tenant.py --side target ran as unit
-  bitport-acc1-wipe, 06:15-06:21 UTC. Result: NOT WIPED on t. for drive, calendar, tasks, chat, shared drives.
-- Cause (measured, read-only): with the target key (target-sa.json, admin nest@t.), Drive returns 401 and
-  Calendar 403 "user must be signed up" and Chat 403 "insufficient" for EVERY user, the admin included. Gmail works.
-  The admin-level grant check (wipe_tenant.granted) still says True for all four, so it does not match what Google
-  does per user. Needs a person in the Admin console (domain-wide delegation scopes for t., and Calendar/Chat set up
-  for the users) before any wipe can succeed. Nothing was deleted.
-- Ledger: intact after the run (38,513 file and 70,288 message mappings). The wipe log line "Ledger reset for drive,
-  gmail, calendar, contacts, tasks, chat on 45 user(s)" contradicts its own "NOT WIPED ... ledger is kept" line; it
-  must be fixed before any acceptance run trusts a wipe.
-- Identity statuses after the last DMS check: 44 users BLOCKED, 1 FAILED (set by the earlier reconciliation). A migration
-  start may refuse them; to be checked before run 1.
-- Acceptance runs 1-3 NOT started. The next step is a grant fix on t. by the operator, then a dry wipe check.
+## Acceptance run 1 (16 Nov): blocked -- both tenants lost Drive and Calendar; the wipe ran half (rechecked)
+CORRECTION of the first note: the wipe DID delete data on t. -- 72,132 Gmail messages (40 users), 3 contacts, 2 groups --
+and forgot them in the ledger (gmail for 40 users, contacts for 45, groups). Drive, Calendar, Tasks, Chat and shared
+drives were not touched and keep their ledger; Gmail kept for 5 users (administration, education, finance, info, ward12).
+The target is half-wiped. The source was not touched by the wipe.
+
+Evidence (all read-only, 16 Nov ~06:20 UTC):
+- Root cause is Google-side, on BOTH tenants, not Bitport: Drive 401 "Active session is invalid. Error code: 4",
+  Calendar 403 notACalendarUser ("must be signed up for Google Calendar"), Tasks 404, Gmail "Mail service not enabled"
+  for some users (nest@t., info@s., ...), and isMailboxSetup=false for EVERY user on s. and t. Same answers through the
+  engine's own clients (AuthManager) and Bitport's readiness check (source and target: Not ready). Likely the
+  Workspace subscriptions/licences of the two sandbox tenants (accounts created 17 Oct - 2 Nov) lapsed: a trial that
+  ended or a billing problem. Only Billing -> Subscriptions in each Admin console can confirm. Window: target writes
+  worked 15 Nov ~09:30 UTC; incidents opened 16 Nov 05:11 UTC.
+- Bitport noticed: incidents #77 (source) and #78 (target) "not ready any more" opened at 05:11 UTC by oversight's
+  watch_tenant_ready -- an hour BEFORE the wipe. The wipe does not consult readiness or open incidents.
+- The wipe's own preflight (wipe_tenant.granted) only mints a token as the admin; it passes while the service itself
+  refuses. So it started, Gmail succeeded for most users, everything else failed: a half-wipe.
+- Its summary "Ledger reset for drive, gmail, calendar, contacts, tasks, chat on 45 user(s)" lists the services TRIED;
+  the truth is in the KEPT clauses that follow. Read as "nothing reset", it led to the wrong first note.
+- Not blockers: 44 BLOCKED + 1 FAILED identity statuses (a run re-migrates any user not DONE with recorded services);
+  the 16 Nov label alignment's 1,149 errors / 1,467 differs (moot after the wipe; likely the same lapse starting).
+
+Fix plan:
+A. Operator (blocks everything): restore both tenants -- Admin console of s.sarafgloabalexim.com AND
+   t.sarafgloabalexim.com -> Billing -> Subscriptions (trial ended / suspended / payment) and Users (a licence on
+   every user; t. also has 34 leftover A/B accounts that may hold licences). Done when Setup "Check again" (or
+   readiness.py --account-id 3 --side source|target) reads Ready on both; incidents #77/#78 then close on their own.
+B. Code, now, no tenant needed (each with a test, ./gate.sh, deploy on an idle box):
+   B1. wipe_tenant refuses to start unless readiness reads Ready for that side AND a real read per requested service
+       succeeds as the admin and as every user it will touch -- all or nothing, nothing deleted otherwise, each refusal
+       named; --allow-partial for a deliberate partial wipe. Replaces granted() (token mint only).
+   B2. The wipe's summary says what was removed and what was not, per service with user counts, and what the ledger
+       forgot vs kept -- no list of services merely tried.
+   B3. Every destructive launcher (wipe, reset, seed, "Run the DMS again") refuses while a watch_tenant_ready
+       incident is open for that side, naming it. Migrations are already gated (readiness.gate).
+C. After A: readiness Ready on both (read-only) -> re-run the wipe (with B deployed) to finish emptying t. -> check t.
+   is empty by counts -> acceptance run 1 via the API -> parity gate -> runs 2 and 3.
