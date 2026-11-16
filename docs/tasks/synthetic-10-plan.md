@@ -1,5 +1,7 @@
 # Bitport to 10/10 on synthetic tenants: a. → b.
 
+The operator calls this plan **fableplan2**.
+
 Operator, 16 Nov 2026: the old tenants are gone. dharan.gov.np can no longer be read, and s. and t.
 lapsed. Two fresh tenants exist: a.sarafgloabalexim.com and b.sarafgloabalexim.com. The goal:
 1. test every benchmark, error and failure with synthetic data;
