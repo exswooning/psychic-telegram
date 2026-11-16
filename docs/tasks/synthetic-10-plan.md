@@ -525,6 +525,15 @@ old keys from root's `authorized_keys`; decide on rewriting the git history that
 
 ## 11. State (newest first)
 
+- 17 Nov 2026, ~00:50 Nepal (Sonnet): P0.5 started in the UI through BrowserOS at
+  `http://192.168.1.9:81/app/...` (the Cloudflare Access address needs a one-time email code; this
+  LAN address is already signed in as admin@bitport.local). Bitport **account 4**
+  (`migration-a-b@migrations.bitport.local`, random password never kept: act on it through "Viewing
+  account") is created. Its subscription was already active (a Deactivate dialog opened by mistake
+  was cancelled). NOT yet done: "Seeding allowed" (state unread: the snapshot does not show checkbox
+  state, so read it with a screenshot before clicking), Setup for source a. and target b., sandbox
+  declarations, P0.3, P0.6, P0.8, P0.9. Resume at 2:55 AM Nepal when the session resets. Page id 3 in
+  the BrowserOS session is on Admin > Accounts; open a new tab if it is gone.
 - 16 Nov 2026, ~23:45 Nepal (Sonnet): P0.4 done: `/etc/bitport/dwd.env` now holds the a. (source) and b.
   (target) logins (names only checked, mode 600, backup kept). Still the operator's: P0.3, P0.5, P0.6.
 - 16 Nov 2026, ~22:30 UTC (Sonnet): STOPPED at 93% of the session window (the operator's screenshot;
