@@ -152,12 +152,13 @@ def test_source_protection_refuses_cross_account_target_unless_declared_a_sandbo
 
 def test_orphaned_verification_is_interrupted_only_when_disabled_and_owner_dead(db, monkeypatch):
     import verification_repairs as R
-    R.pause(db)
+    R.enable(db, operator=True)          # a claim needs the policy on (an operator's pause holds, 11 Nov)
     assert R._claim(db, SRC_USER, "finding")
     run = db.repair_started()
     # Align timestamps as in the observed abandoned callback.
     with db.write() as c:
         c.execute("UPDATE repair_runs SET started_at=(SELECT started_at FROM verification_repairs)")
+    R.pause(db)                          # the operator stops verification while the repair runs
     assert R.reconcile_stopped_verification(db) == 0  # current process lives
     monkeypatch.setattr(R, "_alive", lambda pid: False)
     R.enable(db, operator=True)          # an explicit resume; an automatic one leaves the pause

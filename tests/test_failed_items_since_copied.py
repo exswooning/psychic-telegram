@@ -29,6 +29,26 @@ def test_a_service_level_failure_is_still_listed_when_nothing_later_succeeded(au
     assert ids == [SRC_USER]                                                   # unchanged: not an item row
 
 
+def _same_second(db):
+    db.conn.execute("UPDATE audit_log SET timestamp='2026-11-07T10:00:00Z'")
+    db.conn.commit()
+
+
+def test_a_service_failure_is_cleared_by_a_copy_written_after_it_in_the_same_second(auth, db, settings, identity):
+    """A repair inside one second of the failure used to leave a tie and the user FAILED, half the runs."""
+    db.log_audit(SRC_USER, SRC_USER, "gmail", "FAILED", "Full source/destination ID coverage is incomplete")
+    db.log_audit(SRC_USER, "m1", "message", "SUCCESS", "")                    # written after the failure row
+    _same_second(db)
+    assert _v(auth, db, settings)._failed(("message", "draft", "gmail")) == []
+
+
+def test_a_copy_written_before_the_service_failure_does_not_clear_it(auth, db, settings, identity):
+    db.log_audit(SRC_USER, "m1", "message", "SUCCESS", "")                    # the run's own copy, before its verdict
+    db.log_audit(SRC_USER, SRC_USER, "gmail", "FAILED", "Full source/destination ID coverage is incomplete")
+    _same_second(db)
+    assert [i["id"] for i in _v(auth, db, settings)._failed(("message", "draft", "gmail"))] == [SRC_USER]
+
+
 def test_drive_items_follow_the_same_rule(auth, db, settings, identity):
     db.log_audit(SRC_USER, "f1", "file", "FAILED", "boom")
     db.log_audit(SRC_USER, "f2", "file", "FAILED", "boom")

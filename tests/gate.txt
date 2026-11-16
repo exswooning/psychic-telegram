@@ -32,3 +32,6 @@ tests/test_follow_ons_survive_an_api_restart.py
 tests/test_comment_differences.py
 tests/test_dwd_helper_merge.py
 tests/test_project_creation_restore.py
+tests/test_first_pass_pipeline.py
+tests/test_missing_mail_recovery.py
+tests/test_failed_items_since_copied.py

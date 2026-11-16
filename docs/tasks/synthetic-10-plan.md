@@ -154,13 +154,18 @@ Phase 1 and the code of Phase 2 need no tenant. Start them while Phase 0 is open
   (its last was 16 Nov 06:00 UTC), so a manual resolve would only reopen them. They close on their
   own at the first sweep after 18 Nov 06:00 UTC; check then. Incidents #74, #70, #9 and #8 (older
   account 3 runs) stay open as history. The ledger is kept (rule 10).
-- [ ] P1.1 Green baseline. Two tests fail today and are older than this plan:
-  `tests/test_first_pass_pipeline.py::test_interrupted_mail_is_recovered_inside_original_job` and
-  `tests/test_missing_mail_recovery.py::test_orphaned_verification_is_interrupted_only_when_disabled_and_owner_dead`.
-  Read 16 Nov: the first ends with the user FAILED although its one message was inserted
-  (`assert 'FAILED' == 'DONE'`). Fix the code or the test, whichever is wrong. Done when
-  `.venv/bin/python -m pytest tests/ -q` and `.venv/bin/python -m pytest data-generator/ -q` are
-  green and the skip count is in State.
+- [~] P1.1 Green baseline. Two tests failed, both older than this plan. Fixed 16 Nov:
+  - `test_interrupted_mail_is_recovered_inside_original_job` failed 4 runs in 5, not always: the
+    verifier (`verify_sample.Verifier._failed`) counts a later copy as recovering a service-level
+    FAILED row only when its timestamp is a later second, and the repair inside the test finishes in
+    the same second. A tie kept the user FAILED. Now a row written after the failure row also counts
+    (`id>`); a copy written before it, in the same second, still does not. Tests added in
+    `tests/test_failed_items_since_copied.py`. 5 runs in 5 now pass.
+  - `test_orphaned_verification_is_interrupted_only_when_disabled_and_owner_dead` claimed a repair
+    while the policy was paused, which the operator's pause (11 Nov) correctly refuses. The test now
+    enables, claims, then pauses.
+  Both files and the new tests are in `tests/gate.txt`; the gate passed. Still open, so the box stays
+  unticked: the full `tests/` and `data-generator/` runs, and the skip count in State.
 - [ ] P1.2 Box scripts work for any account. `dms_delta_loop.py` and `dms_user_verify.py` hard-code
   account 3 and `/opt/bitport`; `autopilot.py` and `parity_loop.py` take `--account-id` already.
   Add unit templates `systemd/bitport-autopilot@.service` and `systemd/bitport-parity@.service`
@@ -509,6 +514,8 @@ old keys from root's `authorized_keys`; decide on rewriting the git history that
 
 ## 11. State (newest first)
 
+- 16 Nov 2026, 17:50 UTC (Sonnet): P1.1 fixed and gated; the two named tests pass (the first was a
+  one-second timestamp tie, not a missing feature). The full-suite run is the one thing left on P1.1.
 - 16 Nov 2026, 17:00 UTC (Sonnet): P1.0 done on the box (autopilot for account 3 stopped; no job
   running; API and web UI active). #77 and #78 close themselves after 18 Nov 06:00 UTC. Next: P1.1.
 - 16 Nov 2026, 16:40 UTC: where we are. Phase 0 is open; nothing else has started (0 boxes ticked

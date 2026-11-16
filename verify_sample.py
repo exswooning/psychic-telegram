@@ -687,7 +687,7 @@ class Verifier:
         q = ",".join("?" * len(types))
         items = types[:-1]          # every caller ends `types` with the service's own name
         rows = self.db.conn.execute(
-            f"SELECT item_id, item_type, error_message, timestamp FROM audit_log WHERE source_user=? "
+            f"SELECT id, item_id, item_type, error_message, timestamp FROM audit_log WHERE source_user=? "
             f"AND status LIKE 'FAILED%' AND item_type IN ({q})", (self.src_user, *types)).fetchall()
         out = []
         from config import owed_to_dms
@@ -707,10 +707,14 @@ class Verifier:
                                  and m["created_at"] > r["timestamp"]):
                     continue
             if r["item_type"] == types[-1] and self.db.conn.execute(
-                    f"SELECT 1 FROM audit_log WHERE source_user=? AND status='SUCCESS' AND timestamp>? "
+                    f"SELECT 1 FROM audit_log WHERE source_user=? AND status='SUCCESS' AND (timestamp>? OR id>?) "
                     f"AND item_type IN ({','.join('?' * len(items))}) LIMIT 1",
-                    (self.src_user, r["timestamp"], *items)).fetchone():
-                continue            # the service failed once, and a later run of it copied items
+                    (self.src_user, r["timestamp"], r["id"], *items)).fetchone():
+                # The service failed once, and a later run of it copied items. "Later" is a later second OR a
+                # row written after the failure row: a repair inside one second of the failure left a tie, and
+                # the user stayed FAILED half the time (test_interrupted_mail_is_recovered_inside_original_job).
+                # An item row that already existed is only updated, keeps its id and still needs the later second.
+                continue
             out.append({"id": r["item_id"], "type": r["item_type"], "error": (r["error_message"] or "")[:200]})
         return out
 
