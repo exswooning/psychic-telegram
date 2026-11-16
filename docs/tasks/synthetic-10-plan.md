@@ -6,7 +6,8 @@ lapsed. Two fresh tenants exist: a.sarafgloabalexim.com and b.sarafgloabalexim.c
 2. improve the seeder until it simulates real user data for 300 users;
 3. finish every open phase and reach 10/10.
 
-Assumed until the operator says otherwise: a. is the source, b. is the target, both are sandboxes.
+Confirmed by the operator, 16 Nov: a. is the source, b. is the target, both are sandboxes on
+Business Starter with 300 licences. The subscriptions end on 16 Dec 2026.
 
 This plan replaces [dharan-to-a.md](dharan-to-a.md) (withdrawn) and the account 3 runs of
 [parity-10-plan.md](parity-10-plan.md). That plan's meaning of 10/10 and its open code items are
@@ -24,7 +25,9 @@ Words used below:
 - **Campaign**: the runner (`campaign.py`) that executes scenarios and writes one result line each.
 
 Session routine:
-1. Read section 11 (State) and the first unticked item. Read other files only when the item needs them.
+1. Read section 11 (State), then take the first unticked item that is not marked OPERATOR. While an
+   OPERATOR item blocks a phase, work the items that need no tenant: Phase 1, then P2.1 to P2.4.
+   Read other files only when the item needs them.
 2. See what is running, in one read:
    `ssh -i ~/.ssh/bitport_lenovo root@100.79.158.38 'cd /opt/bitport && .venv/bin/python -c "import job_admission as j; print(j.list_active())"; tail -5 logs/incidents/feed.log'`
 3. Do one item: the code, a test that fails without it, `./gate.sh`, commit, push. Tick the box and
@@ -33,8 +36,10 @@ Session routine:
 
 Rules. They come from CLAUDE.md and are repeated because these are the ones a test run breaks:
 1. Writes and deletes go to a. and b. only. Read the domain in the command or request before each one.
-2. A wipe or reset needs the operator's typed confirmation in the UI, unless P0.7(a) says yes. Never
-   pass `--yes` for one yourself, and never work around a refusal.
+2. Wipes and resets: the operator allowed the campaign to reset or wipe b., and to reset seeded data
+   on a., without a typed confirmation each time (P0.7(a), 16 Nov). That covers a. and b. only,
+   through the product's own wipe and reset. Look at the target first, every time. Any other domain
+   needs the operator's typed confirmation, and a refusal is never worked around.
 3. A run that counts starts from the product: the UI button, or the same `/api/v2/...` request the
    button sends. Never `main.py migrate` by hand. Reading over SSH is fine.
 4. Every error stops the run. Name it, fix it with a test, pass the gate, deploy on an idle box,
@@ -69,7 +74,7 @@ Stop and ask the operator when: a step says OPERATOR; Google refuses something f
 | 3 | Every failure recovered | campaign group `failures` | after the failure and a restart, counts and verdict equal the control's; 0 duplicates |
 | 4 | Every benchmark can pass and can fail | campaign group `benchmarks` | each check in `benchmarks.py` reads PASS on the control and FAIL or UNVERIFIED when its fault is caused |
 | 5 | Every watcher opens and closes | campaign group `watchers` | each `oversight.watch_*` check and each incident kind opens on its condition and closes on evidence |
-| 6 | Parity at scale | `parity_gate.py --account-id N` after the 300-user run | PARITY; the remainder holds accepted kinds only |
+| 6 | Parity at scale | `parity_gate.py --account-id ID` after the 300-user run | PARITY; the remainder holds accepted kinds only |
 | 7 | Repeatable | three wipe-and-migrate runs of the cohort, in a row | same verdict, same counts per service, no failing kinds |
 | 8 | Recoverable at scale | three failures caused during the 300-user run | the run still ends at row 6's verdict |
 | 9 | Fast | P2.10 | each phase is bound by a Google quota or by the box's line, shown by measurement; never by idle Bitport workers |
@@ -79,13 +84,34 @@ Stop and ask the operator when: a step says OPERATOR; Google refuses something f
 Row 7 uses the cohort, not 300 users, because three 300-user runs may not fit the tenants'
 subscription window. The operator can ask for more at P5.1.
 
+### The clock
+
+The subscriptions end on 16 Dec 2026 (the operator's word, 16 Nov: Business Starter, 30 days). All
+tenant work stops on 14 Dec. These are the latest dates, planned backwards from that. P3.6 replaces
+the Phase 5 dates with measured ones.
+
+| By | What |
+|---|---|
+| 20 Nov | Phase 0 done. Each day it is late moves every date below by a day. |
+| 23 Nov | Phase 1, and the code of Phase 2 (runner, failpoints, fixtures) |
+| 28 Nov | Phase 3: the cohort runs |
+| 1 Dec | Phase 4: the seeder, with a dry plan for N users |
+| 2 Dec | P5.1: go or no-go |
+| 12 Dec | Phase 5 done: seeding, the run, the DMS, verification, the delta |
+| 14 Dec | Stop. Two days of slack before the subscriptions end. |
+
+A Phase 6 item that needs a tenant and is not done by 14 Dec waits for a renewal, or the operator
+drops it. If the operator renews, change the dates here.
+
 ## 3. Phase 0: tenants and account (OPERATOR, then the executor verifies)
 
-- [ ] P0.1 OPERATOR: the subscription end date of a. and of b. (Admin console, Billing,
-  Subscriptions). Write both in State. Every later phase must end two days before the earlier date.
-  On 16 Nov the last pair lapsed mid-run and left a half-finished wipe.
-- [ ] P0.2 OPERATOR: 300 licences on a. and 300 on b., beside each admin. A trial stops at 10 users.
-  With fewer, the plan runs with that number N, and every report says N, never 300.
+- [x] P0.1 (16 Nov, the operator's word; not read from the console) Both tenants are Business
+  Starter and end on 16 Dec 2026. See The clock. On 16 Nov the last pair lapsed mid-run and left a
+  half-finished wipe.
+- [x] P0.2 (16 Nov, the operator's word; P0.8 reads the real count) 300 licences on a. and on b.
+  Business Starter allows 300 users in a tenant, the admin included. So N is 300 with the admin's
+  own account as one of them when both admins share a localpart, and 299 otherwise. Every report
+  says N.
 - [ ] P0.3 OPERATOR: on both tenants, Drive allows external sharing and link sharing, the Drive SDK
   is on, and Cloud project creation is allowed.
 - [ ] P0.4 OPERATOR: put both admin logins on the box in `/etc/bitport/dwd.env`: the same four
@@ -95,34 +121,51 @@ subscription window. The operator can ask for more at P5.1.
   b.sarafgloabalexim.com", run Setup for both sides, declare both domains sandboxes, and switch
   seeding on for the account (Admin, Accounts).
 - [ ] P0.6 OPERATOR: one outside Google account you own, for external-share tests. The address only.
-- [ ] P0.7 OPERATOR, yes or no to each:
+- [x] P0.7 (16 Nov) The operator said yes to all three:
   - (a) the campaign may reset or wipe b., and reset seeded data on a., without a typed confirmation
     each time (never any other domain);
   - (b) network tests: a firewall rule on the box blocks outgoing HTTPS for 3 and for 12 minutes and
     removes itself by a timer set before the rule;
   - (c) one reboot of the box in the middle of a run.
+- [ ] P0.8 Executor, read-only: `readiness.py --account-id ID --side source --purpose migrate`,
+  `--side source --purpose seed` and `--side target --purpose migrate` read Ready; Setup's capacity
+  card passes; the licence counts are read (`seed_sandbox.seat_report`). Write the Bitport account
+  id, both licence counts and both storage figures in State.
+- [ ] P0.9 Smoke run, as soon as P0.3 to P0.8 are done, with the tools as they are: seed five users
+  (`--scale tiny`), start a full run from the UI (all services, split mail, DMS after, server-side),
+  let the follow-ons finish, read the parity gate. Its purpose is to find what a fresh Business
+  Starter pair refuses while the code of Phase 2 is still being written: a staging shared drive on
+  b., grants across the two tenants, the DMS approval, the sharing policy. Write each refusal in
+  State and fix or route around it before Phase 3.
 
-  A "no" marks those scenarios SKIPPED BY OPERATOR. Rows 3 and 7 then need the operator's presses,
-  and the nightly run of Phase 6 is not built.
-- [ ] P0.8 Executor, read-only: `readiness.py --account-id N --side source` and `--side target` read
-  Ready; Setup's capacity card passes; the licence counts are read (`seed_sandbox.seat_report`).
-  Write the account id N, both licence counts and both storage figures in State.
+Open on 16 Nov, 16:40 UTC, read on the box: no Bitport account for a. and b., and `dwd.env`
+unchanged since 31 Oct. P0.3 to P0.6 are the operator's, and they are on the critical path.
 
 Phase 1 and the code of Phase 2 need no tenant. Start them while Phase 0 is open.
 
 ## 4. Phase 1: before any test run (code)
 
+- [ ] P1.0 Retire account 3 from the watchers. Its tenants are gone, but the unit
+  `bitport-autopilot-5fa` still runs for it, and incidents #77 and #78 (tenant not ready) stay open.
+  Stop and disable the unit. Resolve both incidents:
+  `incidents.py resolve <id> -m "tenants lapsed 16 Nov; account retired"`. Keep the ledger (rule 10).
 - [ ] P1.1 Green baseline. Two tests fail today and are older than this plan:
   `tests/test_first_pass_pipeline.py::test_interrupted_mail_is_recovered_inside_original_job` and
   `tests/test_missing_mail_recovery.py::test_orphaned_verification_is_interrupted_only_when_disabled_and_owner_dead`.
-  Fix the code or the test, whichever is wrong. Done when `.venv/bin/python -m pytest tests/ -q` and
-  `.venv/bin/python -m pytest data-generator/ -q` are green and the skip count is in State.
+  Read 16 Nov: the first ends with the user FAILED although its one message was inserted
+  (`assert 'FAILED' == 'DONE'`). Fix the code or the test, whichever is wrong. Done when
+  `.venv/bin/python -m pytest tests/ -q` and `.venv/bin/python -m pytest data-generator/ -q` are
+  green and the skip count is in State.
 - [ ] P1.2 Box scripts work for any account. `dms_delta_loop.py` and `dms_user_verify.py` hard-code
   account 3 and `/opt/bitport`; `autopilot.py` and `parity_loop.py` take `--account-id` already.
-  Done when a grep for `accounts/3` and `account_id=3` in the four files finds nothing, with a test.
-- [ ] P1.3 The check tools take `--account-id`: `coverage_audit.py`, `fidelity_audit.py`,
-  `form_deep_check.py`, `mail_dead_links.py`, `sharing_report.py`. Read each `--help` first; change
-  only the ones that lack it.
+  Add unit templates `systemd/bitport-autopilot@.service` and `systemd/bitport-parity@.service`
+  (the instance is the account id): the repo has none, and the box runs a hand-made unit for
+  account 3. Done when a grep for `accounts/3` and `account_id=3` in the four files finds nothing,
+  with a test.
+- [ ] P1.3 `coverage_audit.py` takes `--account-id`. It is the only check tool without it (read
+  16 Nov: `fidelity_audit.py`, `form_deep_check.py`, `mail_dead_links.py`, `tally.py`,
+  `parity_gate.py` and `readiness.py` have it). `sharing_report.py` is not a command: its numbers
+  are read on the Sharing page.
 - [ ] P1.4 Wipe safety, from the 16 Nov half-wipe:
   - a wipe refuses to start unless readiness reads Ready for that side and one real read per
     requested service succeeds as the admin and as every user it will touch. All or nothing; each
@@ -134,7 +177,8 @@ Phase 1 and the code of Phase 2 need no tenant. Start them while Phase 0 is open
 - [ ] P1.5 Preflight before Start. Refuse with the reason when any of these fails: both tenants
   ready, quota, network, the DMS login and authorisation, disk, a pending upgrade.
 - [ ] P1.6 The seeder is repeatable. It seeds its random numbers from `hash(user)`, which Python
-  changes in every process (`seed_sandbox.py`, `corpus.py`). Use `zlib.crc32` over a campaign seed
+  changes in every process (`seed_sandbox.py`, `corpus.py`; measured 16 Nov: 8543 and 9792 for one
+  address in two processes). Use `zlib.crc32` over a campaign seed
   and a content key. Add `--seed` and `--content-key`; two users with the same content key get the
   same content. Done when two separate processes print the same plan for the same seed (test).
 - [ ] P1.7 Mail under 5 MB goes up as raw bytes. Today it goes up as base64 text inside JSON, 33%
@@ -149,15 +193,19 @@ Phase 1 and the code of Phase 2 need no tenant. Start them while Phase 0 is open
 - [ ] P2.1 `campaign.py` and `campaign_scenarios.py` at the repo root, with `tests/test_campaign.py`.
   - A scenario is data: `id`, `group` (`errors`, `failures`, `benchmarks`, `watchers`, `chat`),
     `prepare` (what to seed), `act` (the request to send), `inject` (optional), `expect`.
-  - The runner prepares, sends the request as a signed-in operator (sign in the way `ui_check.py`
-    does; every request carries `reason: "campaign <name> <id>"`), injects, waits until
+  - The runner is root on the box. It makes its own session with `accounts_auth.create_session`
+    for the superadmin account, as the tests do, so no password file is needed.
+    (`/etc/bitport/ui.env`, which `ui_check.py` reads, does not exist on the box; give `ui_check.py`
+    the same option.) Every request carries `reason: "campaign <name> <id>"`.
+  - The runner prepares, sends the request, injects, waits until
     `job_admission` shows no job and no follow-on for the account, judges from the ledger, the
     parity gate and the tally, and appends one JSON line to
     `logs/campaigns/<name>/results.jsonl`. It rewrites `RESULTS.md` (one table row per scenario).
-  - `python campaign.py --account-id N --name NAME --group G [--only ids] [--redo] [--dry-run]`.
+  - `python campaign.py --account-id ID --name NAME --group G [--only ids] [--redo] [--dry-run]`.
     A scenario already in the results is skipped unless `--redo`. It runs on the box as a unit, so
     no model waits on it.
-  - It never wipes. A scenario that needs an untouched user takes the next unused twin.
+  - It never wipes a tenant. A scenario that needs an untouched user takes the next unused twin.
+    When none is left it resets one used twin on b. (P0.7(a)) and says so in the result.
 - [ ] P2.2 Completeness tests in `tests/test_campaign.py`. These are what make "every possible"
   checkable:
   - every id in `known_issues.ISSUES` and `RUN_KINDS` has a scenario, or a line in `UNSEEDABLE`
@@ -180,7 +228,11 @@ Phase 1 and the code of Phase 2 need no tenant. Start them while Phase 0 is open
 ### The cohort: 30 users on a.
 
 - [ ] P2.4 Seed plan for the cohort, built on the seeder's existing shapes (`corpus.py`,
-  `seed_sandbox.py`, `seed_shared_drives.py`, `seed_external_shares.py`):
+  `seed_sandbox.py`, `seed_shared_drives.py`, `seed_external_shares.py`). The seeder gives every
+  user the same tree today and puts its edge cases on the first user. Add
+  `data-generator/fixtures.py` (a registry: a fixture's name to the function that seeds it) and
+  `seed_sandbox.py --cohort FILE` (JSON: each user's fixture names and content key). A scenario
+  names the fixtures it needs, and a test fails when a named fixture does not exist.
 
 | User | Holds |
 |---|---|
@@ -316,9 +368,10 @@ Phase 1 and the code of Phase 2 need no tenant. Start them while Phase 0 is open
 - [ ] P3.2 `coverage_audit.py`: row 1.
 - [ ] P3.3 Control run from the UI: all services, split mail, DMS after, server-side, ordered. Let
   every follow-on finish. The gate must read PARITY. Fix until it does (rule 4).
-- [ ] P3.4 `campaign.py` groups in this order: `errors`, `failures`, `benchmarks`, `watchers`,
+- [ ] P3.4 First one scenario of each group (`--only`), to prove the runner itself. Then the
+  `campaign.py` groups in this order: `errors`, `failures`, `benchmarks`, `watchers`,
   `chat`. A failed scenario is a bug: fix, test, deploy, `--redo` that scenario. After each group
-  run `ui_check.py --account-id N` once, so the UI's numbers are compared with the ledger.
+  run `ui_check.py --account-id ID` once, so the UI's numbers are compared with the ledger.
 - [ ] P3.5 Three wipe-and-migrate runs of the cohort in a row: row 7. Record phase times, verdict
   and counts for each.
 - [ ] P3.6 From the measured rates, estimate the 300-user run: seeding hours, Drive hours, DMS days,
@@ -376,7 +429,10 @@ a Drive link.
   - mail: no server-side copy exists. Keep the message counts of the profile and shrink the sizes
     so the total fits the budget. At 0.9 MB/s, 12 hours carry about 38 GB, which is about 40 KB a
     message for 943,000 messages. If the DMS estimate of P3.6 does not fit the window either, scale
-    the counts by one factor and write the factor in State.
+    the counts by one factor and write the factor in State. Early warning: at account 3's DMS
+    import rate (141,977 messages in about 23 h), 943,000 messages take about six days, more than
+    Phase 5's ten days can carry beside seeding and verification. Expect a factor below 1 unless
+    the cohort shows the DMS is faster with more users.
 - [ ] P4.4 A killed seed, started again, adds nothing twice. All seven seed benchmarks pass.
 - [ ] P4.5 Tests in `data-generator/`: same seed, same plan; the p50 and p90 of files, folders and
   messages per user within 15% of the profile; file-type shares within 3 points; the budget
@@ -422,7 +478,7 @@ measurement before and after.
 - [ ] The UI refuses a full verify while the DMS imports.
 - [ ] One log file per run; DMS console readings appended to a history, never overwritten.
 - [ ] A nightly cohort run with a morning report: the campaign on a systemd timer, one line in
-  `monitor/INBOX.md`. Needs P0.7(a).
+  `monitor/INBOX.md`. Allowed by P0.7(a).
 - [ ] Each known difference fixed or accepted. Open: why the DMS imported its own copy of 4 engine
   link mails (`gmail.duplicate`).
 - [ ] `api_server.py` and `webui.py` split by concern. Last. Moves only, no behaviour change, the
@@ -448,6 +504,16 @@ old keys from root's `authorized_keys`; decide on rewriting the git history that
 
 ## 11. State (newest first)
 
+- 16 Nov 2026, 16:40 UTC: where we are. Phase 0 is open; nothing else has started (0 boxes ticked
+  by an executor, no commit after the plan, the box unchanged). The operator answered P0.1, P0.2 and
+  P0.7. Still the operator's: P0.3 (sharing settings), P0.4 (logins on the box), P0.5 (the Bitport
+  account, Setup, sandbox declarations, the seed switch), P0.6 (the outside test address). An
+  executor can start P1.0 to P1.7 and the code of Phase 2 now. The plan was checked against the
+  code and the box and changed: N counts the admin (Business Starter's limit of 300 users); the
+  runner needs no password file; only `coverage_audit.py` lacks `--account-id`; unit templates and
+  P1.0 added; the cohort needs a fixture registry; P0.9, a five-user smoke run, added; The clock
+  added; a DMS warning for the mail factor added. The three scheduled check-ins of the account 3
+  run were cancelled.
 - 16 Nov 2026: plan written. Nothing started. The box (l3novo) is idle and runs ed3d325: 8 cores,
   19 GB of memory, 52 GB of disk free, about 0.9 MB/s up. The Wi-Fi link reads 433 Mbit/s, so the
   limit is the internet line and a cable would not help. `/etc/bitport/dwd.env` holds the logins of
@@ -460,5 +526,5 @@ old keys from root's `authorized_keys`; decide on rewriting the git history that
 - Tests: `./gate.sh` (about 5 minutes, before every deploy); `.venv/bin/python -m pytest tests/ -q`
   (about 2 hours); `.venv/bin/python -m pytest data-generator/ -q`. One pytest at a time, and no
   source edits while it runs.
-- Verdicts: `parity_gate.py --account-id N`; `readiness.py --account-id N --side source|target`.
+- Verdicts: `parity_gate.py --account-id ID`; `readiness.py --account-id ID --side source|target`.
 - A test that looks stuck: `pytest -o faulthandler_timeout=45`.
