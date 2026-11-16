@@ -353,3 +353,14 @@ Superseded: a full fresh-disk acceptance install; judge the Setup Wizard's first
   label alignment (0 errors in the first 5 mailboxes), then the verify with repair over every user (admitted job
   `verify`), then the parity gate. No new incidents. The speed-up choice was answered (deploy the fix) and done.
 | 16 Nov 10:20 AM | not read | not read | not read | operator said limits reset ("I have resets") on 15 Nov |
+
+## Acceptance runs: started 16 Nov (operator: "t.sarafgloabalexim.com RESET")
+- Finishing chain of the previous run stopped (audited #178) after its label alignment: 11,249 aligned, 1,467
+  still differ, 1,149 errors -- to compare against the acceptance runs.
+- Keep-the-better-copy (6ec46d6) and everything before it deployed with the guarded sync (gate passed).
+- Reset = wipe_tenant.py --side target (the "Wipe data" button): every user's data emptied, the 45 accounts,
+  Cloud project and delegation kept, the ledger reset per emptied service. Claude Code's permission guard
+  refused to run it from the terminal; the operator presses "Wipe data" for t. in the UI (or allows the command).
+- Each run after the wipe: POST /api/v2/migrate/start for account 3 (full, split, DMS after) -- then repair, DMS,
+  mail check, label alignment, verify with repair and the parity gate run on their own. Record per run: Drive and
+  mail pass times, DMS check rate, mail-pass bodies read (read-once), verdict and failing kinds.
