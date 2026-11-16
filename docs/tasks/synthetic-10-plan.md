@@ -198,15 +198,21 @@ Phase 1 and the code of Phase 2 need no tenant. Start them while Phase 0 is open
   refuse. `BITPORT_PREFLIGHT=0` switches it off (the test suite does). Not covered: Google's quota
   (the capacity check beside it asks storage only) and the DMS's own authorisation on the source.
   `tests/test_preflight.py`.
-- [ ] P1.6 The seeder is repeatable. It seeds its random numbers from `hash(user)`, which Python
-  changes in every process (`seed_sandbox.py`, `corpus.py`; measured 16 Nov: 8543 and 9792 for one
-  address in two processes). Use `zlib.crc32` over a campaign seed
-  and a content key. Add `--seed` and `--content-key`; two users with the same content key get the
-  same content. Done when two separate processes print the same plan for the same seed (test).
-- [ ] P1.7 Mail under 5 MB goes up as raw bytes. Today it goes up as base64 text inside JSON, 33%
-  bigger, on a line whose upload is the limit (0.9 MB/s). Seeder: `seed_gmail` and `seed_drafts`.
-  Engine **[opus]**: `gmail_engine._deliver`, which already uploads raw bytes above 5 MB. Measure
-  upload bytes per message before and after on one mailbox (`/proc/net/dev`); expect about a quarter fewer.
+- [x] P1.6 (16 Nov) The seeder is repeatable. `corpus.stable_seed(user, salt)` (crc32 of the campaign
+  seed, the content key and the salt) replaces every `hash(user)`; `--seed` and `--content-key`
+  (env `SEED_CAMPAIGN`, `SEED_CONTENT_KEY`, the channel the seeder already uses for opt-ins). Users
+  with one content key get the same mail; the default key is the user's own address, so users differ
+  and a rerun repeats. Message-IDs stay uuid4 on purpose. `data-generator/test_seed_repeatable.py`
+  runs the seed in four processes with different `PYTHONHASHSEED`, and fails on any `hash(` in the
+  seeder.
+- [~] P1.7 Mail under 5 MB goes up as raw bytes. Today it goes up as base64 text inside JSON, 33%
+  bigger, on a line whose upload is the limit (0.9 MB/s).
+  - [x] (16 Nov) Seeder: `seed_gmail` and `seed_drafts` upload `message/rfc822` bytes (the labels
+    alone in the JSON body). Test in `test_seed_repeatable.py`. Not yet measured live: measure bytes
+    on `wlp2s0` for 1,000 seeded messages before and after, in P0.9.
+  - [ ] **[opus]** Engine: `gmail_engine._deliver`, which already uploads raw bytes above 5 MB. Measure
+    upload bytes per message before and after on one mailbox (`/proc/net/dev`); expect about a
+    quarter fewer.
 
 ## 5. Phase 2: the campaign
 
@@ -526,6 +532,10 @@ old keys from root's `authorized_keys`; decide on rewriting the git history that
 
 ## 11. State (newest first)
 
+- 16 Nov 2026, ~20:00 UTC (Sonnet): P1.2 to P1.6 and the seeder half of P1.7 done in the worktree and
+  tested in isolation (P1.5: preflight.py; P1.6: stable seeds). Not gated or deployed. NOTE: some
+  seeder and oversight tests fail in the worktree only because it has no `migration.db` (the control
+  plane's database); judge them in the main tree.
 - 16 Nov 2026, ~19:00 UTC (Sonnet: P1.4 done in the worktree too, tested in isolation) (earlier note follows) (Sonnet, working in the worktree `../calude-workspace-fp2`, branch
   `fableplan2-work`, while the full suite runs in the main tree): P1.2 and P1.3 done and tested in
   isolation; not yet gated or deployed. Merge into the main branch after the full run ends.

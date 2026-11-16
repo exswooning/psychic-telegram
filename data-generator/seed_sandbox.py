@@ -949,10 +949,13 @@ def seed_gmail(gmail, settings: Settings, user: str, peers: list[str],
         ).execute())()
 
     def insert(raw: bytes, labels: list[str]):
+        # The message goes up as its own bytes (message/rfc822), not as base64 inside JSON: a third
+        # fewer bytes on a line whose upload is the limit (0.9 MB/s on the box, 16 Nov 2026). The
+        # engine does the same for anything over 5 MB.
         return retry(lambda: gmail.users().messages().insert(
             userId="me",
-            body={"raw": base64.urlsafe_b64encode(raw).decode(),
-                  "labelIds": labels},
+            body={"labelIds": labels},
+            media_body=_media(raw, "message/rfc822"),
             internalDateSource="dateHeader",
         ).execute())()
 
@@ -1135,7 +1138,7 @@ def seed_drafts(gmail, settings: Settings, user: str, peers: list[str],
         try:
             retry(lambda r=raw: gmail.users().drafts().create(
                 userId="me",
-                body={"message": {"raw": base64.urlsafe_b64encode(r).decode()}},
+                media_body=_media(r, "message/rfc822"),       # raw bytes, not base64 in JSON
             ).execute())()
             m["drafts"] += 1
         except Exception as exc:  # noqa: BLE001

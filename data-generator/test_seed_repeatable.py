@@ -8,12 +8,33 @@ import re
 import subprocess
 import sys
 
+import pytest
+
 import corpus
 import seed_sandbox as seed
 from fakes import FakeGmail
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
+
+
+UPLOADS = []
+
+
+class _Media:
+    """Stands in for the upload object (the real one needs a live request to read back)."""
+    def __init__(self, data, mimetype):
+        self.data, self.mimetype = data, mimetype
+        UPLOADS.append((len(data), mimetype))
+
+    def read_all(self):
+        return self.data
+
+
+@pytest.fixture(autouse=True)
+def _fake_media(monkeypatch):
+    UPLOADS.clear()
+    monkeypatch.setattr(seed, "_media", _Media)
 
 
 def _in_a_new_process(code: str, hashseed: str, **env) -> str:
@@ -73,3 +94,13 @@ def test_the_same_seed_repeats_and_another_seed_differs(settings, monkeypatch):
     assert _mail("c01@tenanta.com", settings) == first
     monkeypatch.setenv("SEED_CAMPAIGN", "6")
     assert _mail("c01@tenanta.com", settings) != first
+
+
+def test_mail_goes_up_as_its_own_bytes_not_as_base64_in_json(settings, monkeypatch):
+    """P1.7: a third fewer bytes on a line whose upload is the limit. Every message is a message/rfc822
+    upload; the labels alone travel in the JSON body."""
+    monkeypatch.delenv("SEED_CONTENT_KEY", raising=False)
+    gmail = FakeGmail("c01@tenanta.com", "source")
+    seed.seed_gmail(gmail, settings, "c01@tenanta.com", ["p1@tenanta.com"], "ext@example.com", count=20)
+    assert len(UPLOADS) == len(gmail.messages) > 0
+    assert {mime for _, mime in UPLOADS} == {"message/rfc822"}
