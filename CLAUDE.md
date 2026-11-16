@@ -1,6 +1,8 @@
 ## Pending Claude implementation task
 
-- [ ] Top priority: [Bitport to 10/10: plan and progress](docs/tasks/parity-10-plan.md). The audit's fix plan, the measurable definition of 10/10, and checkboxes kept current. Work it in order; deploy only on an idle box.
+- [ ] Top priority (16 Nov): [dharan.gov.np → a.sarafgloabalexim.com, dharan untouched](docs/tasks/dharan-to-a.md). dharan is a real government source: nothing on it may change. Work it in order; deploy only on an idle box.
+
+- [ ] Parked (account 3's tenants s./t. lapsed 16 Nov): [Bitport to 10/10: plan and progress](docs/tasks/parity-10-plan.md). The audit's fix plan, the measurable definition of 10/10, and checkboxes kept current. Work it in order; deploy only on an idle box.
 
 - [ ] High priority: [Gmail search-first link rewriting → DMS](docs/tasks/claude-gmail-search-first-dms.md). Use server-side search to fetch only candidate email bodies by default; keep exhaustive scans/full 1:1 optional. This task is queued, not implemented. Respect active-job deployment gates.
 
