@@ -27,3 +27,20 @@ test('fresh counters take precedence over any historical snapshot', async () => 
   expect(await screen.findByText(/3 of 5 emails imported/)).toBeInTheDocument()
   expect(screen.queryByText(/these do not confirm/)).not.toBeInTheDocument()
 })
+
+vi.mock('@/api/controlPlane', () => ({ startDms: vi.fn() }))
+
+test('the DMS can be run again from its card, with a reason, and says it started', async () => {
+  const { startDms } = await import('@/api/controlPlane')
+  vi.mocked(startDms).mockResolvedValue({ ok: true, actionId: 1, detail: 'started pid 42' })
+  vi.mocked(fetchDmsMetrics).mockResolvedValue({ ageSeconds: 1, data: {
+    status: 'complete', metrics: { 'Emails imported': 10, 'Emails discovered': 10 }, read_at: 300 } })
+  const { fireEvent } = await import('@testing-library/react')
+  render(<DmsMetrics accountId={3} />)
+  fireEvent.click(await screen.findByTestId('dms-start'))
+  const reason = await screen.findByRole('textbox')
+  fireEvent.change(reason, { target: { value: 'cutover final mail' } })
+  fireEvent.click(screen.getByRole('button', { name: /confirm/i }))
+  expect(await screen.findByTestId('dms-start-result')).toHaveTextContent('started pid 42')
+  expect(startDms).toHaveBeenCalledWith('cutover final mail', 3)
+})

@@ -4,6 +4,8 @@ import {
 } from '@mui/material'
 import { Refresh as RefreshIcon } from '@mui/icons-material'
 import { fetchDmsMetrics, runAction, DmsMetricsResponse } from '@/api/client'
+import { startDms } from '@/api/controlPlane'
+import ReasonCodeDialog from './ReasonCodeDialog'
 
 // The order and grouping Google's console shows them in.
 const TASK_FIELDS = ['Discovered tasks', 'Successful', 'Failed', 'Skipped', 'Warning']
@@ -39,6 +41,9 @@ const statusColor = (s: string): 'info' | 'success' | 'warning' | 'default' => {
 const DmsMetrics: React.FC<{ accountId?: number | string }> = ({ accountId }) => {
   const [resp, setResp] = useState<DmsMetricsResponse | null>(null)
   const [refreshing, setRefreshing] = useState(false)
+  const [asking, setAsking] = useState(false)
+  const [started, setStarted] = useState<string | null>(null)
+  const [startErr, setStartErr] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
@@ -106,7 +111,32 @@ const DmsMetrics: React.FC<{ accountId?: number | string }> = ({ accountId }) =>
                 disabled={refreshing} data-testid="dms-metrics-refresh">
           {refreshing ? 'Reading…' : 'Refresh'}
         </Button>
+        {accountId != null && (
+          <Button size="small" variant="outlined" onClick={() => setAsking(true)} data-testid="dms-start">
+            Run the DMS again
+          </Button>
+        )}
       </Stack>
+      {started && (
+        <Typography variant="body2" color="success.main" sx={{ mb: 1 }} data-testid="dms-start-result">{started}</Typography>
+      )}
+      <ReasonCodeDialog
+        open={asking} error={startErr}
+        title="Run the DMS again"
+        description={<>Imports again on the existing map — only mail not yet on the target moves — then checks every
+          mailbox, aligns labels, verifies with repair and runs the parity gate. For a cutover&apos;s final mail, or a
+          DMS that was stopped. Refused while one is running.</>}
+        onCancel={() => { setAsking(false); setStartErr(null) }}
+        onConfirm={async (reason) => {
+          try {
+            const r = await startDms(reason, Number(accountId))
+            if (!r.ok) throw new Error(r.detail)
+            setAsking(false); setStartErr(null); setStarted(r.detail || 'Started')
+          } catch (e) {
+            setStartErr(e instanceof Error ? e.message : String(e))
+          }
+        }}
+      />
 
       {!data && (
         <Typography variant="body2" color="text.secondary">

@@ -2129,6 +2129,13 @@ export const fetchTally = (accountId?: number) =>
 
 /** The per-user tally, on demand -- distinct from startTally above, which runs the
  *  whole-tenant fidelity number behind the reports panel's "Run tally" button. */
+/** Run the DMS pipeline again (a delta on the existing map), then the verify with repair and the parity gate. */
+export const startDms = (reason: string, accountId?: number) =>
+  cpFetch<ActionResult>('/api/v2/dms/start', {
+    method: 'POST',
+    body: JSON.stringify({ reason, account_id: accountId ?? null }),
+  })
+
 export const runTally = (reason: string, opts: { accountId?: number; users?: string[] } = {}) =>
   cpFetch<ActionResult>('/api/v2/tally/run', {
     method: 'POST',

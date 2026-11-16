@@ -3114,6 +3114,22 @@ async def tally_status(account_id: int | None = None, op: Operator = Depends(ope
     return await _off_loop(_tally_view, aid)
 
 
+class DmsStart(WriteAction):
+    account_id: int | None = None
+
+
+@app.post("/api/v2/dms/start")
+async def dms_start(body: DmsStart, op: Operator = Depends(operator)):
+    """Run the DMS pipeline again for this migration -- the same job the automatic follow-on starts
+    (dms_pipeline: decide who is ready, import as a delta on the existing map, reconcile, align labels),
+    followed by the verify with repair and the parity gate. For a cutover's final mail and for a run whose
+    DMS was stopped. Refused while one is already running (job admission)."""
+    account_id = _resolve_account(body, op)
+    return await _gated(op, "dms.start", body, f"account:{account_id}",
+                        lambda: _start_dms(account_id, require_clean=False,
+                                           why=f"started by {op.name}: {body.reason}"))
+
+
 @app.post("/api/v2/tally/run")
 async def tally_run(body: RunVerification, op: Operator = Depends(operator)):
     """Tally again, now: counts both tenants for the chosen users (or every user), writing
