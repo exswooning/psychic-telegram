@@ -147,10 +147,13 @@ Phase 1 and the code of Phase 2 need no tenant. Start them while Phase 0 is open
 
 ## 4. Phase 1: before any test run (code)
 
-- [ ] P1.0 Retire account 3 from the watchers. Its tenants are gone, but the unit
-  `bitport-autopilot-5fa` still runs for it, and incidents #77 and #78 (tenant not ready) stay open.
-  Stop and disable the unit. Resolve both incidents:
-  `incidents.py resolve <id> -m "tenants lapsed 16 Nov; account retired"`. Keep the ledger (rule 10).
+- [x] P1.0 (16 Nov) Retire account 3 from the watchers. Done: `bitport-autopilot-5fa` was a
+  transient unit, so stopping it removed it (nothing to disable, no timer restarts it); the two
+  failed `*-resume` units were cleared. #77 and #78 (tenant not ready) are NOT resolved by hand: the
+  oversight check re-finds them every sweep while account 3 had a run event in the last 48 hours
+  (its last was 16 Nov 06:00 UTC), so a manual resolve would only reopen them. They close on their
+  own at the first sweep after 18 Nov 06:00 UTC; check then. Incidents #74, #70, #9 and #8 (older
+  account 3 runs) stay open as history. The ledger is kept (rule 10).
 - [ ] P1.1 Green baseline. Two tests fail today and are older than this plan:
   `tests/test_first_pass_pipeline.py::test_interrupted_mail_is_recovered_inside_original_job` and
   `tests/test_missing_mail_recovery.py::test_orphaned_verification_is_interrupted_only_when_disabled_and_owner_dead`.
@@ -506,6 +509,8 @@ old keys from root's `authorized_keys`; decide on rewriting the git history that
 
 ## 11. State (newest first)
 
+- 16 Nov 2026, 17:00 UTC (Sonnet): P1.0 done on the box (autopilot for account 3 stopped; no job
+  running; API and web UI active). #77 and #78 close themselves after 18 Nov 06:00 UTC. Next: P1.1.
 - 16 Nov 2026, 16:40 UTC: where we are. Phase 0 is open; nothing else has started (0 boxes ticked
   by an executor, no commit after the plan, the box unchanged). The operator answered P0.1, P0.2 and
   P0.7. Still the operator's: P0.3 (sharing settings), P0.4 (logins on the box), P0.5 (the Bitport
