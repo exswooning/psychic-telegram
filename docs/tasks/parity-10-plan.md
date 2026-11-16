@@ -338,3 +338,18 @@ Superseded: a full fresh-disk acceptance install; judge the Setup Wizard's first
 - Pre-existing failing test, not caused by this work: tests/test_missing_mail_recovery.py::
   test_orphaned_verification_is_interrupted_only_when_disabled_and_owner_dead (fails at 2fb7af3~1 too).
 - The acceptance test (three wipe-and-migrate runs on account 3) needs the operator's typed wipe confirmation.
+
+## Check-in, 16 Nov 04:35 UTC (10:20 AM Nepal)
+- The relaunched DMS pipeline (light proof fixed, 16 workers / 40 qps) checked 139,980 messages at 830/min (~13.8/s,
+  18x the 0.76/s before) and finished 15 Nov ~10:40 UTC: 126,073 verified, 13,907 "blocked" -- nearly all labels
+  Gmail added on the target. That count made dms_migrate exit 2, so the pipeline never reached the label alignment,
+  the verify or the gate. Fixed (f2e74ed): content-proven label differences are labelsOnly, the alignment's work,
+  not a block. DMS console: complete, 141,978 discovered, 17 failed (Google's refusals, unchanged).
+- Deployed to the idle box 04:45 UTC with the guarded sync (gate passed, frontend built): everything since bbfc942
+  incl. the parity gate (+ card, + follow-on), follow-ons surviving API restarts, read-once, Run the DMS again,
+  the insert-intent fix, the comment-quote fix. Two files the deploy must not ship (the box's dms_metrics.json,
+  the local .gate-passed) are excluded from now on (878300e).
+- Finishing the chain where it stopped (unit bitport-dms-finish, log logs/campaigns/fresh-20261112/finish.log):
+  label alignment (0 errors in the first 5 mailboxes), then the verify with repair over every user (admitted job
+  `verify`), then the parity gate. No new incidents. The speed-up choice was answered (deploy the fix) and done.
+| 16 Nov 10:20 AM | not read | not read | not read | operator said limits reset ("I have resets") on 15 Nov |
