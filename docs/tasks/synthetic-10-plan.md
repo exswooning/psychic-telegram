@@ -218,31 +218,24 @@ Phase 1 and the code of Phase 2 need no tenant. Start them while Phase 0 is open
 
 ### The runner
 
-- [ ] P2.1 `campaign.py` and `campaign_scenarios.py` at the repo root, with `tests/test_campaign.py`.
-  - A scenario is data: `id`, `group` (`errors`, `failures`, `benchmarks`, `watchers`, `chat`),
-    `prepare` (what to seed), `act` (the request to send), `inject` (optional), `expect`.
-  - The runner is root on the box. It makes its own session with `accounts_auth.create_session`
-    for the superadmin account, as the tests do, so no password file is needed.
-    (`/etc/bitport/ui.env`, which `ui_check.py` reads, does not exist on the box; give `ui_check.py`
-    the same option.) Every request carries `reason: "campaign <name> <id>"`.
-  - The runner prepares, sends the request, injects, waits until
-    `job_admission` shows no job and no follow-on for the account, judges from the ledger, the
-    parity gate and the tally, and appends one JSON line to
-    `logs/campaigns/<name>/results.jsonl`. It rewrites `RESULTS.md` (one table row per scenario).
-  - `python campaign.py --account-id ID --name NAME --group G [--only ids] [--redo] [--dry-run]`.
-    A scenario already in the results is skipped unless `--redo`. It runs on the box as a unit, so
-    no model waits on it.
-  - It never wipes a tenant. A scenario that needs an untouched user takes the next unused twin.
-    When none is left it resets one used twin on b. (P0.7(a)) and says so in the result.
-- [ ] P2.2 Completeness tests in `tests/test_campaign.py`. These are what make "every possible"
-  checkable:
-  - every id in `known_issues.ISSUES` and `RUN_KINDS` has a scenario, or a line in `UNSEEDABLE`
-    with its reason and the unit test that covers it;
-  - every check in `benchmarks.py` has a scenario for its passing and its failing outcome;
-  - every `oversight.watch_*` function and every incident kind has a scenario;
-  - every failpoint name has a scenario.
-
-  Add `tests/test_campaign.py` to `tests/gate.txt`.
+- [~] P2.1 `campaign.py` and `campaign_scenarios.py` at the repo root, with `tests/test_campaign.py`.
+  Done 16 Nov: the scenario registry (160 scenarios: 55 errors of `known_issues`, 21 failures, 42
+  benchmark outcomes, 42 watcher opens and closes), the runner (`run_scenario`, `judge`, results in
+  `logs/campaigns/<name>/results.jsonl`, `RESULTS.md`, `--dry-run`, `--redo`, `--only`, `--group`,
+  `--allow net,reboot`), tested with a fake driver. The rules it keeps: a scenario with no `act` is
+  UNVERIFIED, never a pass; a fact the driver cannot read is UNVERIFIED; a permission the operator
+  did not give is SKIPPED; an unseedable one is COVERED only when its unit test is named.
+  Still open, needs a tenant: **`LiveDriver`** (the box's `Driver`: sign in with
+  `accounts_auth.create_session`, send the request, `job_admission` for idle, `parity_gate.py --json`,
+  `run_watch.list_incidents`, ledger counts per twin), and the `act`, `inject` and `expect` of each
+  scenario, refined when its group first runs (P3.4). `python campaign.py` without `--dry-run` exits
+  2 until the live driver exists.
+- [x] P2.2 (16 Nov) Completeness tests in `tests/test_campaign.py`, in the gate: every id of
+  `known_issues.ISSUES` and `RUN_KINDS` has a scenario (and none is invented); every benchmark of
+  `benchmarks.DEFAULTS` and `SEED_DEFAULTS` has a pass and a fail scenario and a named fault (read:
+  13 migration + 7 seed, not 14 + 7); every `oversight.CHECKS` entry and incident kind opens and
+  closes; the 21 failures exist; a kind that cannot be caused names an existing unit test. Left for
+  P2.3: every failpoint name has a scenario.
 - [ ] P2.3 **[opus]** for where the calls go; Sonnet for the rest. `failpoints.py`: `hit(name)` does
   nothing unless `BITPORT_FAULT` is set and the run's target domain is a declared sandbox. With
   `BITPORT_FAULT=name@n` the process exits with code 137 at the n-th hit (`kill`). With
@@ -532,6 +525,9 @@ old keys from root's `authorized_keys`; decide on rewriting the git history that
 
 ## 11. State (newest first)
 
+- 16 Nov 2026, ~21:00 UTC (Sonnet): P2.1 (registry and runner, no live driver) and P2.2 done in the
+  worktree. Next: merge the branch into the main tree when the full run ends, gate, push; then P1.1's
+  remaining full-suite failures.
 - 16 Nov 2026, ~20:00 UTC (Sonnet): P1.2 to P1.6 and the seeder half of P1.7 done in the worktree and
   tested in isolation (P1.5: preflight.py; P1.6: stable seeds). Not gated or deployed. NOTE: some
   seeder and oversight tests fail in the worktree only because it has no `migration.db` (the control
