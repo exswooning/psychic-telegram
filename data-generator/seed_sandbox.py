@@ -84,7 +84,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import Settings  # noqa: E402
 from resilience import retry_on_google_error, AdaptiveRateLimiter  # noqa: E402
-from corpus import ORG, SCALES, CorpusBuilder  # noqa: E402
+from corpus import ORG, SCALES, CorpusBuilder, stable_seed  # noqa: E402
 
 # The labels seed_gmail() creates. Reset removes exactly these -- deleting
 # every user label would take labels the account's owner made themselves.
@@ -932,7 +932,7 @@ def seed_gmail(gmail, settings: Settings, user: str, peers: list[str],
                external: str, count: int, drive_items: dict | None = None) -> dict:
     """Seed a mailbox with mail from the other four users, in every state."""
     retry = _retry_factory(settings)
-    rng = random.Random(hash(user) & 0xFFFF)
+    rng = random.Random(stable_seed(user))
     m = {"messages": 0, "unread": 0, "starred": 0, "in_spam": 0, "in_trash": 0,
          "with_attachment": 0, "labels": [], "thread_size": 3,
          "with_drive_link": 0}
@@ -1123,7 +1123,7 @@ def seed_drafts(gmail, settings: Settings, user: str, peers: list[str],
     a user had half-written, and nobody notices until they go looking for it.
     """
     retry = _retry_factory(settings)
-    rng = random.Random((hash(user) & 0xFFFF) + 7)
+    rng = random.Random(stable_seed(user, 7))
     m = {"drafts": 0}
     subjects = ["Re: budget question (WIP)", "Draft — team update",
                 "Notes for Monday", "Reply to vendor — needs review",
@@ -1492,7 +1492,7 @@ def seed_contacts(people, settings: Settings, user: str, peers: list[str],
             group_ids.append(get_or_create_group(name))
             m["groups"] += 1
 
-        rng = random.Random(hash(user) & 0xFFFFFFFF)
+        rng = random.Random(stable_seed(user, 3))
         for i in range(count):
             given, family = rng.choice(first_names), rng.choice(last_names)
             email = f"{given.lower()}.{family.lower()}{i}@{rng.choice(domains)}"
@@ -1625,7 +1625,7 @@ def seed_calendar(cal, settings: Settings, user: str, peers: list[str],
                   drive_items: dict | None = None) -> dict:
     """Seed events using import (not insert), so seeding is itself silent."""
     retry = _retry_factory(settings)
-    rng = random.Random(hash(user) & 0xFFFF)
+    rng = random.Random(stable_seed(user, 5))
     m = {"events": 0, "recurring": 0, "with_external": 0, "all_day": 0,
          "with_drive_link": 0, "with_attachment": 0}
     # A meeting whose description says "agenda is in <drive link>" rots
@@ -1764,7 +1764,7 @@ def seed_secondary_calendars(cal, settings: Settings, user: str,
     meeting, which is exactly the fidelity loss this corpus exists to catch.
     """
     retry = _retry_factory(settings)
-    rng = random.Random((hash(user) & 0xFFFF) + 13)
+    rng = random.Random(stable_seed(user, 13))
     m = {"calendars": 0, "calendar_events": 0}
     names = ["Team Roadmap", "On-Call Rota", "Recruiting Pipeline",
              "Release Schedule", "Budget Reviews"]
@@ -2855,6 +2855,12 @@ def main(argv: list[str] | None = None) -> int:
                                     "alice,bob,carol,dave,erin if that "
                                     "lookup cannot run.")
     ap.add_argument("--scale", default="medium", choices=list(SCALES))
+    ap.add_argument("--seed", type=int, default=0,
+                    help="the campaign seed: the same seed makes the same content in every process "
+                         "(default 0)")
+    ap.add_argument("--content-key", default="",
+                    help="users seeded with the same key get the same content (twins). Default: each "
+                         "user's own address, so every user differs but a re-run repeats")
     ap.add_argument("--external-email", default="external.tester@example.com")
     ap.add_argument("--mail", type=int, help="messages per user "
                                              "(default scales with --scale)")
@@ -3023,6 +3029,12 @@ def main(argv: list[str] | None = None) -> int:
     # opt-in extra is more edit than the extra is worth.
     if args.big_file_mb:
         os.environ["SEED_BIG_FILE_MB"] = str(args.big_file_mb)
+    # Same channel for the randomness (corpus.stable_seed reads both).
+    os.environ["SEED_CAMPAIGN"] = str(args.seed)
+    if args.content_key:
+        os.environ["SEED_CONTENT_KEY"] = args.content_key
+    else:
+        os.environ.pop("SEED_CONTENT_KEY", None)
     # Same channel, for the same reason, read by resources.seed_payload_mb()
     # when it sizes the pool below: _media() copies its buffer into a
     # BytesIO, so a filler chunk is resident once per user in flight. Left
