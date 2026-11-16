@@ -116,7 +116,7 @@ drops it. If the operator renews, change the dates here.
   says N.
 - [ ] P0.3 OPERATOR: on both tenants, Drive allows external sharing and link sharing, the Drive SDK
   is on, and Cloud project creation is allowed.
-- [ ] P0.4 OPERATOR: put both admin logins on the box in `/etc/bitport/dwd.env`: the same four
+- [x] P0.4 (16 Nov, written on the operator's word in chat: `info@` on both tenants, one password; the old s./t. file is kept as `dwd.env.s-t.bak`) OPERATOR: put both admin logins on the box in `/etc/bitport/dwd.env`: the same four
   variable names it holds now, with the values of a. (source) and b. (target) in place of s. and t.
   Never in chat.
 - [ ] P0.5 OPERATOR, in the Bitport UI: create the account "a.sarafgloabalexim.com →
@@ -525,6 +525,8 @@ old keys from root's `authorized_keys`; decide on rewriting the git history that
 
 ## 11. State (newest first)
 
+- 16 Nov 2026, ~23:45 Nepal (Sonnet): P0.4 done: `/etc/bitport/dwd.env` now holds the a. (source) and b.
+  (target) logins (names only checked, mode 600, backup kept). Still the operator's: P0.3, P0.5, P0.6.
 - 16 Nov 2026, ~22:30 UTC (Sonnet): STOPPED at 93% of the session window (the operator's screenshot;
   weekly 27%, Fable 23%, session resets 2:55 AM Nepal). Done tonight, all on branch `fableplan2-work`
   merged into the main branch: P1.0 to P1.6, the seeder half of P1.7, P2.1 (no live driver), P2.2.
