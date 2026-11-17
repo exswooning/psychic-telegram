@@ -121,3 +121,13 @@ def test_the_start_endpoint_answers_409_with_the_reason(monkeypatch):
         client.cookies.set("bp_session", accounts_auth.create_session(aid))
         r = client.post("/api/v2/migrate/start", json={"reason": "go now", "services": ["drive"]})
     assert r.status_code == 409 and "Not started: disk: the disk is 95% full" in r.text
+
+
+def test_the_upgrade_check_does_not_match_the_shutdown_helper_that_always_runs():
+    import inspect
+    src = inspect.getsource(P.check_upgrade)
+    assert "-x" not in src and "unattended-upgrade( |$)" in src
+    import re
+    pat = re.compile(r"/usr/bin/unattended-upgrade( |$)")
+    assert pat.search("/usr/bin/unattended-upgrade --install-deps")
+    assert not pat.search("/usr/bin/python3 /usr/share/unattended-upgrades/unattended-upgrade-shutdown --wait-for-signal")

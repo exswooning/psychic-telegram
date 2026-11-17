@@ -56,7 +56,9 @@ def check_upgrade(exists=os.path.exists, running=None) -> dict:
     if running is None:
         def running():
             import subprocess
-            return subprocess.run(["pgrep", "-x", "unattended-upgr"], capture_output=True).returncode == 0
+            # The upgrade itself, not unattended-upgrade-shutdown: that helper runs for the life of the box and
+            # its name truncates to "unattended-upgr", so `pgrep -x unattended-upgr` always matched it (17 Nov).
+            return subprocess.run(["pgrep", "-f", r"/usr/bin/unattended-upgrade( |$)"], capture_output=True).returncode == 0
     try:
         if running():
             return _row("upgrade", False, "an unattended upgrade is running; start when it has finished")
