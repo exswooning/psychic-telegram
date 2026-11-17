@@ -525,6 +525,11 @@ old keys from root's `authorized_keys`; decide on rewriting the git history that
 
 ## 11. State (newest first)
 
+- 17 Nov 2026, 19:10 UTC (Opus): **parity gate PARITY, 11/11 users** on account 5 (engine run + split run with the
+  DMS). The run-1 users' 10 duplicates had two causes, both fixed: the engine mail default (bc9ac38 era) and
+  the DMS importing users who owed it nothing (96c513a: `dms_handoff.nothing_owed`). The extra copies were
+  trashed after a byte check; the check now treats a copy Bitport itself trashed as kept trash (6b70b62).
+  Incident #86 resolved. Next: P2.4 (the 30-user cohort), P2.3 failpoints [opus], the live campaign driver.
 - 17 Nov 2026, ~18:25 UTC (Opus): **the split path is proven end to end.** Five new users (frank..judy)
   seeded on a., mapped and created on b. (a second provisioning pass again cleared the Directory's 404
   right after creation), migrated with `mail_mode: split`; the DMS followed on its own, the source
