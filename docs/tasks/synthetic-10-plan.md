@@ -122,7 +122,7 @@ drops it. If the operator renews, change the dates here.
 - [ ] P0.5 OPERATOR, in the Bitport UI: create the account "a.sarafgloabalexim.com →
   b.sarafgloabalexim.com", run Setup for both sides, declare both domains sandboxes, and switch
   seeding on for the account (Admin, Accounts).
-- [ ] P0.6 OPERATOR: one outside Google account you own, for external-share tests. The address only.
+- [x] P0.6 (17 Nov, the operator's word) The outside address is `learn.aryanpaul@gmail.com`. OPERATOR: one outside Google account you own, for external-share tests. The address only.
 - [x] P0.7 (16 Nov) The operator said yes to all three:
   - (a) the campaign may reset or wipe b., and reset seeded data on a., without a typed confirmation
     each time (never any other domain);
