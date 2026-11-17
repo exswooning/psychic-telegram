@@ -266,6 +266,25 @@ def _dump_dialog(page, dialog, tag: str) -> None:
         logging.getLogger(__name__).debug("ignored an error", exc_info=True)
 
 
+def _authorize_settled(text: str) -> bool:
+    """Has the Add-new dialog finished saving? It has an answer once it names the duplicate, or once
+    nothing in it says it is still working."""
+    t = text.lower()
+    return "already exists" in t or "progress indicator" not in t
+
+
+def _settle_authorize(page, dialog, timeout_ms: int = 30000) -> None:
+    waited = 0
+    while waited < timeout_ms and _dialog_open(dialog):
+        try:
+            if _authorize_settled(dialog.inner_text()):
+                return
+        except Exception:      # noqa: BLE001 - the dialog closing under us is the success path
+            return
+        page.wait_for_timeout(1000)
+        waited += 1000
+
+
 def _tick_overwrite(dialog, label) -> bool:
     """Tick "Overwrite existing client ID" and PROVE it is ticked. A click on the
     label text did not toggle it live, and Authorize then reads as an inline
@@ -974,6 +993,10 @@ def run(client_id: str, scopes: str, timeout: int, headful: bool,
             auth_btn = page.locator("[role=button]", has_text=AUTHORIZE)
         auth_btn.first.click()
         page.wait_for_timeout(2500)
+        # Authorize can still be saving after 2.5 s (the dialog reads "Progress indicator"): an open dialog is a
+        # duplicate client only once it says so. Read too early, a first Authorize that had worked was taken
+        # for "already delegated" and refused as "could not tick Overwrite" (live, 17 Nov 2026: the seed entry).
+        _settle_authorize(page, dialog)
 
         # A client ID that is already delegated cannot be added again: the
         # console refuses with "Client ID already exists. Check the
