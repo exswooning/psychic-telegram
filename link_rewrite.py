@@ -397,6 +397,42 @@ def doc_requests(doc: dict, lookup: Callable[[str], str | None]) -> list[dict]:
     return out + _replace_all(text_ids, lookup)
 
 
+def doc_restyle_requests(doc: dict, inserted: set[str]) -> list[dict]:
+    """Give the text replaceAllText just wrote the style of the run before it.
+
+    replaceAllText writes its replacement with an empty textStyle, so "...spreadsheets/d/<id>/edit" in one
+    Arial 11 run came back as three runs, the id unstyled (a. -> b., 17 Nov 2026): the copy no longer matched
+    its source. Only a run that is exactly one of the ids Bitport inserted, empty-styled, whose neighbours
+    share a style, is touched; Docs then merges the three back into one."""
+    out: list[dict] = []
+
+    def paragraphs(node):
+        if isinstance(node, dict):
+            if "paragraph" in node:
+                yield node["paragraph"].get("elements") or []
+            for v in node.values():
+                yield from paragraphs(v)
+        elif isinstance(node, list):
+            for v in node:
+                yield from paragraphs(v)
+
+    def style(el):
+        return {k: v for k, v in ((el.get("textRun") or {}).get("textStyle") or {}).items() if k != "link"}
+
+    for elements in paragraphs(doc.get("body")):
+        for i, el in enumerate(elements):
+            run = el.get("textRun")
+            if run is None or style(el) or run.get("content") not in inserted or i == 0:
+                continue
+            before = style(elements[i - 1])
+            after = style(elements[i + 1]) if i + 1 < len(elements) else before
+            if before and before == after:
+                out.append({"updateTextStyle": {
+                    "range": {"startIndex": el.get("startIndex", 0), "endIndex": el["endIndex"]},
+                    "textStyle": before, "fields": ",".join(sorted(before))}})
+    return out
+
+
 def slides_requests(pres: dict, lookup: Callable[[str], str | None]) -> list[dict]:
     """Slides batchUpdate requests repointing every mapped link in `pres` (presentations.get)."""
     out: list[dict] = []
@@ -508,6 +544,13 @@ def rewrite_native(kind: str, svc, file_id: str, lookup: Callable[[str], str | N
         if reqs and apply:
             go("write")
             svc.documents().batchUpdate(documentId=file_id, body={"requests": reqs}).execute()
+            inserted = {r["replaceAllText"]["replaceText"] for r in reqs if "replaceAllText" in r}
+            if inserted:
+                go("read")
+                restyle = doc_restyle_requests(svc.documents().get(documentId=file_id).execute(), inserted)
+                if restyle:
+                    go("write")
+                    svc.documents().batchUpdate(documentId=file_id, body={"requests": restyle}).execute()
     elif kind == "slides":
         go("read")
         reqs = slides_requests(svc.presentations().get(presentationId=file_id).execute(), lookup)

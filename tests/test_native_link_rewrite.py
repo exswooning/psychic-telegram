@@ -380,3 +380,54 @@ def test_linked_and_unset_link_display_are_the_same_cell():
     assert _same_display({"userEnteredFormat": {"hyperlinkDisplayType": "LINKED"}}) == {}
     plain = {"userEnteredFormat": {"hyperlinkDisplayType": "PLAIN_TEXT"}}
     assert _same_display(plain) == plain, "plain text is a real difference"
+
+
+def test_text_written_by_replace_all_text_gets_its_neighbours_style_back():
+    """a. -> b., 17 Nov 2026: replaceAllText wrote the new id unstyled, splitting one Arial 11 run into three,
+    so every rewritten Doc differed from its source. The inserted id takes the run's style; Docs merges them."""
+    import link_rewrite as L
+    arial = {"fontSize": {"magnitude": 11, "unit": "PT"}, "weightedFontFamily": {"fontFamily": "Arial", "weight": 400}}
+    doc = {"body": {"content": [{"paragraph": {"elements": [
+        {"startIndex": 1, "endIndex": 40, "textRun": {"content": "The numbers are in .../spreadsheets/d/", "textStyle": arial}},
+        {"startIndex": 40, "endIndex": 84, "textRun": {"content": "NEWID", "textStyle": {}}},
+        {"startIndex": 84, "endIndex": 90, "textRun": {"content": "/edit\n", "textStyle": arial}}]}}]}}
+    reqs = L.doc_restyle_requests(doc, {"NEWID"})
+    assert reqs == [{"updateTextStyle": {"range": {"startIndex": 40, "endIndex": 84}, "textStyle": arial,
+                                         "fields": "fontSize,weightedFontFamily"}}]
+
+
+def test_a_run_that_is_not_an_inserted_id_or_whose_neighbours_differ_is_left_alone():
+    import link_rewrite as L
+    a, b = {"bold": True}, {"italic": True}
+    doc = {"body": {"content": [{"paragraph": {"elements": [
+        {"startIndex": 1, "endIndex": 5, "textRun": {"content": "x", "textStyle": a}},
+        {"startIndex": 5, "endIndex": 9, "textRun": {"content": "plain", "textStyle": {}}},
+        {"startIndex": 9, "endIndex": 13, "textRun": {"content": "NEWID", "textStyle": {}}},
+        {"startIndex": 13, "endIndex": 15, "textRun": {"content": "y\n", "textStyle": b}}]}}]}}
+    assert L.doc_restyle_requests(doc, {"NEWID"}) == []
+
+
+def test_the_restyle_pass_runs_after_the_rewrite_in_rewrite_native():
+    import link_rewrite as L
+    OLD, NEW = "1vOgo-bKb2gp3kDlKZzx9CI85txxKxwxZxAZvsztyWZQ", "16B2K3Tj_r-ejHaO4O_NDu5nHvU5lvu69rkN22xhBWcI"
+    url = "https://docs.google.com/spreadsheets/d/"
+    first = [{"startIndex": 1, "endIndex": 90, "textRun": {"content": url + OLD + "/edit\n", "textStyle": {"bold": True}}}]
+    after = [{"startIndex": 1, "endIndex": 40, "textRun": {"content": url, "textStyle": {"bold": True}}},
+             {"startIndex": 40, "endIndex": 84, "textRun": {"content": NEW, "textStyle": {}}},
+             {"startIndex": 84, "endIndex": 90, "textRun": {"content": "/edit\n", "textStyle": {"bold": True}}}]
+
+    class Docs:
+        def __init__(self):
+            self.batches, self.reads = [], 0
+        def documents(self):
+            return self
+        def get(self, documentId):
+            self.reads += 1
+            el = first if self.reads == 1 else after
+            return type("R", (), {"execute": lambda s: {"body": {"content": [{"paragraph": {"elements": el}}]}}})()
+        def batchUpdate(self, documentId, body):
+            self.batches.append(body["requests"])
+            return type("R", (), {"execute": lambda s: {}})()
+    d = Docs()
+    L.rewrite_native("docs", d, "f1", lambda i: NEW if i == OLD else None)
+    assert len(d.batches) == 2 and "replaceAllText" in d.batches[0][0] and "updateTextStyle" in d.batches[1][0]
