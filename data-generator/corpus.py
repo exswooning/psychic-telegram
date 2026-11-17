@@ -86,6 +86,10 @@ EXTRA_EXTERNAL_SHARE = "aryan@nestnepal.com.np"
 # ----------------------------------------------------------------------
 # Scale profiles: files per leaf folder, archive depth, etc.
 # ----------------------------------------------------------------------
+# One user's content key, from a cohort file (fixtures.entries_from_cohort): twins share one.
+CONTENT_KEYS: dict[str, str] = {}
+
+
 def stable_seed(user: str, salt: int = 0) -> int:
     """The same number in every process, for the same campaign seed, content key and salt.
 
@@ -94,7 +98,7 @@ def stable_seed(user: str, salt: int = 0) -> int:
     campaign seed is SEED_CAMPAIGN (--seed); the content key defaults to the user and is SEED_CONTENT_KEY
     (--content-key) when users must hold the same content (twins). The salt keeps one user's mail, drafts,
     calendar and contacts from sharing a stream. (Message-IDs stay uuid4 on purpose: see _rfc822.)"""
-    key = os.getenv("SEED_CONTENT_KEY") or user
+    key = CONTENT_KEYS.get(user.lower()) or os.getenv("SEED_CONTENT_KEY") or user
     return zlib.crc32(f"{os.getenv('SEED_CAMPAIGN', '0')}\x1f{key}\x1f{salt}".encode("utf-8"))
 
 

@@ -2924,7 +2924,17 @@ def seed_argv(body: dict, account_id: int | None = None) -> tuple[list[str], dic
     # whole tenant -- 200 users here, days rather than hours, which makes
     # "seed, then check the change I just made" impossible to do from the
     # product. A bounded seed is the common case, not the exotic one.
-    users = (body.get("users") or "").strip()
+    # A cohort file (data-generator/cohorts/<name>.json: fableplan2 P2.4) names the users, their sizes and
+    # fixtures, so it replaces `users`. A bare name only: no path from the caller reaches the command line.
+    cohort = (body.get("cohort") or "").strip()
+    if cohort:
+        if not re.fullmatch(r"[a-z0-9_-]{1,40}", cohort):
+            return [], {}, "cohort must be a file name from data-generator/cohorts/ (letters, digits, - and _)"
+        path = os.path.join(HERE, "data-generator", "cohorts", cohort + ".json")
+        if not os.path.isfile(path):
+            return [], {}, f"no cohort file data-generator/cohorts/{cohort}.json"
+        argv += ["--cohort", path]
+    users = "" if cohort else (body.get("users") or "").strip()
     if users:
         # Localparts only: an address would silently seed nothing, and the
         # seeder's own error for that is deep inside a Directory lookup.

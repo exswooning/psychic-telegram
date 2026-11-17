@@ -928,6 +928,28 @@ SUBJECTS = [
 ]
 
 
+def insert_message(gmail, retry, raw: bytes, labels: list[str]):
+    """One seeded message into a mailbox, by the cheapest route Google accepts.
+
+    The message goes up as its own bytes (message/rfc822), not as base64 inside JSON: a third fewer bytes on a
+    line whose upload is the limit (0.9 MB/s on the box, 16 Nov 2026). The engine does the same above 5 MB.
+    googleapiclient's non-resumable multipart upload cannot carry a message with non-ASCII bytes ("'ascii'
+    codec can't encode", seen live 17 Nov on the first raw-upload seed): such a message goes up as before,
+    base64 inside the JSON body. Only the plain-ASCII ones save the third."""
+    if not raw.isascii():
+        return retry(lambda: gmail.users().messages().insert(
+            userId="me",
+            body={"raw": base64.urlsafe_b64encode(raw).decode(), "labelIds": labels},
+            internalDateSource="dateHeader",
+        ).execute())()
+    return retry(lambda: gmail.users().messages().insert(
+        userId="me",
+        body={"labelIds": labels},
+        media_body=_media(raw, "message/rfc822"),
+        internalDateSource="dateHeader",
+    ).execute())()
+
+
 def seed_gmail(gmail, settings: Settings, user: str, peers: list[str],
                external: str, count: int, drive_items: dict | None = None) -> dict:
     """Seed a mailbox with mail from the other four users, in every state."""
@@ -949,24 +971,7 @@ def seed_gmail(gmail, settings: Settings, user: str, peers: list[str],
         ).execute())()
 
     def insert(raw: bytes, labels: list[str]):
-        # The message goes up as its own bytes (message/rfc822), not as base64 inside JSON: a third
-        # fewer bytes on a line whose upload is the limit (0.9 MB/s on the box, 16 Nov 2026). The
-        # engine does the same for anything over 5 MB.
-        # googleapiclient's non-resumable multipart upload cannot carry a message with non-ASCII bytes
-        # ("'ascii' codec can't encode", seen live 17 Nov on the first raw-upload seed): such a message
-        # goes up as before, base64 inside the JSON body. Only the plain-ASCII ones save the third.
-        if not raw.isascii():
-            return retry(lambda: gmail.users().messages().insert(
-                userId="me",
-                body={"raw": base64.urlsafe_b64encode(raw).decode(), "labelIds": labels},
-                internalDateSource="dateHeader",
-            ).execute())()
-        return retry(lambda: gmail.users().messages().insert(
-            userId="me",
-            body={"labelIds": labels},
-            media_body=_media(raw, "message/rfc822"),
-            internalDateSource="dateHeader",
-        ).execute())()
+        return insert_message(gmail, retry, raw, labels)
 
     # Look the labels up before creating any, exactly as seed_contacts does
     # for its contact groups -- and for a consequence that is much worse
@@ -2640,6 +2645,11 @@ def seed_one_user(settings: Settings, entry: dict, all_users: list[str],
                   fill_percent: float = 100.0,
                   account_limit_bytes: int | None = None) -> dict:
     user = entry["email"]
+    # A cohort entry (fableplan2 P2.4) carries its own size, edge cases and fixtures; every key is optional.
+    scale = entry.get("scale", scale)
+    mail_count = entry.get("mail", mail_count)
+    event_count = entry.get("events", event_count)
+    edge_cases = entry.get("edge_cases", edge_cases)
     peers = [] if getattr(settings, "seed_solo", False) else [u for u in all_users if u != user]
     t0 = time.time()
     print(f"  [{user}] starting ({entry['dept']}, {entry['project']})")
@@ -2721,6 +2731,17 @@ def seed_one_user(settings: Settings, entry: dict, all_users: list[str],
     _content_step(user, base_want("contacts"))
     _content_step(user, base_want("tasks"))
 
+    # The cohort's named fixtures (data-generator/fixtures.py), after the standard content so they can link to it.
+    fixture_m = {}
+    if entry.get("fixtures") and not already:
+        import fixtures
+        fixture_m = fixtures.run_all(entry["fixtures"], fixtures.Ctx(
+            seed=sys.modules[__name__], settings=settings, user=user, peers=peers, external=external,
+            drive=drive, gmail=gmail, cal=cal, retry=retry, items=items, params=entry.get("params") or {},
+            build_people_tasks=lambda: build_people_tasks(settings, user)))
+        print(f"  [{user}] fixtures: " + ", ".join(f"{k}={v.get('made', 0)}" + (f" ({len(v['notes'])} note(s))" if v.get("notes") else "")
+                                                   for k, v in fixture_m.items()))
+
     # Last: every other pass has to finish first so storageQuota.usage
     # reflects everything they wrote, not just some of it.
     fill_m = {"filler_files": 0, "filler_bytes": 0, "note": ""}
@@ -2778,7 +2799,7 @@ def seed_one_user(settings: Settings, entry: dict, all_users: list[str],
     return {"user": user, "dept": entry["dept"], "project": entry["project"],
             "drive": drive_m, "gmail": gmail_m, "calendar": cal_m,
             "chat": chat_m, "contacts": contacts_m, "tasks": tasks_m,
-            "storage": fill_m, "elapsed_sec": elapsed}
+            "storage": fill_m, "fixtures": fixture_m, "elapsed_sec": elapsed}
 
 
 def account_shares(settings: Settings, users: list[str]) -> dict[str, int]:
@@ -2873,6 +2894,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--seed", type=int, default=0,
                     help="the campaign seed: the same seed makes the same content in every process "
                          "(default 0)")
+    ap.add_argument("--cohort", metavar="FILE",
+                    help="a cohort file (data-generator/cohorts/*.json): each user's name, size, content key and "
+                         "named fixtures; replaces --users")
     ap.add_argument("--content-key", default="",
                     help="users seeded with the same key get the same content (twins). Default: each "
                          "user's own address, so every user differs but a re-run repeats")
@@ -3154,6 +3178,10 @@ def main(argv: list[str] | None = None) -> int:
         # -- same wait the shared --create-users block below uses.
         print("\nWaiting 20s for new accounts to become usable ...")
         time.sleep(20)
+    elif args.cohort:
+        import fixtures
+        entries = fixtures.entries_from_cohort(fixtures.load_cohort(args.cohort), settings.source_domain)
+        print(f"\nCohort {args.cohort}: {len(entries)} user(s).")
     elif args.users:
         locals_ = [u.strip() for u in args.users.split(",")]
         entries = []
