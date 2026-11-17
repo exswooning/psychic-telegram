@@ -525,6 +525,15 @@ old keys from root's `authorized_keys`; decide on rewriting the git history that
 
 ## 11. State (newest first)
 
+- 17 Nov 2026, 13:40 UTC (Sonnet): Setup done for both tenants of **account 5**. Source a.: project
+  `wsmig-src-83074`, delegation 18 scopes. Target b.: project `wsmig-tgt-94671`, delegation 15 scopes
+  (a first attempt left an empty project `wsmig-tgt-36651` in b.: delete it at teardown). Readiness
+  (read-only, on the box): source for migrate READY, target for migrate READY, source for SEED not
+  ready (no seed key yet: the seeder creates it first, through gcloud and the Admin console).
+  Used `approve_setup_notices.py` (committed) for the two Google first-use screens. Open: sandbox
+  declarations for a. and b., seed switch on account 5 (account 4's flag was set by mistake), P0.3
+  Drive sharing settings, P0.8 licence counts and storage, P0.9 smoke run, deploy of the pending
+  commit when the gate passes.
 - 17 Nov 2026, ~08:50 Nepal (Sonnet): P0.5 in progress. LESSONS: (1) the wizard creates the pair's
   Bitport account itself when its destination step is confirmed: **account 5**
   (`migration-2-4c22631c@migrations.bitport.local`, "migration of #2"). Account 4
