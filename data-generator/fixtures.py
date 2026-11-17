@@ -112,7 +112,7 @@ def _headers(ctx: Ctx, subject: str, *, message_id: str | None, days_ago: int = 
 
 
 def _raw(headers: list[str], body: str, *, ctype: str = "text/plain; charset=utf-8") -> bytes:
-    return ("\r\n".join(headers + [f"MIME-Version: 1.0", f"Content-Type: {ctype}", ""]) + "\r\n" + body + "\r\n").encode("utf-8")
+    return ("\r\n".join(headers + ["MIME-Version: 1.0", f"Content-Type: {ctype}", ""]) + "\r\n" + body + "\r\n").encode("utf-8")
 
 
 def _with_attachment(ctx: Ctx, subject: str, size_bytes: int, tag: str) -> bytes:

@@ -82,7 +82,6 @@ def test_mail_shapes_makes_every_awkward_message(monkeypatch):
     g = _Gmail()
     out = F.mail_shapes(_ctx(monkeypatch, g))
     assert out["notes"] == [] and out["made"] == len(g.raws) >= 13
-    text = b"\n".join(r[:400] for r in g.raws)
     sizes = sorted(len(r) for r in g.raws)
     assert any(4.7e6 < n < 5.24e6 for n in sizes) and any(n > 5.5e6 for n in sizes)         # either side of 5 MB
     import re
