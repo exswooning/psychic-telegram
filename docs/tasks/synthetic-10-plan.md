@@ -190,14 +190,14 @@ Phase 1 and the code of Phase 2 need no tenant. Start them while Phase 0 is open
     (`oversight.tenant_not_ready`). An unreadable incident list lets the action through: the wipe's
     own preflight is the hard guard.
   Tests: `tests/test_wipe_preflight.py`, `tests/test_destructive_launchers_wait_for_a_ready_tenant.py`.
-- [x] P1.5 (16 Nov) Preflight before Start: `preflight.py`, called by `POST /api/v2/migrate/start`
+- [x] P1.5 (16 Nov) Preflight before Start: `start_checks.py` (not preflight.py: that name is the older source scan, sniff.py), called by `POST /api/v2/migrate/start`
   after the capacity check (a real run only). It answers 409 "Not started: <reason>" for: no route to
   Google, the disk 90% full, a pending reboot or running upgrade, the DMS login (the file must exist,
   name no other pair's domain, and hold a target admin password; read by names and domains, never by
   value), and either tenant not ready (readiness). A check nobody could make is logged and does not
   refuse. `BITPORT_PREFLIGHT=0` switches it off (the test suite does). Not covered: Google's quota
   (the capacity check beside it asks storage only) and the DMS's own authorisation on the source.
-  `tests/test_preflight.py`.
+  `tests/test_start_checks.py`.
 - [x] P1.6 (16 Nov) The seeder is repeatable. `corpus.stable_seed(user, salt)` (crc32 of the campaign
   seed, the content key and the salt) replaces every `hash(user)`; `--seed` and `--content-key`
   (env `SEED_CAMPAIGN`, `SEED_CONTENT_KEY`, the channel the seeder already uses for opt-ins). Users

@@ -20,7 +20,7 @@ os.environ.setdefault("TRANSFER_MODE", "download_upload")
 # readiness.gate asks Google about the configured tenants before every run; a test's
 # fake pair has none. tests/test_readiness.py drives it directly.
 os.environ.setdefault("BITPORT_READINESS_GATE", "0")
-os.environ.setdefault("BITPORT_PREFLIGHT", "0")      # preflight.py asks the network and the box
+os.environ.setdefault("BITPORT_PREFLIGHT", "0")      # start_checks.py asks the network and the box
 # Never the developer's own ledger: Settings() defaults to ./migration.db, and a run
 # claims its ledger for the configured pair -- a test's fake pair archived the real one.
 import tempfile as _tempfile  # noqa: E402

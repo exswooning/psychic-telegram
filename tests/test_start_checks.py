@@ -1,7 +1,6 @@
 """fableplan2 P1.5: Start is refused, with the reason, before anything launches."""
-import pytest
 
-import preflight as P
+import start_checks as P
 
 
 def ok(rows):

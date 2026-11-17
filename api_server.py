@@ -2696,9 +2696,9 @@ async def migrate_start(body: StartMigration, op: Operator = Depends(operator)):
             why = None
         if why:
             raise HTTPException(409, f"Not started: {why}.")
-        # The host and the pair, asked before anything starts (preflight.py): disk, route to Google, an
+        # The host and the pair, asked before anything starts (start_checks.py): disk, route to Google, an
         # upgrade in flight, the DMS login, readiness of both tenants. A failure is named, nothing launches.
-        import preflight
+        import start_checks as preflight
         try:
             st = Settings(account_id=account_id)
             rows = await _off_loop(lambda: preflight.check(
