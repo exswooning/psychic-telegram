@@ -404,10 +404,10 @@ class TestMailLinkScan:
         assert r.status_code == 422 and not seen
 
 
-def test_a_run_naming_no_mode_takes_the_benchmarks_mail_mode_but_server_side(cp, monkeypatch):
+def test_a_run_naming_no_mode_is_split_and_server_side_whatever_the_benchmark_won(cp, monkeypatch):
     monkeypatch.setattr(A, "ab_default", lambda: {"arm": "download_upload + engine", "mode": "download_upload",
                                                  "mailMode": "engine", "errors": 4, "seconds": 900})
     r, seen = _start(cp, monkeypatch, services=["all"])
     assert r.status_code == 200, r.text
-    # the winner sets the MAIL mode; how Drive moves stays server_side unless the operator names one
-    assert seen["env"]["TRANSFER_MODE"] == "server_side" and "MAIL_ONLY_WITH_LINKS" not in seen["env"]
+    # Split by default, never bulk mail by the engine (operator, 10 Nov); Drive stays server_side.
+    assert seen["env"]["TRANSFER_MODE"] == "server_side" and seen["env"].get("MAIL_ONLY_WITH_LINKS") == "true"

@@ -217,14 +217,15 @@ def test_arms_rank_by_errors_then_speed_and_an_unchecked_arm_never_wins(tmp_path
                          "errors": 4, "seconds": 1600, "errorsPer1k": None, "secondsPer100": None}
 
 
-def test_new_runs_take_the_winner_and_keep_the_old_defaults_while_none_qualifies(tmp_path, monkeypatch):
+def test_a_full_run_is_split_whatever_the_benchmark_won(tmp_path, monkeypatch):
+    """Operator's rule (10 Nov): split by default, never bulk mail by the engine. An engine winner from
+    another pair's benchmark made the a. -> b. smoke run (17 Nov) move all mail by the engine."""
     import types
     body = types.SimpleNamespace(services=["all"], sample=None)
     monkeypatch.setattr(api_server, "AB_RESULTS", _arms(tmp_path, ARMS))
     monkeypatch.setattr(api_server.ab_default, "__defaults__", (api_server.AB_RESULTS,))
-    assert api_server._default_mail_mode(body) == "engine"
-    monkeypatch.setattr(api_server.ab_default, "__defaults__", (_arms(tmp_path, ARMS[2:]),))
-    assert api_server.ab_default() is None and api_server._default_mail_mode(body) == "split"
+    assert api_server.ab_default()["mailMode"] == "engine"
+    assert api_server._default_mail_mode(body) == "split"
     assert api_server._default_mail_mode(types.SimpleNamespace(services=["all"], sample=25)) == "engine"
 
 

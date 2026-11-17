@@ -2198,8 +2198,11 @@ def _default_mail_mode(body: "StartMigration") -> str:
     # Without Drive in the run there is nothing to rewrite links against.
     if body.sample is not None or not {"gmail", "drive"} <= wanted:
         return "engine"
-    best = ab_default()       # the benchmark's verified winner, when there is one
-    return (best or {}).get("mailMode") or "split"
+    # Always split: the operator's binding rule (10 Nov 2026) is split by default and never bulk mail
+    # by the engine. The A/B winner used to set this, and its file is one for the whole box: account 3's
+    # "server_side + engine" arm made the a. -> b. smoke run (17 Nov) move every message by the engine
+    # and skip the DMS. The winner still names how Drive moves; mail stays an explicit choice.
+    return "split"
 
 
 def _export_identities_csv(account_id: int | None) -> tuple[str, int]:
