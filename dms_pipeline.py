@@ -139,13 +139,15 @@ def main(argv=None) -> int:
     auth = AuthManager(st)
     with sqlite3.connect(f"file:{st.db_path}?mode=ro", uri=True) as conn:
         held, notes = dms_handoff.assess(conn, auth.source_gmail)
+        idle = {u: why for u, why in dms_handoff.nothing_owed(conn, notes).items() if u not in held}
     ready_path = os.path.join(out_dir, "identities-ready.csv")
-    ready = ready_identities(args.identities, held, ready_path)
+    ready = ready_identities(args.identities, {**held, **idle}, ready_path)
     decision = {"at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "ready": ready,
-                "held": held, "notes": notes, "identities": ready_path}
+                "held": held, "notes": notes, "nothingOwed": sorted(idle), "identities": ready_path}
     with open(os.path.join(out_dir, "decision.json"), "w", encoding="utf-8") as fh:
         json.dump(decision, fh, indent=1)
-    print(f"dms: DECISION ready={ready} held={held or 'none'} notes={notes or 'none'}", flush=True)
+    print(f"dms: DECISION ready={ready} held={held or 'none'} notes={notes or 'none'} "
+          f"nothing owed={len(idle)}", flush=True)
     for user, why in held.items():
         _incident(kind="dms_user_held", title=f"{user} held back from the DMS", summary=why,
                   account_id=args.account_id, job_name="dms", fingerprint=f"dms_user_held:{args.account_id}:{user}",

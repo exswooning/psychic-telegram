@@ -236,3 +236,19 @@ class TestTheSourceApprovalWaitsForThePage:
         import dms_migrate
         page = FakePage(ready_after=10_000)
         assert dms_migrate.press_approve(page, polls=6) is None and page.reloads == 1 and not page.clicked
+
+
+class TestOnlyUsersWhoOweMailAreImported:
+    """a. -> b., 17 Nov 2026: users whose mail the engine had already moved were put in the import map, and
+    the DMS added second copies of what Google did not recognise as the same email (2 per user)."""
+
+    def test_a_user_with_deferred_mail_or_new_mail_is_imported_one_with_neither_is_not(self, ledger):
+        from config import DEFERRED_TO_DMS
+        for u in ("owes@s", "new@s", "done@s"):
+            ledger.user(u)
+        ledger.audit("owes@s", "m1", DEFERRED_TO_DMS)
+        ledger.mapped("done@s", "m2")
+        ledger.conn.commit()
+        with sqlite3.connect(ledger.db_path if hasattr(ledger, "db_path") else ledger.path) as conn:
+            idle = dms_handoff.nothing_owed(conn, {"new@s": "1 new message(s) since its pass"})
+        assert set(idle) == {"done@s"} and "nothing owed" in idle["done@s"]

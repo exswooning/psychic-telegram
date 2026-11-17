@@ -76,6 +76,23 @@ def risky(gmail, ids: list[str]) -> list[str]:
     return out
 
 
+def nothing_owed(conn, notes: dict[str, str]) -> dict[str, str]:
+    """{user: why} for the users the DMS has nothing to carry for: no mail deferred to it by a split run
+    (config.DEFERRED_TO_DMS) and no new source mail since their pass (assess's notes). Left out of the
+    import map: an import for a user whose mail the engine already moved adds second copies of what
+    Google does not recognise as the same email (a. -> b., 17 Nov 2026: 2 per user, 5 users)."""
+    from config import DEFERRED_TO_DMS
+    owed = {r[0].lower() for r in conn.execute(
+        "SELECT DISTINCT source_user FROM audit_log WHERE status=? AND item_type IN ('message','draft')",
+        (DEFERRED_TO_DMS,))}
+    out = {}
+    for (user,) in conn.execute("SELECT source_email FROM identity_map WHERE entity_type='user' ORDER BY 1"):
+        key = user.lower()
+        if key not in owed and key not in notes:
+            out[key] = "nothing owed to the DMS: no deferred mail and no new mail since its pass"
+    return out
+
+
 def assess(conn, source_gmail: Callable[[str], object]) -> tuple[dict[str, str], dict[str, str]]:
     """(held, notes) for every user in the ledger. `source_gmail(user)` returns a read-only Gmail client."""
     held = ledger_holds(conn)
