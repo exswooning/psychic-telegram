@@ -653,12 +653,24 @@ class TestFalsePositivesFoundOnTheFirstLiveVerification:
         r = V.run(auth, db, settings, [SRC_USER], ("gmail",), progress=lambda *_: None)
         assert r["users"][SRC_USER]["gmail"]["missing"] and r["verdict"] == "DIFFERENCES"
 
-    def test_google_sender_alone_does_not_exempt_target_mail(self, auth, db, settings, identity):
+    def test_googles_welcome_mail_in_the_new_target_account_is_not_an_extra(self, auth, db, settings, identity):
+        """Google writes it into every new target account; it is not the source's (a. -> b., 17 Nov 2026)."""
         auth.source_gmail(SRC_USER).add_message(MSG % (1, 1, 1), ["INBOX"])
         gmail_engine.GmailMigrator(auth, db, settings, SRC_USER, TGT_USER).run()
         auth.target_gmail(TGT_USER).add_message(
             b"Message-ID: <w@mail.gmail.com>\r\nFrom: Gmail Team <mail-noreply@google.com>\r\n"
             b"To: t@x\r\nSubject: Tips for using your new inbox\r\n\r\nhi\r\n", ["INBOX"])
+        g = V.run(auth, db, settings, [SRC_USER], ("gmail",), progress=lambda *_: None)["users"][SRC_USER]["gmail"]
+        assert g["extras"] == [] and any("welcome mail" in n for n in g["notes"])
+
+    def test_google_sender_alone_does_not_exempt_mail_that_is_on_the_source(self, auth, db, settings, identity):
+        """The source's own welcome mail, carried over unmapped (by the DMS), is source data: still an extra."""
+        raw = (b"Message-ID: <w@mail.gmail.com>\r\nFrom: Gmail Team <mail-noreply@google.com>\r\n"
+               b"To: t@x\r\nSubject: Tips for using your new inbox\r\n\r\nhi\r\n")
+        auth.source_gmail(SRC_USER).add_message(MSG % (1, 1, 1), ["INBOX"])
+        gmail_engine.GmailMigrator(auth, db, settings, SRC_USER, TGT_USER).run()
+        auth.source_gmail(SRC_USER).add_message(raw, ["INBOX"])
+        auth.target_gmail(TGT_USER).add_message(raw, ["INBOX"])
         g = V.run(auth, db, settings, [SRC_USER], ("gmail",), progress=lambda *_: None)["users"][SRC_USER]["gmail"]
         assert len(g["extras"]) == 1 and g["extras"][0]["classification"] == "UNMATCHED_DESTINATION"
 

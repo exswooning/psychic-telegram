@@ -568,6 +568,12 @@ def copy_lookup(db, target_bytes: bytes):
     return lookup
 
 
+def _google_welcome(sender: str) -> bool:
+    """Exactly Google's account-welcome sender, nothing looser (a google.com domain is not enough)."""
+    import email.utils
+    return email.utils.parseaddr(sender or "")[1].lower() == "mail-noreply@google.com"
+
+
 class Verifier:
     def __init__(self, auth, db, settings, source_user: str, target_user: str, retry=lambda f: f,
                  limit: int | None = None, on_api_attempt=None, on_progress=None):
@@ -1795,6 +1801,7 @@ class Verifier:
         self._drafts(src, tgt, res, mapped_ids)
         self._note_sample(res, "message", "draft")
         # Duplicates and extras by Message-ID.
+        welcome = 0
         try:
             scanned = 0
             for m in self._list_all(tgt):
@@ -1807,13 +1814,28 @@ class Verifier:
                     userId="me", id=i, format="metadata", metadataHeaders=["Message-ID", "From"]).execute())
                 head = {h["name"].lower(): h["value"].strip() for h in hdr.get("payload", {}).get("headers", [])}
                 mid = head.get("message-id", "")
-                # A sender domain or Trash label is not an accepted-difference
-                # record. Preserve and report unmatched destinations for review.
+                # A sender domain or Trash label is not an accepted-difference record, with ONE exact
+                # exception: Google's own welcome mail, which Google puts in every new target account
+                # ("Tips for using your new inbox", "Get the official Gmail app") and which is not the
+                # source's data. The tally leaves the same sender out on both sides (tally.NOT_GOOGLE_WELCOME);
+                # left in here, every freshly made target user read DIFFERENCES (a. -> b., 17 Nov 2026).
+                if (mid and mid not in mapped_msgids and _google_welcome(head.get("from", ""))
+                        and not self._x(lambda q=mid: src.users().messages().list(
+                            userId="me", q=f"rfc822msgid:{q}", includeSpamTrash=True,
+                            maxResults=1).execute()).get("messages")):
+                    # ...and only when its Message-ID is nowhere on the source: a source welcome mail the
+                    # DMS carried over is source data, and stays reported.
+                    welcome += 1
+                    continue
+                # Preserve and report every other unmatched destination for review.
                 (res["duplicates"] if mid in mapped_msgids else res["extras"]).append({
                     "target": m["id"], "messageId": mid, "labels": hdr.get("labelIds") or [],
                     "classification": "UNMATCHED_DESTINATION"})
         except Exception as exc:      # noqa: BLE001
             res["errors"].append(f"could not list the target's mailbox: {error_detail(exc)}")
+        if welcome:
+            res["notes"].append(f"{welcome} email(s) on the target are Google's own welcome mail for the new "
+                                "account (from mail-noreply@google.com), not the source's data: not counted")
         res["notCopied"] = self._failed(("message", "gmail"))
         self._source_mail_coverage(src, res)
         reference_gaps = self.db.conn.execute(
