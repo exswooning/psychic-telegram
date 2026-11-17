@@ -70,3 +70,15 @@ def test_a_seed_keys_gcloud_sign_in_publishes_its_notices_where_the_watcher_can_
 def test_the_tool_can_watch_a_named_progress_file():
     import inspect
     assert "--progress" in inspect.getsource(A.main)
+
+
+def test_the_seed_keys_notice_file_is_found_by_the_ledger_path_when_settings_carry_no_account(tmp_path, monkeypatch):
+    import gcloud_browser_auth as G
+    import separate_credentials as SC
+    key = tmp_path / "k.json"
+    key.write_text(json.dumps({"project_id": "p1", "client_id": "1"}))
+    seen = {}
+    monkeypatch.setattr(G, "login", lambda e, p: seen.update(f=G.NOTICE_FILE) or (False, "stop", None))
+    st = type("S", (), {"source_sa_key": str(key), "account_id": None, "db_path": "/opt/bitport/data/accounts/5/migration.db"})()
+    SC._create_seed_key(st, str(tmp_path / "s.json"), {"DWD_EMAIL_SOURCE": "a@x", "DWD_PASSWORD_SOURCE": "p"})
+    assert "/logs/5/seed-key.json.progress" in seen["f"]
