@@ -952,6 +952,15 @@ def seed_gmail(gmail, settings: Settings, user: str, peers: list[str],
         # The message goes up as its own bytes (message/rfc822), not as base64 inside JSON: a third
         # fewer bytes on a line whose upload is the limit (0.9 MB/s on the box, 16 Nov 2026). The
         # engine does the same for anything over 5 MB.
+        # googleapiclient's non-resumable multipart upload cannot carry a message with non-ASCII bytes
+        # ("'ascii' codec can't encode", seen live 17 Nov on the first raw-upload seed): such a message
+        # goes up as before, base64 inside the JSON body. Only the plain-ASCII ones save the third.
+        if not raw.isascii():
+            return retry(lambda: gmail.users().messages().insert(
+                userId="me",
+                body={"raw": base64.urlsafe_b64encode(raw).decode(), "labelIds": labels},
+                internalDateSource="dateHeader",
+            ).execute())()
         return retry(lambda: gmail.users().messages().insert(
             userId="me",
             body={"labelIds": labels},
@@ -1136,10 +1145,13 @@ def seed_drafts(gmail, settings: Settings, user: str, peers: list[str],
                       rng.randint(1, 400),
                       body="Still drafting this. Not sent yet.\n")
         try:
-            retry(lambda r=raw: gmail.users().drafts().create(
+            retry(lambda r=raw: (gmail.users().drafts().create(
                 userId="me",
                 media_body=_media(r, "message/rfc822"),       # raw bytes, not base64 in JSON
-            ).execute())()
+            ) if r.isascii() else gmail.users().drafts().create(
+                userId="me",
+                body={"message": {"raw": base64.urlsafe_b64encode(r).decode()}},   # non-ASCII: see insert()
+            )).execute())()
             m["drafts"] += 1
         except Exception as exc:  # noqa: BLE001
             print(f"  ! draft {i}: {exc}")

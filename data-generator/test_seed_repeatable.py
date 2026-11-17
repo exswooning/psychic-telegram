@@ -102,5 +102,18 @@ def test_mail_goes_up_as_its_own_bytes_not_as_base64_in_json(settings, monkeypat
     monkeypatch.delenv("SEED_CONTENT_KEY", raising=False)
     gmail = FakeGmail("c01@tenanta.com", "source")
     seed.seed_gmail(gmail, settings, "c01@tenanta.com", ["p1@tenanta.com"], "ext@example.com", count=20)
-    assert len(UPLOADS) == len(gmail.messages) > 0
+    assert 0 < len(UPLOADS) <= len(gmail.messages)          # the plain-ASCII ones; non-ASCII ones keep the JSON route
     assert {mime for _, mime in UPLOADS} == {"message/rfc822"}
+
+
+def test_a_message_with_non_ascii_bytes_still_goes_up_as_base64_json(settings, monkeypatch):
+    """The raw upload cannot carry them (googleapiclient's multipart: 'ascii' codec can't encode)."""
+    monkeypatch.delenv("SEED_CONTENT_KEY", raising=False)
+    gmail = FakeGmail("c01@tenanta.com", "source")
+    seed.seed_gmail(gmail, settings, "c01@tenanta.com", ["p1@tenanta.com"], "ext@example.com", count=40)
+    assert len(gmail.messages) >= 40
+    n_media = len(UPLOADS)
+    assert 0 < n_media <= len(gmail.messages)
+    import base64 as b64
+    non_ascii = [m for m in gmail.messages.values() if not b64.urlsafe_b64decode(m["raw"].encode()).isascii()]
+    assert len(UPLOADS) + len(non_ascii) == len(gmail.messages)      # each message took exactly one route
