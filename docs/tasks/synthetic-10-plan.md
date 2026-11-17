@@ -525,6 +525,17 @@ old keys from root's `authorized_keys`; decide on rewriting the git history that
 
 ## 11. State (newest first)
 
+- 17 Nov 2026, ~08:50 Nepal (Sonnet): P0.5 in progress. LESSONS: (1) the wizard creates the pair's
+  Bitport account itself when its destination step is confirmed: **account 5**
+  (`migration-2-4c22631c@migrations.bitport.local`, "migration of #2"). Account 4
+  (`migration-a-b@...`, made by hand, password not kept) is an orphan: delete it from Admin > Accounts.
+  (2) Setup acts on the OPERATOR's own account view ("Viewing account: My own account"), never on a
+  viewed one ("read-only here"); the Migration picker lists only configured pairs. (3) The LAN UI
+  `http://192.168.1.9:81/app/...` works only on the home network. (4) Setup's real button hides behind
+  "Show advanced options" > untick "Dry run first"; it then asks for the word SETUP. Source setup for a.
+  was started 08:5x (full_setup.py --side source, account 5, keeps the admin login root-only); watch
+  `logs/5/full-setup-source.json.progress`. Then the same for b. (target), then sandbox declarations,
+  seeding on for account 5 (account 4's flag was set by mistake, harmless), P0.3, P0.8, P0.9.
 - 17 Nov 2026, ~00:50 Nepal (Sonnet): P0.5 started in the UI through BrowserOS at
   `http://192.168.1.9:81/app/...` (the Cloudflare Access address needs a one-time email code; this
   LAN address is already signed in as admin@bitport.local). Bitport **account 4**
