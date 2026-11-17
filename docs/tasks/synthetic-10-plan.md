@@ -154,7 +154,7 @@ Phase 1 and the code of Phase 2 need no tenant. Start them while Phase 0 is open
   (its last was 16 Nov 06:00 UTC), so a manual resolve would only reopen them. They close on their
   own at the first sweep after 18 Nov 06:00 UTC; check then. Incidents #74, #70, #9 and #8 (older
   account 3 runs) stay open as history. The ledger is kept (rule 10).
-- [~] P1.1 Green baseline. Two tests failed, both older than this plan. Fixed 16 Nov:
+- [x] P1.1 (18 Nov: full `tests/` green, exit 0, 7 skips, all "macOS OS-isolation"; `data-generator/` green) Green baseline. Two tests failed, both older than this plan. Fixed 16 Nov:
   - `test_interrupted_mail_is_recovered_inside_original_job` failed 4 runs in 5, not always: the
     verifier (`verify_sample.Verifier._failed`) counts a later copy as recovering a service-level
     FAILED row only when its timestamp is a later second, and the repair inside the test finishes in
@@ -525,6 +525,18 @@ old keys from root's `authorized_keys`; decide on rewriting the git history that
 
 ## 11. State (newest first)
 
+- 18 Nov 2026, ~20:45 UTC (Sonnet): **the 30-user cohort is seeded, mapped and created on b.** Seed: 30 users in
+  2,870 s, c10's bulk 8,000 items; fixtures ran: mail_shapes 15, calendar_shapes 8, tasks_shapes 6, eicar 1,
+  person_only_check 3 (Site, My Map, Vids in c09). Gaps found and routed: c07 calendar was refused
+  (`notACalendarUser`, a new user's Calendar not yet active) and re-seeded alone (10 events, 2 secondary
+  calendars); c01, t05, t20 are a few events short and t08 one message short (Gmail `failedPrecondition`),
+  t17's Gmail labels read 400 in the audit (mailbox not ready): re-seed those when convenient. Identity map 41/41;
+  provisioning created all 41 on b., 0 failed, the second pass had nothing left (the 404 did not recur this time).
+  **P1.1 ticked**: full `tests/` green. It found one real defect, fixed: P1.5 on 16 Nov had overwritten the older
+  `preflight.py` (the source scan `sniff.py` uses); the Start checks now live in `start_checks.py`. NOT deployed
+  yet (box still has the overwritten file); deploy on an idle box. `coverage_audit.py --account-id 5` (P3.2 row 1)
+  is NOT met: ABSENT: Apps Script, shared drives (the cohort ran `shared_drives: 0`), external-owned shares,
+  groups; many UNPROBED calendar/drive/gmail rows. Next: seed those four absent kinds, then the probes.
 - 18 Nov 2026, ~19:55 UTC (Sonnet): **P2.4 cohort registry deployed (8609159); the 30-user cohort seed is running**
   on a. (c01..c10 specific, t01..t20 twins; fixtures mail/calendar/task shapes, EICAR, bulk). The three
   hand-made files no API can create now exist in c09's Drive, made through the browser: a Site ("Ward Notice
