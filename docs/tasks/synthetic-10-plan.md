@@ -525,6 +525,12 @@ old keys from root's `authorized_keys`; decide on rewriting the git history that
 
 ## 11. State (newest first)
 
+- 18 Nov 2026, ~19:55 UTC (Sonnet): **P2.4 cohort registry deployed (8609159); the 30-user cohort seed is running**
+  on a. (c01..c10 specific, t01..t20 twins; fixtures mail/calendar/task shapes, EICAR, bulk). The three
+  hand-made files no API can create now exist in c09's Drive, made through the browser: a Site ("Ward Notice
+  Board"), a My Map ("Ward Boundary Map") and a Vids file ("Ward Welcome Video"); `person_only_check` will count
+  3. Not yet: the seed's fixture results, c10's bulk (5,000 messages, 3,000 files), mapping and creating the 30
+  on b. (a second provisioning pass is still needed: 404 right after creation), `coverage_audit.py` (P3.2 row 1).
 - 17 Nov 2026, 19:10 UTC (Opus): **parity gate PARITY, 11/11 users** on account 5 (engine run + split run with the
   DMS). The run-1 users' 10 duplicates had two causes, both fixed: the engine mail default (bc9ac38 era) and
   the DMS importing users who owed it nothing (96c513a: `dms_handoff.nothing_owed`). The extra copies were
