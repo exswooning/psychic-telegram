@@ -643,7 +643,10 @@ def create_key(project: str, sa_email: str, dest: str, steps: list[Step],
                 return False
         if os.path.isfile(dest) and os.path.getsize(dest) == 0:
             os.unlink(dest)     # do not leave an empty file that looks like a key
-        if "disableServiceAccountKeyCreation" not in out or attempt == len(backoffs):
+        # Also a service account created moments ago: IAM answers NOT_FOUND "does not exist" for it
+        # until it propagates (live, 17 Nov 2026: the seed key's account, created one call earlier).
+        just_made = "NOT_FOUND" in out and "does not exist" in out and attempt < 3
+        if ("disableServiceAccountKeyCreation" not in out and not just_made) or attempt == len(backoffs):
             break
         retried = True
         time.sleep(backoffs[attempt])

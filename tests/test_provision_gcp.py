@@ -207,6 +207,30 @@ class TestKeyCreationIsVerifiedNotAssumed:
         assert oct(dest.stat().st_mode)[-3:] == "600"
         assert pg.client_id_of(str(dest)) == "123"
 
+    def test_a_service_account_made_moments_ago_is_retried_until_it_exists(self, tmp_path, monkeypatch):
+        """Live, 17 Nov 2026: the seed key's account was created one call earlier and keys create answered
+        NOT_FOUND 'does not exist'; a re-run seconds later worked."""
+        dest = tmp_path / "sa.json"
+        calls = []
+
+        def fake_run(argv, **kw):
+            calls.append(argv)
+            if len(calls) < 3:
+                return 1, "ERROR: (gcloud.iam.service-accounts.keys.create) NOT_FOUND: Service account sa@p1 does not exist."
+            dest.write_text(json.dumps({"client_id": "9", "project_id": "p1"}))
+            return 0, ""
+        monkeypatch.setattr(pg, "run", fake_run)
+        monkeypatch.setattr(pg.time, "sleep", lambda s: None)
+        steps: list[pg.Step] = []
+        assert pg.create_key("p1", "sa@p1", str(dest), steps, False, False) is True and len(calls) == 3
+
+    def test_an_account_that_never_appears_is_not_retried_forever(self, tmp_path, monkeypatch):
+        dest = tmp_path / "sa.json"
+        calls = []
+        monkeypatch.setattr(pg, "run", lambda argv, **kw: calls.append(1) or (1, "NOT_FOUND: x does not exist"))
+        monkeypatch.setattr(pg.time, "sleep", lambda s: None)
+        assert pg.create_key("p1", "sa@p1", str(dest), [], False, False) is False and len(calls) == 4
+
     def test_an_existing_key_is_not_clobbered(self, tmp_path, monkeypatch):
         """Replacing a working key strands whatever is already deployed with
         the old file."""
