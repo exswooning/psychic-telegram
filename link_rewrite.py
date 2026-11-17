@@ -403,7 +403,9 @@ def doc_restyle_requests(doc: dict, inserted: set[str]) -> list[dict]:
     replaceAllText writes its replacement with an empty textStyle, so "...spreadsheets/d/<id>/edit" in one
     Arial 11 run came back as three runs, the id unstyled (a. -> b., 17 Nov 2026): the copy no longer matched
     its source. Only a run that is exactly one of the ids Bitport inserted, empty-styled, whose neighbours
-    share a style, is touched; Docs then merges the three back into one."""
+    share a style, is touched. It matters when that style is not the paragraph's default (a bold link): Docs
+    keeps a style equal to the default as unset, so for plain text the runs stay split and the check reads
+    them merged (native_fidelity._merge_runs)."""
     out: list[dict] = []
 
     def paragraphs(node):

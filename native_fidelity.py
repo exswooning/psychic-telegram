@@ -40,6 +40,68 @@ ID_MAPS = {
 ROOT_VOLATILE = {"documentId", "presentationId", "revisionId", "suggestionsViewMode"}
 
 
+def _pruned(value):
+    """A style with its empty parts removed: Docs reports an unset colour as {} on one run and leaves the key
+    out on another, and the two mean the same thing."""
+    if isinstance(value, dict):
+        out = {k: _pruned(v) for k, v in value.items()}
+        return {k: v for k, v in out.items() if v not in ({}, None)}
+    return value
+
+
+def _merge_runs(document):
+    """Each Docs paragraph's text runs, merged where what a reader sees is the same.
+
+    A run's look is its paragraph's named style with the run's own style over it. Docs keeps a style equal to
+    that default as "unset" ({}), so a copy whose rewritten link id was written by replaceAllText reads as three
+    runs where its source has one -- same text, same look (a. -> b., 17 Nov 2026: every rewritten Doc failed
+    its check). Runs whose effective styles are equal become one, on both sides alike."""
+    if not isinstance(document, dict) or "namedStyles" not in document and "tabs" not in document:
+        return document
+    import copy
+
+    def named_styles(doc):
+        return {s.get("namedStyleType"): s.get("textStyle") or {}
+                for s in ((doc.get("namedStyles") or {}).get("styles") or [])}
+
+    def fix(node, named):
+        if isinstance(node, dict):
+            if isinstance(node.get("documentTab"), dict):
+                named = named_styles(node["documentTab"]) or named
+            para = node.get("paragraph")
+            if isinstance(para, dict) and isinstance(para.get("elements"), list):
+                base = named.get((para.get("paragraphStyle") or {}).get("namedStyleType") or "NORMAL_TEXT", {})
+                merged = []
+                for el in para["elements"]:
+                    run = el.get("textRun")
+                    eff = _pruned({**base, **(run.get("textStyle") or {})}) if run is not None else None
+                    prev = merged[-1] if merged else None
+                    if (run is not None and prev is not None and prev.get("textRun") is not None
+                            and prev["_eff"] == eff and not run.get("suggestedInsertionIds")
+                            and not run.get("suggestedDeletionIds")):
+                        prev["textRun"]["content"] = prev["textRun"].get("content", "") + run.get("content", "")
+                        if "endIndex" in el:
+                            prev["endIndex"] = el["endIndex"]
+                        continue
+                    el = copy.deepcopy(el)
+                    if run is not None:
+                        el["textRun"]["textStyle"] = eff
+                    el["_eff"] = eff
+                    merged.append(el)
+                for el in merged:
+                    el.pop("_eff", None)
+                para["elements"] = merged
+            for v in node.values():
+                fix(v, named)
+        elif isinstance(node, list):
+            for v in node:
+                fix(v, named)
+
+    doc = copy.deepcopy(document)
+    fix(doc, named_styles(doc))
+    return doc
+
+
 def canonical_native(document, lookup=lambda _: None):
     # visit builds every list/dict anew and never mutates the input. A preliminary
     # deepcopy kept a second full document resident for no comparison benefit.
@@ -192,6 +254,8 @@ def compare_native(auth, source_user, target_user, sid, tid, mime, lookup, fetch
     # image is fetched (the URL acts as the requester, for a short while) and compared
     # by its bytes' hash -- Docs call it contentUri, Slides contentUrl.
     source, target = _hash_images(source, fetch), _hash_images(target, fetch)
+    if mime.endswith(".document"):
+        source, target = _merge_runs(source), _merge_runs(target)
     a, b = canonical_native(source, lookup), canonical_native(target)
     return (
         [] if a == b else ["native document content, formatting or structure differs"]
