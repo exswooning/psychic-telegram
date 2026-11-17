@@ -96,7 +96,22 @@ def _create_seed_key(settings, dest: str, login: dict) -> tuple[bool, str]:
     import gcloud_browser_auth
     import provision_gcp
     project = _key(settings.source_sa_key)["project_id"]
-    ok, detail, cfg = gcloud_browser_auth.login(login["DWD_EMAIL_SOURCE"], login["DWD_PASSWORD_SOURCE"])
+    # Google shows its first-use notices (Cloud SDK access, Cloud Platform terms) on every gcloud sign-in. With
+    # no channel the sign-in refused them outright ("Use the setup UI") and no seed key could be made (17 Nov
+    # 2026). Publish them where approve_setup_notices.py (or a person) can answer, one run at a time.
+    progress = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs",
+                            str(getattr(settings, "account_id", None) or 0), "seed-key.json.progress")
+    saved = (gcloud_browser_auth.HANDOFF, gcloud_browser_auth.NOTICE_FILE)
+
+    def _publish(handoff):
+        os.makedirs(os.path.dirname(progress), exist_ok=True)
+        with open(progress, "w", encoding="utf-8") as fh:
+            json.dump({"pct": 5, "label": "seed key: sign-in", "handoff": handoff}, fh)
+    gcloud_browser_auth.HANDOFF, gcloud_browser_auth.NOTICE_FILE = _publish, progress + ".notice-response"
+    try:
+        ok, detail, cfg = gcloud_browser_auth.login(login["DWD_EMAIL_SOURCE"], login["DWD_PASSWORD_SOURCE"])
+    finally:
+        gcloud_browser_auth.HANDOFF, gcloud_browser_auth.NOTICE_FILE = saved
     if not ok:
         return False, f"gcloud sign-in as the source admin failed: {detail}"
     try:

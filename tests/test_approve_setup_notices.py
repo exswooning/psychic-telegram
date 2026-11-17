@@ -37,3 +37,36 @@ def test_a_government_domain_is_refused_outright():
 def test_an_expired_notice_is_not_answered(tmp_path):
     path = _write(tmp_path, expiresAt=time.time() - 5)
     assert A.step(path, "a.example", {"cloud_console_terms"}, set(), lambda m: None) is None
+
+
+def test_a_seed_keys_gcloud_sign_in_publishes_its_notices_where_the_watcher_can_answer(tmp_path, monkeypatch):
+    """Google's first-use notices appear on every gcloud sign-in; with no channel the seed key could never be made."""
+    import gcloud_browser_auth as G
+    import separate_credentials as SC
+    key = tmp_path / "k.json"
+    key.write_text(json.dumps({"project_id": "p1", "client_id": "1"}))
+    seen = {}
+
+    def login(email, password):
+        seen["handoff"], seen["notice_file"] = G.HANDOFF, G.NOTICE_FILE
+        G.HANDOFF({"kind": "review", "requestId": "r9"})
+        return False, "stop here", None
+    monkeypatch.setattr(G, "login", login)
+    before = (G.HANDOFF, G.NOTICE_FILE)
+    st = type("S", (), {"source_sa_key": str(key), "account_id": 77})()
+    ok, detail = SC._create_seed_key(st, str(tmp_path / "seed.json"), {"DWD_EMAIL_SOURCE": "a@x", "DWD_PASSWORD_SOURCE": "p"})
+    assert not ok and callable(seen["handoff"])
+    assert seen["notice_file"].endswith("logs/77/seed-key.json.progress.notice-response")
+    assert (G.HANDOFF, G.NOTICE_FILE) == before                      # put back, whatever happens
+    import os
+    written = os.path.join(SC.os.path.dirname(os.path.abspath(SC.__file__)), "logs", "77", "seed-key.json.progress")
+    try:
+        assert json.load(open(written))["handoff"]["requestId"] == "r9"
+    finally:
+        os.unlink(written)
+        os.rmdir(os.path.dirname(written))
+
+
+def test_the_tool_can_watch_a_named_progress_file():
+    import inspect
+    assert "--progress" in inspect.getsource(A.main)

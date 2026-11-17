@@ -64,12 +64,14 @@ def main(argv=None) -> int:
     ap.add_argument("--side", choices=("source", "target"), required=True)
     ap.add_argument("--domain", required=True, help="the tenant the notices must belong to")
     ap.add_argument("--categories", default=",".join(DEFAULT_CATEGORIES))
+    ap.add_argument("--progress", help="the progress file to watch (default: that side's full setup; "
+                                       "a seed key's is logs/<id>/seed-key.json.progress)")
     ap.add_argument("--wait", type=int, default=1500, help="stop after this many seconds with nothing to answer")
     args = ap.parse_args(argv)
     if domain_guard.is_government(args.domain):
         print(f"refusing: {args.domain} is a government domain; its Google steps are a person's", file=sys.stderr)
         return 2
-    cats, answered, path = set(args.categories.split(",")), set(), progress_path(args.account_id, args.side)
+    cats, answered, path = set(args.categories.split(",")), set(), args.progress or progress_path(args.account_id, args.side)
     log = lambda m: print(f"{time.strftime('%H:%M:%S', time.gmtime())} {m}", flush=True)  # noqa: E731
     idle_since = time.time()
     while time.time() - idle_since < args.wait:
