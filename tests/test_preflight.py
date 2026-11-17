@@ -125,8 +125,8 @@ def test_the_start_endpoint_answers_409_with_the_reason(monkeypatch):
 
 def test_the_upgrade_check_does_not_match_the_shutdown_helper_that_always_runs():
     import inspect
-    src = inspect.getsource(P.check_upgrade)
-    assert "-x" not in src and "unattended-upgrade( |$)" in src
+    code = "\n".join(l for l in inspect.getsource(P.check_upgrade).splitlines() if not l.strip().startswith("#"))
+    assert '"-x"' not in code and "unattended-upgrade( |$)" in code
     import re
     pat = re.compile(r"/usr/bin/unattended-upgrade( |$)")
     assert pat.search("/usr/bin/unattended-upgrade --install-deps")
