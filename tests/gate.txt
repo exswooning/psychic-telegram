@@ -41,3 +41,4 @@ tests/test_destructive_launchers_wait_for_a_ready_tenant.py
 tests/test_preflight.py
 tests/test_campaign.py
 tests/test_native_runs_merged.py
+tests/test_repair_fingerprint_stable.py

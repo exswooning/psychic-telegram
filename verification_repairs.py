@@ -329,10 +329,16 @@ def _newly_supported(rows):
     return False
 
 
+RUN_METADATA = frozenset({"verifiedAt", "provenance", "cache"})
+
+
 def fingerprint(rows):
     # Wall-clock timestamps must not turn the same unresolved difference into
     # an infinite repair loop. Include finding details, counts and sample scope.
-    stable = [{k: v for k, v in r.items() if k != "verifiedAt"} for r in rows]
+    # provenance (a fresh runId and startedAt) and cache (per-run reuse counters) describe the check, not
+    # the finding: kept in, every check re-keyed the same difference and the dispatcher re-verified those
+    # users every ~3 minutes, forever (a. -> b., 17 Nov 2026).
+    stable = [{k: v for k, v in r.items() if k not in RUN_METADATA} for r in rows]
     stable.sort(key=lambda r: r.get("service", ""))
     # Revisit an old terminal no-op only when a newly implemented repair can
     # apply. Unsupported content findings retain their old keys and do not
