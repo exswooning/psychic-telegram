@@ -525,6 +525,23 @@ old keys from root's `authorized_keys`; decide on rewriting the git history that
 
 ## 11. State (newest first)
 
+- 17 Nov 2026, ~16:05 UTC (Opus, deep check after the smoke run). Found and fixed, deployed 508ac39:
+  1. **Mail moved by the engine, against the rule.** A full run with no `mail_mode` took the box-wide A/B
+     winner ("server_side + engine", from account 3), so the smoke run moved every message by the engine
+     and the DMS never followed. A full run is now always split (`_default_mail_mode`); tests updated.
+     Report: the smoke run's mail on b. was moved by the engine (sandbox; nothing to undo).
+  2. **Every rewritten Doc failed its check.** `replaceAllText` writes the new id with no style, Docs keeps
+     a default-equal style as unset, so one run read as three. The check now merges adjacent runs of
+     equal effective style (`native_fidelity._merge_runs`); the 5 live Docs read IDENTICAL. The rewrite
+     also restyles inserted ids from their neighbours (needed when the link text is bold etc.).
+  3. `dwd_helper` read a dialog still saving ("Progress indicator") as a duplicate client: now waits.
+  4. Key creation retries a service account made moments ago (NOT_FOUND "does not exist").
+  Re-verify with repair running; then the gate. OPEN, in order: (a) the repair dispatcher re-verified the
+  same 5 users every ~3 min with new fingerprints (should stop at an unchanged finding): find why;
+  (b) re-run the smoke migration as split to prove the DMS follow-on (P0.9 again, after a wipe of b. or
+  on new users); (c) P1.7 engine half: a raw upload needs `resumable=True` for non-ASCII bytes, so measure
+  the extra round trip against the 33% before choosing; (d) P1.1 full-suite rerun; (e) P2.3 failpoints
+  [opus]; (f) P2.4 fixture registry; (g) resolve incident #84.
 - 17 Nov 2026, 15:25 UTC (Sonnet): P0.3 to P0.8 done; **P0.9 smoke run ran**: 5 users seeded on a.
   (tiny scale, 498 s), identities mapped (6 with the admin), users created on b., migrate (Drive 10 min,
   mail 1 min, calendar/contacts/tasks 3 min) -> all 6 users DONE, tally finished, `parity_gate`
