@@ -525,6 +525,17 @@ old keys from root's `authorized_keys`; decide on rewriting the git history that
 
 ## 11. State (newest first)
 
+- 17 Nov 2026, ~18:25 UTC (Opus): **the split path is proven end to end.** Five new users (frank..judy)
+  seeded on a., mapped and created on b. (a second provisioning pass again cleared the Directory's 404
+  right after creation), migrated with `mail_mode: split`; the DMS followed on its own, the source
+  admin's approval was clicked by Bitport itself (17:40), Google imported 346/346 (0 failed, 11 users),
+  the reconciliation and verify ran, and the gate reads those five AT PARITY. The six earlier users read
+  STALE (the DMS also processed their mailboxes; their mail had been moved by the engine in run 1): a
+  fresh verify is running. The DMS job exited 2 (incident #86) on 11 unresolved messages: 10 are on the
+  run-1 users (2 each, "match absent or ambiguous"), 1 is alice's link to an unmapped file. Shipped
+  8906c23: a per-user DMS progress bar on Migration detail (`dms_progress.py`,
+  `GET /api/v2/dms/per-user`, `DmsUserProgress.tsx`). Box: auto power-on after a clean shutdown (RTC
+  alarm), backlight off, power-off requests logged; the account 3 campaign timer disabled.
 - 17 Nov 2026, ~16:05 UTC (Opus, deep check after the smoke run). Found and fixed, deployed 508ac39:
   1. **Mail moved by the engine, against the rule.** A full run with no `mail_mode` took the box-wide A/B
      winner ("server_side + engine", from account 3), so the smoke run moved every message by the engine
