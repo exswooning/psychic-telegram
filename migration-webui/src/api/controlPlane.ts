@@ -2129,6 +2129,19 @@ export const fetchTally = (accountId?: number) =>
 
 /** The per-user tally, on demand -- distinct from startTally above, which runs the
  *  whole-tenant fidelity number behind the reports panel's "Run tally" button. */
+/** One mailbox's DMS progress: its message count on the target against the source (null = unreadable). */
+export interface DmsUserProgress {
+  source: string
+  target: string
+  status: string
+  sourceCount: number | null
+  targetCount: number | null
+  share: number | null
+}
+export interface DmsPerUserView { at: number | null; users: DmsUserProgress[]; note?: string }
+export const fetchDmsPerUser = (accountId?: number) =>
+  cpFetch<DmsPerUserView>(`/api/v2/dms/per-user${accountId ? `?account_id=${accountId}` : ''}`)
+
 /** Run the DMS pipeline again (a delta on the existing map), then the verify with repair and the parity gate. */
 export const startDms = (reason: string, accountId?: number) =>
   cpFetch<ActionResult>('/api/v2/dms/start', {

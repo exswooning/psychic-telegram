@@ -12,6 +12,7 @@ vi.mock('@/components/CopySafetyCard', () => ({ default: () => null }))
 vi.mock('@/components/ParityGateCard', () => ({ default: () => null }))
 vi.mock('@/components/OneToOneSummary', () => ({ default: () => null }))
 vi.mock('@/api/controlPlane', () => ({
+  fetchDmsPerUser: () => Promise.resolve({ at: null, users: [] }),
   fetchSourceGuard: () => Promise.resolve({ snapshotTakenAt: null, snapshotUsers: 0, latest: null }),
   runSourceGuard: () => Promise.resolve({ ok: true, actionId: 1, detail: '' }),
   fetchUserProfiles: () => Promise.resolve({ profiles: [] }),

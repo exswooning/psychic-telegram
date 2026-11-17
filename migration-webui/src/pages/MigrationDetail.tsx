@@ -33,6 +33,7 @@ import SharingPanel from '@/components/SharingPanel'
 import CopySafetyCard from '@/components/CopySafetyCard'
 import { itemTypeLabel } from '@/utils/itemTypeLabel'
 import DmsMetrics from '@/components/DmsMetrics'
+import DmsUserProgress from '@/components/DmsUserProgress'
 
 /**
  * One migration in full: what moved, what failed, and why.
@@ -444,6 +445,7 @@ export const MigrationDetail: React.FC = () => {
             </Alert>
           )}
           {(p?.itemsDeferred ?? 0) > 0 && <DmsMetrics accountId={Number(accountId) || undefined} />}
+          {(p?.itemsDeferred ?? 0) > 0 && <DmsUserProgress accountId={Number(accountId) || undefined} />}
 
           {/* Pressing Run delta changed nothing visible: it moves the same
               counters a finished migration already left on screen, and the

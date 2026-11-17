@@ -3131,6 +3131,33 @@ async def tally_status(account_id: int | None = None, op: Operator = Depends(ope
     return await _off_loop(_tally_view, aid)
 
 
+@app.get("/api/v2/dms/per-user")
+async def dms_per_user(account_id: int | None = None, op: Operator = Depends(operator)):
+    """Each mailbox's message count on the target against the source, for a bar per user while the DMS
+    imports. Read-only on both tenants; counted at most once a minute (dms_progress.FRESH_SEC)."""
+    require_login(op)
+    aid = account_id if account_id is not None else op.account_id
+    if not aid:
+        return {"at": None, "users": []}
+    _require_account_access(aid, op)
+
+    def _read() -> dict:
+        import dms_progress
+        from auth import AuthManager
+        from config import Settings
+        from db import MigrationDB
+
+        def pairs():
+            db = MigrationDB(Settings(account_id=aid).db_path)
+            try:
+                return [(r["source_email"], r["target_email"], r["status"]) for r in db.all_identities()
+                        if r["entity_type"] == "user" and r["target_email"]]
+            finally:
+                db.close()
+        return dms_progress.view(aid, lambda: AuthManager(Settings(account_id=aid)), pairs)
+    return await _off_loop(_read)
+
+
 class DmsStart(WriteAction):
     account_id: int | None = None
 
