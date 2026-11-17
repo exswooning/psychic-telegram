@@ -674,6 +674,23 @@ class TestFalsePositivesFoundOnTheFirstLiveVerification:
         g = V.run(auth, db, settings, [SRC_USER], ("gmail",), progress=lambda *_: None)["users"][SRC_USER]["gmail"]
         assert len(g["extras"]) == 1 and g["extras"][0]["classification"] == "UNMATCHED_DESTINATION"
 
+    def test_a_second_copy_bitport_moved_to_the_trash_is_not_a_duplicate(self, auth, db, settings, identity):
+        """Keep the better copy (16 Nov 2026) trashes the DMS's second copy; the check listed it as a duplicate."""
+        auth.source_gmail(SRC_USER).add_message(MSG % (1, 1, 1), ["INBOX"])
+        gmail_engine.GmailMigrator(auth, db, settings, SRC_USER, TGT_USER).run()
+        tgt = auth.target_gmail(TGT_USER)
+        extra = tgt.add_message(MSG % (1, 1, 1), ["TRASH"])
+        db.log_audit(SRC_USER, "<m1@x>", "dms_duplicate", "TRASHED", f"kept the mapped copy x; trashed {extra}, the DMS's copy")
+        g = V.run(auth, db, settings, [SRC_USER], ("gmail",), progress=lambda *_: None)["users"][SRC_USER]["gmail"]
+        assert g["duplicates"] == [] and g["extras"] == [] and any("Bitport moved to the target's trash" in n for n in g["notes"])
+
+    def test_a_trashed_copy_bitport_did_not_trash_is_still_a_duplicate(self, auth, db, settings, identity):
+        auth.source_gmail(SRC_USER).add_message(MSG % (1, 1, 1), ["INBOX"])
+        gmail_engine.GmailMigrator(auth, db, settings, SRC_USER, TGT_USER).run()
+        auth.target_gmail(TGT_USER).add_message(MSG % (1, 1, 1), ["TRASH"])
+        g = V.run(auth, db, settings, [SRC_USER], ("gmail",), progress=lambda *_: None)["users"][SRC_USER]["gmail"]
+        assert len(g["duplicates"]) == 1
+
     def test_any_other_stray_is_still_a_stray(self, auth, db, settings, identity):
         auth.source_gmail(SRC_USER).add_message(MSG % (1, 1, 1), ["INBOX"])
         gmail_engine.GmailMigrator(auth, db, settings, SRC_USER, TGT_USER).run()

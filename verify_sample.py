@@ -1802,6 +1802,13 @@ class Verifier:
         self._note_sample(res, "message", "draft")
         # Duplicates and extras by Message-ID.
         welcome = 0
+        # Second copies Bitport itself put in the target's trash (keep the better copy, 16 Nov 2026), named by
+        # their target id in the ledger: Bitport's own retained trash, recoverable 30 days, not a duplicate.
+        import re as _re
+        bitport_trashed = {m.group(1) for (msg,) in self.db.conn.execute(
+            "SELECT error_message FROM audit_log WHERE source_user=? AND item_type='dms_duplicate' "
+            "AND status='TRASHED'", (self.src_user,)) for m in [_re.search(r"trashed ([\w-]+)", msg or "")] if m}
+        kept_trash = 0
         try:
             scanned = 0
             for m in self._list_all(tgt):
@@ -1809,6 +1816,9 @@ class Verifier:
                 self._report_progress("Gmail target inventory", scanned,
                                       item=f"email {m.get('id', '?')}")
                 if m["id"] in mapped_ids:
+                    continue
+                if m["id"] in bitport_trashed:
+                    kept_trash += 1
                     continue
                 hdr = self._x(lambda i=m["id"]: tgt.users().messages().get(
                     userId="me", id=i, format="metadata", metadataHeaders=["Message-ID", "From"]).execute())
@@ -1833,6 +1843,9 @@ class Verifier:
                     "classification": "UNMATCHED_DESTINATION"})
         except Exception as exc:      # noqa: BLE001
             res["errors"].append(f"could not list the target's mailbox: {error_detail(exc)}")
+        if kept_trash:
+            res["notes"].append(f"{kept_trash} second copy(ies) Bitport moved to the target's trash, kept beside the "
+                                "mapped copy (recoverable 30 days): not counted")
         if welcome:
             res["notes"].append(f"{welcome} email(s) on the target are Google's own welcome mail for the new "
                                 "account (from mail-noreply@google.com), not the source's data: not counted")
