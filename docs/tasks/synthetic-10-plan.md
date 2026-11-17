@@ -525,6 +525,21 @@ old keys from root's `authorized_keys`; decide on rewriting the git history that
 
 ## 11. State (newest first)
 
+- 17 Nov 2026, 15:25 UTC (Sonnet): P0.3 to P0.8 done; **P0.9 smoke run ran**: 5 users seeded on a.
+  (tiny scale, 498 s), identities mapped (6 with the admin), users created on b., migrate (Drive 10 min,
+  mail 1 min, calendar/contacts/tasks 3 min) -> all 6 users DONE, tally finished, `parity_gate`
+  UNVERIFIED (Drive checks STALE because later passes changed the files; Gmail NOT_VERIFIED).
+  NO repair or DMS follow-on started after the run: find out why (the request left `mail_mode` unset;
+  read `api_server._default_mail_mode` and the `then` list in `migrate_start`), then run verify with
+  repair and the DMS from the UI and re-read the gate. Found and fixed by the smoke run (all deployed,
+  bc9ac38): the seed key could not pass Google's first-use screens (notice channel + watcher); a
+  non-ASCII message cannot go up as a raw multipart upload (seeder keeps the JSON route; **the engine
+  half of P1.7 must use a resumable upload for the same reason**); my own preflight refused every start
+  (it matched `unattended-upgrade-shutdown`). Open: erin's Drive acceptance found 1 difference (read
+  it); `dwd_helper` reports "could not tick Overwrite" after a first Authorize that had worked; key
+  creation straight after `seed-sa` is created needs a retry; incident #84 (the first provisioning
+  pass's 404s, resolved by the second pass) is open and can be resolved; the idle browser tab group
+  holds Google sign-ins for both admins.
 - 17 Nov 2026, 13:40 UTC (Sonnet): Setup done for both tenants of **account 5**. Source a.: project
   `wsmig-src-83074`, delegation 18 scopes. Target b.: project `wsmig-tgt-94671`, delegation 15 scopes
   (a first attempt left an empty project `wsmig-tgt-36651` in b.: delete it at teardown). Readiness
