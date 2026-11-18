@@ -207,6 +207,10 @@ from a shell:
 """
 
 
+# Beside the identities file: the path of the map last uploaded to the console (dms_pipeline reads it).
+CONSOLE_MAP_MARK = "console-map.txt"
+
+
 def import_map_csv(identities: str, out: str) -> tuple[int, str]:
     """Turn the migration's identity map into Google's import map.
 
@@ -690,6 +694,14 @@ def start(source_domain: str, source_admin: str, timeout: int,
                             uploaded = True
                         except Exception:  # noqa: BLE001
                             logging.getLogger(__name__).debug("ignored an error", exc_info=True)
+            if uploaded and not already:
+                # Which map the console now holds, so a later delta can reuse it (dms_pipeline.console_map).
+                try:
+                    with open(os.path.join(os.path.dirname(os.path.abspath(identities)), CONSOLE_MAP_MARK),
+                              "w", encoding="utf-8") as fh:
+                        fh.write(os.path.abspath(identities) + "\n")
+                except OSError:
+                    logging.getLogger(__name__).debug("ignored an error", exc_info=True)
             if uploaded:
                 # Uploading kicks off a SERVER-SIDE 'Processing migration maps'
                 # job (visible in the Tasks panel) that can take minutes for

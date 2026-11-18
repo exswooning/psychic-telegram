@@ -44,6 +44,27 @@ def _incident(**kw) -> None:
         print(f"could not record an incident: {exc}", flush=True)
 
 
+def _users(path: str) -> set[str]:
+    rows = [l.split(",")[0].strip().lower() for l in open(path, encoding="utf-8").read().splitlines() if l.strip()]
+    return {r for r in rows if r and r != "source_email"}
+
+
+def console_map(out_dir: str, ready_path: str, held: dict) -> str | None:
+    """The map the console already holds, when a delta on it is right: it covers every ready user and holds no
+    held one. A delta's ready list shrinks as users finish, so a new name every time read as a stale map
+    (a. -> b., 18 Nov 2026); only a map that LACKS users, or carries one held back, is stale."""
+    import dms_migrate
+    try:
+        with open(os.path.join(out_dir, dms_migrate.CONSOLE_MAP_MARK), encoding="utf-8") as fh:
+            path = fh.read().strip()
+        on_console = _users(path)
+    except OSError:
+        return None
+    if _users(ready_path) <= on_console and not ({u.lower() for u in held} & on_console):
+        return path
+    return None
+
+
 def named_by_content(path: str, n: int) -> str:
     """The ready list renamed `identities-ready-<n>u-<hash>.csv`. dms_migrate knows a map already on the
     console as its own by the file's NAME; one fixed name made another run's map read as this one's, and a
@@ -155,7 +176,7 @@ def main(argv=None) -> int:
         idle = {u: why for u, why in dms_handoff.nothing_owed(conn, notes).items() if u not in held}
     ready_path = os.path.join(out_dir, "identities-ready.csv")
     ready = ready_identities(args.identities, {**held, **idle}, ready_path)
-    ready_path = named_by_content(ready_path, ready)
+    ready_path = console_map(out_dir, ready_path, held) or named_by_content(ready_path, ready)
     decision = {"at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "ready": ready,
                 "held": held, "notes": notes, "nothingOwed": sorted(idle), "identities": ready_path}
     with open(os.path.join(out_dir, "decision.json"), "w", encoding="utf-8") as fh:

@@ -266,3 +266,17 @@ def test_the_ready_map_is_named_by_its_users_so_another_runs_map_is_never_taken_
     two = dms_pipeline.named_by_content(str(b / "identities-ready.csv"), 2)
     assert one.endswith(".csv") and "-1u-" in one and "-2u-" in two
     assert one.rsplit("/", 1)[1] != two.rsplit("/", 1)[1]
+
+
+def test_a_delta_reuses_the_consoles_map_only_when_it_covers_the_ready_users_and_no_held_one(tmp_path):
+    import dms_migrate
+    import dms_pipeline
+    on_console = tmp_path / "identities-ready-3u-aaaa.csv"
+    on_console.write_text("source_email,target_email\na@s,a@t\nb@s,b@t\nc@s,c@t\n")
+    (tmp_path / dms_migrate.CONSOLE_MAP_MARK).write_text(str(on_console) + "\n")
+    ready = tmp_path / "identities-ready.csv"
+    ready.write_text("source_email,target_email\na@s,a@t\nb@s,b@t\n")
+    assert dms_pipeline.console_map(str(tmp_path), str(ready), {}) == str(on_console)       # fewer users: a delta
+    assert dms_pipeline.console_map(str(tmp_path), str(ready), {"c@s": "held"}) is None     # a held user is on it
+    ready.write_text("source_email,target_email\na@s,a@t\nd@s,d@t\n")
+    assert dms_pipeline.console_map(str(tmp_path), str(ready), {}) is None                  # it lacks a user: stale
