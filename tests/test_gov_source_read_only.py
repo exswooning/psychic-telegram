@@ -159,3 +159,12 @@ def test_a_file_google_flags_as_harmful_is_copied_with_the_warning_acknowledged(
     import pytest
     with pytest.raises(PermanentAPIError):
         migrator._download_flagged_too(item)
+
+
+def test_an_apps_script_never_goes_server_side_even_from_a_sandbox(migrator, monkeypatch):
+    """Live, a. -> b. (18 Nov 2026): the script copied into staging, then Drive refused to move it into the
+    target's My Drive (403 insufficientFilePermissions) and the copy was stranded with no fallback."""
+    monkeypatch.setattr(type(migrator), "_protected_source", property(lambda self: False))
+    migrator.settings.transfer_mode = "server_side"
+    names = [n for n, _ in migrator._strategies_for({"mimeType": "application/vnd.google-apps.script"}, True)]
+    assert "server_side" not in names and names

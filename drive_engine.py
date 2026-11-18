@@ -537,6 +537,7 @@ PROJECT_QUOTA_REASONS = frozenset({"rateLimitExceeded", "quotaExceeded"})
 
 # The audit prefix for a copy that landed in staging but did not move out.
 STRANDED_IN_STAGING = "copied to staging but move to My Drive failed"
+SCRIPT_MIME = "application/vnd.google-apps.script"
 
 
 def _is_project_quota_rejection(exc: Exception) -> bool:
@@ -1669,6 +1670,11 @@ class DriveMigrator:
                 and mime not in self._COPIES_IN_PLACE):
             # A protected source is never written to: any other Google type goes another
             # way, or is listed for a person, rather than risk a copy beside the original.
+            strategies = [s for s in strategies if s[0] != "server_side"]
+        if mime == SCRIPT_MIME:
+            # Drive copies a script into the staging drive, then refuses to move it to another
+            # organisation's My Drive (403 insufficientFilePermissions; a. -> b., 18 Nov 2026), and the
+            # copy is left stranded with no fallback. A script goes by download and upload only.
             strategies = [s for s in strategies if s[0] != "server_side"]
         from transfer_policy import choose
         decision = choose(self.settings, item, [name for name, _ in strategies])
