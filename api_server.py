@@ -2631,6 +2631,14 @@ def _start_verify_after_dms(account_id: int | None) -> tuple[bool, str]:
 
 def _follow_on(kind: str, account_id: int | None) -> None:
     """What a job that just exited cleanly asked to have done next."""
+    if kind in ("repair", "dms"):
+        import failpoints
+        try:
+            import accounts_auth
+            dom = (accounts_auth.get_tenant_config(account_id, "target") or {}).get("domain", "")
+        except Exception:      # noqa: BLE001 - no domain, no failpoint
+            dom = ""
+        failpoints.hit(f"followon.{kind}.start", domain=dom)
     if kind.startswith("verify-repair:"):
         # Compatibility with already queued launches: the durable scanner will
         # freshly verify each unresolved user and use only scoped repair paths.

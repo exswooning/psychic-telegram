@@ -46,6 +46,8 @@ def run(main, *args) -> None:
     """`if __name__ == "__main__": job_exit.run(main)` -- run, record the exit, exit with it."""
     try:
         rc = main(*args)
+        import failpoints
+        failpoints.hit("run.exit")
     except SystemExit as exc:
         rc = exc.code if isinstance(exc.code, int) else (0 if exc.code is None else 1)
     except BaseException:

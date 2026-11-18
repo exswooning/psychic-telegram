@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures as futures
+import failpoints
 import json
 import logging
 import contextlib
@@ -1424,6 +1425,7 @@ def _run_with_memory_pause(auth, db, settings, services, delta, delta_days,
                     print(f"PASS {i}/{len(plan)} pid={os.getpid()}: {','.join(sorted(one))}",
                           flush=True)
                 pass_results = _run_pass(auth, db, settings, one, delta, delta_days, only)
+                failpoints.hit("run.pass_done")
                 results += pass_results
                 if "drive" in one and i < len(plan):
                     # Read by migrate_user, in this process and in every shard of the

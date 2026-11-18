@@ -22,7 +22,9 @@
    "scale": "tiny",
    "mail": 40,
    "events": 10,
-   "fixtures": []
+   "fixtures": [
+    "apps_script"
+   ]
   },
   {
    "localpart": "c04",

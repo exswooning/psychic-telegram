@@ -50,7 +50,21 @@ def test_every_watcher_and_incident_kind_opens_and_closes():
 
 
 def test_every_failure_of_the_plan_is_a_scenario():
-    assert len([s for s in S.all_scenarios() if s.group == "failures"]) == 21
+    assert len([s for s in S.all_scenarios() if s.id.startswith("fail:")]) == 21
+
+
+def test_every_failpoint_has_a_scenario_and_is_placed_in_the_code():
+    import pathlib
+    import failpoints
+    ids = {s.id for s in S.all_scenarios()}
+    root = pathlib.Path(__file__).resolve().parent.parent
+    code = "".join(p.read_text(encoding="utf-8") for p in root.glob("*.py") if p.name != "failpoints.py")
+    for name in failpoints.NAMES:
+        assert f"fp:{name}:kill" in ids
+        if name not in S.KILL_ONLY:
+            assert f"fp:{name}:lost" in ids
+        placed = f'"{name}"' in code or name.startswith("followon.")
+        assert placed, f"failpoint {name} is named but never hit"
     assert S.by_id()["fail:F-net-12"].needs == ("net",) and S.by_id()["fail:F-reboot"].needs == ("reboot",)
 
 
@@ -172,5 +186,5 @@ def test_a_dry_run_touches_nothing(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(C, "HERE", str(tmp_path))
     assert C.main(["--account-id", "5", "--name", "n", "--group", "failures", "--dry-run"]) == 0
     out = capsys.readouterr().out
-    assert "21 scenario(s) to run" in out and "fail:F-net-3  [failure]  needs net" in out
+    assert "47 scenario(s) to run" in out and "fail:F-net-3  [failure]  needs net" in out
     assert not (tmp_path / "logs").exists()

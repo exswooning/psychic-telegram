@@ -28,6 +28,7 @@ What does not
 from __future__ import annotations
 
 import logging
+import failpoints
 
 from sample_budget import Budget
 
@@ -414,8 +415,8 @@ class ContactsMigrator:
             return
         try:
             self.limiter.acquire()
-            created = self._retry(lambda b=body: self.tgt.people().createContact(
-                body=b).execute())
+            created = self._retry(lambda b=body: failpoints.hit("contacts.created", self.tgt.people().createContact(
+                body=b).execute()))
         except (PermanentAPIError, RuntimeError) as exc:
             self.db.log_audit(self.source_user, rid, "contact", "FAILED",
                               str(exc))

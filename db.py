@@ -561,6 +561,10 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
+_MAPPED_FAILPOINT = {"file": "drive.mapped", "folder": "drive.mapped", "shortcut": "drive.mapped",
+                     "message": "gmail.mapped"}
+
+
 class MigrationDB:
     """Thread-safe façade over migration.db."""
 
@@ -1428,6 +1432,8 @@ class MigrationDB:
                 (source_user, source_id, target_id, item_type,
                  parent_target_id, source_name, utc_now()),
             )
+        import failpoints
+        failpoints.hit(_MAPPED_FAILPOINT.get(item_type, ""))
         # Write through, after the transaction commits. Ordering matters: a
         # cache updated before the commit would answer "already migrated" for
         # work that a crash then rolled back.

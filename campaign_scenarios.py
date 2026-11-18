@@ -133,6 +133,25 @@ def _failures() -> list:
             for fid, title, need in _FAILURES]
 
 
+# ---- failpoints (P2.3): F-kill at every point, F-lost at every Google write --------------------------------
+# A point after a ledger write or around the run has no reply to lose: kill only.
+KILL_ONLY = ("drive.mapped", "gmail.mapped", "run.pass_done", "run.exit", "followon.repair.start",
+             "followon.dms.start")
+
+
+def _failpoints() -> list:
+    import failpoints
+    out = []
+    for name in failpoints.NAMES:
+        for mode in ("kill",) if name in KILL_ONLY else ("kill", "lost"):
+            fault = f"{name}@1" + (":lost" if mode == "lost" else "")
+            out.append(Scenario(id=f"fp:{name}:{mode}", group="failures", how="failpoint",
+                                title=f"{'the process dies' if mode == 'kill' else 'the reply is lost'} at {name}",
+                                inject={"env": {"BITPORT_FAULT": fault}},
+                                expect={"equal_to_control": True, "no_item_twice": True}))
+    return out
+
+
 # ---- benchmarks: each check can pass and can fail ------------------------------------------------------
 # The fault that makes it read FAIL or UNVERIFIED: a failure scenario ("F-...") or a short phrase.
 BENCH_FAULT = {
@@ -194,7 +213,7 @@ def _watchers() -> list:
 
 
 def all_scenarios() -> list:
-    return _errors() + _failures() + _benchmarks() + _watchers()
+    return _errors() + _failures() + _failpoints() + _benchmarks() + _watchers()
 
 
 def by_id() -> dict:

@@ -236,7 +236,16 @@ Phase 1 and the code of Phase 2 need no tenant. Start them while Phase 0 is open
   13 migration + 7 seed, not 14 + 7); every `oversight.CHECKS` entry and incident kind opens and
   closes; the 21 failures exist; a kind that cannot be caused names an existing unit test. Left for
   P2.3: every failpoint name has a scenario.
-- [ ] P2.3 **[opus]** for where the calls go; Sonnet for the rest. `failpoints.py`: `hit(name)` does
+- [x] P2.3 (18 Nov, Opus; code only, not yet caused live) `failpoints.hit(name, value)` returns the call's reply and
+  sits INSIDE the retried lambda, so `:lost` (ConnectionResetError) is retried exactly as a dropped reply would be
+  and the write is made twice -- what F-lost tests the engine's adoption against. Placed: copy (server-side and both
+  upload paths), `db.record_mapping` (file/folder/shortcut -> drive.mapped, message -> gmail.mapped), ACL (single
+  and batch), comment create, move hop 1, native link rewrite, gmail insert, calendar insert/import, contact,
+  task, shared drive create, after each pass (main), after main returns (`job_exit.run`), and the API's
+  `_follow_on` for repair and dms (kills the API: set BITPORT_FAULT on bitport-api only for that scenario).
+  `campaign_scenarios._failpoints`: `fp:<name>:kill` for all 16, `fp:<name>:lost` for the 10 Google writes;
+  `tests/test_failpoints.py` and `test_campaign` (every name has a scenario and is placed). Original spec:
+  **[opus]** for where the calls go; Sonnet for the rest. `failpoints.py`: `hit(name)` does
   nothing unless `BITPORT_FAULT` is set and the run's target domain is a declared sandbox. With
   `BITPORT_FAULT=name@n` the process exits with code 137 at the n-th hit (`kill`). With
   `name@n:lost` the call has already been made and the code then raises a connection error, as if

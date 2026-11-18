@@ -40,6 +40,7 @@ tests/test_wipe_preflight.py
 tests/test_destructive_launchers_wait_for_a_ready_tenant.py
 tests/test_start_checks.py
 tests/test_campaign.py
+tests/test_failpoints.py
 tests/test_native_runs_merged.py
 tests/test_repair_fingerprint_stable.py
 tests/test_google_welcome_not_extra.py

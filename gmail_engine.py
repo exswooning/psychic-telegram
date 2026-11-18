@@ -17,6 +17,7 @@ across automatically.
 
 from __future__ import annotations
 
+import failpoints
 import base64
 import contextlib
 import json
@@ -464,9 +465,9 @@ class GmailMigrator:
                      self.source_user, msgid)
             return {"id": existing, "adopted": True}
 
-        insert = lambda: self.tgt.users().messages().insert(   # noqa: E731
+        insert = lambda: failpoints.hit("gmail.inserted", self.tgt.users().messages().insert(   # noqa: E731
             userId="me", body=body, media_body=media,
-            internalDateSource="dateHeader").execute()
+            internalDateSource="dateHeader").execute())
         try:
             if not msgid:
                 if self.settings.mail_only_with_links or not source_id:

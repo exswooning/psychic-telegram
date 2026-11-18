@@ -32,6 +32,7 @@ import uuid
 
 from datetime import datetime, timedelta, timezone
 
+import failpoints
 import metrics
 
 from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload, MediaUpload  # noqa: F401
@@ -2046,10 +2047,10 @@ class DriveMigrator:
             while True:
                 try:
                     copied = adopted or with_carried_fallback(lambda b: self._retry(
-                        lambda: src.files().copy(
+                        lambda: failpoints.hit("drive.copy.landed", src.files().copy(
                             fileId=item["id"], body=b, supportsAllDrives=True,
                             fields="id,md5Checksum",
-                        ).execute(), label="drive.files.copy", tenant="source"), body)
+                        ).execute()), label="drive.files.copy", tenant="source"), body)
                     break
                 except (PermanentAPIError, RuntimeError) as exc:
                     # Google's own daily cap reads exactly like a rate limit (403
@@ -2226,10 +2227,10 @@ class DriveMigrator:
         pending = json.dumps({"parent": tgt_parent, "item": item}, default=str)
         self.db.log_audit(self.source_user, fid, "file", MOVE_PENDING, pending)
         try:
-            self._retry(lambda: self._mover().files().update(
+            self._retry(lambda: failpoints.hit("drive.moved_out", self._mover().files().update(
                 fileId=fid, addParents=self._staging_drive_id,
                 removeParents=",".join(item.get("parents") or []),
-                supportsAllDrives=True, fields="id").execute(),
+                supportsAllDrives=True, fields="id").execute()),
                 label="drive.files.move_out", tenant="source")
         except (PermanentAPIError, RuntimeError) as exc:
             # A lost response can hide a move that happened: ask where it is first.
@@ -2417,10 +2418,11 @@ class DriveMigrator:
         try:
             media = MediaFileUpload(path, mimetype=item.get("mimeType"),
                                     resumable=size > LARGE_UPLOAD_THRESHOLD)
-            result = with_carried_fallback(lambda b: self._retry(lambda: self.tgt.files().create(
-                body=b, media_body=media, fields="id,md5Checksum",
-                supportsAllDrives=True,
-            ).execute(), label="drive.files.create"), body)
+            result = with_carried_fallback(lambda b: self._retry(lambda: failpoints.hit(
+                "drive.copy.landed", self.tgt.files().create(
+                    body=b, media_body=media, fields="id,md5Checksum",
+                    supportsAllDrives=True,
+                ).execute()), label="drive.files.create"), body)
         except (PermanentAPIError, RuntimeError) as exc:
             self.quota.refund(size)
             self.db.log_audit(self.source_user, item["id"], "file", "FAILED", str(exc))
@@ -2546,9 +2548,10 @@ class DriveMigrator:
         try:
             media = MediaFileUpload(path, mimetype=export_mime,
                                     resumable=size > LARGE_UPLOAD_THRESHOLD)
-            result = with_carried_fallback(lambda b: self._retry(lambda: self.tgt.files().create(
-                body=b, media_body=media, fields="id,modifiedTime", supportsAllDrives=True,
-            ).execute()), body)
+            result = with_carried_fallback(lambda b: self._retry(lambda: failpoints.hit(
+                "drive.copy.landed", self.tgt.files().create(
+                    body=b, media_body=media, fields="id,modifiedTime", supportsAllDrives=True,
+                ).execute())), body)
         except (PermanentAPIError, RuntimeError) as exc:
             self.db.log_audit(self.source_user, item["id"], "file", "FAILED", str(exc))
             self._bump("failed")
@@ -2684,9 +2687,9 @@ class DriveMigrator:
             kind = _NATIVE_KIND[item["mimeType"]]
             try:
                 with _native_slots():
-                    n = self._retry(lambda k=kind, t=tgt_id: link_rewrite.rewrite_native(
+                    n = self._retry(lambda k=kind, t=tgt_id: failpoints.hit("drive.native_links", link_rewrite.rewrite_native(
                         k, self.auth.api("target", k, self.target_user), t,
-                        self.db.target_for_source_id, pace=lambda op, k=k: pace(k, op)),
+                        self.db.target_for_source_id, pace=lambda op, k=k: pace(k, op))),
                         label=f"{kind}.links")
             except Exception as exc:      # noqa: BLE001 - the file migrated; record, never raise
                 self.db.log_audit(self.source_user, item["id"], "link_rewrite",
@@ -3275,7 +3278,7 @@ class DriveMigrator:
             batch.add(req, request_id=str(idx), callback=_cb)
 
         try:
-            self._retry(lambda: batch.execute(),
+            self._retry(lambda: failpoints.hit("drive.acl.granted", batch.execute()),
                         label="drive.permissions.create.batch", cost=len(chunk))
         except (PermanentAPIError, RuntimeError) as exc:
             # A whole-batch failure: every grant in the chunk failed. Record
@@ -3361,10 +3364,10 @@ class DriveMigrator:
         limits = (0, None) if self.budget.limited else (None,)
         for i, limit in enumerate(limits):
             try:
-                self._retry(lambda b=body: self.tgt.permissions().create(
+                self._retry(lambda b=body: failpoints.hit("drive.acl.granted", self.tgt.permissions().create(
                     fileId=target_id, body=b, sendNotificationEmail=False,
                     supportsAllDrives=True, fields="id",
-                ).execute(), label="drive.permissions.create", max_retries=limit)
+                ).execute()), label="drive.permissions.create", max_retries=limit)
                 # Same upsert-clears-the-failure reasoning as the batch path.
                 self.db.log_audit(self.source_user, audit_key, "acl", "SUCCESS", f"role={body.get('role')}")
                 return 1

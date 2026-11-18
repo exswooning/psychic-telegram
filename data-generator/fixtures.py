@@ -282,6 +282,26 @@ def eicar(ctx: Ctx) -> dict:
         return {"made": 0, "notes": [f"Google refused the test file: {str(exc)[:140]}"]}
 
 
+@fixture("apps_script")
+def apps_script(ctx: Ctx) -> dict:
+    """A standalone Apps Script project, made through Drive's import format (no Apps Script API scope needed).
+    The one Drive type a server-side copy cannot take: it goes by download and upload. One per user."""
+    from googleapiclient.http import MediaIoBaseUpload
+    import io
+    q = "mimeType='application/vnd.google-apps.script' and trashed=false"
+    if ctx.retry(lambda: ctx.drive.files().list(q=q, pageSize=1, fields="files(id)").execute())().get("files"):
+        return {"made": 0, "notes": ["already has one"]}
+    project = {"files": [
+        {"name": "Code", "type": "server_js", "source": "function wardReport() {\n  return 'ward report';\n}\n"},
+        {"name": "appsscript", "type": "json",
+         "source": json.dumps({"timeZone": "Asia/Kathmandu", "exceptionLogging": "STACKDRIVER", "runtimeVersion": "V8"})}]}
+    ctx.retry(lambda: ctx.drive.files().create(
+        body={"name": "Ward report script", "mimeType": "application/vnd.google-apps.script"}, fields="id",
+        media_body=MediaIoBaseUpload(io.BytesIO(json.dumps(project).encode()),
+                                     mimetype="application/vnd.google-apps.script+json")).execute())()
+    return {"made": 1, "notes": []}
+
+
 PERSON_ONLY = {"a Google Site": "application/vnd.google-apps.site", "a My Map": "application/vnd.google-apps.map",
                "a Google Vids file": "application/vnd.google-apps.vid"}
 

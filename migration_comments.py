@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import html
+import failpoints
 import re
 from collections import Counter
 from link_rewrite import rewrite_text
@@ -234,7 +235,7 @@ def reconcile(migrator, sid, tid):
             for limiter_name in ("_tgt_write_limiter", "_project_limiter"):
                 limiter=getattr(migrator,limiter_name,None)
                 if limiter is not None:limiter.acquire()
-            created = call().execute()
+            created = failpoints.hit("drive.comment.created", call().execute())
             target_id = created["id"]
             written += 1
         migrator.db.record_mapping(migrator.source_user, key, target_id, kind)
