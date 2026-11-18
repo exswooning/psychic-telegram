@@ -541,6 +541,23 @@ old keys from root's `authorized_keys`; decide on rewriting the git history that
 
 ## 11. State (newest first)
 
+- 18 Nov 2026, ~13:05 UTC (Opus): **P3.3 control run: migrate pass rc=0, all 41 users DONE; the DMS
+  imported 12,091 emails for 41 users, 0 failed; its reconciliation blocked 11 of 11,931.** Defects found
+  in the run, each fixed, tested, deployed (live-run rule): (1) the Apps Script copy was stranded in staging
+  (no server-side route for it now); (2) the calendar instances call named no calendarId (the fake now
+  requires it); (3) a mail link to a Drive *shortcut* never resolved (shortcuts are in the link lookups);
+  (4) the DMS map was named the same for every import, so a stale pilot map read as ours (maps are
+  content-named, `fresh_import`); (5) one email held twice on the source (c04, one Message-ID) blocked the
+  pipeline (`same_source_email`, both may share one target copy) and the blocked user was never released
+  (a passing check releases it); (6) a shrinking ready list made a new map every delta (the console's own map
+  is reused when it covers every ready user); (7) a map that left out users owing nothing went stale when
+  they got mail (the map carries every user not held); (8) **Gmail sends a nextPageToken on a full page with
+  nothing after it**: maxResults=2 over exactly two copies (engine's + the DMS's of the same thread mail,
+  alice..erin, 10 emails) read as "more", so the DMS duplicate was never trashed (`split_mail.target_copies`,
+  4ad4ffb). The 11th: alice's email linking to a shortcut was written by the engine before (3), so it still
+  names the source file; a links-redo run for alice (mail only) replaces it. Then the DMS delta, then
+  verify-after-dms and the gate.
+
 - 18 Nov 2026, ~04:30 UTC (Opus, the operator asleep): **P2.3 done in code; P2.5 near done.** Failpoints at 16
   calls, 26 `fp:` scenarios (see P2.3). Coverage: the audit had 34 rows with no probe; every supported row now
   has one (`coverage_audit.DEEP`), or a reason in `UNSEEDABLE` (Meet recordings). Seeded on a. for it: Apps
