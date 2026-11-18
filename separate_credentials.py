@@ -27,7 +27,7 @@ before Authorize and the row read back after. Logins come from the root-only
 from __future__ import annotations
 
 import argparse
-import dataclasses
+import copy
 import glob
 import json
 import os
@@ -145,7 +145,11 @@ def _grant(account_id, client_id: str, scopes: list[str], key: str, login: dict)
 
 def _probe(settings, key: str, scopes: list[str]) -> dict[str, bool]:
     import verify_scopes
-    st = dataclasses.replace(settings, source_sa_key=key)
+    # A copy, never dataclasses.replace: replace re-runs __post_init__, which reloads the account's
+    # tenant_configs and puts the MIGRATE key back -- so the seed entry was probed with the migrate key,
+    # read "not delegated" for every write scope, and was overwritten on every run (18 Nov 2026).
+    st = copy.copy(settings)
+    st.source_sa_key = key
     return {r["scope"]: bool(r["ok"]) for r in verify_scopes.verify(st, "source", scopes)}
 
 

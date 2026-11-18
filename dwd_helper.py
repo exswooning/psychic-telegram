@@ -1198,8 +1198,9 @@ def main(argv: list[str] | None = None) -> int:
     from config import Settings
     st = Settings(account_id=args.account_id) if args.account_id else Settings()
     if args.key and args.tenant:
-        import dataclasses
-        st = dataclasses.replace(st, **{f"{args.tenant}_sa_key": args.key})
+        import copy
+        st = copy.copy(st)      # not dataclasses.replace: it reloads the account's own key over this one
+        setattr(st, f"{args.tenant}_sa_key", args.key)
     if args.tenant == "source":
         _sign_in_as_source_admin(st)
 
