@@ -64,7 +64,9 @@ def seed_scopes() -> list[str]:
     extra = {GROUP_WRITE_SCOPE, REPORTS_SCOPE, GMAIL_PURGE_SCOPE, DIRECTORY_READONLY_SCOPE,
              GMAIL_SETTINGS_SCOPE, DIRECTORY_WRITE_SCOPE,
              "https://www.googleapis.com/auth/gmail.settings.sharing",
-             "https://www.googleapis.com/auth/chat.delete"}
+             "https://www.googleapis.com/auth/chat.delete",
+             # A meeting room for the calendar_extras fixture (fableplan2 P2.5).
+             "https://www.googleapis.com/auth/admin.directory.resource.calendar"}
     return sorted(set(SEED_SCOPES) | extra)
 
 

@@ -2864,6 +2864,8 @@ def seed_argv(body: dict, account_id: int | None = None) -> tuple[list[str], dic
     argv.append("--yes")
     if body.get("create_users"):
         argv.append("--create-users")
+    if body.get("fixtures_only"):
+        argv.append("--fixtures-only")
     only = body.get("only")
     if only:
         # Top up one service on an existing corpus rather than reseeding --

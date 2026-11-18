@@ -2555,6 +2555,10 @@ def fit_entries(entries: list[dict], available: int,
 # The per-user services this seeder writes, in the order it writes them.
 # Named here so --only can be validated against the real list rather than a
 # second copy of it that drifts.
+# --fixtures-only: run each cohort user's named fixtures and nothing else, on users already seeded too
+# (every fixture is idempotent). How a fixture added after the cohort's seed reaches it.
+FIXTURES_ONLY = False
+
 SEEDABLE = ("drive", "gmail", "calendar", "chat", "contacts", "tasks",
            "gmail_settings")
 
@@ -2661,7 +2665,7 @@ def seed_one_user(settings: Settings, entry: dict, all_users: list[str],
     # `only` narrows the run to one or more services -- everything not named
     # is skipped and reports zeroes, so a partial pass is visibly partial
     # rather than looking like a service that produced nothing.
-    base_want = (lambda svc: only is None or svc in only)
+    base_want = (lambda svc: not FIXTURES_ONLY and (only is None or svc in only))
     empty = {"note": "not requested"}
 
     # Corpus-building services duplicate on a second pass (see
@@ -2733,7 +2737,7 @@ def seed_one_user(settings: Settings, entry: dict, all_users: list[str],
 
     # The cohort's named fixtures (data-generator/fixtures.py), after the standard content so they can link to it.
     fixture_m = {}
-    if entry.get("fixtures") and not already:
+    if entry.get("fixtures") and (FIXTURES_ONLY or not already):
         import fixtures
         fixture_m = fixtures.run_all(entry["fixtures"], fixtures.Ctx(
             seed=sys.modules[__name__], settings=settings, user=user, peers=peers, external=external,
@@ -3005,6 +3009,8 @@ def main(argv: list[str] | None = None) -> int:
                          "skipped and reports zero. For topping up one "
                          "service on an existing corpus -- e.g. chat, once "
                          "the Chat app is configured and the 404s stop.")
+    ap.add_argument("--fixtures-only", action="store_true",
+                    help="with --cohort: run each user's named fixtures only (idempotent), nothing else")
     ap.add_argument("--top-up-only", action="store_true",
                     help="skip every seeding step and only check/top up "
                          "storage toward --target-gb-per-user or "
@@ -3091,6 +3097,12 @@ def main(argv: list[str] | None = None) -> int:
                  "--reset, --top-up-only, --fill-until-full, --create-users or "
                  "--target-gb-per-user.")
 
+    global FIXTURES_ONLY
+    if args.fixtures_only:
+        if not args.cohort:
+            sys.exit("--fixtures-only needs --cohort")
+        FIXTURES_ONLY = True
+        args.groups, args.shared_drives = False, 0
     settings = Settings()
     assert_sandbox(settings, args.confirm_domain)
     _use_own_key(settings)

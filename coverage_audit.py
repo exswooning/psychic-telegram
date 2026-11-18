@@ -55,6 +55,7 @@ from config import Settings                         # noqa: E402
 from db import MigrationDB                          # noqa: E402
 
 COVERED, ABSENT, NA, UNPROBED = "COVERED", "ABSENT", "N/A", "UNPROBED"
+UNSEEDABLE_V = "UNSEEDABLE"
 
 
 # ======================================================================
@@ -70,6 +71,127 @@ COVERED, ABSENT, NA, UNPROBED = "COVERED", "ABSENT", "N/A", "UNPROBED"
 def _drive_kinds(t: dict, *names: str) -> int:
     kinds = t.get("drive", {}).get("kinds", {})
     return sum(kinds.get(n, 0) for n in names)
+
+
+# ======================================================================
+# Deep probes (fableplan2 P2.5): one read of each service's own fields per
+# user, for the scope rows the inventory never counted. Each count is the
+# number of source items that exercise the row; None = could not ask.
+# ======================================================================
+NATIVE_DOCS = ("application/vnd.google-apps.document", "application/vnd.google-apps.spreadsheet",
+               "application/vnd.google-apps.presentation")
+DRIVE_LINK = ("drive.google.com", "docs.google.com")
+BIG_NATIVE = 10 * 1024 * 1024
+COMMENT_SAMPLE = 25          # natives asked for comments, per user
+
+
+def _pages(call, key: str, limit: int = 20000):
+    token, n = None, 0
+    while True:
+        resp = call(token)
+        for x in resp.get(key, []):
+            n += 1
+            yield x
+            if n >= limit:
+                return
+        token = resp.get("nextPageToken")
+        if not token:
+            return
+
+
+def _deep_drive(auth: AuthManager, user: str) -> dict:
+    svc = auth.source_drive(user)
+    files = list(_pages(lambda t: svc.files().list(
+        q="'me' in owners and trashed=false", pageSize=1000, pageToken=t, spaces="drive",
+        fields="nextPageToken,files(id,mimeType,description,starred,modifiedTime,quotaBytesUsed,parents,"
+               "permissions(id,role,expirationTime))").execute(), "files"))
+    perms = {f["id"]: {p["id"] for p in f.get("permissions") or [] if p.get("role") != "owner"} for f in files}
+    out = {
+        "named": sum(1 for f in files if f.get("description") or f.get("starred")),
+        "modified": sum(1 for f in files if f.get("modifiedTime")),
+        "owned": len(files),
+        "native_big": sum(1 for f in files if f.get("mimeType") in NATIVE_DOCS
+                          and int(f.get("quotaBytesUsed") or 0) > BIG_NATIVE),
+        "timed_shares": sum(1 for f in files for p in f.get("permissions") or [] if p.get("expirationTime")),
+        # My Drive reports no "inherited" flag: a grant the parent folder also holds came from it.
+        "inherited": sum(1 for f in files if perms[f["id"]] & set().union(
+            *(perms.get(p, set()) for p in f.get("parents") or []))),
+    }
+    q = " or ".join(f"fullText contains '{d}'" for d in DRIVE_LINK)
+    out["drive_links_in_files"] = sum(1 for _ in _pages(lambda t: svc.files().list(
+        q=f"'me' in owners and trashed=false and ({q})", pageSize=100, pageToken=t,
+        fields="nextPageToken,files(id)").execute(), "files", limit=500))
+    commented = 0
+    for f in [f for f in files if f.get("mimeType") in NATIVE_DOCS][:COMMENT_SAMPLE]:
+        if svc.comments().list(fileId=f["id"], pageSize=1, fields="comments(id)").execute().get("comments"):
+            commented += 1
+    out["commented"] = commented
+    return out
+
+
+def _gmail_count(svc, q: str, limit: int = 500) -> int:
+    return sum(1 for _ in _pages(lambda t: svc.users().messages().list(
+        userId="me", q=q, maxResults=500, pageToken=t, includeSpamTrash=True).execute(), "messages", limit=limit))
+
+
+def _deep_gmail(auth: AuthManager, user: str) -> dict:
+    svc = auth.source_gmail(user)
+    prof = svc.users().getProfile(userId="me").execute()
+    send_as = svc.users().settings().sendAs().list(userId="me").execute().get("sendAs", [])
+    return {
+        "messages": int(prof.get("messagesTotal") or 0),
+        "threaded": max(0, int(prof.get("messagesTotal") or 0) - int(prof.get("threadsTotal") or 0)),
+        "attachments": _gmail_count(svc, "has:attachment"),
+        "unread": _gmail_count(svc, "is:unread"),
+        "flagged": _gmail_count(svc, "is:starred OR is:important OR category:promotions OR category:social "
+                                     "OR category:updates OR category:forums"),
+        "drive_links_in_mail": _gmail_count(svc, " OR ".join(DRIVE_LINK)),
+        "filters": len(svc.users().settings().filters().list(userId="me").execute().get("filter", [])),
+        "signatures": sum(1 for s in send_as if (s.get("signature") or "").strip()),
+    }
+
+
+def _deep_calendar(auth: AuthManager, user: str) -> dict:
+    svc = auth.source_calendar(user)
+    events = list(_pages(lambda t: svc.events().list(
+        calendarId="primary", singleEvents=False, maxResults=2500, pageToken=t, showDeleted=False).execute(), "items"))
+    cals = svc.calendarList().list(maxResults=250).execute().get("items", [])
+    acl = svc.acl().list(calendarId="primary").execute().get("items", [])
+    me = user.lower()
+
+    def n(pred) -> int:
+        return sum(1 for e in events if pred(e))
+    return {
+        "ical": n(lambda e: e.get("iCalUID")),
+        "organizer": n(lambda e: (e.get("organizer") or {}).get("email")),
+        "recurring": n(lambda e: e.get("recurrence")),
+        "moved_instances": n(lambda e: e.get("recurringEventId")),
+        "rsvp": n(lambda e: any(a.get("responseStatus") for a in e.get("attendees") or [])),
+        "timed": n(lambda e: e.get("start")),
+        "styled": n(lambda e: (e.get("reminders") or {}).get("overrides") or e.get("visibility")
+                    or e.get("transparency") or e.get("colorId")),
+        "extended": n(lambda e: e.get("extendedProperties")),
+        "drive_links": n(lambda e: any(d in (e.get("description") or "") for d in DRIVE_LINK)),
+        "attachments": n(lambda e: e.get("attachments")),
+        "meet": n(lambda e: e.get("conferenceData")),
+        "ooo_focus": n(lambda e: e.get("eventType") in ("outOfOffice", "focusTime")),
+        "rooms": n(lambda e: any(a.get("resource") for a in e.get("attendees") or [])),
+        "subscribed": sum(1 for c in cals if c.get("accessRole") != "owner"),
+        "acl": sum(1 for r in acl if r.get("role") != "owner" and (r.get("scope") or {}).get("type") != "default"
+                   and (r.get("scope") or {}).get("value", "").lower() != me),
+    }
+
+
+DEEP = {"drive": _deep_drive, "gmail": _deep_gmail, "calendar": _deep_calendar}
+
+
+def _deep(totals: dict, svc: str, key: str):
+    d = totals.get("deep", {}).get(svc)
+    return None if d is None else d.get(key)
+
+
+def _d(svc: str, key: str):
+    return lambda t: _deep(t, svc, key)
 
 
 PROBES = {
@@ -147,6 +269,81 @@ PROBES = {
     # -- identity -------------------------------------------------------
     "Groups and group membership":
         lambda t: t.get("groups"),
+
+    # -- deep probes (fableplan2 P2.5) -----------------------------------
+    "File names, descriptions, starred flag":
+        _d("drive", "named"),
+    "modifiedTime on files and folders":
+        _d("drive", "modified"),
+    "Native Docs larger than 10 MB":
+        _d("drive", "native_big"),
+    "Comments, replies, suggestions":
+        _d("drive", "commented"),
+    "Timed shares (expirationTime)":
+        _d("drive", "timed_shares"),
+    "Drive links inside migrated mail":
+        _d("gmail", "drive_links_in_mail"),
+    "Drive links inside migrated Drive files":
+        _d("drive", "drive_links_in_files"),
+    "Inherited (folder-derived) permissions":
+        _d("drive", "inherited"),
+    "File ownership":
+        _d("drive", "owned"),
+    "All headers (Received chain, DKIM, Message-ID)":
+        _d("gmail", "messages"),
+    "Attachments and MIME structure":
+        _d("gmail", "attachments"),
+    "Original timestamps":
+        _d("gmail", "messages"),
+    "Read / unread state":
+        _d("gmail", "unread"),
+    "Starred, Important, and Category assignments":
+        _d("gmail", "flagged"),
+    "Conversation threading":
+        _d("gmail", "threaded"),
+    "Spam re-classification avoided":
+        _d("gmail", "messages"),
+    "Filters and rules":
+        _d("gmail", "filters"),
+    "Signatures":
+        _d("gmail", "signatures"),
+    "Original iCalUID":
+        _d("calendar", "ical"),
+    "Original organizer":
+        _d("calendar", "organizer"),
+    "Recurring series (RRULE)":
+        _d("calendar", "recurring"),
+    "Modified instances of a series":
+        _d("calendar", "moved_instances"),
+    "Attendees and their RSVP status":
+        _d("calendar", "rsvp"),
+    "Start/end times, time zones, all-day events":
+        _d("calendar", "timed"),
+    "Reminders, visibility, transparency, colour":
+        _d("calendar", "styled"),
+    "extendedProperties (third-party app metadata)":
+        _d("calendar", "extended"),
+    "Drive links in event descriptions":
+        _d("calendar", "drive_links"),
+    "Drive attachments on events":
+        _d("calendar", "attachments"),
+    "Subscribed / shared calendars":
+        _d("calendar", "subscribed"),
+    "Calendar sharing ACLs":
+        _d("calendar", "acl"),
+    "Room and equipment resources":
+        _d("calendar", "rooms"),
+    "Google Meet conference data":
+        _d("calendar", "meet"),
+    "Out-of-office / focus-time event types":
+        _d("calendar", "ooo_focus"),
+    "Identity mapping (source -> target address)":
+        lambda t: t.get("identities"),
+}
+
+# Supported rows no API can seed on a fresh tenant, with the reason. Never a pass; reported apart.
+UNSEEDABLE = {
+    "Meet recordings": "needs a Google Meet call recorded by people; no API makes a recording",
 }
 
 
@@ -354,6 +551,8 @@ def collect(auth: AuthManager, settings: Settings, users: list[str]) -> dict:
         "delegates": None,
         "forwarding_addresses": None,
         "groups": None,
+        "deep": {},
+        "identities": None,
         "perUser": {},
         "errors": {},
         # Recorded so the report can tell "there are none" apart from "there
@@ -410,6 +609,15 @@ def collect(auth: AuthManager, settings: Settings, users: list[str]) -> dict:
             if n is not None:
                 totals[key] = (totals[key] or 0) + n
 
+        for svc, fn in DEEP.items():
+            try:
+                got = fn(auth, user)
+            except Exception as exc:      # noqa: BLE001 - this user's service is unmeasured, not empty
+                totals["errors"].setdefault(f"{user} ({svc})", str(exc)[:120])
+                continue
+            acc = totals["deep"].setdefault(svc, {})
+            for k, v in got.items():
+                acc[k] = acc.get(k, 0) + v
         totals["perUser"][user] = row
 
     # Tenant-level, like shared drives -- every member's directory sees the
@@ -430,6 +638,8 @@ def assess(totals: dict) -> list[dict]:
     for item in scope.filter_scope():
         if item.status == scope.NONE:
             verdict, count = NA, None
+        elif item.item in UNSEEDABLE:
+            verdict, count = UNSEEDABLE_V, None
         elif item.item not in PROBES:
             verdict, count = UNPROBED, None
         else:
@@ -471,6 +681,13 @@ def render(rows: list[dict], totals: dict) -> str:
         out.append("== UNPROBED — not measured, so not evidence ==============")
         for r in sorted(unprobed, key=lambda r: r["service"]):
             out.append(f"  [{r['service']:<8}] {r['item']}")
+        out.append("")
+
+    unseedable = [r for r in rows if r["verdict"] == UNSEEDABLE_V]
+    if unseedable:
+        out.append("== UNSEEDABLE — supported, but no API can make one ======")
+        for r in unseedable:
+            out.append(f"  [{r['service']:<8}] {r['item']}: {UNSEEDABLE.get(r['item'], '')}")
         out.append("")
 
     out.append("== COVERED ===============================================")
@@ -525,6 +742,8 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     totals = collect(auth, settings, users)
+    totals["identities"] = sum(1 for r in db.all_identities()
+                               if r["entity_type"] == "user" and r["source_email"] in users and dict(r).get("target_email"))
     rows = assess(totals)
 
     if args.json:

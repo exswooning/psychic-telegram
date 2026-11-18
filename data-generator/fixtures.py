@@ -359,3 +359,129 @@ def bulk(ctx: Ctx) -> dict:
     s._run_parallel(list(range(n_msg)), one_message, workers)
     s._run_parallel(list(range(n_files)), one_file, max(1, workers // 2))
     return {"made": made, "notes": notes}
+
+# ---- sharing, mail settings and calendar extras (P2.5: a seeded instance of every scope row) ---------------
+@fixture("sharing_extras")
+def sharing_extras(ctx: Ctx) -> dict:
+    """c02's grants the corpus does not make: one that expires, one to a group, one a file inherits from its
+    folder. Idempotent: a folder of this name means it ran."""
+    from googleapiclient.http import MediaIoBaseUpload
+    import io
+    d, made, notes = ctx.drive, 0, []
+    name = "fableplan2 sharing extras"
+    if ctx.retry(lambda: d.files().list(q=f"name='{name}' and trashed=false and 'me' in owners",
+                                        fields="files(id)").execute())().get("files"):
+        return {"made": 0, "notes": ["already made"]}
+    peer = (ctx.peers or [None])[0]
+    folder = ctx.retry(lambda: d.files().create(body={"name": name, "mimeType": "application/vnd.google-apps.folder"},
+                                                fields="id").execute())()["id"]
+    inner = ctx.retry(lambda: d.files().create(body={"name": "inherits the folder's grant.txt", "parents": [folder]},
+                                               media_body=MediaIoBaseUpload(io.BytesIO(b"inherited\n"), mimetype="text/plain"),
+                                               fields="id").execute())()["id"]
+    made += 2
+    domain = ctx.user.split("@")[1]
+    grants = []
+    if peer:
+        grants.append(("inherited", folder, {"type": "user", "role": "writer", "emailAddress": peer}))
+        until = (datetime.now(timezone.utc) + timedelta(days=60)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        grants.append(("expiring", inner, {"type": "user", "role": "reader", "emailAddress": ctx.peers[-1],
+                                           "expirationTime": until}))
+    grants.append(("group", inner, {"type": "group", "role": "reader",
+                                    "emailAddress": f"{getattr(ctx.seed, 'GENERATED_PREFIX', '')}all-staff@{domain}"}))
+    for label, fid, body in grants:
+        try:
+            ctx.retry(lambda f=fid, b=body: d.permissions().create(fileId=f, body=b, sendNotificationEmail=False,
+                                                                   fields="id").execute())()
+            made += 1
+        except Exception as exc:      # noqa: BLE001
+            notes.append(f"{label} grant: {str(exc)[:140]}")
+    return {"made": made, "notes": notes}
+
+
+@fixture("mail_settings")
+def mail_settings(ctx: Ctx) -> dict:
+    """c05's filters and signature (vacation, IMAP, POP, forwarding and delegates are the seeder's own)."""
+    g, made, notes = ctx.gmail, 0, []
+    try:
+        if not ctx.retry(lambda: g.users().settings().filters().list(userId="me").execute())().get("filter"):
+            labels = ctx.retry(lambda: g.users().labels().list(userId="me").execute())().get("labels", [])
+            lid = next((x["id"] for x in labels if x["name"] == "Filtered"), None) or ctx.retry(
+                lambda: g.users().labels().create(userId="me", body={"name": "Filtered"}).execute())()["id"]
+            for crit in ({"from": (ctx.peers or [ctx.external])[0]}, {"subject": "invoice", "hasAttachment": True}):
+                ctx.retry(lambda c=crit: g.users().settings().filters().create(
+                    userId="me", body={"criteria": c, "action": {"addLabelIds": [lid]}}).execute())()
+                made += 1
+    except Exception as exc:      # noqa: BLE001
+        notes.append(f"filters: {str(exc)[:140]}")
+    try:
+        ctx.retry(lambda: g.users().settings().sendAs().patch(
+            userId="me", sendAsEmail=ctx.user,
+            body={"signature": "<b>Ward office</b><br>Saraf Global Exim · वडा कार्यालय"}).execute())()
+        made += 1
+    except Exception as exc:      # noqa: BLE001
+        notes.append(f"signature: {str(exc)[:140]}")
+    return {"made": made, "notes": notes}
+
+
+ROOM_SCOPE = "https://www.googleapis.com/auth/admin.directory.resource.calendar"
+
+
+def _room(ctx: Ctx) -> str | None:
+    """The tenant's first meeting room's address, made once if there is none (needs ROOM_SCOPE on the seed key)."""
+    from google.oauth2 import service_account
+    from googleapiclient.discovery import build
+    admin = ctx.settings.source_admin
+    creds = service_account.Credentials.from_service_account_file(
+        ctx.seed._resolve_key_path(ctx.settings), scopes=[ROOM_SCOPE]).with_subject(admin)
+    res = build("admin", "directory_v1", credentials=creds, cache_discovery=False).resources().calendars()
+    have = ctx.retry(lambda: res.list(customer="my_customer", maxResults=10).execute())().get("items", [])
+    if not have:
+        have = [ctx.retry(lambda: res.insert(customer="my_customer", body={
+            "resourceId": "fableplan2-room-1", "resourceName": "Ward Hall", "resourceType": "Conference room",
+            "capacity": 12}).execute())()]
+    return have[0].get("resourceEmail")
+
+
+@fixture("calendar_extras")
+def calendar_extras(ctx: Ctx) -> dict:
+    """c06's event shapes calendar_shapes does not make: third-party extendedProperties, a Drive attachment, a
+    booked room, and a colleague's calendar followed. Idempotent by the extras event's summary."""
+    from googleapiclient.http import MediaIoBaseUpload
+    import io
+    cal, made, notes = ctx.cal, 0, []
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+
+    def at(days: int, hour: int) -> dict:
+        return {"dateTime": (now + timedelta(days=days)).replace(hour=hour, minute=0).strftime("%Y-%m-%dT%H:%M:%S+00:00")}
+    if ctx.retry(lambda: cal.events().list(calendarId="primary", q="fableplan2 extras", maxResults=1).execute())().get("items"):
+        return {"made": 0, "notes": ["already made"]}
+
+    def insert(label, body, **kw):
+        nonlocal made
+        try:
+            ctx.retry(lambda: cal.events().insert(calendarId="primary", body=body, sendUpdates="none", **kw).execute())()
+            made += 1
+        except Exception as exc:      # noqa: BLE001
+            notes.append(f"{label}: {str(exc)[:140]}")
+    insert("extendedProperties", {"summary": "fableplan2 extras: CRM meeting", "start": at(8, 9), "end": at(8, 10),
+                                  "extendedProperties": {"private": {"crmId": "ACC-1042"}, "shared": {"ticket": "T-77"}}})
+    try:
+        f = ctx.retry(lambda: ctx.drive.files().create(body={"name": "Agenda for the attached meeting.txt"}, fields="id,webViewLink",
+                                                       media_body=MediaIoBaseUpload(io.BytesIO(b"agenda\n"), mimetype="text/plain")).execute())()
+        insert("Drive attachment", {"summary": "fableplan2 extras: meeting with an agenda", "start": at(9, 9), "end": at(9, 10),
+                                    "attachments": [{"fileUrl": f["webViewLink"], "title": "Agenda"}]}, supportsAttachments=True)
+    except Exception as exc:      # noqa: BLE001
+        notes.append(f"Drive attachment: {str(exc)[:140]}")
+    try:
+        room = _room(ctx)
+        insert("room", {"summary": "fableplan2 extras: in Ward Hall", "start": at(10, 9), "end": at(10, 10),
+                        "attendees": [{"email": room, "resource": True}]})
+    except Exception as exc:      # noqa: BLE001
+        notes.append(f"room: {str(exc)[:140]}")
+    if ctx.peers:
+        try:
+            ctx.retry(lambda: cal.calendarList().insert(body={"id": ctx.peers[0]}).execute())()
+            made += 1
+        except Exception as exc:      # noqa: BLE001
+            notes.append(f"followed calendar: {str(exc)[:140]}")
+    return {"made": made, "notes": notes}

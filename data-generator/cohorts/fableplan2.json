@@ -15,7 +15,9 @@
    "scale": "tiny",
    "mail": 40,
    "events": 10,
-   "fixtures": []
+   "fixtures": [
+    "sharing_extras"
+   ]
   },
   {
    "localpart": "c03",
@@ -40,7 +42,9 @@
    "scale": "tiny",
    "mail": 30,
    "events": 6,
-   "fixtures": []
+   "fixtures": [
+    "mail_settings"
+   ]
   },
   {
    "localpart": "c06",
@@ -48,7 +52,8 @@
    "mail": 20,
    "events": 20,
    "fixtures": [
-    "calendar_shapes"
+    "calendar_shapes",
+    "calendar_extras"
    ]
   },
   {
