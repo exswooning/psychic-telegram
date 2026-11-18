@@ -16,7 +16,9 @@ import io
 import os
 import secrets
 import sys
+import time
 
+from google.auth.exceptions import RefreshError
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
@@ -62,23 +64,43 @@ def main(argv=None) -> int:
                                        "name": {"givenName": "Partner", "familyName": "Organisation"}}).execute()
         print(f"{owner}: made (no source twin, so it is never migrated)")
     drive = as_(owner, DRIVE, "drive", "v3")
+    for _ in range(30):         # a just-made account refuses tokens ("unauthorized_client") for a few minutes
+        try:
+            drive.about().get(fields="user").execute()
+            break
+        except RefreshError:
+            time.sleep(20)
+    admin_drive = as_(tgt["admin_email"], DRIVE, "drive", "v3")
     mine = _owned(drive)
     if mine is None:
-        admin_drive = as_(tgt["admin_email"], DRIVE, "drive", "v3")
         old = _owned(admin_drive)
         if old:
-            admin_drive.permissions().create(fileId=old["id"], transferOwnership=True, sendNotificationEmail=False,
+            # Google refuses a silent ownership transfer; the one notice goes to the new owner, our own account.
+            admin_drive.permissions().create(fileId=old["id"], transferOwnership=True,
                                              body={"type": "user", "role": "owner", "emailAddress": owner}).execute()
-            gone = [p["id"] for p in admin_drive.permissions().list(
-                fileId=old["id"], fields="permissions(id,emailAddress)").execute()["permissions"]
-                if p.get("emailAddress", "").lower() == tgt["admin_email"].lower()]
-            for pid in gone:
-                drive.permissions().delete(fileId=old["id"], permissionId=pid).execute()
             print(f"file {old['id']}: handed from {tgt['admin_email']} to {owner}")
         else:
             drive.files().create(body={"name": NAME}, fields="id", media_body=MediaIoBaseUpload(
                 io.BytesIO(b"Budget note from a partner organisation.\n"), mimetype="text/plain")).execute()
         mine = _owned(drive)
+    # After a transfer the file stays filed in the admin's (info@'s) My Drive, and the admin keeps a grant
+    # INHERITED from that folder, which neither side can delete (cannotDeletePermission). Refile it in the owner's
+    # Drive first; then the grant is the admin's own to drop.
+    try:
+        held = admin_drive.files().get(fileId=mine["id"], fields="parents").execute().get("parents") or []
+    except HttpError as exc:
+        if exc.resp.status != 404:
+            raise
+        held = []               # the admin no longer sees it: already refiled and removed
+    if held:
+        drive.files().update(fileId=mine["id"], addParents="root", fields="id").execute()
+        admin_drive.files().update(fileId=mine["id"], removeParents=",".join(held), fields="id").execute()
+        print(f"file {mine['id']}: refiled from {tgt['admin_email']}'s Drive to {owner}'s")
+        mine = _owned(drive)
+    for p in mine.get("permissions", []):
+        if p.get("emailAddress", "").lower() == tgt["admin_email"].lower():
+            admin_drive.permissions().delete(fileId=mine["id"], permissionId=p["id"]).execute()
+            print(f"{tgt['admin_email']}: removed from the file")
     have = {p.get("emailAddress", "").lower() for p in mine.get("permissions", [])}
     for lp in args.to:
         who = f"{lp}@{src['domain']}".lower()
