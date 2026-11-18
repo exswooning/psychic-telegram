@@ -448,6 +448,14 @@ class TestACopyThatDidNothingIsNotVerified:
         assert r["verdict"] == "DIFFERENCES"
         assert r["users"][SRC_USER]["drive"]["notCopied"][0]["status"] == "UNMAPPED_SOURCE"
 
+    def test_a_file_the_ledger_decided_not_to_copy_is_not_an_absent_structure_item(self, auth, db, settings, identity):
+        """c09's My Maps (SKIPPED_UNEXPORTABLE) read 'absent from target' for ever: gate stuck at 40/41."""
+        fid = auth.source_drive(SRC_USER).add_native("Ward Boundary Map", kind="map")
+        db.log_audit(SRC_USER, fid, "file", "SKIPPED_UNEXPORTABLE", "Ward Boundary Map: no API can copy a map")
+        d = V.run(auth, db, settings, [SRC_USER], ("drive",), progress=lambda *_: None)["users"][SRC_USER]["drive"]
+        assert not [x for x in d["differences"] if x.get("scope") == "drive-structure"]
+        assert not [x for x in d["notCopied"] if x.get("id") == fid]
+
     @pytest.mark.parametrize("svc", V.ALL_SERVICES)
     def test_a_service_that_failed_outright_is_reported_as_not_copied(self, auth, db, settings, identity, svc):
         """migrate_user records it under the service's own name."""

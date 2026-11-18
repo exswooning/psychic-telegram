@@ -201,7 +201,11 @@ def drive(v, result):
                 for a, b, _ in v._pairs(kind)
             }
             matched = 0
-            for item in owned_items:
+            # An item the ledger decided not to copy, with a reason (a My Maps, a Site) has no target to compare;
+            # it is named in the report's remainder. c09's Ward Boundary Map read "absent from target" for ever
+            # and held the parity gate at 40/41 (a. -> b., 18 Nov 2026).
+            checked_items = [i for i in owned_items if i["id"] in mapping or i["id"] not in reasoned]
+            for item in checked_items:
                 sid = item["id"]
                 tid = mapping.get(sid)
                 target = targets.get(tid)
@@ -247,11 +251,11 @@ def drive(v, result):
                 "drive.structure",
                 "Exact parent folders, names and shortcut targets",
                 "DIFFERENCES"
-                if matched != len(owned_items)
+                if matched != len(checked_items)
                 else "MATCHED"
-                if owned_items
+                if checked_items
                 else "EMPTY",
-                len(owned_items),
+                len(checked_items),
                 matched,
             )
 
