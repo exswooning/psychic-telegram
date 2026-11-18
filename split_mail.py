@@ -168,6 +168,21 @@ def same_source_email(gm, other_mid: str, source_raw: str) -> bool:
     return compare_message(decode(source_raw), decode(got.get("raw", "")))[0] != "different"
 
 
+def target_copies(gm, msgid: str, cap: int = 3) -> list[dict]:
+    """The target's messages with this Message-ID, up to `cap` -- so fewer than `cap` is the exact count. Gmail sends
+    a nextPageToken whenever a page is full, even with nothing after it: maxResults=2 over exactly two copies read
+    as "more" and blocked the DMS's duplicate from being trashed (alice..erin, a. -> b., 18 Nov 2026)."""
+    out, token = [], None
+    while True:
+        r = gm._retry(lambda: gm.tgt.users().messages().list(
+            userId="me", q=f"rfc822msgid:{msgid}", includeSpamTrash=True, maxResults=cap,
+            **({"pageToken": token} if token else {})).execute())
+        out += r.get("messages", [])
+        token = r.get("nextPageToken")
+        if not token or len(out) >= cap:
+            return out
+
+
 def trash_dms_duplicate(gm, db, source: str, mid: str, source_raw: str, other: str) -> None:
     """Trash the DMS's copy that sits beside the mapped one, if and only if it is the unrewritten source byte for
     byte. Already in the trash: nothing to do. Anything else raises -- a person decides. DMS_TRASH_DUPLICATES=0
@@ -361,29 +376,15 @@ def reconcile_dms(auth, db, settings, progress=None, users=None):
                     # fuzzy search or arbitrary adoption is allowed.
                     tid = mapped
                 else:
-                    found = gm._retry(
-                        lambda: (
-                            gm.tgt.users()
-                            .messages()
-                            .list(
-                                userId="me",
-                                q=f"rfc822msgid:{msgid}",
-                                includeSpamTrash=True,
-                                maxResults=2,
-                            )
-                            .execute()
-                        )
-                    )
-                    matches = found.get("messages", [])
-                    if (len(matches) == 2 and not found.get("nextPageToken") and mapped
-                            and mapped in {m["id"] for m in matches}):
+                    matches = target_copies(gm, msgid)
+                    if len(matches) == 2 and mapped and mapped in {m["id"] for m in matches}:
                         # Two copies: ours (mapped, links rewritten) and one the DMS imported beside it anyway (4
                         # sent emails on account 3, 15 Nov 2026). Keep the better copy -- ours -- and trash the other
                         # only when it is byte-for-byte the unrewritten source (operator, 16 Nov 2026).
                         other = next(m["id"] for m in matches if m["id"] != mapped)
                         trash_dms_duplicate(gm, db, source, mid, full["raw"], other)
                         matches = [{"id": mapped}]
-                    if len(matches) != 1 or found.get("nextPageToken"):
+                    if len(matches) != 1:
                         raise RuntimeError(
                             "DMS destination match is absent or ambiguous"
                         )

@@ -40,3 +40,19 @@ def test_only_the_proven_twin_may_share_a_target(tmp_path):
     d.adopt_message_mapping("u@a", "second", "T", shares_with="first")
     with pytest.raises(RuntimeError):
         d.adopt_message_mapping("u@a", "third", "T", shares_with="nobody")
+
+
+def test_two_copies_are_two_even_when_gmail_sends_a_page_token():
+    """Gmail tokens a full page with nothing after it: maxResults=2 over two copies read as 'more' (18 Nov 2026)."""
+    import split_mail
+    pages = {None: {"messages": [{"id": "a"}, {"id": "b"}], "nextPageToken": "t"}, "t": {"messages": []}}
+
+    class Msgs:
+        def list(self, userId, q, includeSpamTrash, maxResults, pageToken=None):
+            page = dict(pages[pageToken])
+            page["messages"] = page["messages"][:maxResults]
+            return type("R", (), {"execute": lambda s: page})()
+
+    gm = type("G", (), {"_retry": staticmethod(lambda fn, **k: fn()),
+                        "tgt": type("T", (), {"users": lambda s: type("U", (), {"messages": lambda s: Msgs()})()})()})()
+    assert [m["id"] for m in split_mail.target_copies(gm, "<x@y>")] == ["a", "b"]
