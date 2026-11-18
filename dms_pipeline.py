@@ -44,6 +44,19 @@ def _incident(**kw) -> None:
         print(f"could not record an incident: {exc}", flush=True)
 
 
+def named_by_content(path: str, n: int) -> str:
+    """The ready list renamed `identities-ready-<n>u-<hash>.csv`. dms_migrate knows a map already on the
+    console as its own by the file's NAME; one fixed name made another run's map read as this one's, and a
+    delta re-ran those users (a. -> b., 18 Nov 2026: the 11-user pilot map, 0 imported). A different user
+    set is now a different name, which dms_migrate reports as a stale map instead of re-running it."""
+    import hashlib
+    with open(path, "rb") as fh:
+        digest = hashlib.sha256(fh.read()).hexdigest()[:8]
+    named = os.path.join(os.path.dirname(path), f"identities-ready-{n}u-{digest}.csv")
+    os.replace(path, named)
+    return named
+
+
 def ready_identities(path: str, held: dict[str, str], out_path: str) -> int:
     """Copy the identity file without the held users; returns how many users it keeps."""
     lines = [l for l in open(path, encoding="utf-8").read().splitlines() if l.strip()]
@@ -142,6 +155,7 @@ def main(argv=None) -> int:
         idle = {u: why for u, why in dms_handoff.nothing_owed(conn, notes).items() if u not in held}
     ready_path = os.path.join(out_dir, "identities-ready.csv")
     ready = ready_identities(args.identities, {**held, **idle}, ready_path)
+    ready_path = named_by_content(ready_path, ready)
     decision = {"at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "ready": ready,
                 "held": held, "notes": notes, "nothingOwed": sorted(idle), "identities": ready_path}
     with open(os.path.join(out_dir, "decision.json"), "w", encoding="utf-8") as fh:

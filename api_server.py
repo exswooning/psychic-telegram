@@ -2226,7 +2226,7 @@ def _export_identities_csv(account_id: int | None) -> tuple[str, int]:
     return path, len(rows)
 
 
-def _start_dms(account_id: int | None, *, require_clean: bool, why: str) -> tuple[bool, str]:
+def _start_dms(account_id: int | None, *, require_clean: bool, why: str, fresh: bool = False) -> tuple[bool, str]:
     """Ask Google's Data Migration Service to move this account's mail.
 
     dms_migrate.py --apply drives the Admin console: it asks the SOURCE super admin to
@@ -2279,6 +2279,8 @@ def _start_dms(account_id: int | None, *, require_clean: bool, why: str) -> tupl
                 "--source-domain", st.source_domain, "--target-admin", st.target_admin]
     if st.source_admin:
         dms_args += ["--source-admin", st.source_admin]
+    if fresh:
+        dms_args.append("--fresh-import")
     then = None
     if account_id is None:
         argv = [PY, "dms_migrate.py", "--apply", "--identities", csv_path] + dms_args
@@ -3168,6 +3170,9 @@ async def dms_per_user(account_id: int | None = None, op: Operator = Depends(ope
 
 class DmsStart(WriteAction):
     account_id: int | None = None
+    # A new import with these users, replacing the console's map. Needed when the users changed: a delta on
+    # another run's map re-runs THAT run's users (a. -> b., 18 Nov 2026: the 11-user pilot map, 0 imported).
+    fresh_import: bool = False
 
 
 @app.post("/api/v2/dms/start")
@@ -3183,7 +3188,7 @@ async def dms_start(body: DmsStart, op: Operator = Depends(operator)):
         if why:
             raise HTTPException(409, why)
     return await _gated(op, "dms.start", body, f"account:{account_id}",
-                        lambda: _start_dms(account_id, require_clean=False,
+                        lambda: _start_dms(account_id, require_clean=False, fresh=body.fresh_import,
                                            why=f"started by {op.name}: {body.reason}"))
 
 

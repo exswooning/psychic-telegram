@@ -252,3 +252,17 @@ class TestOnlyUsersWhoOweMailAreImported:
         with sqlite3.connect(ledger.db_path if hasattr(ledger, "db_path") else ledger.path) as conn:
             idle = dms_handoff.nothing_owed(conn, {"new@s": "1 new message(s) since its pass"})
         assert set(idle) == {"done@s"} and "nothing owed" in idle["done@s"]
+
+
+def test_the_ready_map_is_named_by_its_users_so_another_runs_map_is_never_taken_for_it(tmp_path):
+    """a. -> b., 18 Nov 2026: one fixed name made the 11-user pilot map on the console read as this run's;
+    a delta then re-ran the pilot's users and imported nothing."""
+    import dms_pipeline
+    a, b = tmp_path / "a" , tmp_path / "b"
+    a.mkdir(); b.mkdir()
+    (a / "identities-ready.csv").write_text("source_email,target_email\nx@a,x@b\n")
+    (b / "identities-ready.csv").write_text("source_email,target_email\nx@a,x@b\ny@a,y@b\n")
+    one = dms_pipeline.named_by_content(str(a / "identities-ready.csv"), 1)
+    two = dms_pipeline.named_by_content(str(b / "identities-ready.csv"), 2)
+    assert one.endswith(".csv") and "-1u-" in one and "-2u-" in two
+    assert one.rsplit("/", 1)[1] != two.rsplit("/", 1)[1]
