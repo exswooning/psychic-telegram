@@ -220,6 +220,37 @@ def mail_threads(ctx: Ctx) -> dict:
     return {"made": made, "notes": notes}
 
 
+def _noise_png(w: int, h: int) -> bytes:
+    """An uncompressed PNG of random pixels: nothing Google re-encodes it to is smaller."""
+    import struct
+    import zlib
+
+    def chunk(t: bytes, d: bytes) -> bytes:
+        return struct.pack(">I", len(d)) + t + d + struct.pack(">I", zlib.crc32(t + d) & 0xffffffff)
+    raw = b"".join(b"\x00" + os.urandom(w * 3) for _ in range(h))
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(raw, 0)) + chunk(b"IEND", b""))
+
+
+@fixture("big_native_doc")
+def big_native_doc(ctx: Ctx) -> dict:
+    """A native Doc Google refuses to export as .docx (exportSizeLimitExceeded): five 3 MB images, uploaded as
+    HTML and converted. Text alone cannot get there -- Google's text import fails near 2 MB (corpus.py). Drive
+    reports its quotaBytesUsed as 1, so only the export refusal shows it (18 Nov 2026)."""
+    from googleapiclient.http import MediaIoBaseUpload
+    import io
+    name = "Doc past the 10 MB export limit"
+    if _made(ctx, "drive", name):
+        return {"made": 0, "notes": ["already made"]}
+    imgs = "".join(f'<p>Site photo {i}</p><img src="data:image/png;base64,{base64.b64encode(_noise_png(1000, 1000)).decode()}">'
+                   for i in range(5))
+    html = f"<html><body><h1>{name}</h1>{imgs}</body></html>".encode()
+    ctx.retry(lambda: ctx.drive.files().create(
+        body={"name": name, "mimeType": "application/vnd.google-apps.document"}, fields="id",
+        media_body=MediaIoBaseUpload(io.BytesIO(html), mimetype="text/html", resumable=True)).execute())()
+    return {"made": 1, "notes": []}
+
+
 # ---- calendar shapes ---------------------------------------------------------------------------------------
 @fixture("calendar_shapes")
 def calendar_shapes(ctx: Ctx) -> dict:

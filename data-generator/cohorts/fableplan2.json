@@ -8,7 +8,9 @@
    "mail": 60,
    "events": 10,
    "edge_cases": true,
-   "fixtures": []
+   "fixtures": [
+    "big_native_doc"
+   ]
   },
   {
    "localpart": "c02",
