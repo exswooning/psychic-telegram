@@ -284,7 +284,7 @@ Phase 1 and the code of Phase 2 need no tenant. Start them while Phase 0 is open
 
 ### Shapes (row 1)
 
-- [ ] P2.5 `scope.py` has 59 supported rows (34 FULL, 25 PARTIAL) and `coverage_audit.PROBES` has
+- [x] P2.5 (18 Nov, Opus: audit on seeded a. reads 57 covered, 0 absent, 0 unprobed; Meet recordings UNSEEDABLE) `scope.py` has 59 supported rows (34 FULL, 25 PARTIAL) and `coverage_audit.PROBES` has
   24. For each supported row without a probe: add a probe that counts it from the inventory, and a
   seeded instance in the cohort. Done when the audit on seeded a. reads 0 ABSENT and 0 UNPROBED, or
   the row is in `UNSEEDABLE` with its reason (for example Jamboard, which Google has retired).
@@ -395,7 +395,7 @@ Phase 1 and the code of Phase 2 need no tenant. Start them while Phase 0 is open
 
 - [ ] P3.1 Seed the cohort through the product's seed path. All seven seed benchmarks pass. Then
   map identities (Identities page, auto-map), so every seeded user has its address on b.
-- [ ] P3.2 `coverage_audit.py`: row 1.
+- [x] P3.2 (18 Nov, ~06:10 UTC: 57 covered, 0 absent, 0 unprobed, 21 not migrated, 1 unseedable; `logs/coverage-5.txt` on the box) `coverage_audit.py`: row 1.
 - [ ] P3.3 Control run from the UI: all services, split mail, DMS after, server-side, ordered. Let
   every follow-on finish. The gate must read PARITY. Fix until it does (rule 4).
 - [ ] P3.4 First one scenario of each group (`--only`), to prove the runner itself. Then the
@@ -533,6 +533,28 @@ old keys from root's `authorized_keys`; decide on rewriting the git history that
 | Tests | 6 | a green baseline; the campaign and its completeness tests; failpoints |
 
 ## 11. State (newest first)
+
+- 18 Nov 2026, ~04:30 UTC (Opus, the operator asleep): **P2.3 done in code; P2.5 near done.** Failpoints at 16
+  calls, 26 `fp:` scenarios (see P2.3). Coverage: the audit had 34 rows with no probe; every supported row now
+  has one (`coverage_audit.DEEP`), or a reason in `UNSEEDABLE` (Meet recordings). Seeded on a. for it: Apps
+  Script (c03), 3 shared drives (90 memberships), 4 groups (44 members, 1 nested), a file owned by info@b.
+  shared into c02/c03 (`external_owner_share.py`; b. is the only other live domain -- re-run it after a wipe
+  of b.), an expiring share, a group grant and an inherited grant (c02), filters and a signature (c05),
+  extendedProperties, a Drive attachment, a room ("Ward Hall") and a followed calendar (c06), a conversation
+  (c04: the seed's 11,554 messages held none), and a Doc Google refuses to export as .docx (c01: no size field
+  shows it -- quotaBytesUsed reads 1 -- so the probe asks for the export). First audit after: 55 covered,
+  2 absent (threading, big Doc: both since seeded), Chat now reads not migrated (off by default). Second:
+  **57 covered, 0 absent, 0 unprobed** -- row 1 met (P2.5, P3.2).
+  New: `seed_sandbox --fixtures-only` (and `users` now narrows a cohort), every fixture runs once per user.
+  Defects found and fixed: (1) **the seed key's delegation probe used the migrate key** --
+  `dataclasses.replace` re-runs `Settings.__post_init__`, which reloads the account's key; so
+  `separate_credentials` always read the seed entry as not delegated and overwrote it on every run, each
+  overwrite costing ~20 min of Google's propagation (also in `dwd_helper --key`). (2) a fixtures-only pass
+  re-ran c06's calendar_shapes (6 duplicates deleted). (3) mail_settings used a client without
+  gmail.settings.basic; the 403 "insufficient scopes" is retried as transient: 7 minutes. Focus time and
+  working location cannot be seeded on Business Starter (Google: "Organizer is not an enterprise account, or
+  does not have the ... feature enabled", malformedFocusTimeEvent / malformedWorkingLocationEvent);
+  out-of-office covers the row. The seed key now also holds admin.directory.resource.calendar; the migrate entry was not rewritten.
 
 - 18 Nov 2026, ~20:45 UTC (Sonnet): **the 30-user cohort is seeded, mapped and created on b.** Seed: 30 users in
   2,870 s, c10's bulk 8,000 items; fixtures ran: mail_shapes 15, calendar_shapes 8, tasks_shapes 6, eicar 1,
