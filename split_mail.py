@@ -392,6 +392,7 @@ def reconcile_dms(auth, db, settings, progress=None, users=None):
                     (source, tid, mid)).fetchone()
                 if conflict and not same_source_email(gm, conflict[0], full["raw"]):
                     raise RuntimeError("DMS destination identity is already mapped to another source message")
+                shares_with = conflict[0] if conflict else None
                 if conflict:
                     # The source holds this email twice (one Message-ID, the same bytes); Gmail keeps one copy, and
                     # both source messages are that copy (c04's "One Message-ID, twice", a. -> b., 18 Nov 2026).
@@ -414,11 +415,11 @@ def reconcile_dms(auth, db, settings, progress=None, users=None):
                     labels_only = (proof.get("contentProven") is True and not proof.get("findings", {}).get("errors")
                                    and proof.get("labelDifferences"))
                     if labels_only and not mapped:
-                        db.adopt_message_mapping(source, mid, tid)
+                        db.adopt_message_mapping(source, mid, tid, shares_with=shares_with)
                     raise (LabelsDiffer if labels_only else ContentDiffers)("DMS destination content or labels did not match")
                 checkpoint.save(mid, tid, "VERIFIED", {"scope": "content and labels", "target": tid})
                 if not mapped:
-                    db.adopt_message_mapping(source, mid, tid)
+                    db.adopt_message_mapping(source, mid, tid, shares_with=shares_with)
                 resolve_findings(mid)
                 return (source, mid, tid), None
             except Exception as exc:

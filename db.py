@@ -1451,11 +1451,13 @@ class MigrationDB:
                 # outlive someone genuinely in flight right now.
                 self._mapping_cache.move_to_end(source_user)
 
-    def adopt_message_mapping(self, user: str, sid: str, tid: str) -> None:
-        """Adopt a proven identity atomically, preserving existing mappings and collisions."""
+    def adopt_message_mapping(self, user: str, sid: str, tid: str, shares_with: str | None = None) -> None:
+        """Adopt a proven identity atomically, preserving existing mappings and collisions. `shares_with`: the one
+        other source message the caller proved is this same email (split_mail.same_source_email) -- the source
+        holds it twice and Gmail keeps one copy -- may hold the same target."""
         with self.write() as conn:
             old = conn.execute("SELECT target_id FROM id_mapping WHERE source_user=? AND source_id=? AND type='message'", (user,sid)).fetchone()
-            collision = conn.execute("SELECT 1 FROM id_mapping WHERE source_user=? AND type='message' AND target_id=? AND source_id!=? LIMIT 1", (user,tid,sid)).fetchone()
+            collision = conn.execute("SELECT 1 FROM id_mapping WHERE source_user=? AND type='message' AND target_id=? AND source_id NOT IN (?,?) LIMIT 1", (user,tid,sid,shares_with or sid)).fetchone()
             if collision or (old and old[0] != tid):
                 raise RuntimeError("DMS destination identity is absent, changed or ambiguous")
             conn.execute("INSERT OR IGNORE INTO id_mapping(source_user,source_id,target_id,type,created_at) VALUES(?,?,?,'message',?)", (user,sid,tid,utc_now()))

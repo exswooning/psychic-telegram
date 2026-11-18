@@ -30,3 +30,13 @@ def test_a_different_email_never_does():
     a = b"Message-ID: <x@seed.test>\r\n\r\none\r\n"
     b = b"Message-ID: <x@seed.test>\r\n\r\ntwo\r\n"
     assert not split_mail.same_source_email(_gm(b), "other", base64.urlsafe_b64encode(a).decode())
+
+
+def test_only_the_proven_twin_may_share_a_target(tmp_path):
+    import pytest
+    from db import MigrationDB
+    d = MigrationDB(str(tmp_path / "l.db"))
+    d.adopt_message_mapping("u@a", "first", "T")
+    d.adopt_message_mapping("u@a", "second", "T", shares_with="first")
+    with pytest.raises(RuntimeError):
+        d.adopt_message_mapping("u@a", "third", "T", shares_with="nobody")
