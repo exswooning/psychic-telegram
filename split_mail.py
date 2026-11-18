@@ -152,6 +152,15 @@ class LabelsDiffer(RuntimeError):
     could run (15 Nov 2026)."""
 
 
+def same_source_email(gm, other_mid: str, source_raw: str) -> bool:
+    """Whether another SOURCE message is byte for byte this one -- the only case in which two source messages
+    may share one target copy."""
+    import base64
+    got = gm._retry(lambda: gm.src.users().messages().get(userId="me", id=other_mid, format="raw").execute())
+    decode = lambda r: base64.urlsafe_b64decode(r + "=" * (-len(r) % 4))  # noqa: E731
+    return decode(got.get("raw", "")) == decode(source_raw)
+
+
 def trash_dms_duplicate(gm, db, source: str, mid: str, source_raw: str, other: str) -> None:
     """Trash the DMS's copy that sits beside the mapped one, if and only if it is the unrewritten source byte for
     byte. Already in the trash: nothing to do. Anything else raises -- a person decides. DMS_TRASH_DUPLICATES=0
@@ -377,10 +386,15 @@ def reconcile_dms(auth, db, settings, progress=None, users=None):
                             "DMS overlap changed the mapped destination identity"
                         )
                 conflict = db.conn.execute(
-                    "SELECT 1 FROM id_mapping WHERE source_user=? AND type='message' AND target_id=? AND source_id!=? LIMIT 1",
+                    "SELECT source_id FROM id_mapping WHERE source_user=? AND type='message' AND target_id=? AND source_id!=? LIMIT 1",
                     (source, tid, mid)).fetchone()
-                if conflict:
+                if conflict and not same_source_email(gm, conflict[0], full["raw"]):
                     raise RuntimeError("DMS destination identity is already mapped to another source message")
+                if conflict:
+                    # The source holds this email twice (one Message-ID, the same bytes); Gmail keeps one copy, and
+                    # both source messages are that copy (c04's "One Message-ID, twice", a. -> b., 18 Nov 2026).
+                    db.log_audit(source, mid, "message", "SUCCESS_SOURCE_DUPLICATE",
+                                 f"the same email as {conflict[0]} on the source; the target holds one copy ({tid})")
                 from gmail_engine import SYSTEM_LABELS
                 unmapped_labels = set(full.get("labelIds") or []) - SYSTEM_LABELS - set(db.get_label_map(source))
                 if unmapped_labels:
