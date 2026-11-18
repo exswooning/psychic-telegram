@@ -176,7 +176,11 @@ def main(argv=None) -> int:
         idle = {u: why for u, why in dms_handoff.nothing_owed(conn, notes).items() if u not in held}
     ready_path = os.path.join(out_dir, "identities-ready.csv")
     ready = ready_identities(args.identities, {**held, **idle}, ready_path)
-    ready_path = console_map(out_dir, ready_path, held) or named_by_content(ready_path, ready)
+    if ready:
+        # Who owes mail decides whether to run; the MAP carries every user not held. A user with nothing owed
+        # today has mail tomorrow (info@, the DMS's own approval emails), and a map that lacks him is stale.
+        mapped = ready_identities(args.identities, held, ready_path)
+        ready_path = console_map(out_dir, ready_path, held) or named_by_content(ready_path, mapped)
     decision = {"at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "ready": ready,
                 "held": held, "notes": notes, "nothingOwed": sorted(idle), "identities": ready_path}
     with open(os.path.join(out_dir, "decision.json"), "w", encoding="utf-8") as fh:
