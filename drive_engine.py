@@ -1537,8 +1537,15 @@ class DriveMigrator:
             return
 
         if not item.get("capabilities", {}).get("canDownload", True):
-            self.db.log_audit(self.source_user, item["id"], "file",
-                              "SKIPPED_NO_DOWNLOAD", "capabilities.canDownload=false")
+            # Google reads canDownload=false on a Site, a My Maps or a Jamboard to its own owner: no bytes exist.
+            # That is "no API can copy it" (named, listed for a person), not a download ban (c09, a. -> b.).
+            from inventory import UNEXPORTABLE
+            if item.get("mimeType") in UNEXPORTABLE - {"application/vnd.google-apps.form"}:
+                self.db.log_audit(self.source_user, item["id"], "file", "SKIPPED_UNEXPORTABLE",
+                                  _named(item, f"no API can copy a {item['mimeType']}"))
+            else:
+                self.db.log_audit(self.source_user, item["id"], "file",
+                                  "SKIPPED_NO_DOWNLOAD", "capabilities.canDownload=false")
             self._bump("skipped")
             return
 

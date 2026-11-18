@@ -684,6 +684,15 @@ class TestFalsePositivesFoundOnTheFirstLiveVerification:
         g = V.run(auth, db, settings, [SRC_USER], ("gmail",), progress=lambda *_: None)["users"][SRC_USER]["gmail"]
         assert g["duplicates"] == [] and g["extras"] == [] and any("Bitport moved to the target's trash" in n for n in g["notes"])
 
+    def test_the_old_copy_a_links_redo_replaced_is_not_a_duplicate(self, auth, db, settings, identity):
+        """A redo trashes the unrewritten copy and inserts a new one (alice, a. -> b., 18 Nov 2026: 6 duplicates)."""
+        auth.source_gmail(SRC_USER).add_message(MSG % (1, 1, 1), ["INBOX"])
+        gmail_engine.GmailMigrator(auth, db, settings, SRC_USER, TGT_USER).run()
+        old = auth.target_gmail(TGT_USER).add_message(MSG % (1, 1, 1), ["TRASH"])
+        db.log_audit(SRC_USER, "src1", "link_repair", "SUCCESS", f"1 link(s) needed repointing; old copy trashed {old}")
+        g = V.run(auth, db, settings, [SRC_USER], ("gmail",), progress=lambda *_: None)["users"][SRC_USER]["gmail"]
+        assert g["duplicates"] == [] and g["extras"] == []
+
     def test_a_trashed_copy_bitport_did_not_trash_is_still_a_duplicate(self, auth, db, settings, identity):
         auth.source_gmail(SRC_USER).add_message(MSG % (1, 1, 1), ["INBOX"])
         gmail_engine.GmailMigrator(auth, db, settings, SRC_USER, TGT_USER).run()
@@ -941,3 +950,27 @@ class TestTheVerifierGivesMemoryBack:
         monkeypatch.setattr(V, "_LIBC", None)
         V.limit_arenas()
         V.give_back_memory()
+
+
+def test_an_apps_script_project_is_compared_by_its_files_not_their_ids():
+    """c03's two scripts left the native check INCOMPLETE: no type that is not a Doc was ever 'checked'."""
+    import json as _j
+    proj = lambda fid, code: _j.dumps({"files": [{"id": fid, "name": "Code", "type": "server_js", "source": code}]}).encode()
+
+    class Svc:
+        def __init__(self, data):
+            self.data = data
+
+        def files(self):
+            return self
+
+        def export_media(self, fileId, mimeType):
+            assert mimeType == V.SCRIPT_EXPORT
+            return type("R", (), {"execute": lambda s: self.data})()
+    v = object.__new__(V.Verifier)
+    v._x = lambda fn: fn()
+    for code, same in (("f()", True), ("g()", False)):
+        ev = {}
+        out = v._content_unbounded(Svc(proj("a1", "f()")), Svc(proj("b9", code)), "s", "t",
+                                   {"mimeType": V.SCRIPT_MIME}, {}, ev)
+        assert ev["nativeFeaturesChecked"] and ev["nativeFeaturesMatched"] is same and (out == []) is same

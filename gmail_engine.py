@@ -699,7 +699,7 @@ class GmailMigrator:
             # moments later -- the repair erased its own record, and the
             # check that looks for repairs reported none while 38 had run.
             self.db.log_audit(self.source_user, mid, "link_repair", "SUCCESS",
-                              f"{would} link(s) needed repointing; old copy trashed")
+                              f"{would} link(s) needed repointing; old copy trashed {already}")
         # `raw` is already base64url, and `body["raw"]` wants base64url --
         # decoding it only to re-encode the identical bytes doubled peak
         # memory per message and burned CPU on every one. The decode is now

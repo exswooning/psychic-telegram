@@ -169,6 +169,16 @@ def test_undownloadable_file_is_skipped(migrator, auth, db):
     assert db.get_audit(SRC_USER, fid, "file")["status"] == "SKIPPED_NO_DOWNLOAD"
 
 
+def test_a_my_maps_that_reads_undownloadable_is_named_as_uncopyable(migrator, auth, db):
+    """Google reads canDownload=false on its owner's My Maps (c09's Ward Boundary Map, a. -> b., 18 Nov 2026)."""
+    src = auth.source_drive(SRC_USER)
+    fid = src.add_native("Ward Boundary Map", kind="map")
+    src.store[fid]["capabilities"]["canDownload"] = False
+    migrator.run()
+    row = db.get_audit(SRC_USER, fid, "file")
+    assert row["status"] == "SKIPPED_UNEXPORTABLE" and "Ward Boundary Map" in (row["error_message"] or "")
+
+
 def test_unexportable_native_types_fall_back_to_a_copy(migrator, auth, db):
     """A type with no export mapping (a Form) cannot be exported by
     definition -- and a copy does not need one, because it never converts."""

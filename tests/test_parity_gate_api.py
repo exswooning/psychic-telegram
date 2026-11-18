@@ -36,7 +36,7 @@ def test_the_dms_can_be_run_again_with_a_reason_and_is_audited(cp, monkeypatch):
     aid = _signup(cp)
     seen = []
     monkeypatch.setattr(api_server, "_start_dms",
-                        lambda a, require_clean, why: seen.append((a, require_clean, why)) or (True, "started pid 7"))
+                        lambda a, require_clean, why, fresh=False: seen.append((a, require_clean, why)) or (True, "started pid 7"))
     r = cp.post("/api/v2/dms/start", json={"reason": "cutover final mail", "account_id": aid})
     assert r.status_code == 200 and r.json()["ok"], r.text
     assert seen and seen[0][0] == aid and seen[0][1] is False and "cutover final mail" in seen[0][2]

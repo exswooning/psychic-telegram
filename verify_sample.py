@@ -132,6 +132,16 @@ NATIVE_EXPORT = {
     "application/vnd.google-apps.spreadsheet": "text/csv",
     "application/vnd.google-apps.presentation": "text/plain",
 }
+SCRIPT_MIME = "application/vnd.google-apps.script"
+SCRIPT_EXPORT = "application/vnd.google-apps.script+json"
+
+
+def script_files(exported: bytes) -> list[tuple]:
+    """An Apps Script project as what a person wrote: (name, type, code) per file, ids left out."""
+    return sorted((f.get("name"), f.get("type"), f.get("source"))
+                  for f in json.loads(exported or b"{}").get("files", []))
+
+
 # Headers Google is known to add when it stores a message. Their presence on the
 # target and not the source is reported as "equivalent", never as a difference and
 # never silently.
@@ -660,11 +670,12 @@ class Verifier:
 
     def _translate(self, addr: str) -> str:
         # A secondary calendar named as a guest maps through its calendar mapping, as
-        # calendar_engine._map_address maps it.
+        # calendar_engine._map_address maps it; a room through the room the run made on the target (c06's
+        # "Ward Hall" read as a different guest, a. -> b., 18 Nov 2026).
         if not addr:
             return addr
         return (self.db.resolve_identity(addr)
-                or self.db.target_for_source_id(addr.lower(), ("calendar", "group")) or addr).lower()
+                or self.db.target_for_source_id(addr.lower(), ("calendar", "group", "resource")) or addr).lower()
 
     def _pairs(self, type_: str, sample: bool = False) -> list[tuple[str, str, str | None]]:
         """Everything the ledger paired -- or, with `sample`, the part of it to open and compare.
@@ -1368,6 +1379,14 @@ class Verifier:
                         ev["how"] += "; its Drive links repointed at the copies, as intended"
                         return []
                 return [] if a == b else [f"content differs when exported ({len(a)} -> {len(b)} bytes)"]
+            if mime == SCRIPT_MIME:
+                # Exported as the project's JSON; each file's own id is new on every copy, so the project is
+                # its files' names, types and code. Unchecked, every user with a script read INCOMPLETE
+                # (c03, a. -> b., 18 Nov 2026).
+                a, b = (script_files(self._export(side, i, SCRIPT_EXPORT)) for side, i in ((src, sid), (tgt, tid)))
+                ev.update(opened=True, how="Apps Script project: every file's name, type and code",
+                          nativeFeaturesChecked=True, nativeFeaturesMatched=a == b)
+                return [] if a == b else [f"script project differs: {len(a)} file(s) -> {len(b)}, or their code"]
             if mime.startswith("application/vnd.google-apps."):
                 ev["how"] = "not opened: this Google type has no text export"
                 return []
@@ -1803,11 +1822,13 @@ class Verifier:
         # Duplicates and extras by Message-ID.
         welcome = 0
         # Second copies Bitport itself put in the target's trash (keep the better copy, 16 Nov 2026), named by
-        # their target id in the ledger: Bitport's own retained trash, recoverable 30 days, not a duplicate.
+        # their target id in the ledger: Bitport's own retained trash, recoverable 30 days, not a duplicate. So is
+        # the old copy a links redo replaced (link_repair; alice, a. -> b., 18 Nov 2026: 6 read as duplicates).
         import re as _re
         bitport_trashed = {m.group(1) for (msg,) in self.db.conn.execute(
-            "SELECT error_message FROM audit_log WHERE source_user=? AND item_type='dms_duplicate' "
-            "AND status='TRASHED'", (self.src_user,)) for m in [_re.search(r"trashed ([\w-]+)", msg or "")] if m}
+            "SELECT error_message FROM audit_log WHERE source_user=? AND ((item_type='dms_duplicate' "
+            "AND status='TRASHED') OR (item_type='link_repair' AND status='SUCCESS'))", (self.src_user,))
+            for m in [_re.search(r"trashed ([\w-]+)", msg or "")] if m}
         kept_trash = 0
         try:
             scanned = 0

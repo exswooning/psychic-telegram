@@ -28,11 +28,22 @@ SERVICES = ("drive", "gmail", "calendar", "contacts", "tasks", "directory")
 # Which service an audit row's item type belongs to (account 3's ledger, 15 Nov 2026). Unknown types make
 # every service of that user stale: a change nobody can place is a change to all of it.
 SERVICE_OF = {**dict.fromkeys(("file", "folder", "acl", "comment", "shortcut", "fallback", "transfer_route",
-                               "link_rewrite", "shared_drive", "shared_drive_member", "form_link"), "drive"),
-              **dict.fromkeys(("message", "message_link", "draft", "filter", "signature", "gmail", "label"), "gmail"),
-              **dict.fromkeys(("event", "calendar", "calendar_acl"), "calendar"),
-              "contact": "contacts", **dict.fromkeys(("task", "tasklist"), "tasks"),
-              **dict.fromkeys(("group", "group_member", "profile"), "directory")}
+                               "link_rewrite", "shared_drive", "shared_drive_member", "form_link", "drive",
+                               "acl_pass", "links_pass", "carried", "flagged_file", "source_change",
+                               "source_link_reference", "staging_cleanup"), "drive"),
+              # A type missing here reads as a change to EVERY service: the DMS check's own duplicate trash made
+              # five users' older directory checks STALE (a. -> b., 18 Nov 2026). tests/test_parity_gate.py
+              # fails on a type the code writes that is in neither this map nor EVERY_SERVICE.
+              **dict.fromkeys(("message", "message_link", "draft", "filter", "signature", "gmail", "label",
+                               "dms_duplicate", "link_repair", "delegate", "forwarding", "reset_link_recovery"), "gmail"),
+              **dict.fromkeys(("event", "calendar", "calendar_acl", "calendar_subscription", "resource"), "calendar"),
+              **dict.fromkeys(("contact", "contact_group"), "contacts"),
+              **dict.fromkeys(("task", "tasklist", "task_list"), "tasks"),
+              **dict.fromkeys(("group", "group_member", "profile", "profile_photo", "sso_assignment", "sso_profile"),
+                              "directory"),
+              **dict.fromkeys(("chat_member", "chat_message", "chat_space"), "chat")}
+# A whole-user failure (main.migrate_user): it does touch every service.
+EVERY_SERVICE = {"user"}
 # Kinds no API can carry, each named in the final report (known_issues says why for every one).
 ACCEPTED_KINDS = {"chat.attributed", "chat.space_type", "chat.members", "chat.sender", "chat.not_migrated",
                   "drive.form_relinked", "drive.ab_test_residue", "gmail.link_scan_encrypted"}

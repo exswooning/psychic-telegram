@@ -118,3 +118,13 @@ def test_record_writes_the_verdict_and_opens_then_closes_an_incident(tmp_path, m
     assert (tmp_path / "logs" / "reports" / "3" / "parity-gate-latest.json").exists()
     src2 = _ledger(_all(U1)); src2.commit(); db.unlink(); src2.backup(dst := sqlite3.connect(db)); dst.close()
     assert G.record(3, str(db))["verdict"] == "PARITY" and closed == [9]
+
+
+def test_every_audit_type_the_code_writes_names_its_service():
+    """An unplaced type reads as a change to every service (dms_duplicate made 5 directory checks STALE)."""
+    import glob, os, re
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    written = set()
+    for f in glob.glob(os.path.join(root, "*.py")):
+        written |= set(re.findall(r"log_audit\(\s*[^,]+,\s*[^,]+,\s*\"([a-z_]+)\"", open(f, encoding="utf-8").read()))
+    assert written and not written - set(G.SERVICE_OF) - G.EVERY_SERVICE, sorted(written - set(G.SERVICE_OF) - G.EVERY_SERVICE)
