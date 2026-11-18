@@ -153,12 +153,14 @@ class LabelsDiffer(RuntimeError):
 
 
 def same_source_email(gm, other_mid: str, source_raw: str) -> bool:
-    """Whether another SOURCE message is byte for byte this one -- the only case in which two source messages
-    may share one target copy."""
+    """Whether another SOURCE message is this same email -- the only case in which two source messages may share
+    one target copy. Compared as the 1:1 check compares (verify_sample.compare_message): the two copies' bytes
+    differ in the Received line Gmail stamps at insert (c04, 18 Nov 2026: one second apart)."""
     import base64
+    from verify_sample import compare_message
     got = gm._retry(lambda: gm.src.users().messages().get(userId="me", id=other_mid, format="raw").execute())
     decode = lambda r: base64.urlsafe_b64decode(r + "=" * (-len(r) % 4))  # noqa: E731
-    return decode(got.get("raw", "")) == decode(source_raw)
+    return compare_message(decode(source_raw), decode(got.get("raw", "")))[0] != "different"
 
 
 def trash_dms_duplicate(gm, db, source: str, mid: str, source_raw: str, other: str) -> None:
