@@ -3239,6 +3239,11 @@ def main(argv: list[str] | None = None) -> int:
             print(f"\nFound {len(entries)} existing user(s) in "
                   f"{settings.source_domain}; seeding all of them.")
     all_users = [e["email"] for e in entries]
+    if args.cohort and args.users:
+        # --users narrows a cohort to these members; their peers stay the whole cohort.
+        keep = {u.strip().lower() for u in args.users.split(",") if u.strip()}
+        entries = [e for e in entries if e["local"] in keep]
+        print(f"  narrowed to {len(entries)} of the cohort: {', '.join(e['local'] for e in entries)}")
 
     # --- Optionally create the accounts first ----------------------------
     # --create-until-full already created its accounts (and built `entries`

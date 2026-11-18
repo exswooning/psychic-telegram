@@ -197,8 +197,8 @@ class TestACohortIsNamedNotPathed:
         for bad in ("../etc/passwd", "a b", "x/y", "A.json"):
             assert "cohort must be a file name" in self._argv(monkeypatch, cohort=bad)[2]
 
-    def test_an_unknown_cohort_is_named_and_a_real_one_replaces_users(self, monkeypatch):
+    def test_an_unknown_cohort_is_named_and_users_narrow_a_real_one(self, monkeypatch):
         assert "no cohort file" in self._argv(monkeypatch, cohort="nosuch")[2]
         argv, _, err = self._argv(monkeypatch, cohort="fableplan2", users="alice,bob")
         assert not err and "--cohort" in argv and argv[argv.index("--cohort") + 1].endswith("cohorts/fableplan2.json")
-        assert "--users" not in argv
+        assert argv[argv.index("--users") + 1] == "alice,bob"      # narrows the cohort: fixtures are not all idempotent

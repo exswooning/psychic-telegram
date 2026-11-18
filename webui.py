@@ -2936,7 +2936,7 @@ def seed_argv(body: dict, account_id: int | None = None) -> tuple[list[str], dic
         if not os.path.isfile(path):
             return [], {}, f"no cohort file data-generator/cohorts/{cohort}.json"
         argv += ["--cohort", path]
-    users = "" if cohort else (body.get("users") or "").strip()
+    users = (body.get("users") or "").strip()      # with a cohort: narrows it to these members
     if users:
         # Localparts only: an address would silently seed nothing, and the
         # seeder's own error for that is deep inside a Directory lookup.
