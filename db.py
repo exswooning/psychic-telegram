@@ -561,6 +561,10 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
+# What a Drive link can name: a shortcut has its own id and URL too, and a mail link to one was left
+# unresolved (c01, control run a. -> b., 18 Nov 2026).
+DRIVE_ITEM_TYPES = ("file", "folder", "shortcut")
+
 _MAPPED_FAILPOINT = {"file": "drive.mapped", "folder": "drive.mapped", "shortcut": "drive.mapped",
                      "message": "gmail.mapped"}
 
@@ -972,7 +976,7 @@ class MigrationDB:
             f"AND type IN ({marks})", (source_user, *types))}
 
     def target_for_source_id(self, source_id: str,
-                             types: tuple[str, ...] = ("file", "folder")) -> Optional[str]:
+                             types: tuple[str, ...] = DRIVE_ITEM_TYPES) -> Optional[str]:
         """The target id for a source file/folder, whoever owned it.
 
         Deliberately ignores the source_user half of the primary key.
@@ -990,7 +994,7 @@ class MigrationDB:
         return row["target_id"] if row else None
 
     def targets_for_source_id(self, source_id: str,
-                              types: tuple[str, ...] = ("file", "folder")) -> list[str]:
+                              types: tuple[str, ...] = DRIVE_ITEM_TYPES) -> list[str]:
         """Every target copy of one source file. A file owned outside the migration and
         shared with many users is copied once per user (live: one file, 19 ward
         copies), so `target_for_source_id`'s one pick is not the only right answer."""

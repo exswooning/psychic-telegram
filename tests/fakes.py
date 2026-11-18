@@ -1794,7 +1794,7 @@ class _CalEvents:
     def instances(self, **kw):
         return _Call(self.s, "events.instances", self._instances, kw)
 
-    def _instances(self, eventId: str, originalStart: Optional[str] = None, **_):
+    def _instances(self, calendarId: str, eventId: str, originalStart: Optional[str] = None, **_):  # required, as in Google's client
         master = self.s.store.get(eventId)
         if not master:
             raise http_error(404, "notFound", eventId)

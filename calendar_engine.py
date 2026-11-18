@@ -728,7 +728,7 @@ class CalendarMigrator:
         original_start = (item.get("originalStartTime") or {}).get("dateTime")
         try:
             inst_resp = self._retry(lambda: self.tgt.events().instances(
-                eventId=target_master_id, originalStart=original_start,
+                calendarId=tgt_cal_id, eventId=target_master_id, originalStart=original_start,
             ).execute())
         except (PermanentAPIError, RuntimeError) as exc:
             self.db.log_audit(self.source_user, eid, "event", "FAILED", str(exc))
