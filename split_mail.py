@@ -152,6 +152,11 @@ class LabelsDiffer(RuntimeError):
     could run (15 Nov 2026)."""
 
 
+# The note on a user this check blocks: the BLOCKED users dms_handoff holds out of the next import are cleared by
+# the next passing check only when they carry it (c04, 18 Nov 2026: held out of the only run that could re-check it).
+DMS_BLOCK_NOTE = "DMS destination content/identity/labels need attention; see findings"
+
+
 def same_source_email(gm, other_mid: str, source_raw: str) -> bool:
     """Whether another SOURCE message is this same email -- the only case in which two source messages may share
     one target copy. Compared as the 1:1 check compares (verify_sample.compare_message): the two copies' bytes
@@ -507,7 +512,7 @@ def reconcile_dms(auth, db, settings, progress=None, users=None):
                 db.set_identity_status(
                     user,
                     "BLOCKED",
-                    "DMS destination content/identity/labels need attention; see findings",
+                    DMS_BLOCK_NOTE,
                 )
             continue
         st = copy.copy(settings)
@@ -524,9 +529,10 @@ def reconcile_dms(auth, db, settings, progress=None, users=None):
             )
             continue
         identity = db.conn.execute(
-            "SELECT status FROM identity_map WHERE source_email=?", (user,)
+            "SELECT status, notes FROM identity_map WHERE source_email=?", (user,)
         ).fetchone()
-        if identity and identity[0] == "AWAITING_DMS":
+        # A block this check set clears when the check passes; any other BLOCKED (a licence) is not its own.
+        if identity and (identity[0] == "AWAITING_DMS" or (identity[0] == "BLOCKED" and identity[1] == DMS_BLOCK_NOTE)):
             db.mark_services_done(user, ["gmail"])
             db.set_identity_status(
                 user, "DONE", "DMS mail content, labels and source coverage checked"
