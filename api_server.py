@@ -3896,6 +3896,10 @@ async def job_stop(pid: int, body: JobSignal, op: Operator = Depends(operator)):
     force = body.force or await _off_loop(job_admission.stop_asked, pid)
 
     def _stop() -> tuple[bool, str]:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:      # it ended on its own: say so, not a 500 (a. -> b., 18 Nov 2026)
+            return False, f"pid {pid} has already exited"
         if not force:
             # SIGINT, not SIGKILL: the engine handles it cooperatively, finishes
             # the item in flight and commits, so the ledger stays resumable.

@@ -3381,6 +3381,15 @@ class TestForceStop:
         assert r.json()["ok"] is True
         assert sent == [(4242, 2)]
 
+    def test_stopping_a_job_that_already_exited_says_so(self, monkeypatch, cp):
+        import api_server
+
+        def gone(pid, sig):
+            raise ProcessLookupError
+        monkeypatch.setattr(api_server.os, "kill", gone)
+        r = cp.post("/api/v2/jobs/4242/stop", json={"reason": "late"}, headers=ADMIN)
+        assert r.status_code == 200 and r.json()["ok"] is False and "already exited" in r.json()["detail"]
+
     def test_force_kills_a_job_this_app_runs(self, monkeypatch, cp):
         sent = self._kills(monkeypatch)
         r = cp.post("/api/v2/jobs/4242/stop",
