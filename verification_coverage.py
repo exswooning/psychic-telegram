@@ -156,7 +156,7 @@ def drive(v, result):
                     "error": "Live in-scope Drive item has no source-to-target migration mapping",
                 }
             )
-        result["nativeSourceCount"] = sum(f.get("mimeType","").startswith("application/vnd.google-apps.") and not f.get("mimeType","").endswith((".folder",".shortcut")) for f in files if f["id"] in in_scope)
+        result["nativeSourceCount"] = sum(f.get("mimeType","").startswith("application/vnd.google-apps.") and not f.get("mimeType","").endswith((".folder",".shortcut")) for f in files if f["id"] in in_scope and f["id"] not in reasoned)
         result["sourceInventory"] = {
             "inScope": len(in_scope),
             "excludedSharedOrTenantItems": excluded,
