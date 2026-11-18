@@ -48,6 +48,19 @@ class Ctx:
     build_people_tasks: Callable | None = None
 
 
+def _made(ctx: Ctx, kind: str, q: str) -> bool:
+    """Whether a fixture's own marker item exists already: every fixture runs at most once per user, so a
+    --fixtures-only pass for a new fixture never doubles the old ones (18 Nov 2026: c06's calendar shapes)."""
+    if kind == "drive":
+        call = lambda: ctx.drive.files().list(q=f"name='{q}' and trashed=false", pageSize=1, fields="files(id)").execute()  # noqa: E731
+        return bool(ctx.retry(call)().get("files"))
+    if kind == "gmail":
+        call = lambda: ctx.gmail.users().messages().list(userId="me", q=q, maxResults=1, includeSpamTrash=True).execute()  # noqa: E731
+        return bool(ctx.retry(call)().get("messages"))
+    call = lambda: ctx.cal.events().list(calendarId="primary", q=q, maxResults=1).execute()  # noqa: E731
+    return bool(ctx.retry(call)().get("items"))
+
+
 def run_all(names, ctx: Ctx) -> dict:
     out = {}
     for name in names:
@@ -132,6 +145,8 @@ def mail_shapes(ctx: Ctx) -> dict:
     """Mail of every awkward shape the engine and the checks have met: sizes either side of the 5 MB upload
     threshold, no Message-ID, a Message-ID far down a long header block, non-ASCII headers and body, one
     Message-ID twice, an encrypted body, and each kind of Drive-link mail."""
+    if _made(ctx, "gmail", 'subject:"One Message-ID, twice"'):
+        return {"made": 0, "notes": ["already made"]}
     made, notes = 0, []
     s = ctx.seed
 
@@ -184,6 +199,8 @@ def calendar_shapes(ctx: Ctx) -> dict:
     """Every event type and layout a migration has to carry: all-day, Asia/Kathmandu, a weekly series with a
     moved instance, out-of-office, focus time, working location, a Meet link, guests, calendar sharing. No
     update is ever sent: sendUpdates=none, and guests are this run's own seed.test users."""
+    if _made(ctx, "calendar", "Meeting in Kathmandu time"):
+        return {"made": 0, "notes": ["already made"]}
     made, notes = 0, []
     cal = ctx.cal
     now = datetime.now(timezone.utc).replace(microsecond=0)
@@ -249,6 +266,9 @@ def tasks_shapes(ctx: Ctx) -> dict:
     made, notes = 0, []
     try:
         _, tasks = ctx.build_people_tasks()
+        if any(x.get("title") == "fableplan2 shapes" for x in ctx.retry(
+                lambda: tasks.tasklists().list(maxResults=100).execute())().get("items", [])):
+            return {"made": 0, "notes": ["already made"]}
         lst = ctx.retry(lambda: tasks.tasklists().insert(body={"title": "fableplan2 shapes"}).execute())()
         ctx.retry(lambda: tasks.tasklists().insert(body={"title": "fableplan2 empty list"}).execute())()
         made += 2
@@ -272,6 +292,8 @@ def eicar(ctx: Ctx) -> dict:
     itself flagged by a scanner."""
     from googleapiclient.http import MediaIoBaseUpload
     import io
+    if _made(ctx, "drive", "eicar-test.txt"):
+        return {"made": 0, "notes": ["already made"]}
     test = "X5O!P%@AP[4\\PZX54(P^)7CC)7}$" + "EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*"
     try:
         ctx.retry(lambda: ctx.drive.files().create(
@@ -330,6 +352,8 @@ def bulk(ctx: Ctx) -> dict:
     """Paging and pacing: params bulk_messages small messages and bulk_files small files."""
     from googleapiclient.http import MediaIoBaseUpload
     import io
+    if _made(ctx, "drive", "bulk-00000.txt"):
+        return {"made": 0, "notes": ["already made"]}
     s, made, notes = ctx.seed, 0, []
     n_msg, n_files = int(ctx.params.get("bulk_messages", 0)), int(ctx.params.get("bulk_files", 0))
     workers = int(ctx.params.get("workers", 8))
@@ -400,13 +424,16 @@ def sharing_extras(ctx: Ctx) -> dict:
 
 @fixture("mail_settings")
 def mail_settings(ctx: Ctx) -> dict:
-    """c05's filters and signature (vacation, IMAP, POP, forwarding and delegates are the seeder's own)."""
-    g, made, notes = ctx.gmail, 0, []
+    """c05's filters and signature (vacation, IMAP, POP, forwarding and delegates are the seeder's own).
+    Filters and sendAs need gmail.settings.basic, which the corpus client does not hold: a 403 for a missing
+    scope reads as transient to the retry ladder and spent 7 minutes (18 Nov 2026)."""
+    g, made, notes = ctx.seed.build_gmail_settings(ctx.settings, ctx.user), 0, []
     try:
         if not ctx.retry(lambda: g.users().settings().filters().list(userId="me").execute())().get("filter"):
-            labels = ctx.retry(lambda: g.users().labels().list(userId="me").execute())().get("labels", [])
+            lab = ctx.gmail.users().labels()
+            labels = ctx.retry(lambda: lab.list(userId="me").execute())().get("labels", [])
             lid = next((x["id"] for x in labels if x["name"] == "Filtered"), None) or ctx.retry(
-                lambda: g.users().labels().create(userId="me", body={"name": "Filtered"}).execute())()["id"]
+                lambda: lab.create(userId="me", body={"name": "Filtered"}).execute())()["id"]
             for crit in ({"from": (ctx.peers or [ctx.external])[0]}, {"subject": "invoice", "hasAttachment": True}):
                 ctx.retry(lambda c=crit: g.users().settings().filters().create(
                     userId="me", body={"criteria": c, "action": {"addLabelIds": [lid]}}).execute())()

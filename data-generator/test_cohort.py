@@ -56,6 +56,10 @@ class _Gmail:
     def messages(self):
         return self
 
+    def list(self, userId, q="", maxResults=1, includeSpamTrash=False):
+        hit = [{"id": "m"}] if self.raws and "twice" in q else []
+        return type("R", (), {"execute": lambda s: {"messages": hit}})()
+
     def insert(self, userId, body, media_body=None, internalDateSource=""):
         import base64
         raw = body["raw"] and base64.urlsafe_b64decode(body["raw"]) if "raw" in body else media_body.read_all()
@@ -113,3 +117,11 @@ def test_run_all_never_loses_the_other_fixtures(monkeypatch):
 def test_the_eicar_string_is_not_written_whole_in_the_source():
     src = open(os.path.join(HERE, "fixtures.py"), encoding="utf-8").read()
     assert "EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*" in src and "X5O!P%@AP[4\\PZX54(P^)7CC)7}$EICAR" not in src
+
+
+def test_a_fixture_runs_once_per_user(monkeypatch):
+    """A --fixtures-only pass for a new fixture must not double the old ones (18 Nov 2026, c06)."""
+    g = _Gmail()
+    first = F.mail_shapes(_ctx(monkeypatch, g))
+    again = F.mail_shapes(_ctx(monkeypatch, g))
+    assert first["made"] > 0 and again == {"made": 0, "notes": ["already made"]}
