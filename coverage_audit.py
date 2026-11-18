@@ -56,6 +56,7 @@ from db import MigrationDB                          # noqa: E402
 
 COVERED, ABSENT, NA, UNPROBED = "COVERED", "ABSENT", "N/A", "UNPROBED"
 UNSEEDABLE_V = "UNSEEDABLE"
+CHAT_ROW = "Google Chat spaces and messages"      # off by default (operator, 2026-10-31): not migrated
 
 
 # ======================================================================
@@ -81,7 +82,7 @@ def _drive_kinds(t: dict, *names: str) -> int:
 NATIVE_DOCS = ("application/vnd.google-apps.document", "application/vnd.google-apps.spreadsheet",
                "application/vnd.google-apps.presentation")
 DRIVE_LINK = ("drive.google.com", "docs.google.com")
-BIG_NATIVE = 10 * 1024 * 1024
+EXPORT_SAMPLE = 200          # natives export-checked, per user
 COMMENT_SAMPLE = 25          # natives asked for comments, per user
 
 
@@ -99,6 +100,19 @@ def _pages(call, key: str, limit: int = 20000):
             return
 
 
+def _too_large_to_export(svc, files: list) -> int:
+    """Natives Google refuses to export in the engine's own format (exportSizeLimitExceeded). No field says
+    so: a Doc of 20 MB of images reads quotaBytesUsed 1, and its text/plain export succeeds (18 Nov 2026)."""
+    from config import EXPORT_MIME_MAP
+    n = 0
+    for f in [f for f in files if f.get("mimeType") in NATIVE_DOCS][:EXPORT_SAMPLE]:
+        try:
+            svc.files().export(fileId=f["id"], mimeType=EXPORT_MIME_MAP[f["mimeType"]][0]).execute()
+        except Exception as exc:      # noqa: BLE001 - only the size refusal counts
+            n += "exportSizeLimitExceeded" in str(exc)
+    return n
+
+
 def _deep_drive(auth: AuthManager, user: str) -> dict:
     svc = auth.source_drive(user)
     files = list(_pages(lambda t: svc.files().list(
@@ -110,8 +124,7 @@ def _deep_drive(auth: AuthManager, user: str) -> dict:
         "named": sum(1 for f in files if f.get("description") or f.get("starred")),
         "modified": sum(1 for f in files if f.get("modifiedTime")),
         "owned": len(files),
-        "native_big": sum(1 for f in files if f.get("mimeType") in NATIVE_DOCS
-                          and int(f.get("quotaBytesUsed") or 0) > BIG_NATIVE),
+        "native_big": _too_large_to_export(svc, files),
         "timed_shares": sum(1 for f in files for p in f.get("permissions") or [] if p.get("expirationTime")),
         # My Drive reports no "inherited" flag: a grant the parent folder also holds came from it.
         "inherited": sum(1 for f in files if perms[f["id"]] & set().union(
@@ -559,6 +572,7 @@ def collect(auth: AuthManager, settings: Settings, users: list[str]) -> dict:
         # are some and we are configured to drop them".
         "migrate_external_shares": bool(
             getattr(settings, "migrate_external_shares", False)),
+        "migrate_chat": bool(getattr(settings, "migrate_chat", False)),
     }
 
     for user in users:
@@ -636,7 +650,7 @@ def collect(auth: AuthManager, settings: Settings, users: list[str]) -> dict:
 def assess(totals: dict) -> list[dict]:
     rows = []
     for item in scope.filter_scope():
-        if item.status == scope.NONE:
+        if item.status == scope.NONE or (item.item == CHAT_ROW and not totals.get("migrate_chat", True)):
             verdict, count = NA, None
         elif item.item in UNSEEDABLE:
             verdict, count = UNSEEDABLE_V, None

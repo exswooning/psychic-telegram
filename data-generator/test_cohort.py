@@ -41,7 +41,7 @@ def test_entries_carry_each_users_knobs_and_twins_share_content(monkeypatch):
     entries = F.entries_from_cohort(F.load_cohort(COHORT), "a.example")
     by = {e["local"]: e for e in entries}
     assert by["c01"]["edge_cases"] is True and by["c10"]["params"]["bulk_messages"] == 5000
-    assert by["c04"]["fixtures"] == ["mail_shapes"] and by["t01"]["email"] == "t01@a.example"
+    assert by["c04"]["fixtures"][0] == "mail_shapes" and by["t01"]["email"] == "t01@a.example"
     assert corpus.stable_seed("t01@a.example") == corpus.stable_seed("t02@a.example")
     assert corpus.stable_seed("c01@a.example") != corpus.stable_seed("c02@a.example")
 
@@ -125,3 +125,15 @@ def test_a_fixture_runs_once_per_user(monkeypatch):
     first = F.mail_shapes(_ctx(monkeypatch, g))
     again = F.mail_shapes(_ctx(monkeypatch, g))
     assert first["made"] > 0 and again == {"made": 0, "notes": ["already made"]}
+
+
+def test_a_conversation_is_inserted_into_one_thread(monkeypatch):
+    class Threads(_Gmail):
+        bodies = []
+
+        def insert(self, userId, body, media_body=None, internalDateSource=""):
+            Threads.bodies.append(body)
+            return type("R", (), {"execute": lambda s: {"id": "m", "threadId": "T1"}})()
+    out = F.mail_threads(_ctx(monkeypatch, Threads()))
+    assert out["made"] == 3
+    assert [b.get("threadId") for b in Threads.bodies] == [None, "T1", "T1"]

@@ -193,6 +193,33 @@ def mail_shapes(ctx: Ctx) -> dict:
     return {"made": made, "notes": notes}
 
 
+@fixture("mail_threads")
+def mail_threads(ctx: Ctx) -> dict:
+    """A three-message conversation: Gmail threads an inserted message only with the first one's threadId,
+    a matching Subject and In-Reply-To/References -- the seeder's own mail never did, so 11,554 messages held
+    no conversation (coverage audit, 18 Nov 2026)."""
+    subject = "Ward budget review"
+    if _made(ctx, "gmail", f'subject:"{subject}"'):
+        return {"made": 0, "notes": ["already made"]}
+    made, notes, thread, ids = 0, [], None, []
+    for i, body in enumerate(("Draft budget attached for review.", "Two lines need a second look.", "Fixed, thanks.")):
+        mid = f"thread-{i}-{uuid.uuid4().hex[:8]}@seed.test"
+        h = _headers(ctx, subject if i == 0 else f"Re: {subject}", message_id=mid, days_ago=30 - i)
+        if ids:
+            h += [f"In-Reply-To: <{ids[-1]}>", "References: " + " ".join(f"<{x}>" for x in ids)]
+        payload = {"raw": base64.urlsafe_b64encode(_raw(h, body)).decode(), "labelIds": ["INBOX"]}
+        if thread:
+            payload["threadId"] = thread
+        try:
+            got = ctx.retry(lambda p=payload: ctx.gmail.users().messages().insert(
+                userId="me", body=p, internalDateSource="dateHeader").execute())()
+            thread, made = thread or got.get("threadId"), made + 1
+            ids.append(mid)
+        except Exception as exc:      # noqa: BLE001
+            notes.append(f"message {i}: {str(exc)[:120]}")
+    return {"made": made, "notes": notes}
+
+
 # ---- calendar shapes ---------------------------------------------------------------------------------------
 @fixture("calendar_shapes")
 def calendar_shapes(ctx: Ctx) -> dict:

@@ -34,7 +34,8 @@
    "mail": 60,
    "events": 6,
    "fixtures": [
-    "mail_shapes"
+    "mail_shapes",
+    "mail_threads"
    ]
   },
   {
