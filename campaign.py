@@ -60,6 +60,10 @@ def render_md(name: str, scenarios: list, results: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
+class Unautomated(Exception):
+    """The driver cannot cause this yet: the scenario is UNVERIFIED, never a pass or a crash."""
+
+
 class Driver:
     """What a scenario needs from the live system. LiveDriver is the box; tests use a fake."""
     def take_twin(self) -> str: raise NotImplementedError
@@ -68,6 +72,124 @@ class Driver:
     def inject(self, inject: dict) -> None: raise NotImplementedError
     def wait_idle(self, timeout: int) -> bool: raise NotImplementedError
     def facts(self, user: str | None) -> dict: raise NotImplementedError   # what judges read; see judge()
+
+
+TWINS = tuple(f"t{n:02d}" for n in range(2, 21))      # t01 is the control
+CONTROL = "t01"
+
+
+class LiveDriver(Driver):
+    """The box: requests go to the API as the superadmin, with a session made here (root needs no password);
+    facts come from the account's own ledger, its reports and the incident table."""
+
+    def __init__(self, account_id: int, name: str, api: str = "http://127.0.0.1:8090", poll: int = 30):
+        import accounts_auth
+        import control_plane_db as cpdb
+        self.account_id, self.name, self.api_base, self.poll = account_id, name, api, poll
+        with cpdb.ro() as conn:
+            admin = conn.execute("SELECT id FROM accounts WHERE is_superadmin=1 ORDER BY id LIMIT 1").fetchone()
+        self.token = accounts_auth.create_session(admin[0])
+        self.domain = (accounts_auth.get_tenant_config(account_id, "source") or {}).get("domain", "")
+        self.started = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+    def _ledger(self):
+        import sqlite3
+        from config import Settings
+        conn = sqlite3.connect(Settings(account_id=self.account_id).db_path)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    def take_twin(self) -> str:
+        path = os.path.join(results_dir(self.name), "twins.json")
+        try:
+            with open(path, encoding="utf-8") as fh:
+                used = json.load(fh)
+        except (OSError, ValueError):
+            used = []
+        free = [t for t in TWINS if t not in used]
+        if not free:
+            raise Unautomated("every twin is used: wipe-and-migrate the cohort before the next scenario")
+        os.makedirs(results_dir(self.name), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(used + [free[0]], fh)
+        self.started = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        return f"{free[0]}@{self.domain}"
+
+    def prepare(self, fixtures: tuple) -> None:
+        return None          # the cohort is seeded once (P3.1); a fixture names the cohort user holding it
+
+    def api(self, method: str, path: str, body: dict | None) -> dict:
+        import urllib.request
+        req = urllib.request.Request(self.api_base + path, method=method, headers={
+            "Content-Type": "application/json", "Cookie": f"bp_session={self.token}"},
+            data=json.dumps({**(body or {}), "account_id": self.account_id}).encode() if body is not None else None)
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            return json.loads(resp.read() or b"{}")
+
+    def inject(self, inject: dict) -> None:
+        import failpoints
+        fault = (inject.get("env") or {}).get("BITPORT_FAULT")
+        if fault:
+            os.makedirs(os.path.dirname(failpoints.FAULT_FILE), exist_ok=True)
+            with open(failpoints.FAULT_FILE, "w", encoding="utf-8") as fh:
+                fh.write(fault + "\n")
+            return
+        raise Unautomated(f"inject {json.dumps(inject)[:120]}")
+
+    def disarm(self) -> None:
+        import failpoints
+        try:
+            os.remove(failpoints.FAULT_FILE)
+        except FileNotFoundError:
+            pass
+
+    def wait_idle(self, timeout: int) -> bool:
+        """No job of this account for two polls in a row: a follow-on starts a moment after its run ends."""
+        import job_admission
+        deadline, quiet = time.time() + timeout, 0
+        while time.time() < deadline:
+            busy = any(j.get("account_id") == self.account_id for j in job_admission.list_active())
+            quiet = 0 if busy else quiet + 1
+            if quiet >= 2:
+                return True
+            time.sleep(self.poll)
+        return False
+
+    def facts(self, user: str | None) -> dict:
+        import known_issues
+        import run_watch
+        out: dict = {}
+        with self._ledger() as c:
+            if user:
+                found = {r[0] for r in c.execute(
+                    "SELECT issue FROM verification_repair_queue WHERE source_user=? AND issue IS NOT NULL", (user,))}
+                for r in c.execute("SELECT item_type, error_message FROM audit_log WHERE source_user=? AND timestamp>=? "
+                                   "AND status LIKE 'FAILED%'", (user, self.started)):
+                    found.add(known_issues.classify_failure(r[0], r[1] or ""))
+                out["findings"] = found
+                tallies = {r[0]: json.loads(r[1]) for r in c.execute(
+                    "SELECT source_user, payload FROM user_tally WHERE source_user IN (?,?)",
+                    (user, f"{CONTROL}@{self.domain}"))}
+                mine, ctl = tallies.get(user), tallies.get(f"{CONTROL}@{self.domain}")
+                if mine and ctl:
+                    svc = lambda p: {k: v.get("target") for k, v in (p.get("services") or {}).items()}  # noqa: E731
+                    out["equal_to_control"] = svc(mine) == svc(ctl)
+                    out["duplicates"] = sum(max(0, (v.get("target") or 0) - (v.get("expected") or v.get("source") or 0))
+                                            for v in (mine.get("services") or {}).values())
+        reports = sorted(f for f in os.listdir(os.path.join(HERE, "logs", "reports", str(self.account_id)))
+                         if f.endswith(".json") and f.startswith("migration-"))
+        if reports:
+            with open(os.path.join(HERE, "logs", "reports", str(self.account_id), reports[-1]), encoding="utf-8") as fh:
+                rep = json.load(fh)
+            out["benchmarks"] = {b["id"]: b.get("status", "").upper() for b in (rep.get("benchmarks") or {}).get("results", [])}
+        incidents: dict = {}
+        for inc in run_watch.list_incidents(account_id=self.account_id, limit=500):
+            if (inc.get("opened_at") or "") >= self.started:
+                incidents.setdefault(inc.get("kind"), set()).add("opens")
+                if inc.get("status") == "resolved":
+                    incidents[inc.get("kind")].add("closes")
+        out["incidents"] = incidents
+        return out
 
 
 def judge(expect: dict, facts: dict) -> tuple:
@@ -142,6 +264,8 @@ def run_scenario(sc: S.Scenario, driver: Driver, name: str, allow: set, wait: in
         if not driver.wait_idle(wait):
             return {**row, "status": "FAIL", "reason": f"still running after {wait} s", "reply": reply}
         status, why = judge(sc.expect, driver.facts(user))
+    except Unautomated as exc:
+        return {**row, "status": "UNVERIFIED", "reason": f"not automated yet: {exc}"}
     except Exception as exc:      # noqa: BLE001 - a broken scenario is a result, not a crash of the campaign
         return {**row, "status": "FAIL", "reason": f"{type(exc).__name__}: {str(exc)[:200]}"}
     return {**row, "status": status, "reason": why, "user": user, "finished_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
@@ -163,6 +287,8 @@ def run(name: str, driver: Driver, group: str | None = None, only: set | None = 
         return done
     for s in todo:
         row = run_scenario(s, driver, name, allow or set())
+        if hasattr(driver, "disarm"):
+            driver.disarm()
         append_result(name, row)
         done[s.id] = row
         out(f"  {row['status']:<10} {s.id}  {row.get('reason', '')[:90]}")
@@ -185,8 +311,12 @@ def main(argv=None) -> int:
     if args.dry_run:
         run(args.name, Driver(), args.group, only, args.redo, set(args.allow.split(",")) - {""}, dry_run=True)
         return 0
-    print("the live driver is built at P3.4 against the first tenant (LiveDriver); nothing was run", file=sys.stderr)
-    return 2
+    driver = LiveDriver(args.account_id, args.name)
+    try:
+        run(args.name, driver, args.group, only, args.redo, set(args.allow.split(",")) - {""})
+    finally:
+        driver.disarm()
+    return 0
 
 
 if __name__ == "__main__":

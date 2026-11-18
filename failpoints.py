@@ -4,6 +4,7 @@
     BITPORT_FAULT=drive.copy.landed@3:lost   the 3rd copy landed, then its reply is lost: ConnectionResetError,
                                              which the retry layer treats as a dropped connection
 
+Or the same spec as the one line of logs/failpoint (FAULT_FILE), which the campaign's LiveDriver writes.
 `hit(name, value)` returns `value` and does nothing else unless BITPORT_FAULT names this point AND the run's
 target domain (TARGET_DOMAIN, or `domain=`) is a declared sandbox (domain_guard.revocations()). Placed inside
 the retried call, right after the request, so a `lost` reply is retried the way a real one would be.
@@ -27,8 +28,19 @@ _lock = threading.Lock()
 _counts: dict[str, int] = {}
 
 
+# The campaign's LiveDriver arms a point for the run it is about to start by writing this file: a run the
+# API launches does not take an environment from its caller. Read on every hit (a stat when absent).
+FAULT_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs", "failpoint")
+
+
 def _spec() -> tuple[str, int, str] | None:
     raw = os.getenv("BITPORT_FAULT", "").strip()
+    if not raw and os.path.exists(FAULT_FILE):
+        try:
+            with open(FAULT_FILE, encoding="utf-8") as fh:
+                raw = fh.read().strip()
+        except OSError:
+            raw = ""
     if not raw:
         return None
     name, _, rest = raw.partition("@")

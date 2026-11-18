@@ -188,3 +188,25 @@ def test_a_dry_run_touches_nothing(tmp_path, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "47 scenario(s) to run" in out and "fail:F-net-3  [failure]  needs net" in out
     assert not (tmp_path / "logs").exists()
+
+
+def test_a_cause_the_driver_cannot_make_yet_is_unverified_not_failed():
+    sc = S.Scenario(id="x", group="errors", title="t", how="changed_after", act={"path": "/p"},
+                    inject={"cause": "touch a file on b."}, expect={"finding_classified": "drive.mtime"})
+    row = C.run_scenario(sc, FakeDriver(boom=C.Unautomated("inject touch a file on b.")), "n", set())
+    assert row["status"] == "UNVERIFIED" and "not automated yet" in row["reason"]
+
+
+def test_a_failpoint_armed_by_file_fires_like_the_variable(tmp_path, monkeypatch):
+    import domain_guard
+    import failpoints
+    monkeypatch.delenv("BITPORT_FAULT", raising=False)
+    monkeypatch.setattr(failpoints, "FAULT_FILE", str(tmp_path / "failpoint"))
+    monkeypatch.setattr(domain_guard, "revocations", lambda: {"b.example.test": {}})
+    monkeypatch.setenv("TARGET_DOMAIN", "b.example.test")
+    failpoints._counts.clear()
+    (tmp_path / "failpoint").write_text("tasks.created@1:lost\n")
+    import pytest
+    with pytest.raises(ConnectionResetError):
+        failpoints.hit("tasks.created", 1)
+    failpoints._counts.clear()

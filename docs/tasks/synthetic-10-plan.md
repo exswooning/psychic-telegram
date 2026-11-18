@@ -230,6 +230,13 @@ Phase 1 and the code of Phase 2 need no tenant. Start them while Phase 0 is open
   `run_watch.list_incidents`, ledger counts per twin), and the `act`, `inject` and `expect` of each
   scenario, refined when its group first runs (P3.4). `python campaign.py` without `--dry-run` exits
   2 until the live driver exists.
+  18 Nov (Opus): `LiveDriver` written (session as the superadmin, requests to the API on 127.0.0.1:8090,
+  twins t02-t20 handed out once each in `logs/campaigns/<name>/twins.json`, idle = no job of the account for two
+  polls, facts from the ledger's findings and `classify_failure`, the latest report's benchmarks, incidents
+  opened/closed since the scenario began, and `user_tally` against t01). A failpoint is armed by
+  `logs/failpoint` (a launched run takes no env from its caller) and disarmed after each scenario. A cause
+  the driver cannot make yet raises `Unautomated` -> UNVERIFIED. Not yet run live; each group's `act` and
+  restart step are still P3.4's.
 - [x] P2.2 (16 Nov) Completeness tests in `tests/test_campaign.py`, in the gate: every id of
   `known_issues.ISSUES` and `RUN_KINDS` has a scenario (and none is invented); every benchmark of
   `benchmarks.DEFAULTS` and `SEED_DEFAULTS` has a pass and a fail scenario and a named fault (read:
