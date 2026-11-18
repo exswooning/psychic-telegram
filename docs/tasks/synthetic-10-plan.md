@@ -541,6 +541,26 @@ old keys from root's `authorized_keys`; decide on rewriting the git history that
 
 ## 11. State (newest first)
 
+- 18 Nov 2026, ~17:00 UTC (Opus): **P3.3 nearly done: 40/41 at parity; c09 waits on a Drive delta.** After
+  the DMS (12,091 emails, 0 failed, check 0 blocked, 2,505 labels aligned) the gate read UNVERIFIED, 32/41.
+  Fixed and deployed (9cf93d6): the gate placed `dms_duplicate`/`link_repair` audit rows under no service
+  (every service went STALE; a test now reads the code for unplaced types); the 1:1 check counted a links
+  redo's trashed copy as a duplicate (the redo now names it; alice's 6 rows backfilled from evidence); a room
+  guest was not mapped; Apps Script was never compared (c03 INCOMPLETE); a My Maps reading canDownload=false
+  was logged a download ban. `external_owner_share.py` now uses partner@b (made 18 Nov, no source twin), not
+  the target admin. **Next, in a fresh session on Sonnet:** (1) when action 247 (c09 Drive delta, 7 days) has
+  run and c09 is re-verified, run `parity_gate.py --account-id 5`; PARITY ticks P3.3. A migrate skips a DONE
+  user, so only a delta reaches c09. (2) The speed items below, then P3.4.
+  **Speed plan (measured 18 Nov):** (a) the repair dispatcher re-verified c09 5 times in 8 min on an
+  unrepairable finding, holding the slot: stop re-checking an unchanged fingerprint, mark it for a person
+  after 2 tries; (b) a skip whose rule changed is never retried (only a delta re-walks a DONE user): repair
+  should retry it; (c) `sync_vps.sh` never sets `logs/deploy_pending`: set it while waiting for idle; (d) run
+  the gate when the dispatcher closes the last finding; (e) before each full cohort run, run the fixture
+  users first (time the DMS once to see what it saves); (f) P4.1 in a Sonnet worktree while the box runs
+  Phase 3; (g) campaign groups overnight, one job at a time; (h) P3.6 right after P3.3. **Token budget:**
+  Claude Pro; on 18 Nov the week was 72% used (resets Fri 20 Nov 09:44). Fresh session per task, Sonnet to
+  execute, Opus only for [opus] items, no polling (one wait per run), agents only for real parallel work.
+
 - 18 Nov 2026, ~13:05 UTC (Opus): **P3.3 control run: migrate pass rc=0, all 41 users DONE; the DMS
   imported 12,091 emails for 41 users, 0 failed; its reconciliation blocked 11 of 11,931.** Defects found
   in the run, each fixed, tested, deployed (live-run rule): (1) the Apps Script copy was stranded in staging
