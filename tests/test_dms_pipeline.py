@@ -103,6 +103,13 @@ class TestWhoTheDmsMayTake:
         assert set(held) == {"run@s", "lic@s", "bad@s"}
         assert "drivefail@s" not in held, "a failed Drive item says nothing about mail"
 
+    def test_a_user_the_dms_check_blocked_goes_back_in_so_the_check_can_release_it(self, ledger):
+        from split_mail import DMS_BLOCK_NOTE
+        ledger.user("chk@s", "BLOCKED")
+        ledger.conn.execute("UPDATE identity_map SET notes=? WHERE source_email='chk@s'", (DMS_BLOCK_NOTE,))
+        held, _ = _assess(ledger, {"chk@s": FakeGmail({})})
+        assert "chk@s" not in held
+
     def test_a_failure_later_mapped_is_history_not_a_hold(self, ledger):
         ledger.user("a@s"); ledger.audit("a@s", "7", "FAILED"); ledger.mapped("a@s", "7")
         held, _ = _assess(ledger, {"a@s": FakeGmail({"7": "x"})})

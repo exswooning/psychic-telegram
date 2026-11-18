@@ -25,9 +25,13 @@ DRIVE_LINK = re.compile(r"(?:drive|docs)\.google\.com", re.I)
 def ledger_holds(conn) -> dict[str, str]:
     """Holds the ledger alone can see: unfinished users, and mail the engine failed to move."""
     from config import DMS_OWED_FAILURES
+    from split_mail import DMS_BLOCK_NOTE
     holds: dict[str, str] = {}
+    # A user the DMS check itself blocked can receive mail, and only the next import's check can release it --
+    # held out of that import, it was never checked again (bob..erin, a. -> b., 18 Nov 2026).
     for user, status in conn.execute("SELECT source_email, status FROM identity_map "
-                                     "WHERE entity_type='user' AND status IN ('RUNNING', 'BLOCKED')"):
+                                     "WHERE entity_type='user' AND status IN ('RUNNING', 'BLOCKED') "
+                                     "AND COALESCE(notes,'') != ?", (DMS_BLOCK_NOTE,)):
         holds[user.lower()] = (f"status {status}: " +
                                ("its pass has not finished" if status == "RUNNING" else "it cannot receive mail yet"))
     # The same rows api_server._migration_progress counts as mailBlockingDms, per user.
