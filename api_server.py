@@ -311,6 +311,8 @@ class RunVerification(WriteAction):
     # None: the account's usual sample of each kind of item. A number: that many.
     # 0: every item the ledger paired -- the honest, slow check.
     limit: int | None = Field(default=None, ge=0)
+    # [] = every service; a list (drive, gmail, ...) checks only those, e.g. after a change that touched one.
+    services: list[str] = []
     # False: check only -- nothing is written and automatic repair is left as it is
     # (a first-pass benchmark must measure the run, not the run plus its repairs).
     repair: bool = True
@@ -3066,6 +3068,12 @@ async def one_to_one_run(body: RunVerification, op: Operator = Depends(operator)
         argv += ["--limit", str(limit)]
     for u in body.users:
         argv += ["--user", u]
+    if body.services:
+        import verify_sample
+        bad = [x for x in body.services if x not in verify_sample.ALL_SERVICES]
+        if bad:
+            raise HTTPException(400, f"unknown service(s) {bad}; known: {list(verify_sample.ALL_SERVICES)}")
+        argv += ["--services", ",".join(body.services)]
     target = ",".join(body.users) if body.users else "ALL"
     env = dict(os.environ, VERIFY_WORKERS="auto")
     if body.repair:
