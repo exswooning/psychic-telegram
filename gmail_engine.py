@@ -356,6 +356,13 @@ class GmailMigrator:
             if len(found) > 1 or resp.get("nextPageToken"):
                 raise RuntimeError("Ambiguous unclaimed destination Message-ID; recovery blocked")
         if self.settings.mail_only_with_links and (len(found) > 1 or resp.get("nextPageToken")):
+            # Leftovers a reset moved to Trash are retained, not copies: only more than one LIVE copy is ambiguous
+            # (alice, P3.5, 19 Nov 2026: two trashed copies of one Message-ID blocked six messages).
+            if not resp.get("nextPageToken"):
+                live = [t for t in found if "TRASH" not in (self._retry(lambda t=t: self.tgt.users().messages().get(
+                    userId="me", id=t, format="minimal").execute()).get("labelIds") or [])]
+                if len(live) <= 1:
+                    return live[0] if live else found[0]
             raise RuntimeError("Ambiguous destination Message-ID; split delivery blocked")
         return found[0] if found else None
 
@@ -450,8 +457,10 @@ class GmailMigrator:
                         expected, count = rewrite_raw(original["raw"], self._drive_link_target)
                         from verify_sample import normalise_message
                         same_headers = normalise_message(decode(original["raw"]))[0] == normalise_message(decode(target["raw"]))[0]
-                        eligible = old_verdict != "different" or (
-                            getattr(self, "recover_unmapped", False) and same_headers)
+                        # The old copy is the same MESSAGE (same headers) with other link text: the previous run's own
+                        # rewritten copy, left in Trash by a reset. Without this every re-run after a reset blocked on its
+                        # own leftovers (P3.5, 19 Nov 2026: 1,431 messages). It stays in Trash, untouched.
+                        eligible = old_verdict != "different" or same_headers
                         if eligible and count and decode(expected) == decode(raw):
                             replacing = existing
                             self.db.log_audit(self.source_user, source_id, "reset_link_recovery",

@@ -102,3 +102,39 @@ def test_one_engine_draft_absorbs_one_dms_copy_not_two(tmp_path):
         "d-engine": ("m1", _draft("Plan", "u@b.test")), "x1": ("m2", _draft("Plan", "u@a.test")), "x2": ("m3", _draft("Plan", "u@a.test"))},
         mapped={"src-draft": "d-engine"})
     assert split_mail.trash_dms_drafts(gm, db, "u@a.test") == 1 and len(trashed) == 1
+
+
+def test_a_rerun_after_a_reset_inserts_beside_the_previous_runs_own_copy_in_trash(auth, db, settings, identity):
+    """The reset trashes the migrated mail; its rewritten copy then differs from the source, and the engine used to stop on it."""
+    from tests.conftest import SRC_USER, TGT_USER
+    import gmail_engine
+    settings.rewrite_drive_links = True
+    settings.mail_only_with_links = True
+    SRC_FILE, OLD_TGT, NEW_TGT = "1AbCdEfGhIjKlMnOpQrStUvWxYz012345", "1ZyXwVuTsRqPoNmLkJiHgFeDcBa987654", "1QwErTyUiOpAsDfGhJkLzXcVbNm123456"
+    db.record_mapping(SRC_USER, SRC_FILE, NEW_TGT, "file")                 # this run's copy of the file
+    mail = lambda i: (b"Message-ID: <rerun@seed.test>\r\nFrom: bob@tenanta.com\r\nTo: alice@tenanta.com\r\nDate: Mon, 3 Jun 2019 10:00:00 +0000\r\n"
+                      b"Subject: deck\r\n\r\nsee https://drive.google.com/file/d/" + i.encode() + b"/view\r\n")
+    auth.source_gmail(SRC_USER).add_message(mail(SRC_FILE), ["INBOX"])
+    old = auth.target_gmail(TGT_USER).add_message(mail(OLD_TGT), ["TRASH"])  # the previous run's rewritten copy, trashed by the reset
+    gmail_engine.GmailMigrator(auth, db, settings, SRC_USER, TGT_USER).run()
+    msgs = auth.target_gmail(TGT_USER).messages
+    live = [m for k, m in msgs.items() if "TRASH" not in (m.get("labelIds") or [])]
+    assert len(live) == 1 and old in msgs and "TRASH" in msgs[old]["labelIds"]
+
+
+def test_two_trashed_leftovers_are_not_an_ambiguous_destination(auth, db, settings, identity):
+    from tests.conftest import SRC_USER, TGT_USER
+    import gmail_engine
+    settings.rewrite_drive_links = True
+    settings.mail_only_with_links = True
+    SRC_FILE, OLD1, OLD2, NEW = ("1AbCdEfGhIjKlMnOpQrStUvWxYz012345", "1ZyXwVuTsRqPoNmLkJiHgFeDcBa987654",
+                                 "1MnBvCxZlKjHgFdSaPoIuYtReWq456789", "1QwErTyUiOpAsDfGhJkLzXcVbNm123456")
+    db.record_mapping(SRC_USER, SRC_FILE, NEW, "file")
+    mail = lambda i: (b"Message-ID: <two@seed.test>\r\nFrom: bob@tenanta.com\r\nTo: alice@tenanta.com\r\nDate: Mon, 3 Jun 2019 10:00:00 +0000\r\n"
+                      b"Subject: deck\r\n\r\nsee https://drive.google.com/file/d/" + i.encode() + b"/view\r\n")
+    auth.source_gmail(SRC_USER).add_message(mail(SRC_FILE), ["INBOX"])
+    for old in (OLD1, OLD2):
+        auth.target_gmail(TGT_USER).add_message(mail(old), ["TRASH"])
+    gmail_engine.GmailMigrator(auth, db, settings, SRC_USER, TGT_USER).run()
+    msgs = auth.target_gmail(TGT_USER).messages
+    assert len([m for m in msgs.values() if "TRASH" not in (m.get("labelIds") or [])]) == 1 and len(msgs) == 3
