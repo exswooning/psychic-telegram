@@ -365,3 +365,27 @@ def test_a_reset_with_no_services_leaves_chat_alone_unless_chat_is_on(monkeypatc
     assert "chat" not in R.default_services() and "drive" in R.default_services()
     monkeypatch.setenv("MIGRATE_CHAT", "true")
     assert "chat" in R.default_services()
+
+
+@pytest.fixture(autouse=True)
+def _no_purge_client(monkeypatch):
+    """A laptop has the real target key on disk, which would build a client that deletes for good: never in a test."""
+    import reset_target
+    monkeypatch.setattr(reset_target, "_purge_client", lambda settings, user: None)
+
+
+def test_the_mail_reset_is_given_a_purge_client_when_the_target_key_can_delete(monkeypatch):
+    got = {}
+
+    class Seed:
+        def reset_drive(self, svc, st): return 0
+        def reset_gmail(self, svc, st, _purge_client=None): got["purge"] = _purge_client; return 3
+        def reset_calendar(self, svc, st): return 0
+        def reset_chat(self, svc, st, local): return 0
+        def reset_contacts(self, svc, st): return 0
+        def reset_tasks(self, svc, st): return 0
+    monkeypatch.setattr(reset_target, "_load_seeder", lambda: Seed())
+    monkeypatch.setattr(reset_target, "trash_google_welcome_mail", lambda g: 0)
+    monkeypatch.setattr(reset_target, "_purge_client", lambda settings, user: "PURGE")
+    reset_target.reset_one(settings(), _FakeAuth(), "a@a.example.com", services=("gmail",))
+    assert got["purge"] == "PURGE"

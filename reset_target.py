@@ -172,6 +172,21 @@ def reset_all(settings: Settings, auth: AuthManager, users: list[str],
     return totals, unreached
 
 
+def _purge_client(settings: Settings, user: str):
+    """A Gmail client on the TARGET key that may delete for good, or None when the grant is missing (the reset then trashes)."""
+    try:
+        import google_auth_httplib2
+        import httplib2
+        from google.oauth2 import service_account
+        from googleapiclient.discovery import build
+        creds = service_account.Credentials.from_service_account_file(
+            settings.target_sa_key, scopes=["https://mail.google.com/"]).with_subject(user)
+        return build("gmail", "v1", http=google_auth_httplib2.AuthorizedHttp(creds, http=httplib2.Http(timeout=120)),
+                     cache_discovery=False)
+    except Exception:      # noqa: BLE001 - absence is an answer: the reset trashes
+        return None
+
+
 def reset_one(settings: Settings, auth: AuthManager, user: str,
               services: tuple[str, ...] = ALL_SERVICES) -> dict:
     domain_guard.require_not_source(settings.target_domain, settings.source_domain)
@@ -192,7 +207,13 @@ def reset_one(settings: Settings, auth: AuthManager, user: str,
         if key not in services:
             continue
         try:
-            out[key] = fn(svc(user), settings)
+            if key == "gmail":
+                # Permanently, when the target key may (its `mail.google.com` scope): a trashed copy is revived by the
+                # next run (P3.5, 19 Nov 2026), and trashing one message at a time ran at 46 a minute.
+                purge = _purge_client(settings, user)
+                out[key] = fn(svc(user), settings, _purge_client=purge) if purge is not None else fn(svc(user), settings)
+            else:
+                out[key] = fn(svc(user), settings)
         except Exception as exc:  # noqa: BLE001 - one service must not lose the rest
             unreachable.add(key)
             print(f"    ! {user} {key}: {str(exc)[:90]}")

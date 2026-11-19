@@ -1951,8 +1951,10 @@ def reset_gmail(gmail, settings: Settings, _purge_client=None) -> int:
         #
         # includeSpamTrash stays: seeded mail that landed in Spam still has
         # to be found, and the q filter excludes only the trash half.
+        # With a purge client the Trash is purged too: a copy left there is revived by Google's import and by the
+        # engine's own Message-ID lookups (P3.5, 19 Nov 2026: 705 messages ended with two live copies).
         resp = retry(lambda t=token: gmail.users().messages().list(
-            userId="me", maxResults=500, pageToken=t, q="-in:trash",
+            userId="me", maxResults=500, pageToken=t, q="" if purge is not None else "-in:trash",
             includeSpamTrash=True).execute())()
         msgs = resp.get("messages", [])
         for m in msgs:

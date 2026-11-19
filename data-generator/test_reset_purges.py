@@ -137,3 +137,20 @@ class TestTheScopeIsReachable:
         folding this in would take the entire seed down on every tenant that
         has not granted it."""
         assert S.GMAIL_PURGE_SCOPE not in S.SEED_SCOPES
+
+
+def test_a_purging_reset_also_lists_the_trash(settings):
+    seen = []
+
+    def gmail_that_records(ids):
+        g = _Gmail(ids)
+
+        class Msgs(_Msgs):
+            def list(self, **kw):
+                seen.append(kw.get("q"))
+                return super().list(**kw)
+        g.messages = lambda: Msgs(g._ids, g)
+        return g
+    S.reset_gmail(gmail_that_records(["a"]), settings, _Gmail())
+    S.reset_gmail(gmail_that_records(["b"]), settings)
+    assert seen[0] == "" and seen[-1] == "-in:trash", seen
