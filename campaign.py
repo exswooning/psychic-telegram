@@ -256,7 +256,7 @@ def run_scenario(sc: S.Scenario, driver: Driver, name: str, allow: set, wait: in
     if not sc.act and sc.how != "check_only":
         return {**row, "status": "UNVERIFIED", "reason": "the scenario has no `act` yet: define it before its first live run (P3.4)"}
     try:
-        user = driver.take_twin()
+        user = None if sc.how == "check_only" else driver.take_twin()      # a read of the control run spends no twin: there are 19
         driver.prepare(sc.fixtures)
         reply = driver.api(sc.act.get("method", "POST"), sc.act["path"], {**sc.act.get("body", {}), "reason": f"campaign {name} {sc.id}"}) if sc.act else {}
         if sc.inject:

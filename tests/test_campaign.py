@@ -210,3 +210,10 @@ def test_a_failpoint_armed_by_file_fires_like_the_variable(tmp_path, monkeypatch
     with pytest.raises(ConnectionResetError):
         failpoints.hit("tasks.created", 1)
     failpoints._counts.clear()
+
+
+def test_a_check_only_scenario_spends_no_twin():
+    d = FakeDriver()
+    sc = S.Scenario("bench:x", "benchmarks", "t", "check_only", expect={})
+    C.run_scenario(sc, d, "t", set())
+    assert "twin" not in d.calls
