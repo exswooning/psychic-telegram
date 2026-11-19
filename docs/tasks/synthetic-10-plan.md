@@ -403,7 +403,7 @@ Phase 1 and the code of Phase 2 need no tenant. Start them while Phase 0 is open
 - [ ] P3.1 Seed the cohort through the product's seed path. All seven seed benchmarks pass. Then
   map identities (Identities page, auto-map), so every seeded user has its address on b.
 - [x] P3.2 (18 Nov, ~06:10 UTC: 57 covered, 0 absent, 0 unprobed, 21 not migrated, 1 unseedable; `logs/coverage-5.txt` on the box) `coverage_audit.py`: row 1.
-- [ ] P3.3 Control run from the UI: all services, split mail, DMS after, server-side, ordered. Let
+- [x] P3.3 Control run from the UI: all services, split mail, DMS after, server-side, ordered. Let
   every follow-on finish. The gate must read PARITY. Fix until it does (rule 4).
 - [ ] P3.4 First one scenario of each group (`--only`), to prove the runner itself. Then the
   `campaign.py` groups in this order: `errors`, `failures`, `benchmarks`, `watchers`,
@@ -540,6 +540,13 @@ old keys from root's `authorized_keys`; decide on rewriting the git history that
 | Tests | 6 | a green baseline; the campaign and its completeness tests; failpoints |
 
 ## 11. State (newest first)
+
+- 19 Nov 2026, ~04:00 UTC (Sonnet): **P3.3 DONE: the gate reads PARITY, 41/41.** The operator accepted that a Vids video
+  and a Site (c09: "Ward Welcome Video", "Ward Notice Board") are copied but cannot be compared: no API reads their content.
+  `verification_coverage.NO_READ_API` keeps them out of the native count and names them in `drive.native`'s note, and
+  never counts them as compared. Deployed to the box; a full c09 verify (limit 0) read IDENTICAL and the gate PARITY.
+  Next: P3.4 (one scenario of each group, `--only`), P3.6 estimate, then speed items (a) dispatcher stops re-checking an
+  unchanged fingerprint, (b)-(h) above. Operator rule for later types: "copied, listed by name, never counted as compared".
 
 - 18 Nov 2026, ~17:00 UTC (Opus): **P3.3 nearly done: 40/41 at parity; c09 waits on a Drive delta.** After
   the DMS (12,091 emails, 0 failed, check 0 blocked, 2,505 labels aligned) the gate read UNVERIFIED, 32/41.
