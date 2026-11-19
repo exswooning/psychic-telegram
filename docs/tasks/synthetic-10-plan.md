@@ -541,6 +541,15 @@ old keys from root's `authorized_keys`; decide on rewriting the git history that
 
 ## 11. State (newest first)
 
+- 19 Nov 2026, ~17:30 UTC (Sonnet): **All nine `changed_after` scenarios PASS live; the last one found a fifth defect.**
+  The label repair held EVERY message whose links had been rewritten: `repair_verified_gmail_labels` passed decoded BYTES to
+  `link_rewrite.rewrite_raw`, which takes the base64 text and returned them unchanged, so the repair's own "fresh content" guard
+  always read the rewritten message as different (the verifier never noticed: it trusts the engine's receipt). Fixed (base64 in,
+  and the target's own genuine copy of a shared file counts, as in `verify_sample.copy_lookup`), with a test; `gmail.labels_missing`
+  then PASSED (found, repaired, in the fix log). Errors group now: 28 PASS, 1 COVERED, rest UNVERIFIED (see the list in the entry
+  above). Twins t02..t14/15 used; the failures group needs 21 and only the rest remain.
+  **Next: P3.5, the three wipe-and-migrate runs (they give fresh twins, the phase times for P3.6 and the throughput benchmark), then the
+  `failures` group (F-kill ... F-licence), then `watchers`.** Wiping b. needs no confirmation (operator, 16 Nov, a./b. only).
 - 19 Nov 2026, ~16:00 UTC (Sonnet): **P2.6 `changed_after` kinds run live on twins; four product defects found by them and fixed.**
   `campaign_changes.py` (one change per kind: drive.mtime, missing_on_target, grant_missing, content_changed, gmail.labels_missing,
   gmail.unmapped_source, contacts.unmapped_source, contacts.missing_on_target, tasks.list_missing), then `driver.verify` (check AND repair,
