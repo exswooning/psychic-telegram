@@ -541,7 +541,7 @@ old keys from root's `authorized_keys`; decide on rewriting the git history that
 
 ## 11. State (newest first)
 
-- 19 Nov 2026, ~18:15 UTC (Sonnet): **P3.5 run 1 under way (reset phase); P4.1 done.** Run 1 = `/tmp/p35_run.sh 1` on the box: reset target
+- 19 Nov 2026, ~17:35 UTC (Sonnet): **P3.5 run 1 under way (reset phase); P4.1 done.** Run 1 = `/tmp/p35_run.sh 1` on the box: reset target
   (all six services), reset the ledger, `POST /api/v2/migrate/start` (defaults: all services, split mail, DMS after). The reset took
   ~45 min for 40 users and ~1 h for the last: (a) it listed Chat spaces for every user and retried a 403 eleven times each (40
   failure lines; fixed: `reset_target.default_services()` leaves Chat out unless MIGRATE_CHAT); (b) c10's 5,000 messages go at
