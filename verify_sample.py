@@ -1827,7 +1827,7 @@ class Verifier:
         import re as _re
         bitport_trashed = {m.group(1) for (msg,) in self.db.conn.execute(
             "SELECT error_message FROM audit_log WHERE source_user=? AND ((item_type='dms_duplicate' "
-            "AND status='TRASHED') OR (item_type='link_repair' AND status='SUCCESS'))", (self.src_user,))
+            "AND status='TRASHED') OR (item_type='dms_draft_duplicate' AND status='TRASHED') OR (item_type='link_repair' AND status='SUCCESS'))", (self.src_user,))
             for m in [_re.search(r"trashed ([\w-]+)", msg or "")] if m}
         kept_trash = 0
         try:

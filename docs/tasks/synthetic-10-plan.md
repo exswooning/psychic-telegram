@@ -541,6 +541,17 @@ old keys from root's `authorized_keys`; decide on rewriting the git history that
 
 ## 11. State (newest first)
 
+- 19 Nov 2026, ~07:30 UTC (Sonnet): **P3.4: report fixed, draft duplicates fixed, 7 of 8 benchmark reads PASS; gate re-verify pending.**
+  Report: rebuilt through `POST /api/v2/reports/generate` (13 pass, 1 unknown); `run_watch.REGRADE_AFTER` now rebuilds it after a
+  `tally`, `user-tally` or `dms` job, and the migrate run is found past 50 later jobs (the lookup limit was 50, verify jobs filled it).
+  `items_per_min_per_worker` stays UNKNOWN (not required): the latest migrate job is c09's 72 s one-user delta; the P3.5 full runs judge it.
+  Drafts: `split_mail.trash_dms_drafts` (called by `reconcile_dms`) trashes the DMS's copy of a draft only when it equals an engine
+  draft that has no twin yet; 157 trashed on the 41 users, audit item `dms_draft_duplicate`, text carries the MESSAGE id (the
+  verifier's `bitport_trashed` matches message ids; the first version logged draft ids and every trashed copy read as an extra:
+  20 users DIFFERENCES until fixed; the 157 audit rows were backfilled). The tally's mail surplus (175) is unchanged because the
+  tally counts the trash; it is not a test of this fix. **Next: re-verify the users whose gmail verdict is not fresh IDENTICAL
+  (not all 41: the Drive/other verdicts are still valid), then `parity_gate.py --account-id 5`; PARITY again = back to P3.4.**
+  Lesson: a verify with `limit 0` over 41 users takes ~1 h per 20 users; verify only the stale users.
 - 19 Nov 2026, ~05:30 UTC (Sonnet): **P3.4 started; two defects found by the first campaign reads.**
   (1) `campaign.py --group benchmarks` (read-only, on the control run): 25 `check_only`/benchmark scenarios, 9 PASS, 27 have no
   `act` (UNVERIFIED, the P2.6-P2.11 work), 6 FAIL = migration fidelity benchmarks reading UNKNOWN. A whole-tenant tally was run

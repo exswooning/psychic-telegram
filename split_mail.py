@@ -249,7 +249,8 @@ def trash_dms_drafts(gm, db, source: str) -> int:
                 gm.limiter.acquire()
                 gm._retry(lambda m=drafts[did]: gm.tgt.users().messages().trash(userId="me", id=m).execute())
                 db.log_audit(source, did, "dms_draft_duplicate", "TRASHED",
-                             f"kept the engine's draft {mine}; trashed {did}, the DMS's copy of it (recoverable 30 days)")
+                             f"kept the engine's draft {mine}; trashed {drafts[did]}, the message of draft {did}, the DMS's copy of it "
+                             "(recoverable 30 days)")
                 trashed += 1
                 break
     return trashed

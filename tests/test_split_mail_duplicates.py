@@ -1,5 +1,6 @@
 """Two source messages may share one target copy only when they are the same email byte for byte."""
 import base64
+import re
 from types import SimpleNamespace
 
 import split_mail
@@ -85,6 +86,8 @@ def test_the_dms_copy_of_a_draft_is_trashed_beside_the_engines(tmp_path):
         "d-engine": ("m1", _draft("Plan", "U <u@b.test>")), "d-dms": ("m2", _draft("Plan", "u@a.test"))},
         mapped={"src-draft": "d-engine"})
     assert split_mail.trash_dms_drafts(gm, db, "u@a.test") == 1 and trashed == ["m2"]
+    note = db.conn.execute("SELECT error_message FROM audit_log WHERE item_type='dms_draft_duplicate'").fetchone()[0]
+    assert re.search(r"trashed ([\w-]+)", note).group(1) == "m2", "the verifier matches the MESSAGE id, not the draft id"
 
 
 def test_a_draft_with_no_engine_twin_is_left_alone(tmp_path):
