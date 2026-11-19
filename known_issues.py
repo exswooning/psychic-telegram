@@ -484,6 +484,14 @@ RUN_KINDS = [
      "names a file with no copy on the target (9 on audit@, account 3, 8 Nov 2026).",
      "The operator's choice (8 Nov 2026): the DMS carries it with the rest, its links unrewritten. Owed, never a "
      "blocker of the DMS (config.DMS_OWED_FAILURES).", True),
+    ("gmail.reset_leftover", ("message", "draft"),
+     lambda t: "Existing destination Message-ID has different content" in t,
+     "The target already holds this Message-ID with other content",
+     "A reset moves the migrated mail to Trash, and the next run found the previous run's own copy there (its links "
+     "were rewritten, so it differs from the source): 1,431 messages blocked on 41 users (P3.5, 19 Nov 2026).",
+     "Fixed 2026-11-19: a trashed copy with the same headers is the previous run's copy; a fresh one is inserted "
+     "beside it and the old one stays in Trash (gmail_engine). A LIVE copy that differs is still left for a person.",
+     True),
     ("run.held_for_drive", None,
      lambda t: "held: this user's Drive did not migrate" in t,
      "Mail or calendar held back for Drive",
