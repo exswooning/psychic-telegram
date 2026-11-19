@@ -358,11 +358,16 @@ class GmailMigrator:
         if self.settings.mail_only_with_links and (len(found) > 1 or resp.get("nextPageToken")):
             # Leftovers a reset moved to Trash are retained, not copies: only more than one LIVE copy is ambiguous
             # (alice, P3.5, 19 Nov 2026: two trashed copies of one Message-ID blocked six messages).
-            if not resp.get("nextPageToken"):
-                live = [t for t in found if "TRASH" not in (self._retry(lambda t=t: self.tgt.users().messages().get(
+            # Gmail tokens a FULL page even with nothing after it, so a token on a page of two proves nothing: list
+            # again with room (ten), and only a full page of ten is "more".
+            wide = self._retry(lambda: self.tgt.users().messages().list(
+                userId="me", q=query, maxResults=10, includeSpamTrash=True).execute())
+            every = [m["id"] for m in (wide.get("messages") or []) if m["id"] != ignore]
+            if len(every) < 10:
+                live = [t for t in every if "TRASH" not in (self._retry(lambda t=t: self.tgt.users().messages().get(
                     userId="me", id=t, format="minimal").execute()).get("labelIds") or [])]
                 if len(live) <= 1:
-                    return live[0] if live else found[0]
+                    return live[0] if live else every[0]
             raise RuntimeError("Ambiguous destination Message-ID; split delivery blocked")
         return found[0] if found else None
 
@@ -456,7 +461,11 @@ class GmailMigrator:
                             decode(original.get("raw", "")), decode(target.get("raw", "")))
                         expected, count = rewrite_raw(original["raw"], self._drive_link_target)
                         from verify_sample import normalise_message
-                        same_headers = normalise_message(decode(original["raw"]))[0] == normalise_message(decode(target["raw"]))[0]
+                        # Who the message is, not how it is encoded: a rewrite may re-encode the body (quoted-printable
+                        # to base64, charset quoting), which moves Content-Type and Content-Transfer-Encoding.
+                        who = lambda raw: {k: v for k, v in normalise_message(raw)[0].items()   # noqa: E731
+                                           if k in ("message-id", "from", "to", "cc", "subject", "date")}
+                        same_headers = who(decode(original["raw"])) == who(decode(target["raw"]))
                         # The old copy is the same MESSAGE (same headers) with other link text: the previous run's own
                         # rewritten copy, left in Trash by a reset. Without this every re-run after a reset blocked on its
                         # own leftovers (P3.5, 19 Nov 2026: 1,431 messages). It stays in Trash, untouched.

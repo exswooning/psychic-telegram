@@ -1174,7 +1174,8 @@ class _GmailMessages:
         start = int(pageToken or 0)
         page = ids[start: start + maxResults]
         out: dict[str, Any] = {"messages": [{"id": i} for i in page]}
-        if start + maxResults < len(ids):
+        # As Gmail does (18 Nov 2026): a FULL page carries a token even with nothing after it.
+        if page and start + maxResults <= len(ids):
             out["nextPageToken"] = str(start + maxResults)
         return out
 
