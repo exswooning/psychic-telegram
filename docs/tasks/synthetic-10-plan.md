@@ -541,6 +541,16 @@ old keys from root's `authorized_keys`; decide on rewriting the git history that
 
 ## 11. State (newest first)
 
+- 20 Nov 2026 (box 19 Nov ~21:30 UTC) (Sonnet): **P3.5 run 1 hit its first real error; fixed at the cause.** After the reset and ledger reset the
+  migrate pass ended with 1,480 failed rows: 1,431 `FAILED_SPLIT` "Existing destination Message-ID has different content" and
+  6 "Ambiguous destination Message-ID" (alice). Cause: `reset_target` moves migrated mail to Trash; on the next run the engine found the
+  previous run's own REWRITTEN copy there, judged it different from the source, and its Trash exemption only accepted an old
+  UNREWRITTEN copy, so every link-mail message of every user blocked (and the DMS held 39 of 41 users: "mail items failed and are not on the
+  target"). Fix (`gmail_engine`): a trashed copy with the same headers is the previous run's copy: insert a fresh one beside it, leave
+  the old one in Trash; and Trash leftovers are not an "ambiguous" destination (only >1 LIVE copy is). Tests in
+  `test_split_mail_duplicates.py` (one fails without the fix). Then the account's repair retries them (`POST /api/v2/repair/5`).
+  Also open: the DMS follow-on read "stale-map" (rc 3): the console still holds the previous run's user map, so the DMS after a
+  wipe needs `--fresh-import` (the pipeline's `fresh`), and the monitor pattern for incidents is `INCIDENT`, not `OPENED`.
 - 19 Nov 2026, ~17:35 UTC (Sonnet): **P3.5 run 1 under way (reset phase); P4.1 done.** Run 1 = `/tmp/p35_run.sh 1` on the box: reset target
   (all six services), reset the ledger, `POST /api/v2/migrate/start` (defaults: all services, split mail, DMS after). The reset took
   ~45 min for 40 users and ~1 h for the last: (a) it listed Chat spaces for every user and retried a 403 eleven times each (40
