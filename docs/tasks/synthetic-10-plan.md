@@ -541,6 +541,19 @@ old keys from root's `authorized_keys`; decide on rewriting the git history that
 
 ## 11. State (newest first)
 
+- 19 Nov 2026, ~16:00 UTC (Sonnet): **P2.6 `changed_after` kinds run live on twins; four product defects found by them and fixed.**
+  `campaign_changes.py` (one change per kind: drive.mtime, missing_on_target, grant_missing, content_changed, gmail.labels_missing,
+  gmail.unmapped_source, contacts.unmapped_source, contacts.missing_on_target, tasks.list_missing), then `driver.verify` (check AND repair,
+  `services` filter) and the judge reads the fix log (`fixed`). First pass: 6 PASS (mtime, missing_on_target, gmail.unmapped_source, both
+  contacts kinds, tasks.list_missing) and 3 FAIL, all of them real: (1) a finding with two causes was named after the wrong one
+  (`drive.mtime` listed before `drive.content_changed` and `drive.grant_missing`: now after them); (2) the label repair held every message
+  whose target copy has LF where the source has CRLF ("Fresh message content differs"; `verify_sample.normalise_message` now treats the
+  line endings of a TEXT part as equal, binary stays exact); (3) an edit on the source is fixed by a delta, never by a repair, so the
+  scenario runs verify, delta, verify (`campaign.FIXED_BY_DELTA`). Still open for this group: `drive.ab_test_residue` (after an A/B arm),
+  `drive.parent_folder` (made on b. first), `drive.duplicate` and `run.comment_prior_attempt` (failpoints), `run.disk_full`,
+  `run.db_rollback` (F-disk), `drive.source_changed` (protected source), the three Google-decided kinds, the two `arm` kinds,
+  held_for_drive, item_absent, comment_differs/missing/unreadable, unmapped_source, and Chat (opt-in).
+  Twins used so far: t02..t13; seven left (t14..t20) for the failures group, which needs 21: **wipe-and-migrate the cohort (P3.5) before it.**
 - 19 Nov 2026, ~12:00 UTC (Sonnet): **P2.6 errors group: source probes and Drive fixtures.** `campaign_evidence.py` proves a seeded case from the
   source (`source_has`); `campaign.READS_THE_RUN` scenarios PASS when the finding is classified OR the case is on the source and
   every service of the user reads IDENTICAL, and a must-not-happen PASSES only when the case was made (`needs_source`).

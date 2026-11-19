@@ -254,3 +254,44 @@ def test_a_defect_that_must_not_return_proves_nothing_if_the_case_was_never_made
     assert C.judge(exp, {"findings": set(), "source_has": True})[0] == "PASS"
     assert C.judge(exp, {"findings": set(), "source_has": False})[0] == "UNVERIFIED"
     assert C.judge(exp, {"findings": {"drive.comment_quote_escaped"}, "source_has": True})[0] == "FAIL"
+
+
+def test_every_known_change_has_a_function_and_the_other_way_round():
+    import campaign_changes
+    assert set(campaign_changes.CHANGES) == set(C.CHANGES_KNOWN)
+
+
+class _ChangeDriver(FakeDriver):
+    def change(self, kind, user):
+        self.calls.append(("change", kind, user))
+        return "did a thing"
+
+    def verify(self, user, service):
+        self.calls.append(("verify", user, service))
+
+    def delta(self, user):
+        self.calls.append(("delta", user))
+
+
+def test_a_changed_after_scenario_changes_a_twin_checks_it_and_reads_the_fix_log():
+    d = _ChangeDriver(facts={"findings": {"drive.mtime"}, "fixed": {"drive.mtime"}})
+    s = S.Scenario("err:drive.mtime", "errors", "t", "changed_after",
+                   expect={"finding_classified": "drive.mtime", "service": "drive", "fixed": "drive.mtime"})
+    r = C.run_scenario(s, d, "t", set())
+    assert r["status"] == "PASS" and ("change", "drive.mtime", "t02") in d.calls and ("verify", "t02", "drive") in d.calls
+
+
+def test_a_change_found_but_not_fixed_fails():
+    d = _ChangeDriver(facts={"findings": {"drive.mtime"}, "fixed": set()})
+    s = S.Scenario("err:drive.mtime", "errors", "t", "changed_after",
+                   expect={"finding_classified": "drive.mtime", "service": "drive", "fixed": "drive.mtime"})
+    assert C.run_scenario(s, d, "t", set())["status"] == "FAIL"
+
+
+def test_an_edit_on_the_source_is_followed_by_a_delta_and_a_second_check():
+    d = _ChangeDriver(facts={"findings": {"drive.content_changed"}, "fixed": {"drive.content_changed"}})
+    s = S.Scenario("err:drive.content_changed", "errors", "t", "changed_after",
+                   expect={"finding_classified": "drive.content_changed", "service": "drive", "fixed": "drive.content_changed"})
+    assert C.run_scenario(s, d, "t", set())["status"] == "PASS"
+    kinds = [c[0] for c in d.calls if isinstance(c, tuple)]
+    assert kinds.count("verify") == 2 and "delta" in kinds and kinds.index("delta") < len(kinds) - 1

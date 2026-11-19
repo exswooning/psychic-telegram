@@ -105,15 +105,22 @@ ISSUES = [
      "Live: a shortcut to a colleague's file, skipped when this user's own copy did not exist.",
      "Engine resolves to any copy of the target file; repair re-walks the user's Drive "
      "(repair.unresolved_shortcut_users -> retry_drive_stragglers).", True),
+    # Also before drive.mtime: a removed grant moves the file's time too, and the grant is what to put back.
+    ("drive.grant_missing", "drive", lambda t: "grant missing on the target" in t,
+     "A share did not come across",
+     "A grant refused or skipped during the run.",
+     "Re-apply the grant on the target (finding_repairs._repair_grants).", True),
+    # Before drive.mtime: an edit on the source changes the bytes AND the time, and the bytes are the kind
+    # (campaign, 19 Nov 2026: an edited file read 'Modified time differs', so its fix was the wrong one).
+    ("drive.content_changed", "drive", lambda t: "MD5 differs" in t or "size differs" in t,
+     "File bytes differ",
+     "Edited on the source after it was copied (live: an xlsx edited 10-21, copied 10-17).",
+     "The delta (Mirror) copies the new version.", True),
     ("drive.mtime", "drive", lambda t: "modified time not preserved" in t,
      "Modified time differs",
      "A later write on the target moved it, or the source was edited after the copy.",
      "Put back on the target (repair.fix_modified_times) -- unless the source changed after the "
      "copy: then the delta brings the edit (editedOnSource).", True),
-    ("drive.content_changed", "drive", lambda t: "MD5 differs" in t or "size differs" in t,
-     "File bytes differ",
-     "Edited on the source after it was copied (live: an xlsx edited 10-21, copied 10-17).",
-     "The delta (Mirror) copies the new version.", True),
     ("drive.group_grant", "drive", lambda t: "grant missing on the target: ['group'" in t,
      "A group's share did not come across",
      "The group does not exist on the target. Classroom-made groups are hidden from the "
@@ -125,10 +132,6 @@ ISSUES = [
      "some files, so the check sees grants nobody migrated (account 3, 8 Nov 2026). Not a migration fault.",
      "DOCUMENTED, left by the operator's choice (8 Nov 2026): the accounts stay (deleting them would hold their "
      "licences for about 20 days). Removing them, or their grants, clears it.", False),
-    ("drive.grant_missing", "drive", lambda t: "grant missing on the target" in t,
-     "A share did not come across",
-     "A grant refused or skipped during the run.",
-     "Re-apply the grant on the target (finding_repairs._repair_grants).", True),
     # The rest of dharan's 438 'unclassified' Drive findings (2026-10-24).
     ("drive.unmapped_source", "drive", lambda t: "UNMAPPED_SOURCE" in t,
      "A source file has no copy",

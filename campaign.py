@@ -69,6 +69,9 @@ class Driver:
     def take_twin(self) -> str: raise NotImplementedError
     def fixture_user(self, name: str) -> str: return name          # a cohort user (c03) as an address
     def source_has(self, kind: str, user: str): return None        # a source-side probe; None = there is none
+    def change(self, kind: str, user: str) -> str: raise Unautomated(f"no change is written for {kind}")
+    def verify(self, user: str, service: str) -> None: raise NotImplementedError
+    def delta(self, user: str) -> None: raise NotImplementedError
     def prepare(self, fixtures: tuple) -> None: raise NotImplementedError
     def api(self, method: str, path: str, body: dict | None) -> dict: raise NotImplementedError
     def inject(self, inject: dict) -> None: raise NotImplementedError
@@ -112,6 +115,37 @@ class LiveDriver(Driver):
         from config import Settings
         st = Settings(account_id=self.account_id)
         return campaign_evidence.source_has(kind, user, AuthManager(st), st)
+
+    def change(self, kind: str, user: str) -> str:
+        import campaign_changes
+        import webui
+        from types import SimpleNamespace
+        entry = campaign_changes.CHANGES.get(kind)
+        if not entry:
+            raise Unautomated(f"no change is written for {kind}")
+        os.environ.update(webui._dms_env(self.account_id))
+        from auth import AuthManager
+        from config import Settings
+        from db import MigrationDB
+        st = Settings(account_id=self.account_id)
+        db = MigrationDB(st.db_path)
+        try:
+            tgt = user.split("@")[0] + "@" + st.target_domain
+            try:
+                return entry[0](SimpleNamespace(auth=AuthManager(st), db=db, settings=st, src=user, tgt=tgt))
+            except campaign_changes.NoItem as exc:
+                raise Unautomated(f"the twin holds nothing to change for {kind}: {exc}") from exc
+        finally:
+            db.close()
+
+    def verify(self, user: str, service: str) -> None:
+        # check AND repair the user, the way a UI One-to-one run does: the repair is what the scenario judges
+        self.api("POST", "/api/v2/one-to-one/run", {"users": [user], "services": [service], "limit": 0, "repair": True,
+                                                     "reason": f"campaign {self.name}: verify {user} {service}"})
+
+    def delta(self, user: str) -> None:
+        self.api("POST", "/api/v2/migrate/delta", {"users": [user], "services": ["drive"], "days": 3,
+                                                    "reason": f"campaign {self.name}: the delta that copies an edit made on the source"})
 
     def take_twin(self) -> str:
         path = os.path.join(results_dir(self.name), "twins.json")
@@ -181,6 +215,8 @@ class LiveDriver(Driver):
                                    "AND status LIKE 'FAILED%'", (user, self.started if since is None else since)):
                     found.add(known_issues.classify_failure(r[0], r[1] or ""))
                 out["findings"] = found
+                out["fixed"] = {r[0] for r in c.execute(
+                    "SELECT issue FROM issue_fix_log WHERE source_user=? AND fixed_at>=?", (user, self.started))}
                 out["audit_counts"] = {(r[0], r[1]): r[2] for r in c.execute(
                     "SELECT item_type, status, COUNT(*) FROM audit_log WHERE source_user=? GROUP BY 1,2", (user,))}
                 out["verdicts"] = {r[0]: r[1] for r in c.execute(
@@ -215,7 +251,7 @@ def judge(expect: dict, facts: dict) -> tuple:
     driver could not read (missing key) makes that check UNVERIFIED, never a pass."""
     unread = []
     for key, want in expect.items():
-        if key in ("ends_as", "closes_on", "outcome", "or_evidence", "or_source", "needs_source") or want is None:
+        if key in ("ends_as", "closes_on", "outcome", "or_evidence", "or_source", "needs_source", "service") or want is None:
             continue
         if key == "finding_classified":
             have = facts.get("findings")
@@ -244,6 +280,12 @@ def judge(expect: dict, facts: dict) -> tuple:
                         return "FAIL", f"{want} was met ({seen} x {ev[1]}) but the user does not read IDENTICAL: {verdicts}"
                     continue
                 return "FAIL", f"{want} was never classified (saw {sorted(have)[:6]})"
+        elif key == "fixed":
+            have = facts.get("fixed")
+            if have is None:
+                unread.append(key)
+            elif want not in have:
+                return "FAIL", f"{want} was found but not fixed (fix log: {sorted(have)})"
         elif key == "finding_absent":
             if expect.get("needs_source") and facts.get("source_has") is not True:
                 return "UNVERIFIED", "the case was never made on the source, so its absence proves nothing"
@@ -287,6 +329,10 @@ def judge(expect: dict, facts: dict) -> tuple:
     return "PASS", ""
 
 
+CHANGES_KNOWN = ("drive.mtime", "drive.missing_on_target", "drive.grant_missing", "drive.content_changed",
+                 "gmail.labels_missing", "gmail.unmapped_source", "contacts.unmapped_source",
+                 "contacts.missing_on_target", "tasks.list_missing")      # = campaign_changes.CHANGES (a test keeps them equal)
+FIXED_BY_DELTA = ("drive.content_changed",)
 READS_THE_RUN = ("check_only", "seeded", "must_not_happen")
 
 
@@ -306,13 +352,31 @@ def run_scenario(sc: S.Scenario, driver: Driver, name: str, allow: set, wait: in
     if sc.how == "unseedable":
         return {**row, "status": "COVERED" if sc.unit_test else "UNVERIFIED",
                 "reason": f"cannot be caused live; unit test {sc.unit_test}" if sc.unit_test else "unseedable with no unit test named"}
-    if not sc.act and sc.how not in READS_THE_RUN:
+    if not sc.act and sc.how not in READS_THE_RUN and not (sc.how == "changed_after" and sc.id.split(":", 1)[1] in CHANGES_KNOWN):
         return {**row, "status": "UNVERIFIED", "reason": "the scenario has no `act` yet: define it before its first live run (P3.4)"}
     try:
         if sc.how in READS_THE_RUN and not sc.act:
             # The fixture user's own history in the control run: nothing is caused, no twin is spent (there are 19).
             user = driver.fixture_user(sc.fixtures[0]) if sc.fixtures else None
             return _read(sc, driver, row, user)
+        if sc.how == "changed_after" and not sc.act:
+            user = driver.take_twin()
+            kind = sc.id.split(":", 1)[1]
+            made = driver.change(kind, user)
+            driver.verify(user, sc.expect.get("service") or kind.split(".")[0])
+            if not driver.wait_idle(wait):
+                return {**row, "status": "FAIL", "reason": f"still running after {wait} s"}
+            if kind in FIXED_BY_DELTA:
+                # an edit on the source is copied by a delta (or the Mirror), not by a repair: find it, then run it
+                driver.delta(user)
+                if not driver.wait_idle(wait):
+                    return {**row, "status": "FAIL", "reason": f"the delta is still running after {wait} s"}
+                driver.verify(user, sc.expect.get("service") or kind.split(".")[0])
+                if not driver.wait_idle(wait):
+                    return {**row, "status": "FAIL", "reason": f"the second check is still running after {wait} s"}
+            status, why = judge(sc.expect, driver.facts(user))
+            return {**row, "status": status, "reason": why or made, "user": user, "change": made,
+                    "finished_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
         user = None if sc.how == "check_only" else driver.take_twin()
         driver.prepare(sc.fixtures)
         reply = driver.api(sc.act.get("method", "POST"), sc.act["path"], {**sc.act.get("body", {}), "reason": f"campaign {name} {sc.id}"}) if sc.act else {}

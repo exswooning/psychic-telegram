@@ -107,6 +107,11 @@ def _errors() -> list:
                       else {"finding_classified": kid, "ends_as": "its known_issues entry", "or_evidence": EVIDENCE.get(kid),
                                                                  "or_source": kid if kid in SOURCE_PROBES else None}
                       if how == "seeded" else {"finding_classified": kid, "ends_as": "its known_issues entry"})
+            if how == "changed_after":
+                import known_issues
+                auto = {i[0] for i in known_issues.ISSUES if i[6]}
+                expect = {"finding_classified": kid, "ends_as": "its known_issues entry",
+                          "service": kid.split(".")[0], **({"fixed": kid} if kid in auto else {})}
             out.append(Scenario(
                 id=f"err:{kid}", group=group, title=f"{kid} ({why})", how=how,
                 fixtures=(what,) if what in {f"c{n:02d}" for n in range(1, 11)} else (),

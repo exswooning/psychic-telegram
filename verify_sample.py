@@ -211,7 +211,13 @@ def normalise_message(raw: bytes) -> tuple[dict, bytes]:
         if k.lower() in VOLATILE_HEADERS:
             continue
         headers.setdefault(k.lower(), []).append(" ".join(str(v).split()))
-    body = b"".join((p.get_payload(decode=True) or b"") for p in msg.walk() if not p.is_multipart())
+    def part_bytes(p):
+        data = p.get_payload(decode=True) or b""
+        # Line endings of a TEXT part are not content: a copy that went through the link rewrite comes back with LF
+        # where the source has CRLF (a. -> b., 19 Nov 2026: every label repair on such a message was held). A binary
+        # part stays exact.
+        return data.replace(b"\r\n", b"\n") if p.get_content_maintype() == "text" else data
+    body = b"".join(part_bytes(p) for p in msg.walk() if not p.is_multipart())
     return headers, body
 
 

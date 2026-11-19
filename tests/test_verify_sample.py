@@ -991,3 +991,14 @@ def test_an_apps_script_project_is_compared_by_its_files_not_their_ids():
         out = v._content_unbounded(Svc(proj("a1", "f()")), Svc(proj("b9", code)), "s", "t",
                                    {"mimeType": V.SCRIPT_MIME}, {}, ev)
         assert ev["nativeFeaturesChecked"] and ev["nativeFeaturesMatched"] is same and (out == []) is same
+
+
+def test_a_text_body_that_differs_only_in_line_endings_is_the_same_message_but_binary_is_exact():
+    a = b"Message-ID: <x@y>\r\nContent-Type: text/plain\r\n\r\nline one\r\nline two\r\n"
+    b = a.replace(b"\r\n", b"\n")
+    assert V.normalise_message(a)[1] == V.normalise_message(b)[1]
+    import base64
+    def binary(x):
+        return (b"Message-ID: <x@y>\r\nMIME-Version: 1.0\r\nContent-Type: application/octet-stream\r\n"
+                b"Content-Transfer-Encoding: base64\r\n\r\n" + base64.b64encode(x) + b"\r\n")
+    assert V.normalise_message(binary(b"a\r\nb"))[1] != V.normalise_message(binary(b"a\nb"))[1]

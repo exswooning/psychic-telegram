@@ -31,3 +31,11 @@ class TestEveryFindingSeenOnTheSandboxHasAKind:
         for issue_id, _svc, _m, _title, _cause, fix, auto in known_issues.ISSUES:
             if auto:
                 assert fix and fix.strip(), issue_id
+
+
+def test_a_finding_with_both_a_missing_grant_and_a_moved_time_is_the_grant():
+    import known_issues as K
+    t = '{"diffs": ["modified time not preserved: a -> b", "grant missing on the target: [\'user\', \'x@y\', \'reader\']"]}'
+    assert K.classify("drive", t) == "drive.grant_missing"
+    t2 = '{"diffs": ["MD5 differs: a -> b", "modified time not preserved: a -> b"]}'
+    assert K.classify("drive", t2) == "drive.content_changed"
