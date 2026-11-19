@@ -29,7 +29,9 @@
    "fixtures": [
     "apps_script",
     "drive_comments",
-    "drive_shortcuts"
+    "drive_shortcuts",
+    "big_sheet",
+    "doc_with_image"
    ]
   },
   {
@@ -84,7 +86,8 @@
    "events": 6,
    "fixtures": [
     "eicar",
-    "person_only_check"
+    "person_only_check",
+    "forms_basic"
    ]
   },
   {

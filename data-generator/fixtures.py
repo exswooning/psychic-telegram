@@ -342,6 +342,61 @@ def tasks_shapes(ctx: Ctx) -> dict:
     return {"made": made, "notes": notes}
 
 
+def _api(ctx: Ctx, name: str, version: str):
+    """A Docs, Sheets or Forms client on the user's own Drive credential (the `drive` scope covers all three)."""
+    from googleapiclient.discovery import build
+    return build(name, version, http=ctx.drive._http, cache_discovery=False)
+
+
+@fixture("big_sheet")
+def big_sheet(ctx: Ctx) -> dict:
+    """A Sheet whose grid is larger than the verifier's read budget (2,000,000 cells): `drive.sheet_too_large`.
+    Empty cells: 20,000 rows x 120 columns = 2,400,000."""
+    name = "fableplan2 big sheet"
+    if _made(ctx, "drive", name):
+        return {"made": 0, "notes": ["already made"]}
+    sheets = _api(ctx, "sheets", "v4")
+    ctx.retry(lambda: sheets.spreadsheets().create(body={
+        "properties": {"title": name},
+        "sheets": [{"properties": {"gridProperties": {"rowCount": 20000, "columnCount": 120}}}]}).execute())()
+    return {"made": 1, "notes": []}
+
+
+@fixture("doc_with_image")
+def doc_with_image(ctx: Ctx) -> dict:
+    """A Doc with an inline picture, which the migration compares by the hash of the image's bytes
+    (`drive.embedded_images`)."""
+    name = "fableplan2 doc with image"
+    if _made(ctx, "drive", name):
+        return {"made": 0, "notes": ["already made"]}
+    docs = _api(ctx, "docs", "v1")
+    doc = ctx.retry(lambda: docs.documents().create(body={"title": name}).execute())()
+    ctx.retry(lambda: docs.documents().batchUpdate(documentId=doc["documentId"], body={"requests": [
+        {"insertText": {"location": {"index": 1}, "text": "Ward map\n"}},
+        {"insertInlineImage": {"location": {"index": 1}, "objectSize": {"height": {"magnitude": 60, "unit": "PT"},
+                                                                          "width": {"magnitude": 160, "unit": "PT"}},
+                               "uri": "https://www.google.com/images/branding/googlelogo/2x/googlelogo_color_272x92dp.png"}}]}).execute())()
+    return {"made": 1, "notes": []}
+
+
+@fixture("forms_basic")
+def forms_basic(ctx: Ctx) -> dict:
+    """A Form with a text question, a multiple-choice question and a quiz-less description: rebuilt by the Forms API on
+    the target (`run.form_rebuild`). No API can link a Form to its responses Sheet, so `drive.forms_response_sheet` and
+    `drive.form_relinked` stay with a person."""
+    name = "fableplan2 ward survey"
+    if _made(ctx, "drive", name):
+        return {"made": 0, "notes": ["already made"]}
+    forms = _api(ctx, "forms", "v1")
+    form = ctx.retry(lambda: forms.forms().create(body={"info": {"title": name, "documentTitle": name}}).execute())()
+    ctx.retry(lambda: forms.forms().batchUpdate(formId=form["formId"], body={"requests": [
+        {"createItem": {"item": {"title": "Which ward are you in?", "questionItem": {"question": {"required": True, "choiceQuestion": {
+            "type": "RADIO", "options": [{"value": "Ward 1"}, {"value": "Ward 2"}, {"value": "Ward 3"}]}}}}, "location": {"index": 0}}},
+        {"createItem": {"item": {"title": "What should the office improve?", "questionItem": {"question": {"textQuestion": {"paragraph": True}}}},
+                        "location": {"index": 1}}}]}).execute())()
+    return {"made": 1, "notes": []}
+
+
 @fixture("drive_comments")
 def drive_comments(ctx: Ctx) -> dict:
     """Comments on a Doc and a Sheet: a plain one, one with quote marks in its text, a reply, a resolved one, and one

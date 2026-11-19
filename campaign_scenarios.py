@@ -95,7 +95,7 @@ EVIDENCE = {
 
 
 # Kinds proved from the source instead (campaign_evidence.PROBES): the case is there, and the user reads IDENTICAL.
-SOURCE_PROBES = ("tasks.untitled", "drive.comments", "drive.shortcut_target", "run.malware_flag", "drive.comment_quote_escaped")
+SOURCE_PROBES = ("drive.sheet_too_large", "drive.embedded_images", "run.form_rebuild", "drive.group_grant", "gmail.no_message_id", "gmail.body_link_copy", "gmail.link_owner_not_migrated", "tasks.untitled", "drive.comments", "drive.shortcut_target", "run.malware_flag", "drive.comment_quote_escaped")
 
 
 def _errors() -> list:

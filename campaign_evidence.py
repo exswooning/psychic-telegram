@@ -42,7 +42,38 @@ def _quote_in_comment(auth, user, _s):
     return False
 
 
+def _mail(subject):
+    def probe(auth, user, _s):
+        g = auth.source_gmail(user)
+        return bool(g.users().messages().list(userId="me", q=f'subject:"{subject}"', includeSpamTrash=True,
+                                              maxResults=1).execute().get("messages"))
+    return probe
+
+
+def _by_name(name, mime=None):
+    def probe(auth, user, _s):
+        q = f"name='{name}'" + (f" and mimeType='{mime}'" if mime else "")
+        return bool(_owned(auth, user, q))
+    return probe
+
+
+def _group_grant(auth, user, _s):
+    d = auth.source_drive(user)
+    for f in _owned(auth, user, "name='inherits the folder\\'s grant.txt'"):
+        perms = d.permissions().list(fileId=f["id"], fields="permissions(type)").execute().get("permissions", [])
+        if any(p.get("type") == "group" for p in perms):
+            return True
+    return False
+
+
 PROBES = {
+    "drive.sheet_too_large": _by_name("fableplan2 big sheet", "application/vnd.google-apps.spreadsheet"),
+    "drive.embedded_images": _by_name("fableplan2 doc with image", "application/vnd.google-apps.document"),
+    "run.form_rebuild": _by_name("fableplan2 ward survey", "application/vnd.google-apps.form"),
+    "drive.group_grant": _group_grant,
+    "gmail.no_message_id": _mail("Old mail with no Message-ID"),
+    "gmail.body_link_copy": _mail("Re: link"),
+    "gmail.link_owner_not_migrated": _mail("Link: a file of a user outside the run"),
     "tasks.untitled": _untitled_task,
     "drive.comments": _comments,
     "drive.shortcut_target": lambda a, u, s: bool(_owned(a, u, "mimeType='application/vnd.google-apps.shortcut'")),
