@@ -287,3 +287,17 @@ def test_a_delta_reuses_the_consoles_map_only_when_it_covers_the_ready_users_and
     assert dms_pipeline.console_map(str(tmp_path), str(ready), {"c@s": "held"}) is None     # a held user is on it
     ready.write_text("source_email,target_email\na@s,a@t\nd@s,d@t\n")
     assert dms_pipeline.console_map(str(tmp_path), str(ready), {}) is None                  # it lacks a user: stale
+
+
+def test_a_dms_after_a_reset_starts_fresh_and_one_after_a_real_import_does_not(monkeypatch):
+    import api_server
+    import run_watch
+    runs = lambda *rows: (lambda aid, limit=0: list(rows))      # noqa: E731  newest first
+    reset = {"jobName": "reset target", "finishedAt": "t", "rc": 0}
+    ok_dms = {"jobName": "dms", "finishedAt": "t", "rc": 0}
+    crashed = {"jobName": "dms", "finishedAt": "t", "rc": 3}
+    running = {"jobName": "dms", "finishedAt": None, "rc": None, "running": True}
+    for rows, want in (((reset, ok_dms), True), ((ok_dms, reset), False), ((running, reset), False),
+                       ((crashed, reset), True), ((), False)):
+        monkeypatch.setattr(run_watch, "list_runs", runs(*rows))
+        assert api_server._dms_needs_fresh(5) is want, rows

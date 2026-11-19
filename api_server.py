@@ -2228,6 +2228,22 @@ def _export_identities_csv(account_id: int | None) -> tuple[str, int]:
     return path, len(rows)
 
 
+def _dms_needs_fresh(account_id: int | None) -> bool:
+    """True when the target was reset after the last DMS import began: the console still holds that import's user map, and
+    the next start reads it as a stale map and stops (rc 3; P3.5, 19 Nov 2026). A DMS job that crashed (rc != 0) did not
+    import anything; one still running, or one that finished cleanly, did."""
+    import run_watch
+    try:
+        for r in run_watch.list_runs(account_id, limit=5000):     # newest first
+            if r["jobName"] == "reset target" and r.get("finishedAt") and r.get("rc") == 0:
+                return True
+            if r["jobName"] == "dms" and (r.get("running") or r.get("rc") == 0):
+                return False
+    except Exception:      # noqa: BLE001 - unknown means the usual start
+        log.warning("could not read the run history to decide on a fresh DMS import", exc_info=True)
+    return False
+
+
 def _start_dms(account_id: int | None, *, require_clean: bool, why: str, fresh: bool = False) -> tuple[bool, str]:
     """Ask Google's Data Migration Service to move this account's mail.
 
@@ -2281,7 +2297,7 @@ def _start_dms(account_id: int | None, *, require_clean: bool, why: str, fresh: 
                 "--source-domain", st.source_domain, "--target-admin", st.target_admin]
     if st.source_admin:
         dms_args += ["--source-admin", st.source_admin]
-    if fresh:
+    if fresh or _dms_needs_fresh(account_id):
         dms_args.append("--fresh-import")
     then = None
     if account_id is None:
