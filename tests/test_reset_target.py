@@ -357,3 +357,11 @@ def test_chat_spaces_the_ledger_made_are_deleted_by_id(tmp_path):
     auth = type("A", (), {"target_chat": lambda self, u: Chat()})()
     assert reset_target._delete_ledger_spaces(st, auth, "u@b.example.com") == 1
     assert deleted == ["spaces/TGT1"]
+
+
+def test_a_reset_with_no_services_leaves_chat_alone_unless_chat_is_on(monkeypatch):
+    import reset_target as R
+    monkeypatch.delenv("MIGRATE_CHAT", raising=False)
+    assert "chat" not in R.default_services() and "drive" in R.default_services()
+    monkeypatch.setenv("MIGRATE_CHAT", "true")
+    assert "chat" in R.default_services()

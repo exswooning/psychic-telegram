@@ -111,6 +111,14 @@ def assert_sandbox(settings: Settings, confirm_domain: str,
 # what carries its marker, as migrated copies do.
 ALL_SERVICES = ("drive", "gmail", "calendar", "chat", "contacts", "tasks")
 
+
+def default_services() -> tuple:
+    """What a reset with no --services clears: everything, and Chat only when Chat is on (MIGRATE_CHAT). With it off
+    the reset listed Chat spaces for every user, got 403 and retried 11 times each: 40 failure lines and ~40 minutes on
+    41 users (a. -> b., 19 Nov 2026)."""
+    from config import chat_by_default
+    return ALL_SERVICES if chat_by_default() else tuple(x for x in ALL_SERVICES if x != "chat")
+
 # What Google puts in every new mailbox ("Tips for using your new inbox", "Get the official Gmail
 # app"). The seeder's own reset only trashes @seed.test mail, so these survive it -- and the source
 # mailboxes hold the same two, which a migration copies. Every reset-and-rerun cycle then leaves
@@ -247,7 +255,7 @@ def main(argv: list[str] | None = None) -> int:
                          "this the whole tenant is emptied, which is right for "
                          "a rehearsal and wrong for a controlled experiment "
                          "that only needs a few mailboxes reset.")
-    ap.add_argument("--services", default=",".join(ALL_SERVICES),
+    ap.add_argument("--services", default=",".join(default_services()),
                     help="comma-separated subset of drive,gmail,calendar,chat -- "
                          "e.g. --services drive to reset only Drive and leave "
                          "already-migrated Gmail/Calendar/Chat data untouched")
