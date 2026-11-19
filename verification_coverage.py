@@ -8,6 +8,8 @@ import json
 VERSION = 2
 
 
+NO_READ_API = {"application/vnd.google-apps.vid", "application/vnd.google-apps.site"}
+
 def check(key, label, status, checked=0, matched=0, note=None, required=True):
     return {
         "key": key,
@@ -156,7 +158,11 @@ def drive(v, result):
                     "error": "Live in-scope Drive item has no source-to-target migration mapping",
                 }
             )
-        result["nativeSourceCount"] = sum(f.get("mimeType","").startswith("application/vnd.google-apps.") and not f.get("mimeType","").endswith((".folder",".shortcut")) for f in files if f["id"] in in_scope and f["id"] not in reasoned)
+        # Operator's decision (19 Nov 2026): a Vids video or a Site is copied and mapped, and its structure and
+        # sharing are checked, but Google has no API that reads its content, so it is named, never counted as compared.
+        result["nativeNoReadApi"] = sorted(f.get("name", f["id"]) for f in files
+                                           if f["id"] in in_scope and f["id"] not in reasoned and f.get("mimeType") in NO_READ_API)
+        result["nativeSourceCount"] = sum(f.get("mimeType","").startswith("application/vnd.google-apps.") and not f.get("mimeType","").endswith((".folder",".shortcut")) and f.get("mimeType") not in NO_READ_API for f in files if f["id"] in in_scope and f["id"] not in reasoned)
         result["sourceInventory"] = {
             "inScope": len(in_scope),
             "excludedSharedOrTenantItems": excluded,
@@ -326,7 +332,9 @@ def drive(v, result):
     result["checks"].append(check("drive.native", "Readable native content, formatting and structures",
         "EMPTY" if result.get("nativeSourceCount")==0 else "INCOMPLETE" if native_checked!=result.get("nativeSourceCount") else "DIFFERENCES" if any(e.get("nativeFeaturesMatched") is False for e in v.evidence if e.get("service")=="drive") else "MATCHED",
         result.get("nativeSourceCount",0),native_checked,
-        note="Native API fields only. Embedded image bytes and unsupported Google types block this check; revision history is separate."))
+        note="Native API fields only. Embedded image bytes and unsupported Google types block this check; revision history is separate."
+             + (f" Copied, content not comparable (no API reads a Vids video or a Site): {', '.join(result['nativeNoReadApi'])}."
+                if result.get("nativeNoReadApi") else "")))
     if getattr(v.settings,"migrate_comments",False):
         def comments():
             from migration_comments import list_threads,differences

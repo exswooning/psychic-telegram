@@ -457,6 +457,14 @@ class TestACopyThatDidNothingIsNotVerified:
         assert not [x for x in d["notCopied"] if x.get("id") == fid]
         assert d["nativeSourceCount"] == 0, "a decided skip is not a native file the check owes a comparison"
 
+    def test_a_copied_vids_video_is_named_not_counted_as_compared(self, auth, db, settings, identity):
+        """Operator, 19 Nov 2026: no API reads a Vids video or a Site, so it is named in the check, never compared."""
+        sid = auth.source_drive(SRC_USER).add_native("Ward Welcome Video", kind="vid")
+        tid = auth.target_drive(TGT_USER).add_native("Ward Welcome Video", kind="vid")
+        db.record_mapping(SRC_USER, sid, tid, "file")
+        d = V.run(auth, db, settings, [SRC_USER], ("drive",), progress=lambda *_: None)["users"][SRC_USER]["drive"]
+        assert d["nativeSourceCount"] == 0 and d["nativeNoReadApi"] == ["Ward Welcome Video"]
+
     @pytest.mark.parametrize("svc", V.ALL_SERVICES)
     def test_a_service_that_failed_outright_is_reported_as_not_copied(self, auth, db, settings, identity, svc):
         """migrate_user records it under the service's own name."""
