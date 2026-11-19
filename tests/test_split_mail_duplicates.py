@@ -56,3 +56,46 @@ def test_two_copies_are_two_even_when_gmail_sends_a_page_token():
     gm = type("G", (), {"_retry": staticmethod(lambda fn, **k: fn()),
                         "tgt": type("T", (), {"users": lambda s: type("U", (), {"messages": lambda s: Msgs()})()})()})()
     assert [m["id"] for m in split_mail.target_copies(gm, "<x@y>")] == ["a", "b"]
+
+
+def _draft(subject, sender, body="hello"):
+    raw = f"From: {sender}\r\nTo: x@y.test\r\nSubject: {subject}\r\n\r\n{body}\r\n".encode()
+    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+
+def _draft_gm(tmp_path, target_drafts, mapped):
+    """target_drafts {draft id: (message id, raw)}; mapped = draft ids the ledger knows."""
+    from db import MigrationDB
+    db = MigrationDB(str(tmp_path / "l.db"))
+    for sid, tid in mapped.items():
+        db.record_mapping("u@a.test", sid, tid, "draft")
+    trashed = []
+    drafts = SimpleNamespace(
+        list=lambda **kw: SimpleNamespace(execute=lambda: {"drafts": [{"id": i, "message": {"id": m}} for i, (m, _) in target_drafts.items()]}),
+        get=lambda **kw: SimpleNamespace(execute=lambda: {"message": {"raw": target_drafts[kw["id"]][1]}}))
+    msgs = SimpleNamespace(trash=lambda **kw: SimpleNamespace(execute=lambda: trashed.append(kw["id"]) or {}))
+    tgt = SimpleNamespace(users=lambda: SimpleNamespace(drafts=lambda: drafts, messages=lambda: msgs))
+    gm = SimpleNamespace(tgt=tgt, _retry=lambda f: f(), limiter=SimpleNamespace(acquire=lambda: None),
+                         target_user="u@b.test", settings=SimpleNamespace(dry_run=False, source_domain="a.test", target_domain="b.test"))
+    return gm, db, trashed
+
+
+def test_the_dms_copy_of_a_draft_is_trashed_beside_the_engines(tmp_path):
+    gm, db, trashed = _draft_gm(tmp_path, {
+        "d-engine": ("m1", _draft("Plan", "U <u@b.test>")), "d-dms": ("m2", _draft("Plan", "u@a.test"))},
+        mapped={"src-draft": "d-engine"})
+    assert split_mail.trash_dms_drafts(gm, db, "u@a.test") == 1 and trashed == ["m2"]
+
+
+def test_a_draft_with_no_engine_twin_is_left_alone(tmp_path):
+    gm, db, trashed = _draft_gm(tmp_path, {
+        "d-engine": ("m1", _draft("Plan", "U <u@b.test>")), "d-own": ("m3", _draft("Something else", "u@b.test"))},
+        mapped={"src-draft": "d-engine"})
+    assert split_mail.trash_dms_drafts(gm, db, "u@a.test") == 0 and trashed == []
+
+
+def test_one_engine_draft_absorbs_one_dms_copy_not_two(tmp_path):
+    gm, db, trashed = _draft_gm(tmp_path, {
+        "d-engine": ("m1", _draft("Plan", "u@b.test")), "x1": ("m2", _draft("Plan", "u@a.test")), "x2": ("m3", _draft("Plan", "u@a.test"))},
+        mapped={"src-draft": "d-engine"})
+    assert split_mail.trash_dms_drafts(gm, db, "u@a.test") == 1 and len(trashed) == 1

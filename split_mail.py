@@ -205,6 +205,56 @@ def trash_dms_duplicate(gm, db, source: str, mid: str, source_raw: str, other: s
                  f"kept the mapped copy; trashed {other}, the DMS's unrewritten copy (recoverable 30 days)")
 
 
+def trash_dms_drafts(gm, db, source: str) -> int:
+    """Trash a draft the DMS delivered beside the engine's own copy of it. The engine creates every draft itself
+    (a draft has no Message-ID, so nothing else can say two are one), and the DMS imports them too: 4 drafts on
+    c01@a became 8 on b. (19 Nov 2026). Only a target draft the ledger does not map, whose subject, recipients and
+    body equal a mapped one that has no twin yet, is trashed (recoverable 30 days); one it cannot pair is left, it
+    may be the person's own. Target only, recorded in the ledger. DMS_TRASH_DUPLICATES=0 and a dry run turn it off."""
+    import base64
+    if os.getenv("DMS_TRASH_DUPLICATES", "1") == "0" or gm.settings.dry_run:
+        return 0
+    from domain_guard import require_not_source
+    from verify_sample import compare_draft
+    require_not_source(gm.target_user.rsplit("@", 1)[-1], gm.settings.source_domain)
+    mapped = {r[0] for r in db.conn.execute(
+        "SELECT target_id FROM id_mapping WHERE source_user=? AND type='draft'", (source,))}
+    drafts, token = {}, None
+    while True:
+        resp = gm._retry(lambda t=token: gm.tgt.users().drafts().list(userId="me", maxResults=100, pageToken=t).execute())
+        got = resp.get("drafts", [])
+        drafts.update({d["id"]: (d.get("message") or {}).get("id") for d in got})
+        token = resp.get("nextPageToken")
+        if not token or not got:
+            break
+    spare = [d for d in drafts if d not in mapped]
+    if not spare:
+        return 0
+    raws = {}
+
+    def raw(did):
+        if did not in raws:
+            m = (gm._retry(lambda: gm.tgt.users().drafts().get(userId="me", id=did, format="raw").execute())
+                 .get("message") or {}).get("raw", "")
+            m = m if isinstance(m, str) else m.decode()
+            raws[did] = base64.urlsafe_b64decode(m + "=" * (-len(m) % 4))
+        return raws[did]
+    src_dom, tgt_dom = gm.settings.source_domain.lower(), gm.settings.target_domain.lower()
+    own = lambda a: a.rsplit("@", 1)[0] + "@" + tgt_dom if a.lower().endswith("@" + src_dom) else a  # noqa: E731
+    twinned, trashed = set(), 0
+    for did in spare:
+        for mine in sorted(mapped & set(drafts) - twinned):
+            if compare_draft(raw(did), raw(mine), own)[0] == "equivalent":
+                twinned.add(mine)
+                gm.limiter.acquire()
+                gm._retry(lambda m=drafts[did]: gm.tgt.users().messages().trash(userId="me", id=m).execute())
+                db.log_audit(source, did, "dms_draft_duplicate", "TRASHED",
+                             f"kept the engine's draft {mine}; trashed {did}, the DMS's copy of it (recoverable 30 days)")
+                trashed += 1
+                break
+    return trashed
+
+
 def reconcile_tuning() -> tuple[int, float]:
     """(threads per mailbox, reads a second per mailbox) for the DMS reconciliation.
 
@@ -280,6 +330,10 @@ def reconcile_dms(auth, db, settings, progress=None, users=None):
         # other message, including mail arriving after discovery.
         from mail_reconciliation import inventory
         live, drafts = inventory(gm)
+        try:
+            out["draftDuplicatesTrashed"] = out.get("draftDuplicatesTrashed", 0) + trash_dms_drafts(gm, db, source)
+        except Exception as exc:      # noqa: BLE001 - named, never silent; the mail check goes on
+            out["errors"].append(f"{source}: DMS draft duplicates not cleaned: {str(exc)[:160]}")
         excluded_chat = {r[0] for r in db.conn.execute(
             "SELECT item_id FROM audit_log WHERE source_user=? AND item_type='message' AND status='SKIPPED_CHAT'", (source,))}
         rows = [{"item_id": sid} for sid in sorted(live - drafts - excluded_chat)]

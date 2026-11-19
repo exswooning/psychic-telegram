@@ -35,7 +35,7 @@ SERVICE_OF = {**dict.fromkeys(("file", "folder", "acl", "comment", "shortcut", "
               # five users' older directory checks STALE (a. -> b., 18 Nov 2026). tests/test_parity_gate.py
               # fails on a type the code writes that is in neither this map nor EVERY_SERVICE.
               **dict.fromkeys(("message", "message_link", "draft", "filter", "signature", "gmail", "label",
-                               "dms_duplicate", "link_repair", "delegate", "forwarding", "reset_link_recovery"), "gmail"),
+                               "dms_duplicate", "dms_draft_duplicate", "link_repair", "delegate", "forwarding", "reset_link_recovery"), "gmail"),
               **dict.fromkeys(("event", "calendar", "calendar_acl", "calendar_subscription", "resource"), "calendar"),
               **dict.fromkeys(("contact", "contact_group"), "contacts"),
               **dict.fromkeys(("task", "tasklist", "task_list"), "tasks"),
