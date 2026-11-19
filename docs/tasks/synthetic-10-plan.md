@@ -541,6 +541,20 @@ old keys from root's `authorized_keys`; decide on rewriting the git history that
 
 ## 11. State (newest first)
 
+- 20 Nov 2026 (box 19 Nov ~21:00 UTC) (Sonnet): **P3.5 run 1: the reset-leftover mail failures are fixed (0 FAILED rows), the DMS is running fresh.**
+  Five product defects found by run 1 and fixed with tests: (1) `reset_target` listed Chat with Chat off (40 x 11 retries);
+  (2) a reset moves migrated mail to Trash and the engine then stopped on the previous run's own REWRITTEN copy (1,431 blocked
+  messages): a trashed copy with the same identity headers (message-id, from, to, cc, subject, date; NOT content-type or
+  transfer-encoding, which a rewrite re-encodes) is the previous run's, a fresh copy is inserted beside it; (3) two trashed
+  leftovers read "ambiguous": Gmail tokens a FULL page of two, so the ambiguity check now re-lists with room (ten) and counts only
+  LIVE copies; the test fake now does what Gmail does; (4) the DMS after a reset stopped at "stale-map": `_dms_needs_fresh`
+  (a finished `reset target` newer than the last DMS that began cleanly) makes the follow-on pass `--fresh-import`; (5) the dispatcher's own
+  verify batches held the one job slot for an hour ahead of the retry (speed item a: stop re-checking users whose findings a queued
+  job is about to change; `logs/deploy_pending` is the stop-gap). `known_issues.RUN_KINDS` names `gmail.reset_leftover`. Retry =
+  `POST /api/v2/migrate/start {services:[gmail], mail_mode:split}` (takes only users whose Gmail is not done: 4 minutes for ~40).
+  Run 1 timeline (box clock): reset 16:28-18:18 (c10's 5,000 messages at 46 a minute); migrate start 18:19; Drive pass and Gmail pass done 18:51.
+  **Next: let the DMS pipeline finish (import, deltas to zero, labels, verify-after-dms, parity gate); read `parity-gate-latest.json`,
+  record the phase times from run_events, then run 2 and 3 with `/tmp/p35_run_nochat.sh N`.**
 - 20 Nov 2026 (box 19 Nov ~21:30 UTC) (Sonnet): **P3.5 run 1 hit its first real error; fixed at the cause.** After the reset and ledger reset the
   migrate pass ended with 1,480 failed rows: 1,431 `FAILED_SPLIT` "Existing destination Message-ID has different content" and
   6 "Ambiguous destination Message-ID" (alice). Cause: `reset_target` moves migrated mail to Trash; on the next run the engine found the
