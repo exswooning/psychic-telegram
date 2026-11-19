@@ -374,9 +374,12 @@ def repair_verified_gmail_labels(auth, db, settings, report: dict,
                 actual = target_raw.get("raw")
                 if not isinstance(expected, str) or not isinstance(actual, str):
                     raise RuntimeError("Fresh message content unavailable; label repair held")
-                expected = decode(expected)
                 if getattr(settings, "rewrite_drive_links", False):
-                    expected = rewrite_raw(expected, db.target_for_source_id)[0]
+                    # rewrite_raw takes the base64 text, not bytes (passed bytes it did nothing, so every message whose
+                    # links were rewritten was held), and the copy the target names counts when it is one of the file's
+                    # genuine copies (one source file shared with many users has a copy per user): the verifier's rule
+                    expected = rewrite_raw(expected, V.copy_lookup(db, decode(actual)))[0]
+                expected = decode(expected)
                 if V.compare_message(expected, decode(actual))[0] == "different":
                     raise RuntimeError("Fresh message content differs; label repair held")
                 if db.get_target_id(source_user, source_id, "message") != target_id:

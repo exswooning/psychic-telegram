@@ -122,3 +122,21 @@ def test_label_repair_holds_if_message_body_changed_since_verification(auth, db,
     result = repair.repair_verified_gmail_labels(auth, db, settings, report, apply=True)
     assert result['changed'] == 0 and 'content differs' in str(result['errors'])
     assert auth.target_gmail(TGT_USER).call_count('messages.batchModify') == 0
+
+
+def test_label_repair_accepts_a_link_to_any_genuine_copy_of_a_shared_file(auth, db, settings, identity):
+    """One source file shared with many users has a copy per user; the engine wrote the link to the copy it had, and
+    the repair must not predict another one (a. -> b., 19 Nov 2026: every such label repair was held)."""
+    from tests.conftest import SRC_USER, TGT_USER
+    SRC_FILE = "1AbCdEfGhIjKlMnOpQrStUvWxYz012345"
+    COPY_A, COPY_B = "1ZyXwVuTsRqPoNmLkJiHgFeDcBa987654", "1QwErTyUiOpAsDfGhJkLzXcVbNm123456"
+    db.record_mapping(SRC_USER, SRC_FILE, COPY_A, 'file')
+    db.record_mapping("other@" + SRC_USER.split("@")[1], SRC_FILE, COPY_B, 'file')
+    settings.rewrite_drive_links = True
+    link = lambda i: f"Message-ID: <l@example>\r\n\r\nsee https://drive.google.com/file/d/{i}/view\r\n".encode()
+    sid = auth.source_gmail(SRC_USER).add_message(link(SRC_FILE), ['UNREAD'])
+    tid = auth.target_gmail(TGT_USER).add_message(link(COPY_B), [])       # names the OTHER user's copy
+    db.record_mapping(SRC_USER, sid, tid, 'message')
+    report = {'users': {SRC_USER: {'gmail': {'differences': [{'source': sid, 'target': tid, 'diffs': ['unread state differs']}]}}}}
+    result = repair.repair_verified_gmail_labels(auth, db, settings, report, apply=True)
+    assert 'content differs' not in str(result['errors']), result
