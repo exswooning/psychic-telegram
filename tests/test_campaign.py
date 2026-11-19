@@ -238,3 +238,19 @@ def test_a_seeded_case_handled_without_a_finding_passes_only_on_ledger_evidence_
     assert C.judge(exp, {**ok, "verdicts": {"gmail": "DIFFERENCES"}})[0] == "FAIL"
     assert C.judge(exp, {**ok, "audit_counts": {}})[0] == "UNVERIFIED"
     assert C.judge({**exp, "or_evidence": None}, {"findings": set()})[0] == "UNVERIFIED"
+
+
+def test_a_seeded_case_proved_from_the_source_needs_the_case_there_and_a_clean_user():
+    exp = {"finding_classified": "tasks.untitled", "or_evidence": None, "or_source": "tasks.untitled"}
+    clean = {"findings": set(), "verdicts": {"tasks": "IDENTICAL"}}
+    assert C.judge(exp, {**clean, "source_has": True})[0] == "PASS"
+    assert C.judge(exp, {**clean, "source_has": False})[0] == "UNVERIFIED"
+    assert C.judge(exp, {**clean, "source_has": True, "verdicts": {"tasks": "DIFFERENCES"}})[0] == "FAIL"
+    assert C.judge(exp, clean)[0] == "UNVERIFIED"
+
+
+def test_a_defect_that_must_not_return_proves_nothing_if_the_case_was_never_made():
+    exp = {"finding_absent": "drive.comment_quote_escaped", "needs_source": "drive.comment_quote_escaped"}
+    assert C.judge(exp, {"findings": set(), "source_has": True})[0] == "PASS"
+    assert C.judge(exp, {"findings": set(), "source_has": False})[0] == "UNVERIFIED"
+    assert C.judge(exp, {"findings": {"drive.comment_quote_escaped"}, "source_has": True})[0] == "FAIL"

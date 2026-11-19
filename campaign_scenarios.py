@@ -94,13 +94,18 @@ EVIDENCE = {
 }
 
 
+# Kinds proved from the source instead (campaign_evidence.PROBES): the case is there, and the user reads IDENTICAL.
+SOURCE_PROBES = ("tasks.untitled", "drive.comments", "drive.shortcut_target", "run.malware_flag", "drive.comment_quote_escaped")
+
+
 def _errors() -> list:
     out = []
     for how, (ids, why) in _ERRORS.items():
         for kid, what in ids.items():
             group = "chat" if how == "chat" else "errors"
-            expect = ({"finding_absent": kid} if how == "must_not_happen"
-                      else {"finding_classified": kid, "ends_as": "its known_issues entry", "or_evidence": EVIDENCE.get(kid)}
+            expect = ({"finding_absent": kid, **({"needs_source": kid} if kid in SOURCE_PROBES else {})} if how == "must_not_happen"
+                      else {"finding_classified": kid, "ends_as": "its known_issues entry", "or_evidence": EVIDENCE.get(kid),
+                                                                 "or_source": kid if kid in SOURCE_PROBES else None}
                       if how == "seeded" else {"finding_classified": kid, "ends_as": "its known_issues entry"})
             out.append(Scenario(
                 id=f"err:{kid}", group=group, title=f"{kid} ({why})", how=how,

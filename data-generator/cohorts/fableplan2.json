@@ -27,7 +27,9 @@
    "mail": 40,
    "events": 10,
    "fixtures": [
-    "apps_script"
+    "apps_script",
+    "drive_comments",
+    "drive_shortcuts"
    ]
   },
   {

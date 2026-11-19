@@ -68,6 +68,7 @@ class Driver:
     """What a scenario needs from the live system. LiveDriver is the box; tests use a fake."""
     def take_twin(self) -> str: raise NotImplementedError
     def fixture_user(self, name: str) -> str: return name          # a cohort user (c03) as an address
+    def source_has(self, kind: str, user: str): return None        # a source-side probe; None = there is none
     def prepare(self, fixtures: tuple) -> None: raise NotImplementedError
     def api(self, method: str, path: str, body: dict | None) -> dict: raise NotImplementedError
     def inject(self, inject: dict) -> None: raise NotImplementedError
@@ -102,6 +103,15 @@ class LiveDriver(Driver):
 
     def fixture_user(self, name: str) -> str:
         return f"{name}@{self.domain}"
+
+    def source_has(self, kind: str, user: str):
+        import campaign_evidence
+        import webui
+        os.environ.update(webui._dms_env(self.account_id))
+        from auth import AuthManager
+        from config import Settings
+        st = Settings(account_id=self.account_id)
+        return campaign_evidence.source_has(kind, user, AuthManager(st), st)
 
     def take_twin(self) -> str:
         path = os.path.join(results_dir(self.name), "twins.json")
@@ -205,7 +215,7 @@ def judge(expect: dict, facts: dict) -> tuple:
     driver could not read (missing key) makes that check UNVERIFIED, never a pass."""
     unread = []
     for key, want in expect.items():
-        if key in ("ends_as", "closes_on", "outcome", "or_evidence") or want is None:
+        if key in ("ends_as", "closes_on", "outcome", "or_evidence", "or_source", "needs_source") or want is None:
             continue
         if key == "finding_classified":
             have = facts.get("findings")
@@ -213,9 +223,18 @@ def judge(expect: dict, facts: dict) -> tuple:
                 unread.append(key)
             elif want not in have:
                 ev = expect.get("or_evidence")
-                if ev is None and "or_evidence" in expect:
+                if ev is None and "or_evidence" in expect and not expect.get("or_source"):
                     # a seeded case Bitport may have handled without raising anything: nothing evidences it yet
                     return "UNVERIFIED", f"no {want} finding came and no ledger evidence is defined for it"
+                if expect.get("or_source") and facts.get("source_has") is not None:
+                    verdicts = facts.get("verdicts") or {}
+                    if not facts["source_has"]:
+                        return "UNVERIFIED", f"no {want} finding and the source does not hold the case: the fixture was never made"
+                    if not verdicts or any(v != "IDENTICAL" for v in verdicts.values()):
+                        return "FAIL", f"{want} is on the source but the user does not read IDENTICAL: {verdicts}"
+                    continue
+                if expect.get("or_source"):
+                    return "UNVERIFIED", f"no {want} finding and the source could not be probed for the case"
                 if ev:
                     seen = (facts.get("audit_counts") or {}).get(tuple(ev), 0)
                     verdicts = facts.get("verdicts") or {}
@@ -226,6 +245,8 @@ def judge(expect: dict, facts: dict) -> tuple:
                     continue
                 return "FAIL", f"{want} was never classified (saw {sorted(have)[:6]})"
         elif key == "finding_absent":
+            if expect.get("needs_source") and facts.get("source_has") is not True:
+                return "UNVERIFIED", "the case was never made on the source, so its absence proves nothing"
             have = facts.get("findings")
             if have is None:
                 unread.append(key)
@@ -270,7 +291,11 @@ READS_THE_RUN = ("check_only", "seeded", "must_not_happen")
 
 
 def _read(sc, driver, row, user):
-    status, why = judge(sc.expect, driver.facts(user, since=""))
+    facts = driver.facts(user, since="")
+    probe = sc.expect.get("or_source") or sc.expect.get("needs_source")
+    if probe and user:
+        facts["source_has"] = driver.source_has(probe, user)
+    status, why = judge(sc.expect, facts)
     return {**row, "status": status, "reason": why, "user": user, "finished_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
 
 

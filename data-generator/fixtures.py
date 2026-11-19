@@ -342,6 +342,65 @@ def tasks_shapes(ctx: Ctx) -> dict:
     return {"made": made, "notes": notes}
 
 
+@fixture("drive_comments")
+def drive_comments(ctx: Ctx) -> dict:
+    """Comments on a Doc and a Sheet: a plain one, one with quote marks in its text, a reply, a resolved one, and one
+    on the Sheet. What `drive.comments`, `run.comment_differs` and `run.comment_missing` have to carry across."""
+    from googleapiclient.http import MediaIoBaseUpload
+    import io
+    doc_name, sheet_name = "fableplan2 comments doc", "fableplan2 comments sheet"
+    if _made(ctx, "drive", doc_name):
+        return {"made": 0, "notes": ["already made"]}
+
+    def native(name, mime, body, source_mime):
+        return ctx.retry(lambda: ctx.drive.files().create(
+            body={"name": name, "mimeType": mime}, fields="id",
+            media_body=MediaIoBaseUpload(io.BytesIO(body.encode()), mimetype=source_mime)).execute())()["id"]
+    made, notes = 0, []
+    doc = native(doc_name, "application/vnd.google-apps.document", "Ward report\nThe ward office opens at nine.\n", "text/plain")
+    sheet = native(sheet_name, "application/vnd.google-apps.spreadsheet", "ward,households\n1,120\n2,98\n", "text/csv")
+    made += 2
+
+    def comment(fid, text, quoted=None):
+        body = {"content": text}
+        if quoted:
+            body["quotedFileContent"] = {"mimeType": "text/plain", "value": quoted}
+        return ctx.retry(lambda: ctx.drive.comments().create(fileId=fid, fields="id", body=body).execute())()["id"]
+    try:
+        first = comment(doc, "Please check the opening time", "opens at nine")
+        comment(doc, 'The clerk said "nine sharp" and left', "ward office")
+        ctx.retry(lambda: ctx.drive.replies().create(fileId=doc, commentId=first, fields="id",
+                                                     body={"content": "Confirmed with the office"}).execute())()
+        done = comment(doc, "Typo fixed")
+        ctx.retry(lambda: ctx.drive.replies().create(fileId=doc, commentId=done, fields="id",
+                                                     body={"content": "done", "action": "resolve"}).execute())()
+        comment(sheet, "Recount ward 2")
+        made += 5
+    except Exception as exc:      # noqa: BLE001 - what Google refuses is a note
+        notes.append(f"{type(exc).__name__}: {str(exc)[:140]}")
+    return {"made": made, "notes": notes}
+
+
+@fixture("drive_shortcuts")
+def drive_shortcuts(ctx: Ctx) -> dict:
+    """A shortcut to a file and one to a folder, both in this user's own Drive (a shortcut resolves to whichever copy
+    the migration made: `drive.shortcut_target`)."""
+    name = "fableplan2 shortcut target"
+    if _made(ctx, "drive", name):
+        return {"made": 0, "notes": ["already made"]}
+    from googleapiclient.http import MediaIoBaseUpload
+    import io
+    f = ctx.retry(lambda: ctx.drive.files().create(body={"name": name}, fields="id", media_body=MediaIoBaseUpload(
+        io.BytesIO(b"target of a shortcut"), mimetype="text/plain")).execute())()["id"]
+    d = ctx.retry(lambda: ctx.drive.files().create(body={
+        "name": "fableplan2 shortcut folder", "mimeType": "application/vnd.google-apps.folder"}, fields="id").execute())()["id"]
+    for label, target in (("file", f), ("folder", d)):
+        ctx.retry(lambda t=target, l=label: ctx.drive.files().create(body={
+            "name": f"fableplan2 shortcut to {l}", "mimeType": "application/vnd.google-apps.shortcut",
+            "shortcutDetails": {"targetId": t}}, fields="id").execute())()
+    return {"made": 4, "notes": []}
+
+
 # ---- files only a person can move, and a malware test file -------------------------------------------------
 @fixture("eicar")
 def eicar(ctx: Ctx) -> dict:
