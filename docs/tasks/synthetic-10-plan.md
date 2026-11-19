@@ -541,6 +541,17 @@ old keys from root's `authorized_keys`; decide on rewriting the git history that
 
 ## 11. State (newest first)
 
+- 19 Nov 2026, ~12:00 UTC (Sonnet): **P2.6 errors group: source probes and Drive fixtures.** `campaign_evidence.py` proves a seeded case from the
+  source (`source_has`); `campaign.READS_THE_RUN` scenarios PASS when the finding is classified OR the case is on the source and
+  every service of the user reads IDENTICAL, and a must-not-happen PASSES only when the case was made (`needs_source`).
+  Probes: tasks.untitled, drive.comments, drive.shortcut_target, run.malware_flag, drive.comment_quote_escaped, gmail.no_message_id,
+  gmail.body_link_copy, gmail.link_owner_not_migrated, drive.sheet_too_large, drive.embedded_images, run.form_rebuild, drive.group_grant.
+  New fixtures (`data-generator/fixtures.py`, cohort file): `drive_comments`, `drive_shortcuts`, `big_sheet` (20,000 x 120),
+  `doc_with_image`, `forms_basic`; seeded on c03/c09 through `/api/seed` (webui, port 8080) with `fixtures_only`, then a delta and a verify.
+  Lesson: a Form's Drive modifiedTime moves a few seconds after its last write (the Forms API is async), so a copy made at once keeps
+  the earlier time (c09 `drive.mtime`): a delta after it settles reads the final time. Still UNVERIFIED: forms_response_sheet and
+  form_relinked (no API links a Form to its responses Sheet: a person), held_for_drive, item_absent, comment_differs/missing/unreadable,
+  unmapped_source (needs the outside account to put a file in a folder), then the `changed_after` kinds (need an `act`).
 - 19 Nov 2026, ~11:00 UTC (Sonnet): **P2.6/P3.4 `errors` group read on the control run: 8 PASS, 1 COVERED, 40 UNVERIFIED, 0 FAIL.**
   The seeded scenarios are reads of the fixture user (`campaign.READS_THE_RUN`: `check_only`, `seeded`, `must_not_happen`; no twin
   spent, `facts(user, since="")`). Raising a finding is not the same as coping with the case, so the judge has three outcomes:
