@@ -541,6 +541,22 @@ old keys from root's `authorized_keys`; decide on rewriting the git history that
 
 ## 11. State (newest first)
 
+- 19 Nov 2026, ~05:30 UTC (Sonnet): **P3.4 started; two defects found by the first campaign reads.**
+  (1) `campaign.py --group benchmarks` (read-only, on the control run): 25 `check_only`/benchmark scenarios, 9 PASS, 27 have no
+  `act` (UNVERIFIED, the P2.6-P2.11 work), 6 FAIL = migration fidelity benchmarks reading UNKNOWN. A whole-tenant tally was run
+  (pid 526871, 04:59Z: count parity 1.0, ACL 1.0, timestamps 1.0, 0 checksum failures, 0 extra grants, 0 missing), but the
+  benchmarks are computed when the report is BUILT, and the only report is `migration-20261118T164116Z.json`, older than
+  the tally. **Next: rebuild the report after the tally (find the entry point in `run_report.py`; the API builds it when a
+  migrate job ends) then `campaign.py --redo --only` those six.** Also: the migrate follow-on order should run the tally BEFORE
+  the report is built, or the benchmarks read UNKNOWN on every run (fix at its cause).
+  (2) **Drafts arrive twice** (not seen by the gate: 41/41 PARITY still holds). The engine's draft pass (`gmail_engine._migrate_drafts`,
+  every mode, mapped, compared by `verify_sample._drafts`) creates each draft, and the DMS also imports them (original date,
+  CATEGORY_PERSONAL, ids unmapped; `split_mail.inventory` leaves drafts out of the DMS-owed rows, and `verify_sample`
+  excludes draft message ids from strays, so nothing flags them). c01: source 4 drafts, target 8; the tally's mail surplus (175
+  over 41 users, +4 or +6 per user) is these plus the target's own Google welcome pair (+2, expected). A draft has no
+  Message-ID, so `reconcile_dms` cannot match it. **Fix to build: after the DMS, trash (never delete) a target draft that is
+  unmapped and equals a mapped engine draft by internalDate-independent content; count each in `issue_fix_log`; make the
+  verify name an unmapped draft as an extra; test; then re-run c01's check.** Rule from account 3: find out what an extra is.
 - 19 Nov 2026, ~04:00 UTC (Sonnet): **P3.3 DONE: the gate reads PARITY, 41/41.** The operator accepted that a Vids video
   and a Site (c09: "Ward Welcome Video", "Ward Notice Board") are copied but cannot be compared: no API reads their content.
   `verification_coverage.NO_READ_API` keeps them out of the native count and names them in `drive.native`'s note, and
