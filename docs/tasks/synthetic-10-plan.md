@@ -541,6 +541,14 @@ old keys from root's `authorized_keys`; decide on rewriting the git history that
 
 ## 11. State (newest first)
 
+- 19 Nov 2026, ~09:00 UTC (Sonnet): **Gate PARITY 41/41 again, with the draft duplicates cleaned.** The Gmail-only re-verify of the 40
+  users (new `services` field on `POST /api/v2/one-to-one/run`) read IDENTICAL for all, after the audit rows carried the MESSAGE id
+  (the backfill pattern first missed because a draft id is `s:123...`; the new rows `split_mail.trash_dms_drafts` writes were right).
+  Rule kept: a verify after a change that touched one service uses `services`, and `logs/deploy_pending` keeps the dispatcher from
+  taking the job slot while it runs. The tally's mail surplus (175) still counts the trash, so it cannot show this fix.
+  **Next, in order:** P3.4 groups need their `act` steps (P2.6 first: errors seeded in c01-c09 are in the control run already, so a
+  seeded scenario is a read of that user's findings and fix log, `facts()` already reads both); then P3.5 (three wipe-and-migrate
+  runs; they will also judge `items_per_min_per_worker`), P3.6. Open: run `ui_check.py --account-id 5` once after the benchmarks group.
 - 19 Nov 2026, ~07:30 UTC (Sonnet): **P3.4: report fixed, draft duplicates fixed, 7 of 8 benchmark reads PASS; gate re-verify pending.**
   Report: rebuilt through `POST /api/v2/reports/generate` (13 pass, 1 unknown); `run_watch.REGRADE_AFTER` now rebuilds it after a
   `tally`, `user-tally` or `dms` job, and the migrate run is found past 50 later jobs (the lookup limit was 50, verify jobs filled it).
