@@ -437,7 +437,7 @@ Files by type: .docx 31.1%, JPEG 23.5%, PDF 12.7%, folders 5.8%, .doc 5.7%, .xls
 .pptx 0.5%. Mail: 245 GB in 141,416 messages (1.7 MB each on average); 4,991 messages (3.5%) carry
 a Drive link.
 
-- [ ] P4.1 `data-generator/profile_extract.py`, run on the box, read-only on account 3's ledger
+- [x] P4.1 (19 Nov; `profiles/org45.json`: 45 users, files p50 364 / p90 2,189 / max 5,657, messages 141,434, link mail 4,991 at 2.1 files each; calendar/contacts/tasks per user are not in account 3's ledger shape and stay at the seeder's own defaults) `data-generator/profile_extract.py`, run on the box, read-only on account 3's ledger
   (tables `discovery`, `migration_source_manifest`, `audit_log`, `mail_link_messages`,
   `label_map`). It writes `data-generator/profiles/org45.json`: sorted per-user vectors and
   histograms. Numbers and file types only. No name, address, subject, file name or id leaves the
@@ -541,6 +541,12 @@ old keys from root's `authorized_keys`; decide on rewriting the git history that
 
 ## 11. State (newest first)
 
+- 19 Nov 2026, ~18:15 UTC (Sonnet): **P3.5 run 1 under way (reset phase); P4.1 done.** Run 1 = `/tmp/p35_run.sh 1` on the box: reset target
+  (all six services), reset the ledger, `POST /api/v2/migrate/start` (defaults: all services, split mail, DMS after). The reset took
+  ~45 min for 40 users and ~1 h for the last: (a) it listed Chat spaces for every user and retried a 403 eleven times each (40
+  failure lines; fixed: `reset_target.default_services()` leaves Chat out unless MIGRATE_CHAT); (b) c10's 5,000 messages go at
+  ~46 a minute (one delete each: a `batchDelete` of 1,000 ids is the speed fix, and it is what a 300-user reset needs). Runs 2 and 3:
+  `/tmp/p35_run_nochat.sh N`. Record phase times for P3.6 from `run_events` / the PASS markers.
 - 19 Nov 2026, ~17:30 UTC (Sonnet): **All nine `changed_after` scenarios PASS live; the last one found a fifth defect.**
   The label repair held EVERY message whose links had been rewritten: `repair_verified_gmail_labels` passed decoded BYTES to
   `link_rewrite.rewrite_raw`, which takes the base64 text and returned them unchanged, so the repair's own "fresh content" guard
