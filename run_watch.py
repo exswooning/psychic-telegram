@@ -67,6 +67,9 @@ RC_GRACE_SEC = 120
 # A tally is deliberately absent: it measures the tenants for a report, it is not
 # a run to be judged (it moves nothing, so it would score as "migrated nothing").
 MIGRATION_JOBS = {"migrate": "migration", "delta": "migration"}
+# A job that measures the tenants after the run: when it ends cleanly the latest migration's report is built
+# again, so its fidelity benchmarks read the new numbers (19 Nov 2026: a whole-tenant tally left six of them UNKNOWN).
+REGRADE_AFTER = {"user-tally", "tally", "dms"}
 
 
 def report_kind(job_name: str) -> str | None:
@@ -669,7 +672,7 @@ class Watcher:
         counted anything, so it reads UNVERIFIED. When that tally finishes, the latest
         migration's report is built again -- now graded against the users it ran
         (run_report._run_users_fidelity) -- and replaces the ungraded one."""
-        last = next((r for r in list_runs(aid, limit=50)
+        last = next((r for r in list_runs(aid, limit=5000)
                      if r["jobName"] in MIGRATION_JOBS and r.get("finishedAt")), None)
         if not last:
             return
@@ -682,7 +685,7 @@ class Watcher:
 
     def _handle_finished(self, ev: dict) -> None:
         name, aid, rc = ev["job_name"], ev["account_id"], ev["rc"]
-        if name == "user-tally" and rc == 0 and aid is not None:
+        if name in REGRADE_AFTER and rc == 0 and aid is not None:
             self._regrade_last_migration(aid)
         kind = report_kind(name)
         run = {"returnCode": rc, "startedAt": ev.get("started_at"), "finishedAt": ev["at"], "name": name}

@@ -50,3 +50,8 @@ def test_a_regrade_replaces_the_report_built_at_exit(tmp_path, monkeypatch):
                                  "facts": {"run": {"startedAt": "S"}}}, 3)
     assert not (tmp_path / "migration-1.json").exists()
     assert not (tmp_path / "migration-1.human.pdf").exists()
+
+
+def test_every_job_that_measures_the_tenants_regrades_the_report():
+    import run_watch
+    assert {"user-tally", "tally", "dms"} <= run_watch.REGRADE_AFTER

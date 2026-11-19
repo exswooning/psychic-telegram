@@ -7541,7 +7541,7 @@ async def generate_run_report(body: GenerateReportRequest, op: Operator = Depend
             # without it a report had no exit code or job timing, and "did the run
             # complete" (required) read unknown -- UNVERIFIED however clean the run.
             import run_watch
-            last = next((r for r in run_watch.list_runs(aid, limit=50)
+            last = next((r for r in run_watch.list_runs(aid, limit=5000)
                          if r["jobName"] in run_watch.MIGRATION_JOBS and r.get("finishedAt")), None)
             run = ({"returnCode": last["rc"], "startedAt": last["startedAt"],
                     "finishedAt": last["finishedAt"], "name": last["jobName"]} if last else None)
