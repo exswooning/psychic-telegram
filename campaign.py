@@ -67,6 +67,7 @@ class Unautomated(Exception):
 class Driver:
     """What a scenario needs from the live system. LiveDriver is the box; tests use a fake."""
     def take_twin(self) -> str: raise NotImplementedError
+    def fixture_user(self, name: str) -> str: return name          # a cohort user (c03) as an address
     def prepare(self, fixtures: tuple) -> None: raise NotImplementedError
     def api(self, method: str, path: str, body: dict | None) -> dict: raise NotImplementedError
     def inject(self, inject: dict) -> None: raise NotImplementedError
@@ -98,6 +99,9 @@ class LiveDriver(Driver):
         conn = sqlite3.connect(Settings(account_id=self.account_id).db_path)
         conn.row_factory = sqlite3.Row
         return conn
+
+    def fixture_user(self, name: str) -> str:
+        return f"{name}@{self.domain}"
 
     def take_twin(self) -> str:
         path = os.path.join(results_dir(self.name), "twins.json")
@@ -155,7 +159,7 @@ class LiveDriver(Driver):
             time.sleep(self.poll)
         return False
 
-    def facts(self, user: str | None) -> dict:
+    def facts(self, user: str | None, since: str | None = None) -> dict:
         import known_issues
         import run_watch
         out: dict = {}
@@ -164,9 +168,13 @@ class LiveDriver(Driver):
                 found = {r[0] for r in c.execute(
                     "SELECT issue FROM verification_repair_queue WHERE source_user=? AND issue IS NOT NULL", (user,))}
                 for r in c.execute("SELECT item_type, error_message FROM audit_log WHERE source_user=? AND timestamp>=? "
-                                   "AND status LIKE 'FAILED%'", (user, self.started)):
+                                   "AND status LIKE 'FAILED%'", (user, self.started if since is None else since)):
                     found.add(known_issues.classify_failure(r[0], r[1] or ""))
                 out["findings"] = found
+                out["audit_counts"] = {(r[0], r[1]): r[2] for r in c.execute(
+                    "SELECT item_type, status, COUNT(*) FROM audit_log WHERE source_user=? GROUP BY 1,2", (user,))}
+                out["verdicts"] = {r[0]: r[1] for r in c.execute(
+                    "SELECT service, verdict FROM user_verification WHERE source_user=?", (user,))}
                 tallies = {r[0]: json.loads(r[1]) for r in c.execute(
                     "SELECT source_user, payload FROM user_tally WHERE source_user IN (?,?)",
                     (user, f"{CONTROL}@{self.domain}"))}
@@ -197,13 +205,25 @@ def judge(expect: dict, facts: dict) -> tuple:
     driver could not read (missing key) makes that check UNVERIFIED, never a pass."""
     unread = []
     for key, want in expect.items():
-        if key in ("ends_as", "closes_on", "outcome") or want is None:
+        if key in ("ends_as", "closes_on", "outcome", "or_evidence") or want is None:
             continue
         if key == "finding_classified":
             have = facts.get("findings")
             if have is None:
                 unread.append(key)
             elif want not in have:
+                ev = expect.get("or_evidence")
+                if ev is None and "or_evidence" in expect:
+                    # a seeded case Bitport may have handled without raising anything: nothing evidences it yet
+                    return "UNVERIFIED", f"no {want} finding came and no ledger evidence is defined for it"
+                if ev:
+                    seen = (facts.get("audit_counts") or {}).get(tuple(ev), 0)
+                    verdicts = facts.get("verdicts") or {}
+                    if not seen:
+                        return "UNVERIFIED", f"no {want} finding and the ledger shows no {ev[1]} row: the fixture may not have been met"
+                    if any(v != "IDENTICAL" for v in verdicts.values()) or not verdicts:
+                        return "FAIL", f"{want} was met ({seen} x {ev[1]}) but the user does not read IDENTICAL: {verdicts}"
+                    continue
                 return "FAIL", f"{want} was never classified (saw {sorted(have)[:6]})"
         elif key == "finding_absent":
             have = facts.get("findings")
@@ -246,6 +266,14 @@ def judge(expect: dict, facts: dict) -> tuple:
     return "PASS", ""
 
 
+READS_THE_RUN = ("check_only", "seeded", "must_not_happen")
+
+
+def _read(sc, driver, row, user):
+    status, why = judge(sc.expect, driver.facts(user, since=""))
+    return {**row, "status": status, "reason": why, "user": user, "finished_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+
+
 def run_scenario(sc: S.Scenario, driver: Driver, name: str, allow: set, wait: int = 4 * 3600) -> dict:
     row = {"id": sc.id, "group": sc.group, "how": sc.how, "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
     if sc.needs and not set(sc.needs) <= allow:
@@ -253,10 +281,14 @@ def run_scenario(sc: S.Scenario, driver: Driver, name: str, allow: set, wait: in
     if sc.how == "unseedable":
         return {**row, "status": "COVERED" if sc.unit_test else "UNVERIFIED",
                 "reason": f"cannot be caused live; unit test {sc.unit_test}" if sc.unit_test else "unseedable with no unit test named"}
-    if not sc.act and sc.how != "check_only":
+    if not sc.act and sc.how not in READS_THE_RUN:
         return {**row, "status": "UNVERIFIED", "reason": "the scenario has no `act` yet: define it before its first live run (P3.4)"}
     try:
-        user = None if sc.how == "check_only" else driver.take_twin()      # a read of the control run spends no twin: there are 19
+        if sc.how in READS_THE_RUN and not sc.act:
+            # The fixture user's own history in the control run: nothing is caused, no twin is spent (there are 19).
+            user = driver.fixture_user(sc.fixtures[0]) if sc.fixtures else None
+            return _read(sc, driver, row, user)
+        user = None if sc.how == "check_only" else driver.take_twin()
         driver.prepare(sc.fixtures)
         reply = driver.api(sc.act.get("method", "POST"), sc.act["path"], {**sc.act.get("body", {}), "reason": f"campaign {name} {sc.id}"}) if sc.act else {}
         if sc.inject:

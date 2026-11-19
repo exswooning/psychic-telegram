@@ -97,7 +97,8 @@ class FakeDriver(C.Driver):
     def wait_idle(self, timeout):
         return self.idle
 
-    def facts(self, user):
+    def facts(self, user, since=None):
+        self.read = (user, since)
         return self._facts
 
 
@@ -112,7 +113,7 @@ def sc(**kw):
 
 
 def test_a_scenario_with_no_act_is_unverified_never_a_pass():
-    r = C.run_scenario(sc(act={}), FakeDriver(), "n", set())
+    r = C.run_scenario(sc(act={}, how="failure"), FakeDriver(), "n", set())
     assert r["status"] == "UNVERIFIED" and "no `act`" in r["reason"]
 
 
@@ -217,3 +218,23 @@ def test_a_check_only_scenario_spends_no_twin():
     sc = S.Scenario("bench:x", "benchmarks", "t", "check_only", expect={})
     C.run_scenario(sc, d, "t", set())
     assert "twin" not in d.calls
+
+
+def test_a_seeded_scenario_reads_its_fixture_user_and_spends_no_twin():
+    d = FakeDriver(facts={"findings": {"gmail.duplicate"}})
+    r = C.run_scenario(sc(act={}, fixtures=("c04",)), d, "t", set())
+    assert r["status"] == "PASS" and "twin" not in d.calls and d.read == ("c04", "")
+
+
+def test_a_seeded_scenario_whose_finding_never_came_fails():
+    d = FakeDriver(facts={"findings": {"gmail.labels_added"}})
+    assert C.run_scenario(sc(act={}, fixtures=("c04",)), d, "t", set())["status"] == "FAIL"
+
+
+def test_a_seeded_case_handled_without_a_finding_passes_only_on_ledger_evidence_and_a_clean_user():
+    exp = {"finding_classified": "gmail.duplicate", "or_evidence": ("message", "SUCCESS_SOURCE_DUPLICATE")}
+    ok = {"findings": set(), "audit_counts": {("message", "SUCCESS_SOURCE_DUPLICATE"): 2}, "verdicts": {"gmail": "IDENTICAL"}}
+    assert C.judge(exp, ok)[0] == "PASS"
+    assert C.judge(exp, {**ok, "verdicts": {"gmail": "DIFFERENCES"}})[0] == "FAIL"
+    assert C.judge(exp, {**ok, "audit_counts": {}})[0] == "UNVERIFIED"
+    assert C.judge({**exp, "or_evidence": None}, {"findings": set()})[0] == "UNVERIFIED"

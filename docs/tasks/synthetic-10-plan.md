@@ -541,6 +541,18 @@ old keys from root's `authorized_keys`; decide on rewriting the git history that
 
 ## 11. State (newest first)
 
+- 19 Nov 2026, ~11:00 UTC (Sonnet): **P2.6/P3.4 `errors` group read on the control run: 8 PASS, 1 COVERED, 40 UNVERIFIED, 0 FAIL.**
+  The seeded scenarios are reads of the fixture user (`campaign.READS_THE_RUN`: `check_only`, `seeded`, `must_not_happen`; no twin
+  spent, `facts(user, since="")`). Raising a finding is not the same as coping with the case, so the judge has three outcomes:
+  PASS = finding classified, OR (`campaign_scenarios.EVIDENCE`: the ledger row that shows the case was met) and the user reads
+  IDENTICAL on every service; FAIL = met but not clean, or a finding of that kind never classified where no evidence is
+  expected; UNVERIFIED = no finding and no evidence defined (never a pass). Passing now: `gmail.labels_added`, `gmail.duplicate`
+  (c04: 2 `SUCCESS_SOURCE_DUPLICATE`), `gmail.link_scan_encrypted`, `run.mail_owed_to_dms`, and the four `must_not_happen`. I removed a false
+  PASS: `run.malware_flag` had been credited on c09's My Map row, which says nothing about the EICAR file.
+  **Next:** one EVIDENCE entry per remaining seeded kind (read what the ledger or the source shows for c02/c03/c04/c07/c09: shortcuts,
+  comments, the Forms, the huge Sheet, the untitled task, the group grant, the outside-account file; start with `tasks.untitled`,
+  `drive.shortcut_target`, `drive.comments`), then the `changed_after` kinds (they need an `act`: change on a./b., then verify), then
+  `failures` and `watchers`. `ui_check.py --account-id 5` is still owed once.
 - 19 Nov 2026, ~09:00 UTC (Sonnet): **Gate PARITY 41/41 again, with the draft duplicates cleaned.** The Gmail-only re-verify of the 40
   users (new `services` field on `POST /api/v2/one-to-one/run`) read IDENTICAL for all, after the audit rows carried the MESSAGE id
   (the backfill pattern first missed because a draft id is `s:123...`; the new rows `split_mail.trash_dms_drafts` writes were right).

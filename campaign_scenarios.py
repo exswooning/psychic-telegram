@@ -85,13 +85,23 @@ UNIT_TESTS = {
 }
 
 
+# What the control run's ledger shows when a seeded condition was met and handled (no finding needed): the
+# (item_type, status) of an audit row. A kind not listed has no evidence defined yet, so it reads UNVERIFIED.
+EVIDENCE = {
+    "gmail.duplicate": ("message", "SUCCESS_SOURCE_DUPLICATE"),
+    "gmail.link_scan_encrypted": ("message_link", "LINK_SCAN_ENCRYPTED"),
+    "run.mail_owed_to_dms": ("message", "DELIVERED_BY_DMS"),
+}
+
+
 def _errors() -> list:
     out = []
     for how, (ids, why) in _ERRORS.items():
         for kid, what in ids.items():
             group = "chat" if how == "chat" else "errors"
             expect = ({"finding_absent": kid} if how == "must_not_happen"
-                      else {"finding_classified": kid, "ends_as": "its known_issues entry"})
+                      else {"finding_classified": kid, "ends_as": "its known_issues entry", "or_evidence": EVIDENCE.get(kid)}
+                      if how == "seeded" else {"finding_classified": kid, "ends_as": "its known_issues entry"})
             out.append(Scenario(
                 id=f"err:{kid}", group=group, title=f"{kid} ({why})", how=how,
                 fixtures=(what,) if what in {f"c{n:02d}" for n in range(1, 11)} else (),
