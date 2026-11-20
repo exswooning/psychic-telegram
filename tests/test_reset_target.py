@@ -408,6 +408,9 @@ def test_the_reset_deletes_what_the_ledger_says_the_migration_wrote_outside_the_
     deleted = []
 
     class Files:
+        def list(self, **_):         # what is at the root of the target My Drive: two mapped, one the user's own
+            return SimpleNamespace(execute=lambda: {"files": [{"id": "t1"}, {"id": "t2"}, {"id": "theirs"}]})
+
         def delete(self, fileId, **_):
             deleted.append(fileId)
             return SimpleNamespace(execute=lambda: {})

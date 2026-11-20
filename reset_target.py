@@ -263,11 +263,22 @@ def _delete_ledger_drive_items(settings: Settings, auth: AuthManager, target_use
         logging.getLogger(__name__).debug("ignored an error", exc_info=True)
         return 0
     drive, n = auth.target_drive(target_user), 0
-    for fid in ids:
+    # Only what still sits at the root of the user's My Drive: the seeded tree has just taken everything under it, and
+    # a delete per mapped id cost a call each, nearly all of them 404s (run 2, 20 Nov 2026: c10's 3,000). Anything
+    # nested outside the tree goes with the root folder it sits in, which the ledger maps too.
+    wanted, at_root, token = set(ids), [], None
+    while True:
+        resp = drive.files().list(q="'root' in parents and 'me' in owners and trashed = false", pageSize=1000,
+                                  pageToken=token, fields="nextPageToken,files(id)").execute()
+        at_root += [f["id"] for f in resp.get("files", []) if f["id"] in wanted]
+        token = resp.get("nextPageToken")
+        if not token:
+            break
+    for fid in at_root:
         try:
             drive.files().delete(fileId=fid, supportsAllDrives=True).execute()
             n += 1
-        except Exception as exc:  # noqa: BLE001 - gone already (the seeded tree took it), or not this user's
+        except Exception as exc:  # noqa: BLE001 - gone already, or not this user's
             if "404" not in str(exc) and "notFound" not in str(exc):
                 print(f"    ! {target_user} drive item {fid}: {str(exc)[:90]}")
     return n
