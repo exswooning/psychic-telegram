@@ -1843,6 +1843,20 @@ class FakeMediaUpload:
         return len(self._data)
 
 
+class FakeIoUpload:
+    """Stands in for MediaIoBaseUpload (bytes already in memory)."""
+
+    def __init__(self, fd, mimetype: Optional[str] = None, chunksize: int = -1, resumable: bool = False):
+        self.mimetype, self.resumable = mimetype, resumable
+        self._data = fd.read()
+
+    def read_all(self) -> bytes:
+        return self._data
+
+    def size(self) -> int:
+        return len(self._data)
+
+
 class FakeDownloader:
     """Stands in for MediaIoBaseDownload: one chunk, straight to the handle."""
 

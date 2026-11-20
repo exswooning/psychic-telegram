@@ -31,7 +31,7 @@ import re
 import uuid
 
 from google.auth.exceptions import RefreshError
-from googleapiclient.http import MediaFileUpload  # noqa: F401
+from googleapiclient.http import MediaFileUpload, MediaIoBaseUpload  # noqa: F401
 
 from config import DEFERRED_TO_DMS, DELIVERED_BY_DMS, OWED_GRANT, Settings
 from sample_budget import Budget
@@ -67,6 +67,20 @@ SYSTEM_LABELS = {
 
 # Gmail's simple (non-resumable) upload path tops out at 5 MB.
 LARGE_MESSAGE_THRESHOLD = 5 * 1024 * 1024
+
+
+def _small_upload(raw_b64: str):
+    """A message under 5 MB as its own bytes (message/rfc822), not base64 text inside JSON: a quarter fewer bytes on
+    a line whose upload is the limit (0.9 MB/s on the box). None when it must still go as `raw` in the body: the
+    switch is off (GMAIL_RAW_UPLOAD=0), or the bytes are not ASCII -- googleapiclient's one-shot multipart upload
+    cannot carry those ("'ascii' codec can't encode", the seeder's first raw upload, 17 Nov 2026)."""
+    if os.getenv("GMAIL_RAW_UPLOAD", "1").lower() in ("0", "false", "no"):
+        return None
+    data = base64.urlsafe_b64decode(raw_b64 + "=" * (-len(raw_b64) % 4))
+    if not data.isascii():
+        return None
+    import io
+    return MediaIoBaseUpload(io.BytesIO(data), mimetype="message/rfc822", resumable=False)
 
 
 def _ascii_headers(raw_b64: str) -> str:
@@ -797,7 +811,9 @@ class GmailMigrator:
                 fh.write(base64.urlsafe_b64decode(raw))
             media = MediaFileUpload(path, mimetype="message/rfc822", resumable=True)
         else:
-            body["raw"] = raw
+            media = _small_upload(raw)
+            if media is None:
+                body["raw"] = raw
 
         try:
             # `already` is set only on a link repair, and by here its copy has
@@ -813,6 +829,8 @@ class GmailMigrator:
                 body.pop("threadId")
                 if path:
                     media = MediaFileUpload(path, mimetype="message/rfc822", resumable=True)
+                elif "raw" not in body:
+                    media = _small_upload(raw)
                 result = self._insert_once(body, media, raw, replacing=already, source_id=mid)
         except (PermanentAPIError, RuntimeError) as exc:
             self.db.log_audit(self.source_user, mid, "message", "FAILED_SPLIT" if self.settings.mail_only_with_links else "FAILED", str(exc))

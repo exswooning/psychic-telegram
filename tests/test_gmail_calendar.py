@@ -903,3 +903,27 @@ def test_a_filter_already_on_the_target_is_adopted_not_failed(gmail_migrator, au
     gmail_migrator._migrate_filters()
     assert db.get_target_id(gmail_migrator.source_user, "f1", "filter") == "t9"
     assert gmail_migrator.stats.get("filters_failed", 0) == 0
+
+
+class TestSmallMailGoesUpAsItsOwnBytes:
+    """P1.7, engine half: under 5 MB an ASCII message is uploaded as message/rfc822 bytes, not base64 inside JSON."""
+
+    def test_an_ascii_message_carries_no_raw_in_its_json_body(self, auth, db, settings, identity, monkeypatch):
+        import gmail_engine
+        seen = []
+        real = gmail_engine.GmailMigrator._insert_once
+
+        def spy(self, body, media, raw, **kw):
+            seen.append(("raw" in body, media is not None))
+            return real(self, body, media, raw, **kw)
+        monkeypatch.setattr(gmail_engine.GmailMigrator, "_insert_once", spy)
+        auth.source_gmail(SRC_USER).add_message(b"Message-ID: <a@x>\\r\\nSubject: plain\\r\\n\\r\\nascii body\\r\\n", ["INBOX"])
+        gmail_engine.GmailMigrator(auth, db, settings, SRC_USER, TGT_USER).run()
+        assert seen == [(False, True)]
+        assert len(auth.target_gmail(TGT_USER).messages) == 1
+
+    def test_non_ascii_bytes_and_the_switch_off_still_go_in_the_body(self, auth, db, settings, identity, monkeypatch):
+        import gmail_engine
+        assert gmail_engine._small_upload(base64.urlsafe_b64encode("Subject: नमस्ते\\r\\n\\r\\nx".encode()).decode()) is None
+        monkeypatch.setenv("GMAIL_RAW_UPLOAD", "0")
+        assert gmail_engine._small_upload(base64.urlsafe_b64encode(b"Subject: a\\r\\n\\r\\nx").decode()) is None

@@ -39,7 +39,7 @@ import gmail_engine  # noqa: E402
 from config import Settings  # noqa: E402
 from db import MigrationDB  # noqa: E402
 from resilience import DailyQuotaGuard  # noqa: E402
-from tests.fakes import FakeAuth, FakeDownloader, FakeMediaUpload  # noqa: E402
+from tests.fakes import FakeAuth, FakeDownloader, FakeIoUpload, FakeMediaUpload  # noqa: E402
 
 SRC_USER = "alice@tenanta.com"
 TGT_USER = "alice@tenantb.com"
@@ -297,6 +297,7 @@ def auth(settings, monkeypatch) -> FakeAuth:
     monkeypatch.setattr(drive_engine, "MediaFileUpload", FakeMediaUpload)
     monkeypatch.setattr(drive_engine, "MediaIoBaseDownload", FakeDownloader)
     monkeypatch.setattr(gmail_engine, "MediaFileUpload", FakeMediaUpload)
+    monkeypatch.setattr(gmail_engine, "MediaIoBaseUpload", FakeIoUpload)
     return FakeAuth(settings)
 
 
