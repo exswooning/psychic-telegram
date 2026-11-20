@@ -29,9 +29,11 @@ def ledger_holds(conn) -> dict[str, str]:
     holds: dict[str, str] = {}
     # A user the DMS check itself blocked can receive mail, and only the next import's check can release it --
     # held out of that import, it was never checked again (bob..erin, a. -> b., 18 Nov 2026).
-    for user, status in conn.execute("SELECT source_email, status FROM identity_map "
-                                     "WHERE entity_type='user' AND status IN ('RUNNING', 'BLOCKED') "
-                                     "AND COALESCE(notes,'') != ?", (DMS_BLOCK_NOTE,)):
+    for user, status, done in conn.execute("SELECT source_email, status, COALESCE(services_done,'') FROM identity_map "
+                                           "WHERE entity_type='user' AND status IN ('RUNNING', 'BLOCKED') "
+                                           "AND COALESCE(notes,'') != ?", (DMS_BLOCK_NOTE,)):
+        if status == "RUNNING" and "gmail" in done.split(","):
+            continue        # its mail pass is over; a later pass (calendar, contacts, tasks) is what is running
         holds[user.lower()] = (f"status {status}: " +
                                ("its pass has not finished" if status == "RUNNING" else "it cannot receive mail yet"))
     # The same rows api_server._migration_progress counts as mailBlockingDms, per user.

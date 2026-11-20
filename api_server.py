@@ -2023,6 +2023,43 @@ def _resume_after_memory_pause(argv, account_id, job_name, env, then, pid, start
                 "within %ds: left for a person", job_name, account_id, RESUME_WAIT_SEC)
 
 
+_EARLY_DMS: set = set()       # accounts whose DMS this run already started at the end of its mail pass
+_PASS_LINE = re.compile(r"^PASS (\d+)/(\d+) pid=(\d+): (.*)$")
+
+
+def _dms_at_mail_pass(account_id: int | None, proc, log_path: str, start_at: int) -> None:
+    """Start the DMS the moment the run's mail pass ends, not after the passes and follow-ons that come after it
+    (fableplan2 Phase 6; DMS_AT_MAIL_PASS=1). The pass that follows mail prints its own PASS marker, carrying this
+    run's pid, and that line is the mail pass's end. The DMS's own decision still holds back every user whose mail
+    did not end clean (dms_handoff), so starting early never carries link mail unrewritten. Started here, the
+    exit follow-on does not start it again."""
+    seen_mail = False
+    pos = start_at
+    while proc.poll() is None:
+        try:
+            with open(log_path, encoding="utf-8", errors="replace") as fh:
+                fh.seek(pos)
+                chunk = fh.read()
+                pos = fh.tell()
+        except OSError:
+            chunk = ""
+        for line in chunk.splitlines():
+            m = _PASS_LINE.match(line.strip())
+            if not m or int(m.group(3)) != proc.pid:
+                continue
+            passes = set(m.group(4).split(","))
+            if "gmail" in passes:
+                seen_mail = True
+            elif seen_mail:
+                ok, detail = _start_dms(account_id, require_clean=True,
+                                        why="started automatically when the split run's mail pass ended")
+                if ok:
+                    _EARLY_DMS.add(account_id)
+                log.info("DMS at the end of the mail pass for account %s: %s", account_id, detail)
+                return
+        time.sleep(15)
+
+
 def _start_admitted(argv: list[str], account_id: int | None, job_name: str,
                     env: dict[str, str] | None = None,
                     then: str | list[str] | None = None) -> tuple[bool, str]:
@@ -2034,12 +2071,21 @@ def _start_admitted(argv: list[str], account_id: int | None, job_name: str,
     if why:
         return False, why
     out = _child_output(job_name, account_id)
+    log_path = getattr(out, "name", None)
+    try:
+        log_start = out.tell()
+    except (OSError, AttributeError):
+        log_start = 0
     try:
         proc = subprocess.Popen(argv, cwd=HERE, stdout=out,
                                 stderr=subprocess.STDOUT,
                                 stdin=subprocess.DEVNULL, env=env)
     finally:
         out.close()
+    if (job_name == "migrate" and then and "dms" in ([then] if isinstance(then, str) else then)
+            and isinstance(log_path, str) and os.getenv("DMS_AT_MAIL_PASS", "0").lower() in ("1", "true", "yes")):
+        threading.Thread(target=_dms_at_mail_pass, args=(account_id, proc, log_path, log_start),
+                         name=f"dms-at-mail-pass-{account_id}", daemon=True).start()
     # Record the pid so the slot can be verified by something other than this
     # thread. try_admit runs before Popen and has no pid to store, and this
     # waiter dies whenever the server restarts -- a deploy mid-run left a
@@ -2675,6 +2721,10 @@ def _follow_on(kind: str, account_id: int | None) -> None:
                                       "when it was tried, ...) are checked against the target and fixed now, "
                                       "without waiting for anyone to press Repair")
     elif kind == "dms":
+        if account_id in _EARLY_DMS:
+            _EARLY_DMS.discard(account_id)      # already started when the mail pass ended
+            log.info("DMS for account %s already started at the end of the mail pass", account_id)
+            return
         _start_dms(account_id, require_clean=True, why="started automatically: the split migration finished cleanly, "
                                                        "so the mail it left for the DMS is now owed")
     elif kind == "verify-after-dms":

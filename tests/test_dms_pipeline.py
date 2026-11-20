@@ -110,6 +110,14 @@ class TestWhoTheDmsMayTake:
         held, _ = _assess(ledger, {"chk@s": FakeGmail({})})
         assert "chk@s" not in held
 
+    def test_a_user_still_running_a_later_pass_goes_to_the_dms_once_its_mail_pass_is_done(self, ledger):
+        """Phase 6, the DMS at the end of the mail pass: calendar/contacts/tasks still running is no reason to hold mail."""
+        ledger.user("mailed@s", "RUNNING"); ledger.user("mid@s", "RUNNING")
+        ledger.conn.execute("UPDATE identity_map SET services_done='drive,gmail' WHERE source_email='mailed@s'")
+        ledger.conn.execute("UPDATE identity_map SET services_done='drive' WHERE source_email='mid@s'")
+        held, _ = _assess(ledger, {u: FakeGmail({}) for u in ("mailed@s", "mid@s")})
+        assert "mailed@s" not in held and "mid@s" in held
+
     def test_a_failure_later_mapped_is_history_not_a_hold(self, ledger):
         ledger.user("a@s"); ledger.audit("a@s", "7", "FAILED"); ledger.mapped("a@s", "7")
         held, _ = _assess(ledger, {"a@s": FakeGmail({"7": "x"})})
@@ -301,3 +309,28 @@ def test_a_dms_after_a_reset_starts_fresh_and_one_after_a_real_import_does_not(m
                        ((crashed, reset), True), ((), False)):
         monkeypatch.setattr(run_watch, "list_runs", runs(*rows))
         assert api_server._dms_needs_fresh(5) is want, rows
+
+
+
+def test_the_dms_starts_when_the_mail_pass_ends_and_not_again_at_the_exit(tmp_path, monkeypatch):
+    """Phase 6 (DMS_AT_MAIL_PASS): the marker of the pass AFTER mail, with this run's pid, starts the DMS once."""
+    import api_server
+    started = []
+    monkeypatch.setattr(api_server, "_start_dms", lambda aid, **kw: started.append(aid) or (True, "started"))
+    log = tmp_path / "migrate.log"
+    log.write_text("PASS 1/3 pid=4242: drive\nPASS 2/3 pid=4242: gmail\nPASS 1/3 pid=999: drive,gmail\n"
+                   "PASS 3/3 pid=4242: calendar,contacts,tasks\n")
+
+    class Proc:
+        pid, polls = 4242, 0
+
+        def poll(self):
+            self.polls += 1
+            return None if self.polls < 3 else 0
+    monkeypatch.setattr(api_server.time, "sleep", lambda s: None)
+    api_server._EARLY_DMS.discard(5)
+    api_server._dms_at_mail_pass(5, Proc(), str(log), 0)
+    assert started == [5] and 5 in api_server._EARLY_DMS
+    api_server._follow_on("dms", 5)            # the exit follow-on
+    assert started == [5], "started twice"
+    assert 5 not in api_server._EARLY_DMS
