@@ -158,3 +158,22 @@ def test_the_dms_copy_beside_ours_is_trashed_only_when_it_is_the_unrewritten_sou
         assert again["blocked"] == 0, "a rerun sees the trashed copy and is not ambiguous again"
     else:
         assert not trashed and out["blocked"] == 1
+
+
+def test_the_light_check_matches_in_memory_from_one_index_of_the_target(db, auth, settings, identity, light):
+    """Phase 6, the bulk DMS check: no search per message; the index is one list and one read per target message."""
+    pairs = [_pair(auth, db, n) for n in range(6)]
+    out = reconcile_dms(auth, db, settings, progress=lambda _: None)
+    assert out["verified"] == 6 and out["indexed"] == 6
+    searches = [c for c in auth.target_gmail(TGT_USER).calls_to("messages.list") if "rfc822msgid" in (c.get("q") or "")]
+    assert len(searches) <= 1, f"{len(searches)} searches; only the sampled full proof may search"
+    assert all(db.get_target_id(SRC_USER, s, "message") == t for s, t in pairs)
+
+
+def test_a_message_the_index_does_not_hold_is_searched_for_never_read_as_absent(db, auth, settings, identity, light):
+    import dms_light_proof
+    import gmail_engine
+    sid, tid = _pair(auth, db, 1)
+    gm = gmail_engine.GmailMigrator(auth, db, settings, SRC_USER, TGT_USER)
+    verdict, got, _ = dms_light_proof.check(gm, db, SRC_USER, sid, None, index={})
+    assert verdict == "verified" and got == tid

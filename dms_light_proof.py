@@ -50,15 +50,53 @@ def _meta(gm, svc, mid, label):
     return m, headers
 
 
-def check(gm, db, source_user: str, mid: str, mapped: str | None):
-    """('verified' | 'labels' | 'unknown', target_id, evidence). 'unknown' always means: prove it fully."""
+def target_index(gm, make_gm=None, workers: int = 1) -> dict:
+    """Every message on the target, Trash included, by Message-ID: {message-id: {target id: (metadata, headers)}}.
+    One list and one metadata read per TARGET message, made once per mailbox, instead of a search per source
+    message (fableplan2 Phase 6, the bulk DMS check). A message the index does not hold (mail that arrived after
+    it was built) is looked up the old way, by search, never read as absent. `make_gm` gives each worker thread its
+    own client (googleapiclient objects are not shared across threads)."""
+    import concurrent.futures as futures
+    import threading
+    ids, token = [], None
+    while True:
+        gm.limiter.acquire()
+        r = gm._retry(lambda t=token: gm.tgt.users().messages().list(
+            userId="me", maxResults=500, pageToken=t, includeSpamTrash=True).execute(), label="gmail.light.index")
+        got = [m["id"] for m in r.get("messages", [])]
+        ids += got
+        token = r.get("nextPageToken")
+        if not token or not got:
+            break
+    local = threading.local()
+
+    def meta(tid):
+        if make_gm is not None and not hasattr(local, "gm"):
+            local.gm = make_gm()
+        g = getattr(local, "gm", gm)
+        return tid, _meta(g, g.tgt, tid, "gmail.light.index-meta")
+    index: dict = {}
+    with futures.ThreadPoolExecutor(max_workers=max(1, workers if make_gm else 1)) as pool:
+        for tid, (tm, th) in pool.map(meta, ids):
+            index.setdefault(th.get("message-id", ""), {})[tid] = (tm, th)
+    return index
+
+
+def check(gm, db, source_user: str, mid: str, mapped: str | None, index: dict | None = None):
+    """('verified' | 'labels' | 'unknown', target_id, evidence). 'unknown' always means: prove it fully.
+    With `index` (target_index) the target is matched and read from memory: one source read per message."""
     import verify_sample as V
     from gmail_engine import SYSTEM_LABELS
     sm, sh = _meta(gm, gm.src, mid, "gmail.light.source")
     msgid = sh.get("message-id")
     if not msgid and not mapped:
         return "unknown", None, {"why": "no Message-ID and no mapping"}
+    copies = (index or {}).get(msgid) if msgid else None
     tid = mapped
+    if not tid and copies:
+        if len(copies) != 1:
+            return "unknown", None, {"why": "the target match is absent or ambiguous"}
+        tid = next(iter(copies))
     if not tid:
         gm.limiter.acquire()
         found = gm._retry(lambda: gm.tgt.users().messages().list(
@@ -74,7 +112,7 @@ def check(gm, db, source_user: str, mid: str, mapped: str | None):
         return "unknown", tid, {"why": "that target copy is mapped to another message"}
     if set(sm.get("labelIds") or []) - SYSTEM_LABELS - set(db.get_label_map(source_user)):
         return "unknown", tid, {"why": "a source label has no target label yet"}
-    tm, th = _meta(gm, gm.tgt, tid, "gmail.light.target")
+    tm, th = (copies or {}).get(tid) or _meta(gm, gm.tgt, tid, "gmail.light.target")
     facts = [k for k in COMPARED if sh.get(k, "") != th.get(k, "")]
     if msgid and th.get("message-id") and th.get("message-id") != msgid:
         facts.append("message-id")

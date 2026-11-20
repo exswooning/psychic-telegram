@@ -345,6 +345,19 @@ def reconcile_dms(auth, db, settings, progress=None, users=None):
         light = dms_light_proof.enabled()
         sampled = dms_light_proof.sample([r["item_id"] for r in rows]) if light else set()
         degraded = threading.Event()
+        index = None
+        if light and rows:
+            # One read of the target per message, made once (fableplan2 Phase 6): the light check then matches in
+            # memory instead of searching the target for every source message. A failure costs only the speed-up.
+            def make_gm(gm=gm):
+                g = GmailMigrator(auth, db, settings, source, target)
+                g.limiter = gm.limiter
+                return g
+            try:
+                index = dms_light_proof.target_index(gm, make_gm=make_gm, workers=workers)
+                out["indexed"] = out.get("indexed", 0) + sum(len(v) for v in index.values())
+            except Exception as exc:      # noqa: BLE001 - the per-message search still works
+                out.setdefault("notes", []).append(f"{source}: target index not built ({str(exc)[:120]}); searching per message")
         progress(f"DMS reconciliation: {source} | starting {len(rows)} email checks"
                  + (f" (light proof; {len(sampled)} sampled in full)" if light else ""))
 
@@ -387,7 +400,7 @@ def reconcile_dms(auth, db, settings, progress=None, users=None):
                     return (source, mid, cached), None
                 if light and mid not in sampled and not degraded.is_set() and dms_light_proof.eligible(db, source, mid):
                     mapped = db.get_target_id(source, mid, "message")
-                    verdict, ltid, evidence = dms_light_proof.check(gm, db, source, mid, mapped)
+                    verdict, ltid, evidence = dms_light_proof.check(gm, db, source, mid, mapped, index=index)
                     if verdict != "unknown":
                         tid = ltid
                         dms_light_proof.record(db, source, mid, tid, verdict, evidence)
