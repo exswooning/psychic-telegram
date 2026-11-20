@@ -205,12 +205,12 @@ Phase 1 and the code of Phase 2 need no tenant. Start them while Phase 0 is open
   and a rerun repeats. Message-IDs stay uuid4 on purpose. `data-generator/test_seed_repeatable.py`
   runs the seed in four processes with different `PYTHONHASHSEED`, and fails on any `hash(` in the
   seeder.
-- [~] P1.7 Mail under 5 MB goes up as raw bytes. Today it goes up as base64 text inside JSON, 33%
+- [x] P1.7 (20 Nov, measured: see the engine line) Mail under 5 MB goes up as raw bytes. Today it goes up as base64 text inside JSON, 33%
   bigger, on a line whose upload is the limit (0.9 MB/s).
   - [x] (16 Nov) Seeder: `seed_gmail` and `seed_drafts` upload `message/rfc822` bytes (the labels
     alone in the JSON body). Test in `test_seed_repeatable.py`. Not yet measured live: measure bytes
     on `wlp2s0` for 1,000 seeded messages before and after, in P0.9.
-  - [~] **[opus]** (20 Nov: code done, `_small_upload`, `GMAIL_RAW_UPLOAD=0` turns it off; non-ASCII keeps the body route; MEASUREMENT OWED) Engine: `gmail_engine._deliver`, which already uploads raw bytes above 5 MB. Measure
+  - [x] **[opus]** (20 Nov, deployed and measured on the box's `wlp2s0`, 200 messages of 19.9 KB into t20@b., the routes alternated twice: base64 in JSON sent 31,483 / 31,133 bytes a message (1.59x / 1.57x its size), raw bytes 26,454 / 26,505 (1.33x): **16% fewer bytes**, not a quarter: the rest is per-request TLS/HTTP/TCP overhead neither route avoids. `_small_upload`; `GMAIL_RAW_UPLOAD=0` turns it off; non-ASCII keeps the body route) Engine: `gmail_engine._deliver`, which already uploads raw bytes above 5 MB. Measure
     upload bytes per message before and after on one mailbox (`/proc/net/dev`); expect about a
     quarter fewer.
 
@@ -541,6 +541,15 @@ old keys from root's `authorized_keys`; decide on rewriting the git history that
 
 ## 11. State (newest first)
 
+- 20 Nov 2026, ~04:45 UTC box (Opus): **[opus] items coded and deployed; run 1b NOT_PARITY 40/41 on a reset gap; run 2 starts.**
+  Run 1b: reset 44 min (permanent mail delete), migrate 45 min (0 failures, report PASS), DMS import + reconciliation 0 unresolved,
+  labels 528 aligned, verify, gate 40/41: c03 had four extra shortcuts. Cause: the Drive reset deleted only the seeder's
+  MIGRATION-TEST tree; fixtures at the My Drive root were copied to the target root and outlived every reset; plain files were
+  adopted by the next run, shortcuts were made again. Fix: `reset_target._delete_ledger_drive_items` deletes every Drive item the ledger
+  says the migration wrote for the user (never a moved file). Run 1b therefore does not count; the three repeatable runs start with run 2.
+  Deployed at 04:38 (seven files, checksums checked): the reset fix, P1.7 (measured 16% fewer bytes), the bulk DMS check (on; run 1b's
+  reconciliation is the "before"), `DRIVE_FINISH_IN_STAGING` and `DMS_AT_MAIL_PASS` (both OFF until measured). Run 2:
+  `/tmp/p35_run_nochat.sh 2` on the box.
 - 20 Nov 2026 (box 19 Nov ~21:00 UTC) (Sonnet): **P3.5 run 1: the reset-leftover mail failures are fixed (0 FAILED rows), the DMS is running fresh.**
   Five product defects found by run 1 and fixed with tests: (1) `reset_target` listed Chat with Chat off (40 x 11 retries);
   (2) a reset moves migrated mail to Trash and the engine then stopped on the previous run's own REWRITTEN copy (1,431 blocked
