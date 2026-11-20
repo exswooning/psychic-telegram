@@ -178,3 +178,35 @@ def test_a_429_resource_exhausted_gets_the_rate_limit_budget_too(monkeypatch):
     with pytest.raises(RuntimeError, match="exhausted"):
         boom()
     assert calls["n"] == R.RATE_LIMIT_RETRY_BUDGET + 1, calls
+
+
+class TestGmailBusyMailbox:
+    """Gmail's 400 failedPrecondition on a busy mailbox (c10 during the DMS import, 20 Nov 2026) gets a few tries."""
+
+    def _boom(self, uri, reason="failedPrecondition"):
+        calls = {"n": 0}
+
+        @R.retry_on_google_error(max_retries=6, base_delay=0, max_delay=0)
+        def boom():
+            calls["n"] += 1
+            raise R.HttpError(
+                resp=type("R", (), {"status": 400, "reason": "Bad Request",
+                                    "get": lambda self, k, d=None: None})(),
+                content=('{"error":{"errors":[{"reason":"%s"}],"message":"Precondition check failed."}}'
+                         % reason).encode(), uri=uri)
+
+        return boom, calls
+
+    def test_a_gmail_read_is_retried_a_few_times(self, monkeypatch):
+        monkeypatch.setattr(R.time, "sleep", lambda *_: None)
+        boom, calls = self._boom("https://gmail.googleapis.com/gmail/v1/users/me/messages?q=x")
+        with pytest.raises(Exception):
+            boom()
+        assert calls["n"] == R.GMAIL_PRECONDITION_RETRY_BUDGET + 1, calls
+
+    def test_the_same_400_elsewhere_still_fails_fast(self, monkeypatch):
+        monkeypatch.setattr(R.time, "sleep", lambda *_: None)
+        boom, calls = self._boom("https://www.googleapis.com/drive/v3/files/x")
+        with pytest.raises(Exception):
+            boom()
+        assert calls["n"] == 1, calls

@@ -148,6 +148,16 @@ TRANSIENT_400_FRAGMENTS = ("no google account",)
 # is recorded as owed (drive_engine) and granted by repair once the account exists.
 NO_ACCOUNT_RETRY_BUDGET = 1
 
+# Gmail answers a read 400 failedPrecondition ("Precondition check failed") while the mailbox is busy -- live, an
+# rfc822msgid search on c10 while Google's DMS import wrote into it (a. -> b. P3.5 run 2, 20 Nov 2026); the same
+# search a minute later answered. A mailbox with Gmail switched off answers it every time, so a few tries, not the
+# full ladder.
+GMAIL_PRECONDITION_RETRY_BUDGET = 3
+
+
+def _is_gmail_precondition(status: int, reason: str, exc) -> bool:
+    return status == 400 and reason == "failedPrecondition" and "gmail.googleapis.com" in str(exc)
+
 # A 403 insufficientPermissions is permanent by default and usually should
 # be: it is how Drive says a user may not touch a file, and retrying that
 # six times per file wastes the quota real work needs.
@@ -320,7 +330,7 @@ def _is_permanent(status: int, reason: str, exc: HttpError | None = None) -> boo
         return reason not in TRANSIENT_403_REASONS
     if status == 401 and exc is not None and _is_transient_401(reason, exc):
         return False
-    if status == 400 and _is_transient_400(exc):
+    if status == 400 and (_is_transient_400(exc) or _is_gmail_precondition(status, reason, exc)):
         return False
     if status in RETRYABLE_STATUSES:
         return False
@@ -532,6 +542,8 @@ def retry_on_google_error(
                     budget = max_retries
                     if status == 400 and _is_transient_400(exc):
                         budget = min(max_retries, NO_ACCOUNT_RETRY_BUDGET)
+                    elif _is_gmail_precondition(status, reason, exc):
+                        budget = min(max_retries, GMAIL_PRECONDITION_RETRY_BUDGET)
                     elif _is_transient_403(exc):
                         budget = max(max_retries, SCOPE_RETRY_BUDGET)
                     elif reason in TRANSIENT_403_REASONS or status == 429:
