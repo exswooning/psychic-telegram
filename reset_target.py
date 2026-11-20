@@ -217,6 +217,14 @@ def reset_one(settings: Settings, auth: AuthManager, user: str,
         except Exception as exc:  # noqa: BLE001 - one service must not lose the rest
             unreachable.add(key)
             print(f"    ! {user} {key}: {str(exc)[:90]}")
+    if "drive" in services and "drive" not in unreachable:
+        try:
+            gone = _delete_ledger_drive_items(settings, auth, user)
+            out["drive"] += gone
+            if gone:
+                print(f"    {user}: deleted {gone} migrated Drive item(s) outside the seeded tree")
+        except Exception as exc:  # noqa: BLE001 - the seeded tree is already gone; this is tidying
+            print(f"    ! {user} migrated Drive items: {str(exc)[:90]}")
     # Not for a mailbox the seeder's own reset could not reach (an account the target does not have):
     # that error has been reported once already, and a second one for the same cause is only noise.
     if "gmail" in services and "gmail" not in unreachable:
@@ -235,6 +243,34 @@ def reset_one(settings: Settings, auth: AuthManager, user: str,
         out["chat"] += _delete_ledger_spaces(settings, auth, user)
     out["unreachable"] = sorted(unreachable)
     return out
+
+
+def _delete_ledger_drive_items(settings: Settings, auth: AuthManager, target_user: str) -> int:
+    """Every Drive item the ledger says the migration wrote for this user, by id -- not only the seeded tree. A
+    fixture made at the root of a source My Drive was copied to the root of the target's, outside MIGRATION-TEST, so
+    the seeder's reset never matched it; a plain file was adopted by the next run, but a shortcut was made again
+    beside the old one (c03, P3.5 run 1b, 20 Nov 2026: four extra shortcuts held the gate at 40/41). Only ids the
+    ledger maps, on the target; a file already gone answers 404."""
+    import sqlite3
+    try:
+        conn = sqlite3.connect(f"file:{settings.db_path}?mode=ro", uri=True)
+        ids = [r[0] for r in conn.execute(
+            "SELECT m.target_id FROM id_mapping m JOIN identity_map i ON i.source_email = m.source_user "
+            "WHERE lower(i.target_email) = lower(?) AND m.type IN ('file','folder','shortcut') "
+            "AND m.target_id != m.source_id", (target_user,))]
+        conn.close()
+    except Exception:  # noqa: BLE001 - no ledger to read is nothing to delete
+        logging.getLogger(__name__).debug("ignored an error", exc_info=True)
+        return 0
+    drive, n = auth.target_drive(target_user), 0
+    for fid in ids:
+        try:
+            drive.files().delete(fileId=fid, supportsAllDrives=True).execute()
+            n += 1
+        except Exception as exc:  # noqa: BLE001 - gone already (the seeded tree took it), or not this user's
+            if "404" not in str(exc) and "notFound" not in str(exc):
+                print(f"    ! {target_user} drive item {fid}: {str(exc)[:90]}")
+    return n
 
 
 def _delete_ledger_spaces(settings: Settings, auth: AuthManager, target_user: str) -> int:

@@ -389,3 +389,31 @@ def test_the_mail_reset_is_given_a_purge_client_when_the_target_key_can_delete(m
     monkeypatch.setattr(reset_target, "_purge_client", lambda settings, user: "PURGE")
     reset_target.reset_one(settings(), _FakeAuth(), "a@a.example.com", services=("gmail",))
     assert got["purge"] == "PURGE"
+
+
+def test_the_reset_deletes_what_the_ledger_says_the_migration_wrote_outside_the_seeded_tree(tmp_path):
+    """c03, P3.5 run 1b: fixture shortcuts at the My Drive root outlived every reset and were made again beside the old."""
+    import sqlite3
+    from types import SimpleNamespace
+    db = tmp_path / "l.db"
+    c = sqlite3.connect(db)
+    c.execute("CREATE TABLE identity_map (source_email TEXT, target_email TEXT)")
+    c.execute("CREATE TABLE id_mapping (source_user TEXT, source_id TEXT, target_id TEXT, type TEXT)")
+    c.execute("INSERT INTO identity_map VALUES ('u@a.example.com', 'u@b.example.com')")
+    c.executemany("INSERT INTO id_mapping VALUES (?,?,?,?)", [
+        ("u@a.example.com", "s1", "t1", "shortcut"), ("u@a.example.com", "s2", "t2", "file"),
+        ("u@a.example.com", "m1", "m1", "file"),                    # moved: one id on both sides, never deleted
+        ("u@a.example.com", "s3", "t3", "message"), ("other@a.example.com", "s4", "t4", "file")])
+    c.commit(); c.close()
+    deleted = []
+
+    class Files:
+        def delete(self, fileId, **_):
+            deleted.append(fileId)
+            return SimpleNamespace(execute=lambda: {})
+
+    class Auth:
+        def target_drive(self, user):
+            return SimpleNamespace(files=lambda: Files())
+    n = reset_target._delete_ledger_drive_items(SimpleNamespace(db_path=str(db)), Auth(), "u@b.example.com")
+    assert n == 2 and sorted(deleted) == ["t1", "t2"]
