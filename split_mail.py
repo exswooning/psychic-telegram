@@ -168,6 +168,35 @@ def same_source_email(gm, other_mid: str, source_raw: str) -> bool:
     return compare_message(decode(source_raw), decode(got.get("raw", "")))[0] != "different"
 
 
+def shared_copy(gm, db, source: str, mid: str, tid: str, source_raw: str) -> str | None:
+    """The other source message already holding `tid`, when it is this same email -- the source holds it twice
+    (one Message-ID, the same bytes) and Gmail keeps one copy (c04's "One Message-ID, twice", 18 Nov 2026). None
+    when nobody holds it; raises when someone else's email does."""
+    other = db.conn.execute(
+        "SELECT source_id FROM id_mapping WHERE source_user=? AND type='message' AND target_id=? AND source_id!=? LIMIT 1",
+        (source, tid, mid)).fetchone()
+    if not other:
+        return None
+    if not same_source_email(gm, other[0], source_raw):
+        raise RuntimeError("DMS destination identity is already mapped to another source message")
+    db.log_audit(source, mid, "message", "SUCCESS_SOURCE_DUPLICATE",
+                 f"the same email as {other[0]} on the source; the target holds one copy ({tid})")
+    return other[0]
+
+
+def adopt(gm, db, source: str, mid: str, tid: str, source_raw: str, shares_with: str | None) -> None:
+    """Adopt `tid` for `mid`. Both source copies of one email are checked at once on two workers: the other took
+    `tid` after this one's shared_copy found it free, and the adoption refused (c04, a. -> b. run 2, 20 Nov 2026).
+    Asked again once, then adopted beside it."""
+    try:
+        db.adopt_message_mapping(source, mid, tid, shares_with=shares_with)
+    except RuntimeError:
+        late = None if shares_with else shared_copy(gm, db, source, mid, tid, source_raw)
+        if not late:
+            raise
+        db.adopt_message_mapping(source, mid, tid, shares_with=late)
+
+
 def target_copies(gm, msgid: str, cap: int = 3) -> list[dict]:
     """The target's messages with this Message-ID, up to `cap` -- so fewer than `cap` is the exact count. Gmail sends
     a nextPageToken whenever a page is full, even with nothing after it: maxResults=2 over exactly two copies read
@@ -461,17 +490,7 @@ def reconcile_dms(auth, db, settings, progress=None, users=None):
                         raise RuntimeError(
                             "DMS overlap changed the mapped destination identity"
                         )
-                conflict = db.conn.execute(
-                    "SELECT source_id FROM id_mapping WHERE source_user=? AND type='message' AND target_id=? AND source_id!=? LIMIT 1",
-                    (source, tid, mid)).fetchone()
-                if conflict and not same_source_email(gm, conflict[0], full["raw"]):
-                    raise RuntimeError("DMS destination identity is already mapped to another source message")
-                shares_with = conflict[0] if conflict else None
-                if conflict:
-                    # The source holds this email twice (one Message-ID, the same bytes); Gmail keeps one copy, and
-                    # both source messages are that copy (c04's "One Message-ID, twice", a. -> b., 18 Nov 2026).
-                    db.log_audit(source, mid, "message", "SUCCESS_SOURCE_DUPLICATE",
-                                 f"the same email as {conflict[0]} on the source; the target holds one copy ({tid})")
+                shares_with = shared_copy(gm, db, source, mid, tid, full["raw"])
                 from gmail_engine import SYSTEM_LABELS
                 unmapped_labels = set(full.get("labelIds") or []) - SYSTEM_LABELS - set(db.get_label_map(source))
                 if unmapped_labels:
@@ -489,11 +508,11 @@ def reconcile_dms(auth, db, settings, progress=None, users=None):
                     labels_only = (proof.get("contentProven") is True and not proof.get("findings", {}).get("errors")
                                    and proof.get("labelDifferences"))
                     if labels_only and not mapped:
-                        db.adopt_message_mapping(source, mid, tid, shares_with=shares_with)
+                        adopt(gm, db, source, mid, tid, full["raw"], shares_with)
                     raise (LabelsDiffer if labels_only else ContentDiffers)("DMS destination content or labels did not match")
                 checkpoint.save(mid, tid, "VERIFIED", {"scope": "content and labels", "target": tid})
                 if not mapped:
-                    db.adopt_message_mapping(source, mid, tid, shares_with=shares_with)
+                    adopt(gm, db, source, mid, tid, full["raw"], shares_with)
                 resolve_findings(mid)
                 return (source, mid, tid), None
             except Exception as exc:

@@ -43,6 +43,21 @@ def test_only_the_proven_twin_may_share_a_target(tmp_path):
         d.adopt_message_mapping("u@a", "third", "T", shares_with="nobody")
 
 
+def test_a_twin_adopted_by_a_sibling_worker_after_the_check_still_shares(tmp_path):
+    """Both source copies checked at once: the other worker took T after this one found it free (c04, 20 Nov 2026)."""
+    import pytest
+    from db import MigrationDB
+    raw = b"Message-ID: <twice@seed.test>\r\n\r\nsame id\r\n"
+    enc = base64.urlsafe_b64encode(raw).decode()
+    d = MigrationDB(str(tmp_path / "l.db"))
+    assert split_mail.shared_copy(_gm(raw), d, "u@a", "second", "T", enc) is None   # free when checked
+    d.adopt_message_mapping("u@a", "first", "T")                                    # the sibling wins
+    split_mail.adopt(_gm(raw), d, "u@a", "second", "T", enc, None)
+    assert d.get_target_id("u@a", "second", "message") == "T"
+    with pytest.raises(RuntimeError):                                               # another email never shares
+        split_mail.adopt(_gm(b"Message-ID: <x@seed.test>\r\n\r\nother\r\n"), d, "u@a", "third", "T", enc, None)
+
+
 def test_two_copies_are_two_even_when_gmail_sends_a_page_token():
     """Gmail tokens a full page with nothing after it: maxResults=2 over two copies read as 'more' (18 Nov 2026)."""
     import split_mail
