@@ -210,7 +210,7 @@ Phase 1 and the code of Phase 2 need no tenant. Start them while Phase 0 is open
   - [x] (16 Nov) Seeder: `seed_gmail` and `seed_drafts` upload `message/rfc822` bytes (the labels
     alone in the JSON body). Test in `test_seed_repeatable.py`. Not yet measured live: measure bytes
     on `wlp2s0` for 1,000 seeded messages before and after, in P0.9.
-  - [ ] **[opus]** Engine: `gmail_engine._deliver`, which already uploads raw bytes above 5 MB. Measure
+  - [~] **[opus]** (20 Nov: code done, `_small_upload`, `GMAIL_RAW_UPLOAD=0` turns it off; non-ASCII keeps the body route; MEASUREMENT OWED) Engine: `gmail_engine._deliver`, which already uploads raw bytes above 5 MB. Measure
     upload bytes per message before and after on one mailbox (`/proc/net/dev`); expect about a
     quarter fewer.
 
@@ -503,15 +503,15 @@ measurement before and after.
 
 - [ ] One run record that lists its phases for the UI; a restart resumes from the recorded phase.
   Proven by F-api and F-reboot.
-- [ ] **[opus]** Bulk DMS check: list the target once with Message-ID headers, match in memory, read
+- [~] **[opus]** (20 Nov: code done, `dms_light_proof.target_index`; run 1b = before, run 2 = after) Bulk DMS check: list the target once with Message-ID headers, match in memory, read
   content only for link mail and mismatches. Proven by P2.10.
-- [ ] **[opus]** One target write per Drive file: comments, then grants, while the file is in the
+- [~] **[opus]** (20 Nov: probed live on b. -- grants incl. outside and comments survive the move, the move's time holds except Docs re-stamps a commented Doc; code behind `DRIVE_FINISH_IN_STAGING`, OFF until the A/B) One target write per Drive file: comments, then grants, while the file is in the
   staging drive, then the move. A/B on twins first.
 - [ ] The mail verify reuses the bulk index for its extras check.
 - [ ] End-of-pass retry by class: transient (retry), quota (wait for the reset), explained
   (accepted), unexplained (hold that user, go on, open an incident). Two rounds without progress
   stop and report.
-- [ ] **[opus]** The DMS starts per user as that user's mail pass ends clean.
+- [~] **[opus]** (20 Nov: code behind `DMS_AT_MAIL_PASS`, OFF until measured: the DMS starts when the run's mail pass ends, users whose mail did not end clean held as before; a per-user start needs the console to accept users added to a running import, not yet probed) The DMS starts per user as that user's mail pass ends clean.
 - [ ] The UI refuses a full verify while the DMS imports.
 - [ ] One log file per run; DMS console readings appended to a history, never overwritten.
 - [ ] A nightly cohort run with a morning report: the campaign on a systemd timer, one line in
