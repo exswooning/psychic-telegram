@@ -2137,6 +2137,9 @@ class DriveMigrator:
                         self.source_user, item["name"],
                         copied["md5Checksum"], item["md5Checksum"])
 
+        staged = None
+        if os.getenv("DRIVE_FINISH_IN_STAGING", "0").lower() in ("1", "true", "yes") and not self.settings.dry_run:
+            staged = self._finish_in_staging(item, copy_id)
         try:
             moved = self._out_of_staging(item, copy_id, tgt_parent)
         except (PermanentAPIError, RuntimeError) as exc:
@@ -2160,7 +2163,7 @@ class DriveMigrator:
             self._bump("failed")
             return
 
-        self._landed(item, copy_id, tgt_parent, moved, bytes_moved=size)
+        self._landed(item, copy_id, tgt_parent, moved, bytes_moved=size, staged=staged)
 
     def _out_of_staging(self, item: dict, file_id: str, tgt_parent: str) -> dict:
         """The second hop, as the TARGET account: out of the staging drive into its
@@ -2193,7 +2196,8 @@ class DriveMigrator:
         return moved
 
     def _landed(self, item: dict, target_id: str, tgt_parent: str, moved: dict | None,
-                bytes_moved: int = 0, note: str = "", comments: bool = True) -> None:
+                bytes_moved: int = 0, note: str = "", comments: bool = True,
+                staged: dict | None = None) -> None:
         """Record a file that reached its place on the target, then finish it."""
         self.db.record_mapping(self.source_user, item["id"], target_id, "file",
                                parent_target_id=tgt_parent, source_name=item["name"])
@@ -2210,7 +2214,7 @@ class DriveMigrator:
         # kept -- free, already asked for -- so a mismatch forces the restore.
         kept = (moved or {}).get("modifiedTime") or ""
         want = item.get("modifiedTime") or ""
-        self._finish_item(item, target_id, comments=comments,
+        self._finish_item(item, target_id, comments=comments, staged=staged,
                           force_mtime_restore=bool(want and kept and kept[:19] != want[:19]))
 
     # -- move: the file itself, not a copy ------------------------------------------------
@@ -3413,7 +3417,8 @@ class DriveMigrator:
         return 0
 
     def _finish_item(self, item: dict, target_id: str, *, comments: bool = True,
-                     resume: bool = False, force_mtime_restore: bool = False) -> None:
+                     resume: bool = False, force_mtime_restore: bool = False,
+                     staged: dict | None = None) -> None:
         """Everything done to an item after it lands -- its sharing, its comments -- and
         then the modifiedTime those writes moved.
 
@@ -3439,6 +3444,39 @@ class DriveMigrator:
         if item.get("mimeType") == FORM_MIME and self.settings.migrate_form_links:
             self._note_form_link(item)
         shareable = item.get("shared") is not False      # an explicit False has nothing to share
+        if staged is not None:
+            # Comments and sharing were written while the copy sat in the staging drive, and the move that
+            # followed carried the modifiedTime (finish_in_staging): only a failure, a forced restore or a
+            # commented native's late re-stamp still needs a write here.
+            # Comments still count: a commented Doc is re-stamped by Docs minutes after the move, and the late check
+            # that puts it back is registered by the restore below (measured on b., 20 Nov 2026).
+            touched, failed, sharing_ran, commented = (staged["commented"], staged["failed"], staged["sharing_ran"],
+                                                       staged["commented"])
+        else:
+            touched, failed, sharing_ran, commented = self._write_comments_and_grants(item, target_id, comments, resume)
+        writes_applied = touched or (1 if failed else 0) or (1 if force_mtime_restore else 0)
+        # A Form's time is re-stamped by the Forms service a little after its rebuild, overwriting a
+        # restore that stuck when made (9 Nov 2026: rebuilt Forms read their last edit time while the
+        # restore had reported success) -- checked again after it settles, like a commented file.
+        late = bool(commented) or item.get("mimeType") == "application/vnd.google-apps.form"
+        self._restore_modified_time(target_id, item, writes_applied, late_bump=late)
+        self._apply_lock(target_id, item)
+        if shareable and sharing_ran:
+            self.db.clear_acl_pending(self.source_user, item["id"])
+
+    def _finish_in_staging(self, item: dict, copy_id: str, comments: bool = True) -> dict:
+        """Comments, then sharing, written to the copy while it is still in the staging drive, so the move that
+        follows carries the modifiedTime in the same call and no separate restore is needed (fableplan2 Phase 6,
+        "one target write per Drive file"). Measured on b. (20 Nov 2026): grants to a colleague and to an outside
+        account, and a comment, made in the staging drive survive the move into My Drive, and the time the move
+        sets holds -- except a commented Doc, which Docs re-stamps ~4 minutes later (the late check still runs).
+        DRIVE_FINISH_IN_STAGING=1 switches it on; off until the A/B on twins says it is right."""
+        touched, failed, sharing_ran, commented = self._write_comments_and_grants(item, copy_id, comments, False)
+        return {"touched": touched, "failed": failed, "sharing_ran": sharing_ran, "commented": commented}
+
+    def _write_comments_and_grants(self, item: dict, target_id: str, comments: bool, resume: bool):
+        """(writes made, any step failed, sharing ran, comments written). Comments first: see _finish_item."""
+        shareable = item.get("shared") is not False
         if shareable:
             self.db.mark_acl_pending(self.source_user, item["id"])
         touched, failed, sharing_ran, commented = 0, False, False, 0
@@ -3467,17 +3505,7 @@ class DriveMigrator:
             log.warning("[%s] sharing of %s failed after it was copied (%s: %s); it stays "
                         "marked unfinished and the next run retries it",
                         self.source_user, item.get("name"), type(exc).__name__, exc)
-        # Always put the time back after ANY step that may have written -- including one
-        # that raised half way through.
-        writes_applied = touched or (1 if failed else 0) or (1 if force_mtime_restore else 0)
-        # A Form's time is re-stamped by the Forms service a little after its rebuild, overwriting a
-        # restore that stuck when made (9 Nov 2026: rebuilt Forms read their last edit time while the
-        # restore had reported success) -- checked again after it settles, like a commented file.
-        late = bool(commented) or item.get("mimeType") == "application/vnd.google-apps.form"
-        self._restore_modified_time(target_id, item, writes_applied, late_bump=late)
-        self._apply_lock(target_id, item)
-        if shareable and sharing_ran:
-            self.db.clear_acl_pending(self.source_user, item["id"])
+        return touched, failed, sharing_ran, commented
 
     def _note_form_link(self, item: dict) -> None:
         """Which Sheet this Form writes its responses to. The copy is linked to nothing,

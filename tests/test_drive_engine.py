@@ -2267,3 +2267,46 @@ def test_an_apps_script_projects_comments_404_is_a_skip_not_a_failure(auth, db, 
     finally:
         migration_comments.reconcile = orig
     assert db.get_audit(SRC_USER, fid, "comment")["status"] == "SKIPPED_NO_COMMENTS_API"
+
+
+def _file_writes(auth):
+    """The target writes on the copied file itself, in order: 'grant', 'move', 'restore' (not the staging drive's own grants)."""
+    calls = auth.target_drive(TGT_USER).calls
+    moved = next(kw["fileId"] for n, kw in calls if n == "files.update" and kw.get("removeParents"))
+    out = []
+    for n, kw in calls:
+        if kw.get("fileId") != moved:
+            continue
+        if n == "permissions.create":
+            out.append("grant")
+        elif n == "files.update":
+            out.append("move" if kw.get("removeParents") else "restore" if (kw.get("body") or {}).get("modifiedTime") else "update")
+    return out
+
+
+def test_finish_in_staging_grants_before_the_move_and_needs_no_separate_restore(auth, db, settings, identity, quota, monkeypatch):
+    """Phase 6, one target write per Drive file (DRIVE_FINISH_IN_STAGING): a shared, uncommented file gets its grant while
+    the copy is in the staging drive, then the move carries its modifiedTime: no restore call after it."""
+    import drive_engine
+    from db import bulk_seed_identities
+    bulk_seed_identities(db, [("bob@tenanta.com", "robert.jones@tenantb.com")])
+    monkeypatch.setenv("DRIVE_FINISH_IN_STAGING", "1")
+    _server_side(settings)
+    src = auth.source_drive(SRC_USER)
+    fid = src.add_binary("shared.bin", data=b"x" * 10)
+    src.add_permission(fid, "user", "writer", email="bob@tenanta.com")
+    drive_engine.DriveMigrator(auth, db, settings, SRC_USER, TGT_USER, quota).run()
+    assert _file_writes(auth) == ["grant", "move"], _file_writes(auth)
+
+
+def test_without_the_switch_the_grant_follows_the_move_and_the_time_is_put_back(auth, db, settings, identity, quota, monkeypatch):
+    import drive_engine
+    from db import bulk_seed_identities
+    bulk_seed_identities(db, [("bob@tenanta.com", "robert.jones@tenantb.com")])
+    monkeypatch.delenv("DRIVE_FINISH_IN_STAGING", raising=False)
+    _server_side(settings)
+    src = auth.source_drive(SRC_USER)
+    fid = src.add_binary("shared.bin", data=b"x" * 10)
+    src.add_permission(fid, "user", "writer", email="bob@tenanta.com")
+    drive_engine.DriveMigrator(auth, db, settings, SRC_USER, TGT_USER, quota).run()
+    assert _file_writes(auth) == ["move", "grant", "restore"], _file_writes(auth)
