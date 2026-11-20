@@ -161,3 +161,20 @@ class TestWhichLimitRefusedIsRecorded:
             ("drive.files.copy", 429, "rateLimitExceeded", "Write requests per minute per user"): 1,
             ("drive.files.copy", 403, "userRateLimitExceeded", "User Rate Limit Exceeded"): 1}
         assert "Write requests per minute per user" in caplog.text      # the first of a kind, in full
+
+
+def test_a_429_resource_exhausted_gets_the_rate_limit_budget_too(monkeypatch):
+    """The Sheets per-minute read quota: 429 RESOURCE_EXHAUSTED, not one of the three 403 reasons."""
+    monkeypatch.setattr(R.time, "sleep", lambda *_: None)
+    calls = {"n": 0}
+
+    @R.retry_on_google_error(max_retries=6, base_delay=0, max_delay=0)
+    def boom():
+        calls["n"] += 1
+        raise R.HttpError(
+            resp=type("R", (), {"status": 429, "reason": "Too Many Requests",
+                                "get": lambda self, k, d=None: None})(),
+            content=b'{"error":{"code":429,"status":"RESOURCE_EXHAUSTED","message":"Quota exceeded for quota metric"}}')
+    with pytest.raises(RuntimeError, match="exhausted"):
+        boom()
+    assert calls["n"] == R.RATE_LIMIT_RETRY_BUDGET + 1, calls

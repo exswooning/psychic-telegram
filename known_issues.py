@@ -484,6 +484,13 @@ RUN_KINDS = [
      "names a file with no copy on the target (9 on audit@, account 3, 8 Nov 2026).",
      "The operator's choice (8 Nov 2026): the DMS carries it with the rest, its links unrewritten. Owed, never a "
      "blocker of the DMS (config.DMS_OWED_FAILURES).", True),
+    ("run.rate_limited", None,
+     lambda t: "exhausted" in t and ("HTTP 429" in t or "RESOURCE_EXHAUSTED" in t),
+     "Google kept saying 'slow down' longer than the retries waited",
+     "A per-minute quota (Sheets reads, 60 a minute per user) spent by many users finishing a pass at the same moment; "
+     "a 429 RESOURCE_EXHAUSTED got the standard six tries, about a minute (P3.5 run 2, 20 Nov 2026: three link rewrites).",
+     "Fixed 2026-11-20: every 429 gets the rate-limit budget (resilience.RATE_LIMIT_RETRY_BUDGET, about three minutes); a "
+     "link rewrite still lost is repointed by the verify's repair (repair_verified_native_links).", True),
     ("gmail.reset_leftover", ("message", "draft"),
      lambda t: "Existing destination Message-ID has different content" in t,
      "The target already holds this Message-ID with other content",

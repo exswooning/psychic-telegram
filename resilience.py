@@ -534,7 +534,10 @@ def retry_on_google_error(
                         budget = min(max_retries, NO_ACCOUNT_RETRY_BUDGET)
                     elif _is_transient_403(exc):
                         budget = max(max_retries, SCOPE_RETRY_BUDGET)
-                    elif reason in TRANSIENT_403_REASONS:
+                    elif reason in TRANSIENT_403_REASONS or status == 429:
+                        # A 429 is "slow down" whatever its reason: the Sheets per-minute read quota answers
+                        # 429 RESOURCE_EXHAUSTED, which six tries (about a minute) did not outlast when every
+                        # twin finished its Drive pass at once (P3.5 run 2, 20 Nov 2026: three link rewrites lost).
                         # A rate limit is transient BY DEFINITION -- it is
                         # the server saying "later", not "no". The standard
                         # ladder gives it about a minute, which is short
