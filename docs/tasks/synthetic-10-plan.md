@@ -551,7 +551,7 @@ Overall 22 Nov: 6.5 / 10.
 1. P3.7, dharan's route: run 7 to PARITY on a complete check, run 8 (`/tmp/p35_dharan.sh 8`, proves the
    shared-drive reset), then F-stop on it (stop mid-Drive, restart, equal to control).
 2. P3.5: two server-side runs back to back with no code change between them (`/tmp/p35_run_nochat.sh N`).
-3. The full suite green in one run (`pytest tests/ data-generator/`); fix what fails before any live scenario.
+3. [x] (22 Nov, ae38999: 9 failures fixed, `tests/` and `data-generator/` each rc 0; run them separately, as CLAUDE.md says -- one process mixing both conftests fails test_big_attachment) The full suite green; fix what fails before any live scenario.
 4. P3.4 live: the first scenario of each group (`campaign.py --only`), fixing the executor's live details
    (log markers, job names, the F-webui body). Then every P2.6 error and P2.7 failure row live, P2.11
    openers inside them, P2.8's live faults. A failing scenario is a fix, a test and a re-run.
