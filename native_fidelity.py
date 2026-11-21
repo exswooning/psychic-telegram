@@ -257,13 +257,47 @@ def compare_native(auth, source_user, target_user, sid, tid, mime, lookup, fetch
     # A signed image URL is not an identity: each side's differs on every read. Each
     # image is fetched (the URL acts as the requester, for a short while) and compared
     # by its bytes' hash -- Docs call it contentUri, Slides contentUrl.
+    raw_source, raw_target = source, target
     source, target = _hash_images(source, fetch), _hash_images(target, fetch)
     if mime.endswith(".document"):
         source, target = _merge_runs(source), _merge_runs(target)
     a, b = canonical_native(source, lookup), canonical_native(target)
+    if a != b and mime.endswith(".presentation"):
+        # A .pptx round trip (a read-only source) rebuilds the layouts and masters and spells out inherited
+        # properties, while every slide renders pixel-identical (11 decks, P3.7 run 7, 21 Nov 2026). A deck is
+        # then judged by what a person sees: Google's own rendering of each slide, compared pixel by pixel.
+        differs = _slides_render_differently(auth, source_user, target_user, sid, tid,
+                                             raw_source, raw_target, fetch or _fetch_image, pace)
+        if not differs:
+            return [], scope + "; slides compared as rendered (their stored structure differs)"
+        return [f"slide {n} renders differently" for n in differs], scope
     return (
         [] if a == b else ["native document content, formatting or structure differs"]
     ), scope
+
+
+def _slides_render_differently(auth, source_user, target_user, sid, tid, source, target, fetch, pace=lambda: None):
+    """Slide numbers (1-based) whose rendered thumbnails differ; every slide when the decks' slide counts differ."""
+    import io
+    from PIL import Image, ImageChops
+    ss, ts = source.get("slides") or [], target.get("slides") or []
+    if len(ss) != len(ts):
+        return list(range(1, max(len(ss), len(ts)) + 1))
+
+    def picture(side, user, pid, page):
+        pace()
+        url = auth.api(side, "slides", user).presentations().pages().getThumbnail(
+            presentationId=pid, pageObjectId=page, thumbnailProperties_thumbnailSize="MEDIUM",
+            thumbnailProperties_mimeType="PNG").execute()["contentUrl"]
+        return Image.open(io.BytesIO(fetch(url))).convert("RGB")
+
+    out = []
+    for n, (sp, tp) in enumerate(zip(ss, ts), 1):
+        a = picture("source", source_user, sid, sp["objectId"])
+        b = picture("target", target_user, tid, tp["objectId"])
+        if a.size != b.size or ImageChops.difference(a, b).convert("L").point(lambda v: 255 if v > 16 else 0).getbbox():
+            out.append(n)
+    return out
 
 
 # -- Forms ---------------------------------------------------------------------------------------

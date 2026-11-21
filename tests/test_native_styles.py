@@ -75,3 +75,43 @@ def test_the_check_compares_displayed_padding_and_one_font_in_two_spellings():
     assert nr.canonical_sheet(src) == nr.canonical_sheet(fixed)
     assert nr.canonical_sheet(src) != nr.canonical_sheet(unfixed)      # text really sits lower: still a difference
     assert nr.canonical_sheet(src) != nr.canonical_sheet(bold)         # a real format is never folded away
+
+
+def _png(color):
+    import io
+    from PIL import Image
+    buf = io.BytesIO()
+    Image.new("RGB", (8, 8), color).save(buf, "PNG")
+    return buf.getvalue()
+
+
+class _Slides:
+    def __init__(self, deck, shots):
+        self.deck, self.shots = deck, shots
+
+    def presentations(self):
+        outer = self
+        from types import SimpleNamespace as NS
+        return NS(get=lambda presentationId: NS(execute=lambda: outer.deck),
+                  pages=lambda: NS(getThumbnail=lambda presentationId, pageObjectId, **kw: NS(
+                      execute=lambda: {"contentUrl": outer.shots[pageObjectId]})))
+
+
+def _compare(source_deck, target_deck, shots):
+    from types import SimpleNamespace as NS
+    apis = {"source": _Slides(source_deck, shots), "target": _Slides(target_deck, shots)}
+    auth = NS(api=lambda side, kind, user: apis[side])
+    return nf.compare_native(auth, "u@a", "u@b", "S", "T", "application/vnd.google-apps.presentation",
+                             lambda _: None, fetch=lambda url: _png(url))[0]
+
+
+def test_a_deck_whose_structure_differs_but_renders_the_same_is_identical():
+    src = {"slides": [{"objectId": "p1", "pageElements": [{"transform": {"scaleX": 2.8401999473571777}}]}]}
+    tgt = {"slides": [{"objectId": "q1", "pageElements": [{"transform": {"scaleX": 2.8402}}]}]}
+    assert _compare(src, tgt, {"p1": "white", "q1": "white"}) == []
+
+
+def test_a_slide_that_renders_differently_is_named():
+    src = {"slides": [{"objectId": "p1", "x": 1}, {"objectId": "p2"}]}
+    tgt = {"slides": [{"objectId": "q1", "x": 2}, {"objectId": "q2"}]}
+    assert _compare(src, tgt, {"p1": "white", "q1": "white", "p2": "white", "q2": "black"}) == ["slide 2 renders differently"]

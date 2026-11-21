@@ -88,10 +88,11 @@ ISSUES = [
     ("drive.native_structure", "drive", lambda t: ("native document content, formatting or structure differs" in t
                                                  or "native Sheet entered values, formatting, or structures differ" in t),
      "Doc/Slide structure differs from the source",
-     "A read-only source forces download+upload: Google rebuilds the document's internals "
-     "(style/list ids, soft breaks). Text is the same.",
-     "None automatic. Exact copies need server-side copy, i.e. Drive write on the source grant "
-     "(an operator's decision). Listed in the final report.", False),
+     "A read-only source forces download+upload: the Office round trip changes a Doc's paragraph spacing and "
+     "header margin, a Sheet's time zone, grid and default padding, and rebuilds a deck's layouts and masters.",
+     "Since 21 Nov 2026 the copy is repaired after every import (native_styles: Docs and Sheets identical) and a "
+     "deck is judged by Google's rendering of each slide (11 of 11 pixel-identical). What is left is listed "
+     "in the final report.", False),
     ("drive.content_export", "drive", lambda t: "content differs when exported" in t,
      "Exported content differs",
      "Rebuild differences or a later edit.",
