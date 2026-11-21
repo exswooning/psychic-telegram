@@ -173,3 +173,14 @@ def test_first_changed_at_is_the_start_of_the_current_unbroken_run_of_changed(db
             c.execute("INSERT INTO source_guard_checks(checked_at, since, verdict, report) VALUES (?,?,?,?)",
                       (at, "s", v, "{}"))
     assert G.latest(db)["firstChangedAt"] == "t3"
+
+
+def test_a_search_by_this_tool_is_a_read_not_a_change():
+    """files.list with a query is logged as "search": four name lookups on a. stopped P3.7 run 8 (22 Nov 2026)."""
+    def ev(ip, name, **p):
+        return ({"ipAddress": ip, "id": {"time": "t"}, "actor": {"email": "u@src"}}, {"name": name}, p)
+    log = {"token": [ev("9.9.9.9", "authorize", client_id="42")],
+           "drive": [ev("9.9.9.9", "search"), ev("9.9.9.9", "edit", doc_title="a real change")],
+           "admin": [], "calendar": []}
+    out = G.audit(None, "since", "42", events=lambda app: log[app])
+    assert [r["event"] for r in out["byBitport"]] == ["edit"]

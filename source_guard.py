@@ -33,7 +33,10 @@ log = logging.getLogger("source_guard")
 
 # Audit events that only read. Everything else from this tool's addresses is a change.
 READS = {"view", "download", "access_item_content", "preview", "print", "source_copy",
-         "sync_item_content", "authorize"}
+         "sync_item_content", "authorize",
+         # A files.list with a query is logged as "search" (22 Nov 2026: four name lookups on a. stopped P3.7 run 8
+         # as "changes"). It reads; on dharan every lookup by name would have stopped the run.
+         "search"}
 APPS = ("drive", "admin", "calendar")
 
 
