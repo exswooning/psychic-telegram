@@ -398,9 +398,19 @@ def _cleared(inc: dict, ledger_path_for) -> str | None:
         if st.get("torn_down_at"):
             return f"teardown completed at {st['torn_down_at']}"
         return None if st.get("approved_at") else "the approval was undone"
+    if kind == "disk_full":
+        import housekeeping
+        from config import Settings
+        pct = housekeeping.worst_disk(Settings().scratch_dir)["pct"]
+        return None if pct >= housekeeping.WARN_AT_PCT else f"the disk is {pct}% full again, under {housekeeping.WARN_AT_PCT}%"
     path = ledger_path_for(aid)
     if not path or not os.path.isfile(path):
         return None
+    if kind == "source_changed" and str(inc["fingerprint"] or "").startswith("source-guard"):
+        with cpdb.ro(path) as c:
+            last = c.execute("SELECT checked_at, verdict FROM source_guard_checks ORDER BY id DESC LIMIT 1").fetchone()
+        if last and last["verdict"] == "CLEAN" and last["checked_at"] > inc["last_seen_at"]:
+            return f"the source guard's check at {last['checked_at']} found the source clean"
     if kind == "failing":
         # failing:{account}:{job}:{normalised message}, from _watch_migration
         family = inc["fingerprint"].split(":", 3)[-1]

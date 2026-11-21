@@ -449,14 +449,14 @@ MB_PER_SEED_WORKER = mb_per_seed_worker()
 
 # Above this fraction of swap in use, the machine is already trading disk for
 # memory and more concurrency makes it strictly worse.
-SWAP_DISTRESS = 0.60
+SWAP_DISTRESS = float(os.getenv("SWAP_DISTRESS", "0.60"))      # campaign F-memory sets 0: any swap in use is distress
 
 # Drain trigger for the memory-pause watchdog (main.py). A hard floor (128 MB)
 # plus a fraction of TOTAL RAM -- never of *usable* RAM, which shrinks as
 # memory drains and would eventually sit below anything the machine can reach.
 # That self-referential threshold is what made an earlier admission-gate design
 # dead code on any host above ~2.5 GB.
-PRESSURE_FLOOR_MB = 128
+PRESSURE_FLOOR_MB = float(os.getenv("PRESSURE_FLOOR_MB", "128"))      # campaign F-memory sets it above total RAM
 PRESSURE_FLOOR_FRACTION = 0.05
 
 # Ceiling on the per-USER worker pool -- the threads that each own one

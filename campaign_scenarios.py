@@ -238,3 +238,6 @@ def all_scenarios() -> list:
 
 def by_id() -> dict:
     return {s.id: s for s in all_scenarios()}
+
+
+import campaign_failures, campaign_watchers  # noqa: E402,F401 -- replace the stub fail:* and watch:* scenarios (P2.7, P2.11)
