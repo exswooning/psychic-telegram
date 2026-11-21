@@ -95,6 +95,15 @@ class TestTheSharedRunner:
         assert runner.passes == [{"drive"}, {"gmail"}, {"calendar", "contacts", "tasks", "chat"}]
         assert [r["source"] for r in results] == ["u1", "u2", "u3"]
 
+    def test_every_pass_ends_with_its_failures_sorted_by_class(self, runner, monkeypatch):
+        import pass_retry
+        seen = []
+        monkeypatch.setattr(pass_retry, "end_of_pass",
+                            lambda db, auth, st, services, results, migrate_user, **kw: seen.append((set(services), results)))
+        runner(self.ALL, main.ordered_passes(self.ALL))
+        assert [s for s, _ in seen] == [{"drive"}, {"gmail"}, {"calendar", "contacts", "tasks", "chat"}]
+        assert seen[0][1] == [{"source": "u1", "services": {}}]
+
     def test_the_whole_run_registers_once_not_once_per_pass(self, runner):
         """A pass registering and releasing would drop the run out of the admission
         table between passes: the slot cap, the dashboard and the run watcher would

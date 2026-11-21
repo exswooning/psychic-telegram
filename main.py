@@ -1441,6 +1441,11 @@ def _run_with_memory_pause(auth, db, settings, services, delta, delta_days,
                 # asked it to stop, is the opposite of what either means.
                 if MEMORY_PAUSE.is_set() or SHUTDOWN.is_set():
                     break
+                # The pass's failures by class (pass_retry.py): transient and quota ones retried here, the
+                # unexplained user held (and an incident), the run goes on. Never raises.
+                import pass_retry
+                pass_retry.end_of_pass(db, auth, settings, one, pass_results, migrate_user,
+                                       stop=lambda: SHUTDOWN.is_set() or MEMORY_PAUSE.is_set())
                 # Shared drives are tenant-level, so only a whole-tenant run owns them --
                 # and right after Drive, before mail, for the same reason the passes are
                 # ordered at all: a link in mail can name a shared-drive file too.
