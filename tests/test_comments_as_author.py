@@ -65,7 +65,13 @@ def _migrator(db, settings, source_comments, allowed=("carol@b.test",)):
                                                {"id": "p-out", "type": "user", "emailAddress": "x@elsewhere.test"}])
     shared = []
     tgt = Drive(shared, "Dave B")
-    auth = SimpleNamespace(target_drive=lambda who: Drive(shared, who, allowed=who in allowed))
+    people = [{"primaryEmail": "carol@a.test", "name": {"fullName": "Carol"}},
+              {"primaryEmail": "ram1@a.test", "name": {"fullName": "Ram Sharma"}},
+              {"primaryEmail": "ram2@a.test", "name": {"fullName": "Ram Sharma"}}]
+    directory = SimpleNamespace(users=lambda: SimpleNamespace(list=lambda **kw: _Exec(fn=lambda: {"users": people})))
+    mc._NAMES.clear()
+    auth = SimpleNamespace(target_drive=lambda who: Drive(shared, who, allowed=who in allowed),
+                           source_directory=lambda: directory)
     return SimpleNamespace(settings=settings, db=db, src=src, tgt=tgt, auth=auth, source_user="dave@a.test",
                            target_user="dave@b.test", _retry=lambda fn, **kw: fn()), shared
 
@@ -75,7 +81,7 @@ def _comment(cid, text, author, when="2026-11-17T13:58:40Z", replies=()):
 
 
 def test_a_colleagues_comment_is_posted_as_them(db, settings):
-    src = [_comment("a", "Numbers in row 12 look off.", {"displayName": "Carol", "permissionId": "p-carol"},
+    src = [_comment("a", "Numbers in row 12 look off.", {"displayName": "Carol"},
                     replies=[{"id": "r", "content": "Fixed.", "createdTime": "2026-11-18T09:00:00Z", "action": "resolve",
                               "author": {"displayName": "Dave", "me": True}}])]
     m, target = _migrator(db, settings, src)
@@ -89,8 +95,8 @@ def test_a_colleagues_comment_is_posted_as_them(db, settings):
 
 
 def test_an_author_without_access_or_account_is_named_by_the_owner(db, settings):
-    src = [_comment("a", "Who approved this?", {"displayName": "Carol", "permissionId": "p-carol"}),
-           _comment("b", "From outside.", {"displayName": "X", "permissionId": "p-out"})]
+    src = [_comment("a", "Who approved this?", {"displayName": "Carol"}),
+           _comment("b", "From outside.", {"displayName": "X"})]
     m, target = _migrator(db, settings, src, allowed=())
     mc.reconcile(m, "S1", "T1")
     assert [c["author"]["displayName"] for c in target] == ["Dave B", "Dave B"]
@@ -98,9 +104,16 @@ def test_an_author_without_access_or_account_is_named_by_the_owner(db, settings)
     assert mc.differences(src, target, lambda _: None) == []
 
 
+def test_two_people_of_one_name_are_never_guessed(db, settings):
+    src = [_comment("a", "Hello.", {"displayName": "Ram Sharma"})]
+    m, target = _migrator(db, settings, src, allowed=("ram1@b.test", "ram2@b.test"))
+    mc.reconcile(m, "S1", "T1")
+    assert target[0]["author"]["displayName"] == "Dave B" and target[0]["content"].startswith("[Ram Sharma, ")
+
+
 def test_switched_off_it_posts_as_the_owner(db, settings):
     settings.comments_as_author = False
-    src = [_comment("a", "Hi.", {"displayName": "Carol", "permissionId": "p-carol"})]
+    src = [_comment("a", "Hi.", {"displayName": "Carol"})]
     m, target = _migrator(db, settings, src)
     mc.reconcile(m, "S1", "T1")
     assert target[0]["author"]["displayName"] == "Dave B" and target[0]["content"].startswith("[Carol, ")

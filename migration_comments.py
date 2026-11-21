@@ -5,12 +5,13 @@ from __future__ import annotations
 import html
 import failpoints
 import re
+import threading
 from collections import Counter
 from link_rewrite import rewrite_text
 from db import utc_now
 
-FIELDS = ("id,content,anchor,quotedFileContent,createdTime,resolved,author(displayName,me,permissionId),"
-          "replies(id,content,createdTime,action,author(displayName,me,permissionId))")
+FIELDS = ("id,content,anchor,quotedFileContent,createdTime,resolved,author(displayName,me),"
+          "replies(id,content,createdTime,action,author(displayName,me))")
 
 
 def list_threads(svc, fid, execute=lambda fn: fn()):
@@ -308,13 +309,45 @@ def _refused(exc) -> bool:
     return status in (403, 404) or type(exc).__name__ == "RefreshError"
 
 
+_NAMES: dict = {}
+_NAMES_LOCK = threading.Lock()
+
+
+def _source_names(migrator) -> dict:
+    """Full name -> source addresses, from the source directory, once per process. A comment names its author
+    only by display name: Drive returns no address, no permission id (requested, never sent), and a photo link
+    that differs from the sharing list's (measured on b., 21 Nov 2026). A listing that fails is not kept."""
+    domain = (getattr(migrator.settings, "source_domain", "") or "").lower()
+    with _NAMES_LOCK:
+        if domain in _NAMES:
+            return _NAMES[domain]
+        names: dict = {}
+        try:
+            svc, token = migrator.auth.source_directory(), None
+            while True:
+                r = migrator._retry(lambda t=token: svc.users().list(
+                    domain=domain, maxResults=500, pageToken=t,
+                    fields="nextPageToken,users(primaryEmail,name(fullName))").execute(), write=False, tenant="source")
+                for u in r.get("users", []):
+                    full = ((u.get("name") or {}).get("fullName") or "").strip().lower()
+                    if full:
+                        names.setdefault(full, []).append(u["primaryEmail"].lower())
+                token = r.get("nextPageToken")
+                if not token:
+                    break
+        except Exception:      # noqa: BLE001 - unknown authors are posted by the owner, named in the text
+            return {}
+        _NAMES[domain] = names
+        return names
+
+
 class _Writers:
     """Who wrote each source comment, as a target account Bitport can act as (domain-wide delegation: no password).
-    Drive names a comment's author only by display name and permission id, so the id is read against the source
-    file's sharing list; an author no longer on it, outside the source domain, or with no mapping is not guessed."""
+    Matched by full name in the source directory, and only when exactly one person has it: two people of one name,
+    an outsider or a deleted account are posted by the owner, naming the author -- never guessed."""
 
     def __init__(self, migrator, sid):
-        self.m, self.sid, self._accounts, self._clients = migrator, sid, None, {}
+        self.m, self.sid, self._clients = migrator, sid, {}
 
     def account(self, row):
         if not getattr(self.m.settings, "comments_as_author", True):
@@ -322,26 +355,8 @@ class _Writers:
         author = row.get("author") or {}
         if author.get("me"):
             return self.m.target_user
-        pid = author.get("permissionId")
-        return self._map().get(pid) if pid else None
-
-    def _map(self):
-        if self._accounts is None:
-            self._accounts = {}
-            domain = (getattr(self.m.settings, "source_domain", "") or "").lower()
-            try:
-                perms = self.m._retry(lambda: self.m.src.permissions().list(
-                    fileId=self.sid, fields="permissions(id,type,emailAddress)", supportsAllDrives=True).execute(),
-                    write=False, tenant="source").get("permissions", [])
-            except Exception:      # noqa: BLE001 - unknown authors are posted by the owner, named in the text
-                perms = []
-            for p in perms:
-                email = (p.get("emailAddress") or "").lower()
-                if p.get("type") == "user" and email.endswith("@" + domain):
-                    target = self.m.db.resolve_identity(email)
-                    if target:
-                        self._accounts[p["id"]] = target
-        return self._accounts
+        emails = _source_names(self.m).get((author.get("displayName") or "").strip().lower(), [])
+        return self.m.db.resolve_identity(emails[0]) if len(emails) == 1 else None
 
     def client(self, account):
         if account == self.m.target_user:
