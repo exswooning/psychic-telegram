@@ -789,11 +789,13 @@ def misread_shared_drive_users(db) -> list[str]:
 
 
 def pending_share_users(db) -> list[str]:
-    """Source users with a copied item whose sharing was started and never finished
-    (an `acl_pass` PENDING mark), still in the corpus."""
+    """Source users with a copied item whose sharing or link rewrite was started and
+    never finished (an `acl_pass`/`links_pass` PENDING mark, or a FAILED native
+    `link_rewrite`), still in the corpus. Only a Drive walk over the file finishes it."""
     return [r["source_user"] for r in db.conn.execute(
         """SELECT DISTINCT source_user FROM audit_log a
-            WHERE item_type='acl_pass' AND status='PENDING'
+            WHERE ((item_type IN ('acl_pass','links_pass') AND status='PENDING')
+                   OR (item_type='link_rewrite' AND status LIKE 'FAILED%'))
               AND EXISTS (SELECT 1 FROM identity_map m WHERE m.source_email = a.source_user)""")]
 
 

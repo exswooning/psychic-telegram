@@ -259,6 +259,17 @@ class TestARedoRepointsNativesCopiedBefore:
         assert m._pending_native == []
 
 
+    def test_a_failed_rewrite_is_queued_again_and_its_user_repaired(self, settings, db):
+        import repair
+        settings.rewrite_drive_links, settings.redo_unrewritten_links = True, False
+        m = self._engine(settings, db)
+        db.conn.execute("INSERT INTO identity_map (source_email, target_email) VALUES ('u@a', 'u@b')")
+        assert repair.pending_share_users(db) == []
+        db.log_audit("u@a", "S1", "link_rewrite", "FAILED", "exhausted 6 retries on HTTP 429")
+        assert repair.pending_share_users(db) == ["u@a"]
+        m._sync_file({"id": "S1", "mimeType": "application/vnd.google-apps.document"}, "P")
+        assert [t for _, t in m._pending_native] == ["T1"]
+
 def test_the_setup_check_requires_the_three_native_apis():
     import ensure_apis
     assert {"docs.googleapis.com", "sheets.googleapis.com", "slides.googleapis.com"} <= set(

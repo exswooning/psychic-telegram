@@ -1523,7 +1523,8 @@ class DriveMigrator:
             if (self.settings.rewrite_drive_links and item.get("mimeType") in _NATIVE_KIND
                     and not self.settings.dry_run
                     and (self.settings.redo_unrewritten_links
-                         or self.db.links_pending(self.source_user, item["id"]))):
+                         or self.db.links_pending(self.source_user, item["id"])
+                         or self._links_failed(item["id"]))):
                 # A redo also repoints natives copied before the in-place rewrite
                 # existed; one already clean produces no request at all. Without a redo,
                 # a copy a stopped run left due its rewrite gets it now.
@@ -2728,6 +2729,12 @@ class DriveMigrator:
         if fixed:
             log.info("[%s] repointed links inside native copies: %d update(s)",
                      self.source_user, fixed)
+
+    def _links_failed(self, item_id: str) -> bool:
+        # A failed rewrite is owed, not final: a 429 left three Sheets on a. -> b. still
+        # linking to the source, and nothing ever went back to them.
+        prior = self.db.get_audit(self.source_user, item_id, "link_rewrite")
+        return prior is not None and str(prior["status"]).startswith("FAILED")
 
     def _after_native_check(self, item: dict, tgt_id: str, n: int) -> None:
         """Record one native's link check: what was repointed, or a clean result over
