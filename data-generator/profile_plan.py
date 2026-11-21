@@ -23,7 +23,17 @@ NATIVES = (GOOGLE_APPS + "document", GOOGLE_APPS + "spreadsheet", GOOGLE_APPS + 
 
 # The profile has no figure for these; they are the plan's own, stated here and nowhere else.
 LINK_KINDS = {"own": 0.40, "colleague": 0.25, "shared_drive": 0.10, "folder": 0.10, "deleted": 0.05, "outside": 0.10}
-DUPLICATE_NAME = 0.02       # a file named exactly like the one before it, in the same folder
+OUTSIDE_ADDRESS = "learn.aryanpaul@gmail.com"   # P0.6 (17 Nov, the operator): the only address outside the tenant ever shared with
+# Departments and their relative size (the profile says nothing about either), and the rest of the sharing shape: the
+# plan's own numbers, stated here and nowhere else.
+DEPARTMENTS = {"Administration": 5, "Finance": 3, "Planning": 3, "Health": 4, "Education": 4, "Engineering": 3, "Social": 2,
+               "Records": 1}
+SHARING = {"readers": 5,             # people who read the shared mailbox
+           "users_per_drive": 25,    # one shared drive for this many users
+           "drive_members": 0.12,    # share of the users on each shared drive
+           "outside_users": 0.15,    # share of the users who share something with the outside address
+           "outside_files": (1, 3)}  # how many of their files
+DUPLICATE_NAME = 0.02      # a file named exactly like the one before it, in the same folder
 PATH_BREAKING = 0.015       # a name with a character that breaks a path
 LONG_NAME = 0.03
 DEVANAGARI = 0.25
@@ -110,6 +120,26 @@ def plan(profile: dict, users: int, seed: int) -> list[dict]:
             "labels": lab[rl], "link_mail": links, "link_kinds": kinds,
         })
     return out
+
+
+def sharing(plans: list[dict], seed: int) -> dict:
+    """Who belongs where, by user index: a department each (its lead is the first member), the shared mailbox (the biggest
+    mailbox) and its readers, the members of each shared drive, and how many files each user shares outside. Only
+    (plans, seed) decide it."""
+    n, names = len(plans), list(DEPARTMENTS)
+    dept = [_rng(seed, "dept", i).choices(names, weights=list(DEPARTMENTS.values()))[0] for i in range(n)]
+    mailbox = max(range(n), key=lambda i: (plans[i]["messages"], -i)) if n else None
+    others = [i for i in range(n) if i != mailbox]
+    readers = sorted(_rng(seed, "mailbox").sample(others, min(SHARING["readers"], len(others))))
+    drives = [sorted(_rng(seed, "sd", d).sample(range(n), min(n, max(2, round(n * SHARING["drive_members"])))))
+              for d in range(round(n / SHARING["users_per_drive"]) if n > 1 else 0)]
+    outside = {}
+    for i, p in enumerate(plans):
+        r = _rng(seed, "outside", i)
+        if p["files"] > p["shortcuts"] and r.random() < SHARING["outside_users"]:
+            outside[i] = min(r.randint(*SHARING["outside_files"]), p["files"] - p["shortcuts"])
+    return {"dept": dept, "lead": {d: dept.index(d) for d in sorted(set(dept))}, "mailbox": mailbox, "readers": readers,
+            "drives": drives, "outside": outside}
 
 
 def _split(total: int, shares: dict) -> dict:

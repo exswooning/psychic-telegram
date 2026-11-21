@@ -1383,8 +1383,9 @@ _SEED_MARKER = {"key": "seed_sandbox", "value": "true"}
 
 
 def seed_groups(directory, settings: Settings, users: list[str],
-                external: str, prefix: str = "") -> dict:
-    """Create the tenant's groups, their members, and one nested group.
+                external: str, prefix: str = "", shapes: list | None = None) -> dict:
+    """Create the tenant's groups, their members, and one nested group. `shapes` (a list of (local, name, members, role)
+    like `plan` below) replaces the four standard groups: the profile seeder's department groups.
 
     Tenant-level, not per-user: a group belongs to the domain, so this runs
     once per seed rather than inside seed_one_user().
@@ -1412,7 +1413,7 @@ def seed_groups(directory, settings: Settings, users: list[str],
     # Shapes worth having, not just count: a wide all-hands, a small team
     # with an owner and a manager, one carrying an external member, and one
     # that contains another group.
-    plan = [
+    plan = shapes or [
         (f"{prefix}all-staff", "All Staff", users, "MEMBER"),
         (f"{prefix}engineering", "Engineering", users[:max(1, len(users) // 3)], "MEMBER"),
         (f"{prefix}leads", "Leads", users[:2], "OWNER"),
@@ -2698,7 +2699,10 @@ def seed_one_user(settings: Settings, entry: dict, all_users: list[str],
         if want("drive"):
             profile_seed.mark_done(drive, retry, "drive")
         if want("gmail") or want("calendar") or want("chat"):
-            litems = profile_seed.link_items(S, drive, plan, entry["pool"], retry)
+            litems = profile_seed.link_items(S, drive, plan, entry["pool"], retry, entry.get("share"))
+        if base_want("drive") and "sharing" not in done and (entry.get("share") or {}).get("outside"):
+            profile_seed.share_outside(S, settings, drive, user, plan, entry["share"]["outside"], external, retry)
+            profile_seed.mark_done(drive, retry, "sharing")
         items = {f"own-{i}": f for i, f in enumerate(litems.get("own", [])[:6])} or None
     elif want("drive"):
         builder = CorpusBuilder(drive, settings, user, peers, external, scale,
@@ -2970,14 +2974,14 @@ def _profile_step(args, settings, total_users: int):
     return (0 if args.plan_only else None), plans, {"mix": mix, "pool_bytes": pool_bytes, "cap": cap, "msg_bytes": b["msg_bytes"]}
 
 
-def _profile_entries(plans: list, domain: str) -> list[dict]:
+def _profile_entries(plans: list, domain: str, sharing: dict | None = None) -> list[dict]:
     width = max(3, len(str(len(plans))))
     out = []
     for i, p in enumerate(plans):
         local = f"{GENERATED_PREFIX}p{i + 1:0{width}d}"
         template = ORG[i % len(ORG)]
-        out.append({"local": local, "email": f"{local}@{domain}", "dept": template["dept"], "project": template["project"],
-                    "plan": p})
+        out.append({"local": local, "email": f"{local}@{domain}", "dept": sharing["dept"][i] if sharing else template["dept"],
+                    "project": template["project"], "plan": p})
     return out
 
 
@@ -3178,6 +3182,12 @@ def main(argv: list[str] | None = None) -> int:
             sys.exit("--profile seeds new users; it cannot be combined with --reset, --top-up-only, --trim-filler, "
                      "--fill-until-full, --create-until-full, --all-users or --fit-to-licenses")
         args.users = None
+        # P0.6: the one address outside the tenant that is ever shared with (files, groups, the guest of an event)
+        import profile_plan
+        if args.external_email not in (ap.get_default("external_email"), profile_plan.OUTSIDE_ADDRESS):
+            sys.exit(f"--profile: --external-email may only be {profile_plan.OUTSIDE_ADDRESS} (the operator's P0.6 address)")
+        args.external_email = profile_plan.OUTSIDE_ADDRESS
+        args.shared_drives = 0      # the profile's own shared drives are made before the users (profile_seed.seed_sharing)
 
     only = None
     if args.only:
@@ -3383,7 +3393,9 @@ def main(argv: list[str] | None = None) -> int:
             print(f"\nFound {len(entries)} existing user(s) in "
                   f"{settings.source_domain}; seeding all of them.")
     if profile_plans is not None:
-        entries = entries + _profile_entries(profile_plans, settings.source_domain)
+        import profile_plan
+        profile_ctx["sharing"] = profile_plan.sharing(profile_plans, args.seed)
+        entries = entries + _profile_entries(profile_plans, settings.source_domain, profile_ctx["sharing"])
     all_users = [e["email"] for e in entries]
     if args.cohort and args.users:
         # --users narrows a cohort to these members; their peers stay the whole cohort.
@@ -3744,6 +3756,19 @@ def main(argv: list[str] | None = None) -> int:
         for e in entries:
             if e.get("plan"):
                 e["pool"], e["msg_bytes"] = pool, profile_ctx["msg_bytes"]
+        if not args.solo:     # before any user's mail, so link mail names real colleagues' and shared-drive files
+            print("\nSharing: department groups and folders, shared drives, the shared mailbox ...", flush=True)
+            sharing = profile_seed.seed_sharing(sys.modules[__name__], settings, entries, pool, args.external_email,
+                                                profile_ctx["sharing"], os.getenv("SOURCE_ADMIN") or settings.source_admin)
+            print(f"  {sharing['groups']} department group(s) ({sharing['group_members']} members), {sharing['dept_files']} "
+                  f"department file(s) ({sharing['dept_grants']} group grant(s)), {sharing['drives']} shared drive(s) "
+                  f"({sharing['drive_members']} members), shared mailbox {sharing['mailbox'] or '-'} "
+                  f"({sharing['readers']} reader(s) added)")
+            for note in sharing["notes"]:
+                print(f"    ! {note}")
+            for e in entries:
+                if e.get("plan"):
+                    e["share"] = sharing["per_user"].get(e["email"], {})
 
     t0 = time.time()
     results = []
