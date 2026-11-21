@@ -50,8 +50,9 @@ def render_md(name: str, scenarios: list, results: dict) -> str:
     """One table row per scenario: its latest status, or NOT RUN."""
     tally = {}
     for sc in scenarios:
-        st = results.get(sc.id, {}).get("status", "NOT RUN")
-        tally[st] = tally.get(st, 0) + 1
+        if sc.group != "chat":        # opt-in, not scored
+            st = results.get(sc.id, {}).get("status", "NOT RUN")
+            tally[st] = tally.get(st, 0) + 1
     lines = [f"# Campaign {name}", "", ", ".join(f"{n} {k}" for k, n in sorted(tally.items())), "",
              "| Group | Scenario | Status | Why |", "|---|---|---|---|"]
     for sc in scenarios:
@@ -214,9 +215,23 @@ class LiveDriver(Driver):
                 for r in c.execute("SELECT item_type, error_message FROM audit_log WHERE source_user=? AND timestamp>=? "
                                    "AND status LIKE 'FAILED%'", (user, self.started if since is None else since)):
                     found.add(known_issues.classify_failure(r[0], r[1] or ""))
+                since, fixed_runs = (self.started if since is None else since), set()
+                # a run failure retried and no longer FAILED is a run kind fixed (known_issues.run_failure_summary)
+                for r in c.execute("SELECT item_type, prev_error FROM item_retries WHERE source_user=? AND at>=? "
+                                   "AND new_status NOT LIKE 'FAIL%'", (user, since)):
+                    found.add(known_issues.classify_failure(r[0], r[1] or ""))
+                    fixed_runs.add(known_issues.classify_failure(r[0], r[1] or ""))
                 out["findings"] = found
-                out["fixed"] = {r[0] for r in c.execute(
-                    "SELECT issue FROM issue_fix_log WHERE source_user=? AND fixed_at>=?", (user, self.started))}
+                out["fixed"] = fixed_runs | {r[0] for r in c.execute(
+                    "SELECT issue FROM issue_fix_log WHERE source_user=? AND fixed_at>=?", (user, since))}
+                try:       # what the parity gate says of this user's findings: accepted, or for a person
+                    import parity_gate
+                    gate = parity_gate.assess(c, parity_gate._accepted_list())
+                    out["gate"] = {"accepted": {a["kind"] for a in gate["accepted"] if a["user"] == user},
+                                   "listed": {d["kind"] for d in gate["differences"]
+                                              if d["user"] == user and d.get("how") == "person"}}
+                except Exception:      # noqa: BLE001 - a gate that cannot be read is UNVERIFIED, never a pass
+                    pass
                 out["audit_counts"] = {(r[0], r[1]): r[2] for r in c.execute(
                     "SELECT item_type, status, COUNT(*) FROM audit_log WHERE source_user=? GROUP BY 1,2", (user,))}
                 out["verdicts"] = {r[0]: r[1] for r in c.execute(
@@ -251,7 +266,7 @@ def judge(expect: dict, facts: dict) -> tuple:
     driver could not read (missing key) makes that check UNVERIFIED, never a pass."""
     unread = []
     for key, want in expect.items():
-        if key in ("ends_as", "closes_on", "outcome", "or_evidence", "or_source", "needs_source", "service") or want is None:
+        if key in ("ends_as", "closes_on", "outcome", "or_evidence", "or_source", "needs_source", "service", "verify_after") or want is None:
             continue
         if key == "finding_classified":
             have = facts.get("findings")
@@ -286,6 +301,12 @@ def judge(expect: dict, facts: dict) -> tuple:
                 unread.append(key)
             elif want not in have:
                 return "FAIL", f"{want} was found but not fixed (fix log: {sorted(have)})"
+        elif key in ("accepted", "listed"):       # the parity gate's own word for the kind, for this user
+            have = (facts.get("gate") or {}).get(key)
+            if have is None:
+                unread.append(key)
+            elif want not in have:
+                return "FAIL", f"{want} is not {key} by the parity gate (it reads {sorted(have)})"
         elif key == "finding_absent":
             if expect.get("needs_source") and facts.get("source_has") is not True:
                 return "UNVERIFIED", "the case was never made on the source, so its absence proves nothing"
@@ -345,6 +366,11 @@ def _read(sc, driver, row, user):
     return {**row, "status": status, "reason": why, "user": user, "finished_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
 
 
+def _bind(body: dict, user: str | None) -> dict:
+    """The request body with "$user" (the twin, or the fixture user) filled in."""
+    return json.loads(json.dumps(body).replace("$user", user or ""))
+
+
 def run_scenario(sc: S.Scenario, driver: Driver, name: str, allow: set, wait: int = 4 * 3600) -> dict:
     row = {"id": sc.id, "group": sc.group, "how": sc.how, "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
     if sc.needs and not set(sc.needs) <= allow:
@@ -352,6 +378,12 @@ def run_scenario(sc: S.Scenario, driver: Driver, name: str, allow: set, wait: in
     if sc.how == "unseedable":
         return {**row, "status": "COVERED" if sc.unit_test else "UNVERIFIED",
                 "reason": f"cannot be caused live; unit test {sc.unit_test}" if sc.unit_test else "unseedable with no unit test named"}
+    if sc.how == "failure" and sc.inject.get("failure") and not sc.act:
+        # caused by another scenario (F-disk): read what that one left on its twin
+        prior = read_results(name).get(sc.inject["failure"], {})
+        if not prior.get("user"):
+            return {**row, "status": "UNVERIFIED", "reason": f"{sc.inject['failure']} has not run: it causes this one"}
+        return _read(sc, driver, row, prior["user"])
     if not sc.act and sc.how not in READS_THE_RUN and not (sc.how == "changed_after" and sc.id.split(":", 1)[1] in CHANGES_KNOWN):
         return {**row, "status": "UNVERIFIED", "reason": "the scenario has no `act` yet: define it before its first live run (P3.4)"}
     try:
@@ -377,14 +409,26 @@ def run_scenario(sc: S.Scenario, driver: Driver, name: str, allow: set, wait: in
             status, why = judge(sc.expect, driver.facts(user))
             return {**row, "status": status, "reason": why or made, "user": user, "change": made,
                     "finished_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
-        user = None if sc.how == "check_only" else driver.take_twin()
-        driver.prepare(sc.fixtures)
-        reply = driver.api(sc.act.get("method", "POST"), sc.act["path"], {**sc.act.get("body", {}), "reason": f"campaign {name} {sc.id}"}) if sc.act else {}
         if sc.inject:
-            driver.inject(sc.inject)
-        if not driver.wait_idle(wait):
-            return {**row, "status": "FAIL", "reason": f"still running after {wait} s", "reply": reply}
-        status, why = judge(sc.expect, driver.facts(user))
+            driver.inject(sc.inject)       # a fault is armed (or found unmakeable) before a twin and a run are spent
+        user = None if sc.how == "check_only" else driver.fixture_user(sc.fixtures[0]) if sc.fixtures else driver.take_twin()
+        driver.prepare(sc.fixtures)
+        since = row["started_at"] if sc.fixtures else None        # a fixture user has a history older than this scenario
+        for _ in range(int(sc.act.get("tries", 1))):
+            reply = driver.api(sc.act.get("method", "POST"), sc.act["path"], {**_bind(sc.act.get("body", {}), user), "reason": f"campaign {name} {sc.id}"}) if sc.act else {}
+            if sc.act.get("beside_verify"):
+                driver.verify(user, sc.act["beside_verify"])
+            if not driver.wait_idle(wait):
+                return {**row, "status": "FAIL", "reason": f"still running after {wait} s", "reply": reply}
+            if sc.expect.get("verify_after"):
+                driver.verify(user, sc.expect["verify_after"])
+                if not driver.wait_idle(wait):
+                    return {**row, "status": "FAIL", "reason": f"the check is still running after {wait} s"}
+            status, why = judge(sc.expect, driver.facts(user, since=since))
+            if status == "PASS" or "never classified" not in why:
+                break
+        if sc.how == "google" and sc.unit_test and "never classified" in why:
+            return {**row, "status": "COVERED", "user": user, "reason": f"never happened live in {sc.act.get('tries', 1)} tries; unit test {sc.unit_test} covers it"}
     except Unautomated as exc:
         return {**row, "status": "UNVERIFIED", "reason": f"not automated yet: {exc}"}
     except Exception as exc:      # noqa: BLE001 - a broken scenario is a result, not a crash of the campaign
@@ -393,7 +437,9 @@ def run_scenario(sc: S.Scenario, driver: Driver, name: str, allow: set, wait: in
 
 
 def select(scenarios: list, group: str | None, only: set | None) -> list:
-    return [s for s in scenarios if (not group or s.group == group) and (not only or s.id in only)]
+    """Chat is opt-in (outside the score): only `--group chat` or a named id runs it."""
+    return [s for s in scenarios if (s.group == group if group else bool(only) or s.group != "chat")
+            and (not only or s.id in only)]
 
 
 def run(name: str, driver: Driver, group: str | None = None, only: set | None = None, redo: bool = False,

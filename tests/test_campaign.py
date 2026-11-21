@@ -295,3 +295,98 @@ def test_an_edit_on_the_source_is_followed_by_a_delta_and_a_second_check():
     assert C.run_scenario(s, d, "t", set())["status"] == "PASS"
     kinds = [c[0] for c in d.calls if isinstance(c, tuple)]
     assert kinds.count("verify") == 2 and "delta" in kinds and kinds.index("delta") < len(kinds) - 1
+
+
+# ---- P2.6 the errors: every id is caused, or covered by a named test, and ends as its entry says ----
+def _errors():
+    return [s for s in S.all_scenarios() if s.id.startswith("err:")]
+
+
+def test_every_error_is_caused_by_an_act_or_a_change_or_covered_by_a_test_that_exists():
+    import os
+    for s in _errors():
+        if s.how in ("seeded", "must_not_happen"):
+            continue
+        if s.how == "unseedable":
+            assert s.unit_test and os.path.isfile(os.path.join(C.HERE, s.unit_test)) and s.inject.get("cause"), s.id
+        elif s.how == "changed_after" and s.id[4:] in C.CHANGES_KNOWN:
+            continue
+        else:
+            assert s.act.get("path") or s.inject.get("failure"), f"{s.id} says how it is caused only in words"
+        if s.how == "google":
+            assert s.unit_test and s.act["tries"] == 3, s.id
+
+
+def test_every_error_ends_as_its_known_issues_entry_says_and_the_gate_agrees():
+    import parity_gate
+    for s in _errors():
+        kid = s.id[4:]
+        if s.how == "must_not_happen":
+            continue
+        entry = known_issues.BY_ID.get(kid) or known_issues.RUN_BY_ID[kid]
+        want = "fixed" if entry[6] else "accepted" if kid in parity_gate.ACCEPTED_KINDS else "listed"
+        assert s.expect.get("ends_as") == want, (kid, s.expect.get("ends_as"), want)
+        if s.act and kid != "run.db_rollback":
+            assert s.expect.get(want) == kid, (kid, s.expect)
+
+
+def test_an_act_names_its_user_and_a_fixture_user_is_not_a_twin():
+    assert C._bind({"users": ["$user"], "n": 1}, "c07@a.test") == {"users": ["c07@a.test"], "n": 1}
+    d = _Verifying({"findings": {"chat.members"}, "gate": {"accepted": {"chat.members"}}})
+    assert C.run_scenario(S.by_id()["err:chat.members"], d, "n", set())["status"] == "PASS"
+    assert "twin" not in d.calls and ("prepare", ("c07",)) in d.calls
+    assert d.read[0] == "c07" and d.read[1]          # a fixture user's older history is not this scenario's
+
+
+class _Verifying(FakeDriver):
+    def verify(self, user, service):
+        self.calls.append(("verify", user, service))
+
+
+def test_a_cause_is_armed_before_the_twin_and_the_run_are_spent():
+    d = _Verifying({"findings": {"drive.duplicate"}, "fixed": {"drive.duplicate"}})
+    C.run_scenario(S.by_id()["err:drive.duplicate"], d, "n", set())
+    kinds = [c if isinstance(c, str) else c[0] for c in d.calls]
+    assert kinds.index("inject") < kinds.index("twin") < kinds.index("api")
+
+
+def test_a_fix_is_read_after_a_verify_with_repair():
+    d = _Verifying({"findings": {"drive.content_export"}, "fixed": {"drive.content_export"}})
+    assert C.run_scenario(S.by_id()["err:drive.content_export"], d, "n", set())["status"] == "PASS"
+    assert ("verify", "t02", "drive") in d.calls
+    d = _Verifying({"findings": {"drive.content_export"}, "fixed": set()})
+    assert C.run_scenario(S.by_id()["err:drive.content_export"], d, "n", set())["status"] == "FAIL"
+
+
+def test_the_gate_must_name_an_accepted_kind_accepted_and_a_person_kind_listed():
+    acc, lst = {"accepted": "chat.members"}, {"listed": "chat.text"}
+    assert C.judge(acc, {"gate": {"accepted": {"chat.members"}, "listed": set()}})[0] == "PASS"
+    assert C.judge(acc, {"gate": {"accepted": set(), "listed": {"chat.members"}}})[0] == "FAIL"
+    assert C.judge(lst, {"gate": {"accepted": set(), "listed": {"chat.text"}}})[0] == "PASS"
+    assert C.judge(lst, {})[0] == "UNVERIFIED"
+
+
+def test_a_google_decided_error_that_never_happens_in_three_tries_is_covered_by_its_unit_test():
+    d = _Verifying({"findings": set()})
+    r = C.run_scenario(S.by_id()["err:gmail.rate_limited"], d, "n", set())
+    assert r["status"] == "COVERED" and "tests/test_verify_gmail_quota.py" in r["reason"]
+    assert len([c for c in d.calls if isinstance(c, tuple) and c[0] == "api"]) == 3
+    assert [c for c in d.calls if isinstance(c, tuple) and c[0] == "verify"][0][2] == "gmail"
+    d = _Verifying({"findings": {"gmail.rate_limited"}, "fixed": {"gmail.rate_limited"}})
+    assert C.run_scenario(S.by_id()["err:gmail.rate_limited"], d, "n", set())["status"] == "PASS"
+
+
+def test_an_error_a_failure_causes_reads_that_failures_twin_and_waits_for_it(tmp_path, monkeypatch):
+    monkeypatch.setattr(C, "HERE", str(tmp_path))
+    s = S.by_id()["err:run.disk_full"]
+    assert C.run_scenario(s, FakeDriver(), "n", set())["status"] == "UNVERIFIED"
+    C.append_result("n", {"id": "fail:F-disk", "status": "PASS", "user": "t05@a.test"})
+    d = FakeDriver({"findings": {"run.disk_full"}, "fixed": {"run.disk_full"}})
+    assert C.run_scenario(s, d, "n", set())["status"] == "PASS" and d.read == ("t05@a.test", "")
+
+
+def test_chat_is_opt_in_and_outside_the_score():
+    every = S.all_scenarios()
+    assert not [s for s in C.select(every, None, None) if s.group == "chat"]
+    assert len(C.select(every, "chat", None)) == 6 and C.select(every, None, {"err:chat.text"})
+    assert "NOT RUN" not in C.render_md("n", [s for s in every if s.group == "chat"], {}).splitlines()[2]
