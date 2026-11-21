@@ -2610,6 +2610,11 @@ def run(auth, db, settings, users: list[str] | None = None, services=ALL_SERVICE
                 else:
                     state["last_api_result"] = "ok"
             elif event == "progress" and "stats" in details:
+                # A file compared is progress too: the item count moves a batch at a time, and a batch of 20
+                # slow files read as a 640s stall while 25 of them were verified (c08/c09, 21 Nov 2026).
+                done = lambda s: sum((s or {}).get(k, 0) for k in ("verified", "unverified"))  # noqa: E731
+                if done(details["stats"]) > done(state.get("stats")):
+                    state["last_progress_at"] = now
                 state["stats"] = details["stats"]
                 return
             elif event == "progress":
