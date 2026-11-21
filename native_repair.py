@@ -86,9 +86,71 @@ def _a1(col, row):
     return f"{letters}{row+1}"
 
 
+NATIVE_PADDING = {"top": 2, "right": 3, "bottom": 2, "left": 3}     # a Sheet made in Sheets (measured 21 Nov 2026)
+
+
+def _pad(p):
+    return {k: (p or {}).get(k, 0) for k in ("top", "right", "bottom", "left")}
+
+
+_DEFAULT_BLACK = ({"themeColor": "TEXT"}, {"rgbColor": {}})
+
+
+def _font(v):
+    # One font, two spellings: a Sheet made in Sheets says "arial,sans,sans-serif", an import "Arial".
+    return v.split(",")[0].strip().lower() if isinstance(v, str) else v
+
+
+def _is_default_text(key, value, default):
+    if key == "fontFamily":
+        return _font(value) == _font(default.get(key))
+    if key == "foregroundColorStyle":      # the theme's text colour and plain black render the same (21 Nov 2026)
+        return value in _DEFAULT_BLACK and default.get(key, {"rgbColor": {}}) in _DEFAULT_BLACK
+    return default.get(key) == value
+
+
+def _displayed_formats(doc):
+    """Cell formats as a person sees them. An Office import's default lacks top/bottom padding (text ~2 px lower);
+    native_styles writes the source's padding on the cells, and Sheets then stamps the default text style on them
+    too. So a cell's padding is its own or the spreadsheet default, compared only where it differs from a native
+    Sheet's; a text format equal to the spreadsheet's default is no format. Trailing cells and rows left empty by
+    that are trimmed, as Sheets itself leaves them out. Measured: the repaired Sheet renders pixel-identical."""
+    df = (doc.get("properties") or {}).get("defaultFormat")
+    if not isinstance(df, dict) or "padding" not in df:
+        return
+    default = _pad(df.pop("padding"))
+    default_text = df.get("textFormat") or {}
+    for sheet in doc.get("sheets") or []:
+        for data in sheet.get("data") or []:
+            rows = data.get("rowData") or []
+            for row in rows:
+                cells = row.get("values") or []
+                for cell in cells:
+                    fmt = cell.get("userEnteredFormat")
+                    shown = _pad(fmt.pop("padding")) if isinstance(fmt, dict) and "padding" in fmt else default
+                    if shown != NATIVE_PADDING:
+                        cell.setdefault("userEnteredFormat", {})["padding"] = shown
+                    fmt = cell.get("userEnteredFormat")
+                    if isinstance(fmt, dict) and isinstance(fmt.get("textFormat"), dict):
+                        tf = {k: v for k, v in fmt["textFormat"].items() if not _is_default_text(k, v, default_text)}
+                        if tf:
+                            fmt["textFormat"] = tf
+                        else:
+                            del fmt["textFormat"]
+                    if cell.get("userEnteredFormat") == {}:
+                        del cell["userEnteredFormat"]
+                while cells and cells[-1] == {}:
+                    cells.pop()
+                if "values" in row and not cells:
+                    del row["values"]
+            while rows and rows[-1] == {}:
+                rows.pop()
+
+
 def canonical_sheet(document, lookup=lambda fid: None):
     """Compare entered values/formulas and native structures, not volatile recalculation results."""
     doc = _rewrite(document, lookup)
+    _displayed_formats(doc)
     sheets = doc.get("sheets", [])
     sheet_ids = {s["properties"]["sheetId"]: i for i, s in enumerate(sheets)}
     generated = {
@@ -112,6 +174,8 @@ def canonical_sheet(document, lookup=lambda fid: None):
         for k, v in value.items():
             if k == "sheetId":
                 out[k] = sheet_ids.get(v, v)
+            elif k == "fontFamily" and isinstance(v, str):
+                out[k] = _font(v)
             elif k in generated:
                 out[k] = generated[k].setdefault(str(v), len(generated[k]))
             elif k not in (

@@ -43,3 +43,35 @@ def test_the_unwritable_custom_margin_flag_is_not_a_difference():
     a = nf.canonical_native(_doc(None, {"magnitude": 36, "unit": "PT"}))
     b = nf.canonical_native(_doc(None, {"magnitude": 36, "unit": "PT"}, custom=True))
     assert a == b
+
+
+def _sheet(default_pad, cells, font="arial,sans,sans-serif"):
+    return {"properties": {"defaultFormat": {"padding": default_pad, "textFormat": {"foregroundColor": {}, "fontFamily": font, "foregroundColorStyle": {"rgbColor": {}}}}},
+            "sheets": [{"properties": {"sheetId": 3, "gridProperties": {"rowCount": 1000, "columnCount": 26}},
+                        "data": [{"rowData": [{"values": cells}]}]}]}
+
+
+NATIVE = {"top": 2, "right": 3, "bottom": 2, "left": 3}
+IMPORTED = {"right": 3, "left": 3}
+
+
+def test_sheet_padding_is_written_on_the_cells_that_hold_anything():
+    src = _sheet(NATIVE, [{"userEnteredValue": {"numberValue": 1}}, {"userEnteredValue": {"stringValue": "x"}}])
+    tgt = _sheet(IMPORTED, [{"userEnteredValue": {"numberValue": 1}}, {"userEnteredValue": {"stringValue": "x"}}])
+    reqs = ns.sheet_requests(src, tgt)
+    assert reqs == [{"repeatCell": {"range": {"sheetId": 3, "startRowIndex": 0, "endRowIndex": 1, "startColumnIndex": 0,
+                                              "endColumnIndex": 2},
+                                    "cell": {"userEnteredFormat": {"padding": NATIVE}}, "fields": "userEnteredFormat.padding"}}]
+
+
+def test_the_check_compares_displayed_padding_and_one_font_in_two_spellings():
+    import native_repair as nr
+    value = {"userEnteredValue": {"numberValue": 1}}
+    src = _sheet(NATIVE, [dict(value)])
+    stamped = {"foregroundColor": {}, "fontFamily": "Arial", "foregroundColorStyle": {"themeColor": "TEXT"}}
+    fixed = _sheet(IMPORTED, [{**value, "userEnteredFormat": {"padding": NATIVE, "textFormat": stamped}}], font="Arial")
+    bold = _sheet(IMPORTED, [{**value, "userEnteredFormat": {"padding": NATIVE, "textFormat": {**stamped, "bold": True}}}])
+    unfixed = _sheet(IMPORTED, [dict(value)], font="Arial")
+    assert nr.canonical_sheet(src) == nr.canonical_sheet(fixed)
+    assert nr.canonical_sheet(src) != nr.canonical_sheet(unfixed)      # text really sits lower: still a difference
+    assert nr.canonical_sheet(src) != nr.canonical_sheet(bold)         # a real format is never folded away
