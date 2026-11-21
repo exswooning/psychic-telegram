@@ -48,6 +48,9 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from auth import AuthManager        # noqa: E402
+
+# Parallel deletes per user for the ledger's root items; Drive's per-user write quota is far above 8 in flight.
+RESET_DELETE_WORKERS = int(os.environ.get("RESET_DELETE_WORKERS", "8"))
 from config import Settings         # noqa: E402
 from db import MigrationDB          # noqa: E402
 
@@ -274,13 +277,26 @@ def _delete_ledger_drive_items(settings: Settings, auth: AuthManager, target_use
         token = resp.get("nextPageToken")
         if not token:
             break
-    for fid in at_root:
-        try:
-            drive.files().delete(fileId=fid, supportsAllDrives=True).execute()
-            n += 1
-        except Exception as exc:  # noqa: BLE001 - gone already, or not this user's
-            if "404" not in str(exc) and "notFound" not in str(exc):
-                print(f"    ! {target_user} drive item {fid}: {str(exc)[:90]}")
+    from resilience import retry_on_google_error
+
+    def delete_slice(fids: list) -> int:
+        # One client per thread (httplib2 is not thread-safe). In parallel: one at a time, c10's ~3,000 root files
+        # held the whole reset ~90 min after the other 40 users had finished in 4 (P3.5 run 3, 21 Nov 2026).
+        mine, done = auth.target_drive(target_user), 0
+        delete = retry_on_google_error(label="reset.drive.delete")(
+            lambda fid: mine.files().delete(fileId=fid, supportsAllDrives=True).execute())
+        for fid in fids:
+            try:
+                delete(fid)
+                done += 1
+            except Exception as exc:  # noqa: BLE001 - gone already, or not this user's
+                if "404" not in str(exc) and "notFound" not in str(exc):
+                    print(f"    ! {target_user} drive item {fid}: {str(exc)[:90]}")
+        return done
+
+    workers = max(1, min(RESET_DELETE_WORKERS, len(at_root)))
+    with futures.ThreadPoolExecutor(max_workers=workers) as pool:
+        n = sum(pool.map(delete_slice, [at_root[i::workers] for i in range(workers)]))
     return n
 
 
