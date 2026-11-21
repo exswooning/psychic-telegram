@@ -136,6 +136,20 @@ class TestVerifyNow:
         cp.post("/api/v2/one-to-one/run", json={"reason": "all of it", "account_id": aid, "limit": 0})
         assert "--limit" not in seen["argv"]
 
+    def test_a_full_check_is_refused_while_the_dms_imports(self, cp, monkeypatch):
+        aid = _signup(cp)
+        seen = self._capture(monkeypatch)
+        monkeypatch.setattr(api_server.job_admission, "list_active",
+                            lambda: [{"account_id": aid, "job_name": "dms", "pid": 1}])
+        monkeypatch.setattr(api_server.job_admission, "is_live", lambda j: True)
+        r = cp.post("/api/v2/one-to-one/run", json={"reason": "all of it", "account_id": aid, "limit": 0}).json()
+        assert r["ok"] is False and "DMS is importing" in r["detail"]
+        assert "argv" not in seen
+        # a sample is not refused, nor is a full check once the DMS is gone
+        assert cp.post("/api/v2/one-to-one/run", json={"reason": "sample", "account_id": aid, "limit": 5}).json()["ok"]
+        monkeypatch.setattr(api_server.job_admission, "list_active", lambda: [])
+        assert cp.post("/api/v2/one-to-one/run", json={"reason": "all", "account_id": aid, "limit": 0}).json()["ok"]
+
     def test_it_needs_a_reason(self, cp, monkeypatch):
         aid = _signup(cp)
         self._capture(monkeypatch)

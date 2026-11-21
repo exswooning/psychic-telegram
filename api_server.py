@@ -3123,6 +3123,11 @@ async def migration_checks_view(account_id: int | None = None, offset: int = Que
     return await _off_loop(_migration_checks_view, aid, offset)
 
 
+def _dms_importing(account_id: int | None) -> bool:
+    return any(j.get("job_name") == "dms" and j.get("account_id") == account_id and job_admission.is_live(j)
+               for j in job_admission.list_active())
+
+
 @app.post("/api/v2/one-to-one/run")
 async def one_to_one_run(body: RunVerification, op: Operator = Depends(operator)):
     """Compare both tenants, then repair supported target differences per finished user.
@@ -3147,8 +3152,14 @@ async def one_to_one_run(body: RunVerification, op: Operator = Depends(operator)
     env = dict(os.environ, VERIFY_WORKERS="auto")
     if body.repair:
         argv += ["--repair-after-user"]
-    return await _gated(op, "one-to-one.run", body, target,
-                        lambda: _run_admitted(argv, account_id, "verify", env=env))
+
+    def start():
+        # A full check reads every mail while the DMS is still writing it: it would report the import as missing mail.
+        if limit == 0 and _dms_importing(account_id):
+            return False, ("A full one-to-one check is refused while the DMS is importing this account's mail: it would "
+                           "read mail the import has not written yet. Wait for the DMS to finish, or run a sample.")
+        return _run_admitted(argv, account_id, "verify", env=env)
+    return await _gated(op, "one-to-one.run", body, target, start)
 
 
 class RunTenantVerification(WriteAction):
