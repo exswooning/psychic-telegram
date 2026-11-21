@@ -406,6 +406,20 @@ def users_for(conn, issue: str) -> list[dict]:
 # from dharan.gov.np -> s. (2026-10-25), where all 194 failures read "not yet classified".
 # id, item types (None = any), matches(error text), title, cause, fix, auto
 RUN_KINDS = [
+    ("run.backend_500", ("file", "folder", "shortcut"),
+     lambda t: "exhausted" in t and "HTTP 500" in t and "internalError" in t,
+     "Google's backend failed an upload repeatedly",
+     "Drive answered 500 internalError to every try of one upload (P3.7 run 7, a. -> b., 21 Nov 2026: two "
+     "files); nothing was created.",
+     "The end-of-run repair copies the file again (repair.retry_drive_stragglers); run 7 ended with 0 "
+     "failed items.", True),
+    ("run.coverage_incomplete", ("drive", "gmail", "calendar", "contacts", "tasks"),
+     lambda t: "ID coverage is incomplete" in t,
+     "A user's pass ended with its coverage check incomplete",
+     "The pass finished but its own source/target id check could not account for every item yet "
+     "(main.migrate_user records the service FAILED so no later pass promotes the user past it).",
+     "Its findings go to the repair queue; a clean re-run of the service clears the row (P3.7 run 7: "
+     "cleared on its own).", True),
     ("run.resource_key", ("file", "shortcut", "acl", "comment"),
      lambda t: "File not found" in t,
      "Source file read 'not found' (resource key)",

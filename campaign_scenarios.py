@@ -77,7 +77,9 @@ _ERRORS = {
     "google": ({"drive.read_refused": "c03", "drive.unverified_transient": "c03", "gmail.rate_limited": "c10",
                 "run.rate_limited": "c03"}, "Google decides when"),
     "unseedable": ({"run.resource_key": "needs a link-shared file from before Google's 2021 change",
-                    "gmail.reset_leftover": "needs a reset, then a rerun (P3.5 runs 2 and 3 read it on the gate)"},
+                    "gmail.reset_leftover": "needs a reset, then a rerun (P3.5 runs 2 and 3 read it on the gate)",
+                    "run.backend_500": "Google's own 500 on an upload; nothing on our side causes it",
+                    "run.coverage_incomplete": "a pass whose coverage check runs before its findings are repaired"},
                    "likely unseedable"),
     # not_migrated first: it needs c07's Chat still unmigrated, the rest migrate it.
     "chat": ({"chat.not_migrated": "c07", "chat.attributed": "c07", "chat.space_type": "c07", "chat.members": "c07",
@@ -91,6 +93,8 @@ UNIT_TESTS = {
     "gmail.rate_limited": "tests/test_verify_gmail_quota.py",
     "run.rate_limited": "tests/test_rate_limit_gets_time.py",
     "gmail.reset_leftover": "tests/test_split_mail_duplicates.py",
+    "run.backend_500": "tests/test_dharan_followups.py",          # the end-of-run straggler re-copy
+    "run.coverage_incomplete": "tests/test_campaign.py",          # named and classified (run 7, 21 Nov 2026)
 }
 
 

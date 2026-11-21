@@ -489,3 +489,11 @@ def test_every_watcher_and_incident_kind_has_its_own_defined_pair_and_the_teardo
             live = sc.inject["opens_in"]
             assert (sc.how == "check_only") == bool(live) and (live in ids if live else sc.unit_test.endswith(test)), sc.id
     assert set(CW.WATCHERS) | set(CW.NOT_CAUSED) == {c.__name__ for c in oversight.CHECKS} | set(S.INCIDENT_KINDS)
+
+
+def test_run_7s_two_unnamed_failures_have_names():
+    import known_issues
+    assert known_issues.classify_failure("file", 'exhausted 6 retries on HTTP 500 (internalError): <HttpError 500 '
+                                         'when requesting https://www.googleapis.com/upload/drive/v3/files') == "run.backend_500"
+    assert known_issues.classify_failure(
+        "drive", "Full source/destination ID coverage is incomplete; findings scheduled for repair") == "run.coverage_incomplete"
