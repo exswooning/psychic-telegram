@@ -89,13 +89,13 @@ ROWS = {
     "F-kill-random": ("SIGKILL at 5 random moments", 1, [
         {"do": "repeat", "times": 5, "steps": [start(), {"do": "wait_log", "match": "PASS|heartbeat", "after_random_sec": [20, 240]},
                                                 STOP(True), {"do": "wait_exit"}]},
-        start(), IDLE, *FINISH], BASE,
+        start(), IDLE, *FINISH], {**BASE, "stopped_not_crashed": True},
         "each kill is recorded STOPPED by the operator (the Stop is audited with the pid), never crashed; the next run finishes"),
     "F-stop": ("Stop, then Start (one press, and two)", 2, [
         {"do": "twin", "n": 1}, start(), {"do": "wait_pass", "pass": "drive"}, STOP(False), {"do": "wait_exit"},
         start(), IDLE, *FINISH,
         {"do": "twin", "n": 2}, start(), {"do": "wait_pass", "pass": "drive"}, STOP(False), STOP(False),
-        {"do": "wait_exit"}, start(), IDLE, *FINISH], BASE,
+        {"do": "wait_exit"}, start(), IDLE, *FINISH], {**BASE, "stopped_not_crashed": True},
         "both stops recorded STOPPED, not crashed (a press and a second press are the Jobs page's own); both resume to the control's counts"),
     "F-api": ("The API restarts in the Drive pass, the mail pass and a follow-on", 1, [
         start(), {"do": "wait_pass", "pass": "drive"}, RESTART_API, {"do": "wait_resume", "by": "start"},
@@ -115,7 +115,7 @@ ROWS = {
         {"do": "wait_resume", "by": "autopilot", "after_boot": True}, IDLE, *FINISH], BASE,
         "after boot the run resumes from the ledger (autopilot or the operator's Start) and ends equal to the control"),
     "F-net-3": ("No network for 3 minutes", 1, [
-        start(), {"do": "wait_pass", "pass": "drive"}, shell("./netdrop.sh 180"), IDLE, *FINISH], BASE,
+        start(), {"do": "wait_pass", "pass": "drive"}, shell("./netdrop.sh 180"), IDLE, *FINISH], {**BASE, "failed_items": 0},
         "the run rides it out: 0 failed items in the ledger, no stop"),
     "F-net-12": ("No network for 12 minutes", 1, [
         start(), {"do": "wait_pass", "pass": "drive"}, shell("./netdrop.sh 720"),

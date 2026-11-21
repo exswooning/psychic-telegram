@@ -16,6 +16,8 @@ import os
 import sys
 import time
 
+import campaign_changes
+import campaign_executor as X
 import campaign_scenarios as S
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -77,6 +79,20 @@ class Driver:
     def api(self, method: str, path: str, body: dict | None) -> dict: raise NotImplementedError
     def inject(self, inject: dict) -> None: raise NotImplementedError
     def wait_idle(self, timeout: int) -> bool: raise NotImplementedError
+    # What the step executor (campaign_executor) calls. A driver that cannot make one is UNVERIFIED, never a pass.
+    poll = 30
+    def sleep(self, seconds: float) -> None: time.sleep(seconds)
+    def disarm(self) -> None: return None
+    def arm(self, spec: str) -> None: raise Unautomated("this driver cannot arm a failpoint")
+    def webui(self, method: str, path: str, body: dict | None) -> dict: raise Unautomated("this driver has no web UI")
+    def shell(self, cmd: str, allow: set) -> tuple: raise Unautomated("this driver cannot run a shell command")
+    def job_pid(self, job=None, exclude=(), timeout: int = 120, active_only: bool = False): raise Unautomated("no job table")
+    def log_text(self, job: str) -> str: raise Unautomated("no job log")
+    def exit_of(self, pid: int): raise Unautomated("no run history")
+    def incidents(self) -> dict: raise Unautomated("no incident table")
+    def directory(self, action: str, side: str, user: str) -> str: raise Unautomated("no Directory API")
+    def source(self, action: str, user: str) -> str: raise Unautomated("no source writer")
+    def dwd(self, tenant: str, drop_scope: str) -> None: raise Unautomated("no delegation writer")
     def facts(self, user: str | None) -> dict: raise NotImplementedError   # what judges read; see judge()
 
 
@@ -117,27 +133,58 @@ class LiveDriver(Driver):
         st = Settings(account_id=self.account_id)
         return campaign_evidence.source_has(kind, user, AuthManager(st), st)
 
-    def change(self, kind: str, user: str) -> str:
-        import campaign_changes
+    def _act(self, fn, user: str) -> str:
+        """Run a campaign_changes function for a twin (its a. and b. addresses made from the one local part).
+        An address on neither of this account's domains is refused."""
         import webui
         from types import SimpleNamespace
-        entry = campaign_changes.CHANGES.get(kind)
-        if not entry:
-            raise Unautomated(f"no change is written for {kind}")
         os.environ.update(webui._dms_env(self.account_id))
         from auth import AuthManager
         from config import Settings
         from db import MigrationDB
         st = Settings(account_id=self.account_id)
+        local, _, domain = user.partition("@")
+        if domain.lower() not in {st.source_domain.lower(), st.target_domain.lower()}:
+            raise campaign_changes.Refused(f"{user} is on neither domain of this account's pair")
         db = MigrationDB(st.db_path)
         try:
-            tgt = user.split("@")[0] + "@" + st.target_domain
             try:
-                return entry[0](SimpleNamespace(auth=AuthManager(st), db=db, settings=st, src=user, tgt=tgt))
+                return fn(SimpleNamespace(auth=AuthManager(st), db=db, settings=st,
+                                          src=f"{local}@{st.source_domain}", tgt=f"{local}@{st.target_domain}"))
             except campaign_changes.NoItem as exc:
-                raise Unautomated(f"the twin holds nothing to change for {kind}: {exc}") from exc
+                raise Unautomated(f"the twin holds nothing to change: {exc}") from exc
         finally:
             db.close()
+
+    def change(self, kind: str, user: str) -> str:
+        entry = campaign_changes.CHANGES.get(kind)
+        if not entry:
+            raise Unautomated(f"no change is written for {kind}")
+        return self._act(entry[0], user)
+
+    def directory(self, action: str, side: str, user: str) -> str:
+        if side != "target":
+            raise campaign_changes.Refused("the campaign suspends users on the target only")
+        return self._act(campaign_changes.DIRECTORY[action], user)
+
+    def source(self, action: str, user: str) -> str:
+        return self._act(campaign_changes.SOURCE[action], user)
+
+    def dwd(self, tenant: str, drop_scope: str) -> None:
+        """Re-delegate the source's key WITHOUT one scope (dwd_helper drives the Admin console in a browser)."""
+        import subprocess
+        import sys
+        import verify_scopes
+        from config import Settings
+        st = Settings(account_id=self.account_id)
+        campaign_changes._guard(f"campaign@{st.source_domain}", st.source_domain, "changes the delegation of")
+        with open(st.source_sa_key, encoding="utf-8") as fh:
+            client_id = json.load(fh)["client_id"]
+        scopes = [s for s in verify_scopes.migrate_source_scopes(st) if s != drop_scope]
+        proc = subprocess.run([sys.executable, "dwd_helper.py", "--tenant", tenant, "--client-id", client_id, "--scopes", ",".join(scopes),
+                               "--no-merge", "--account-id", str(self.account_id)], cwd=HERE, capture_output=True, text=True, timeout=1500)
+        if proc.returncode:
+            raise RuntimeError(f"dwd_helper exited {proc.returncode}: {(proc.stdout + proc.stderr)[-200:]}")
 
     def verify(self, user: str, service: str) -> None:
         # check AND repair the user, the way a UI One-to-one run does: the repair is what the scenario judges
@@ -167,23 +214,101 @@ class LiveDriver(Driver):
     def prepare(self, fixtures: tuple) -> None:
         return None          # the cohort is seeded once (P3.1); a fixture names the cohort user holding it
 
-    def api(self, method: str, path: str, body: dict | None) -> dict:
+    def _call(self, base: str, method: str, path: str, body: dict | None) -> dict:
         import urllib.request
-        req = urllib.request.Request(self.api_base + path, method=method, headers={
+        req = urllib.request.Request(base + path, method=method, headers={
             "Content-Type": "application/json", "Cookie": f"bp_session={self.token}"},
             data=json.dumps({**(body or {}), "account_id": self.account_id}).encode() if body is not None else None)
         with urllib.request.urlopen(req, timeout=60) as resp:
             return json.loads(resp.read() or b"{}")
 
-    def inject(self, inject: dict) -> None:
+    def api(self, method: str, path: str, body: dict | None) -> dict:
+        return self._call(self.api_base, method, path, body)
+
+    def webui(self, method: str, path: str, body: dict | None) -> dict:
+        return self._call(self.api_base.rsplit(":", 1)[0] + ":8080", method, path, body)
+
+    def arm(self, spec: str) -> None:
         import failpoints
+        os.makedirs(os.path.dirname(failpoints.FAULT_FILE), exist_ok=True)
+        with open(failpoints.FAULT_FILE, "w", encoding="utf-8") as fh:
+            fh.write(spec + "\n")
+
+    def inject(self, inject: dict) -> None:
         fault = (inject.get("env") or {}).get("BITPORT_FAULT")
         if fault:
-            os.makedirs(os.path.dirname(failpoints.FAULT_FILE), exist_ok=True)
-            with open(failpoints.FAULT_FILE, "w", encoding="utf-8") as fh:
-                fh.write(fault + "\n")
-            return
+            return self.arm(fault)
         raise Unautomated(f"inject {json.dumps(inject)[:120]}")
+
+    def shell(self, cmd: str, allow: set) -> tuple:
+        """Only what campaign_executor.SHELL lists, and `reboot`/`net` only with the operator's --allow. A restart of
+        a unit waits for its port to answer again, so the next request does not meet a closed door."""
+        import socket
+        import subprocess
+        X.check_shell(cmd, allow)
+        proc = subprocess.run(cmd, shell=True, executable="/bin/bash", cwd=HERE, capture_output=True, text=True, timeout=3600)
+        for unit, port in (("bitport-api", 8090), ("bitport-webui", 8080)):
+            if f"restart {unit}" in cmd and not proc.returncode:
+                for _ in range(45):
+                    try:
+                        socket.create_connection(("127.0.0.1", port), timeout=2).close()
+                        break
+                    except OSError:
+                        time.sleep(2)
+        return proc.returncode, proc.stdout + proc.stderr
+
+    def job_pid(self, job=None, exclude=(), timeout: int = 120, active_only: bool = False):
+        """The newest job of this account (named `job`) not in `exclude`: a running one, else (unless active_only) the
+        newest run of this scenario already finished -- a failpoint can end a run within seconds of its start."""
+        import job_admission
+        import run_watch
+        end = time.time() + timeout
+        while True:
+            for j in reversed(job_admission.list_active()):
+                if j.get("account_id") == self.account_id and job in (None, j["job_name"]) and j["pid"] not in exclude:
+                    return j["pid"]
+            if not active_only:
+                for r in run_watch.list_runs(self.account_id, limit=20):
+                    if job in (None, r["jobName"]) and r["pid"] not in exclude and (r["startedAt"] or "") >= self.started:
+                        return r["pid"]
+            if time.time() >= end:
+                return None
+            time.sleep(min(self.poll, 2))
+
+    def log_text(self, job: str) -> str:
+        """The tail (2 MB) of the current run's log of this job."""
+        import webui
+        try:
+            with open(webui.job_log_path(self.account_id, job), "rb") as fh:
+                fh.seek(0, 2)
+                fh.seek(max(0, fh.tell() - 2_000_000))
+                return fh.read().decode("utf-8", "replace")
+        except OSError:
+            return ""
+
+    def exit_of(self, pid: int):
+        import run_watch
+        return next((r["rc"] for r in run_watch.list_runs(self.account_id, limit=50) if r["pid"] == pid and not r["running"]), None)
+
+    def incidents(self) -> dict:
+        """{incident kind: {"opens", "closes"}} for the incidents opened since this scenario's twin was taken."""
+        import run_watch
+        out: dict = {}
+        for inc in run_watch.list_incidents(account_id=self.account_id, limit=500):
+            if (inc.get("opened_at") or "") >= self.started:
+                out.setdefault(inc.get("kind"), set()).add("opens")
+                if inc.get("status") == "resolved":
+                    out[inc.get("kind")].add("closes")
+        return out
+
+    def exits(self) -> dict:
+        """Runs since the twin was taken that ended non-zero: STOPPED (an audited Stop names the pid) or crashed."""
+        import run_watch
+        out = {"stopped": 0, "crashed": 0}
+        for r in run_watch.list_runs(self.account_id, limit=200):
+            if not r["running"] and r["rc"] not in (None, 0) and (r["startedAt"] or "") >= self.started:
+                out["stopped" if run_watch.stopped_by(r["pid"], r["startedAt"]) else "crashed"] += 1
+        return out
 
     def disarm(self) -> None:
         import failpoints
@@ -206,7 +331,6 @@ class LiveDriver(Driver):
 
     def facts(self, user: str | None, since: str | None = None) -> dict:
         import known_issues
-        import run_watch
         out: dict = {}
         with self._ledger() as c:
             if user:
@@ -251,13 +375,11 @@ class LiveDriver(Driver):
             with open(os.path.join(HERE, "logs", "reports", str(self.account_id), reports[-1]), encoding="utf-8") as fh:
                 rep = json.load(fh)
             out["benchmarks"] = {b["id"]: b.get("status", "").upper() for b in (rep.get("benchmarks") or {}).get("results", [])}
-        incidents: dict = {}
-        for inc in run_watch.list_incidents(account_id=self.account_id, limit=500):
-            if (inc.get("opened_at") or "") >= self.started:
-                incidents.setdefault(inc.get("kind"), set()).add("opens")
-                if inc.get("status") == "resolved":
-                    incidents[inc.get("kind")].add("closes")
-        out["incidents"] = incidents
+        out["incidents"] = self.incidents()
+        try:
+            out["exits"] = self.exits()
+        except Exception:      # noqa: BLE001 - a run history that cannot be read is UNVERIFIED, never a pass
+            pass
         return out
 
 
@@ -341,6 +463,22 @@ def judge(expect: dict, facts: dict) -> tuple:
                         unread.append(f"incident {want}")
                     elif phase not in seen:
                         return "FAIL", f"incident {want} never {phase[:-1]}ed"
+        elif key == "stopped_not_crashed":      # every non-zero exit was an audited Stop (run_watch.stopped_by), none a crash
+            have = facts.get("exits")
+            if have is None:
+                unread.append(key)
+            elif have.get("crashed"):
+                return "FAIL", f"{have['crashed']} run(s) were recorded crashed, not stopped"
+            elif not have.get("stopped"):
+                return "FAIL", "no run was recorded STOPPED: the Stop was never audited against a run"
+        elif key == "failed_items":             # at most this many FAILED rows in the twin's ledger (0 = none)
+            have = facts.get("audit_counts")
+            if have is None:
+                unread.append(key)
+            else:
+                failed = sum(n for (_, status), n in have.items() if str(status).upper().startswith("FAIL"))
+                if failed > want:
+                    return "FAIL", f"{failed} failed item(s) in the ledger, at most {want} allowed"
         elif key in ("opens", "closes"):
             continue
         else:
@@ -352,7 +490,7 @@ def judge(expect: dict, facts: dict) -> tuple:
 
 CHANGES_KNOWN = ("drive.mtime", "drive.missing_on_target", "drive.grant_missing", "drive.content_changed",
                  "gmail.labels_missing", "gmail.unmapped_source", "contacts.unmapped_source",
-                 "contacts.missing_on_target", "tasks.list_missing")      # = campaign_changes.CHANGES (a test keeps them equal)
+                 "contacts.missing_on_target", "tasks.list_missing", "drive.grant_extra")      # = campaign_changes.CHANGES (a test keeps them equal)
 FIXED_BY_DELTA = ("drive.content_changed",)
 READS_THE_RUN = ("check_only", "seeded", "must_not_happen")
 
@@ -371,6 +509,21 @@ def _bind(body: dict, user: str | None) -> dict:
     return json.loads(json.dumps(body).replace("$user", user or ""))
 
 
+def _run_steps(sc, driver, row, name, allow):
+    """A failure row: take its twins, run its steps (refused whole, before any twin is spent, if one is not allowed),
+    then judge every twin the way an act's twin is judged; the worst verdict is the scenario's."""
+    steps = sc.inject["steps"]
+    ctx = X.Ctx(name, sc.id, allow, [], getattr(driver, "account_id", None), driver.fixture_user(TWINS[-1]))
+    X.validate(steps, ctx)
+    ctx.twins = [driver.take_twin() for _ in range(int(sc.inject.get("twin", 1)))]
+    ctx.user = ctx.twins[0]
+    X.run(steps, driver, ctx)
+    verdicts = [judge(sc.expect, driver.facts(t)) for t in ctx.twins]
+    status, why = min(verdicts, key=lambda v: ("FAIL", "UNVERIFIED", "PASS").index(v[0]))
+    return {**row, "status": status, "reason": why, "user": ctx.twins[0], "twins": ctx.twins,
+            "finished_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+
+
 def run_scenario(sc: S.Scenario, driver: Driver, name: str, allow: set, wait: int = 4 * 3600) -> dict:
     row = {"id": sc.id, "group": sc.group, "how": sc.how, "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
     if sc.needs and not set(sc.needs) <= allow:
@@ -384,6 +537,15 @@ def run_scenario(sc: S.Scenario, driver: Driver, name: str, allow: set, wait: in
         if not prior.get("user"):
             return {**row, "status": "UNVERIFIED", "reason": f"{sc.inject['failure']} has not run: it causes this one"}
         return _read(sc, driver, row, prior["user"])
+    if sc.how == "failure" and sc.inject.get("steps") and not sc.act:
+        try:
+            return _run_steps(sc, driver, row, name, allow)
+        except campaign_changes.Refused as exc:
+            return {**row, "status": "UNVERIFIED", "reason": f"refused, nothing was run: {exc}"}
+        except Unautomated as exc:
+            return {**row, "status": "UNVERIFIED", "reason": f"not automated yet: {exc}"}
+        except Exception as exc:      # noqa: BLE001 - a step that failed is a result, not a crash of the campaign
+            return {**row, "status": "FAIL", "reason": f"{type(exc).__name__}: {str(exc)[:200]}"}
     if not sc.act and sc.how not in READS_THE_RUN and not (sc.how == "changed_after" and sc.id.split(":", 1)[1] in CHANGES_KNOWN):
         return {**row, "status": "UNVERIFIED", "reason": "the scenario has no `act` yet: define it before its first live run (P3.4)"}
     try:
@@ -450,7 +612,7 @@ def run(name: str, driver: Driver, group: str | None = None, only: set | None = 
     out(f"{len(todo)} scenario(s) to run of {len(select(scenarios, group, only))} selected")
     if dry_run:
         for s in todo:
-            out(f"  {s.id}  [{s.how}]" + (f"  needs {','.join(s.needs)}" if s.needs else "") + ("" if s.act or s.how in ("check_only", "unseedable") else "  (no act yet)"))
+            out(f"  {s.id}  [{s.how}]" + (f"  needs {','.join(s.needs)}" if s.needs else "") + ("" if s.act or s.inject.get("steps") or s.how in ("check_only", "unseedable") else "  (no act yet)"))
         return done
     for s in todo:
         row = run_scenario(s, driver, name, allow or set())
