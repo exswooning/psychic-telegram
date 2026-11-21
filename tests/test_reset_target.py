@@ -448,3 +448,15 @@ def test_the_shared_drives_the_ledger_maps_are_deleted_with_their_contents(tmp_p
     assert reset_target._delete_ledger_shared_drives(st, auth) == 1
     assert sorted(k["driveId"] for k in calls) == ["T1", "T2"]
     assert all(k["useDomainAdminAccess"] and k["allowItemDeletion"] for k in calls)
+
+
+def test_a_whole_tenant_ledger_reset_clears_the_shared_drive_records(tmp_path):
+    import reset_drive_ledger
+    from db import MigrationDB
+    db = MigrationDB(str(tmp_path / "l.db"))
+    db.record_mapping("admin@a", "SD1", "TD1", "shared_drive")
+    db.record_mapping("admin@a", "MOVED", "MOVED", "shared_drive")      # a moved drive keeps its id: kept
+    db.log_audit("admin@a", "SD1", "shared_drive_member", "FAILED", "404")
+    assert reset_drive_ledger.clear_shared_drive_records(db) == 2
+    left = db.conn.execute("SELECT source_id FROM id_mapping WHERE type='shared_drive'").fetchall()
+    assert [r[0] for r in left] == ["MOVED"]

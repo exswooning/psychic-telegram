@@ -456,7 +456,7 @@ def main(argv: list[str] | None = None) -> int:
             return 1
 
     totals, unreached = reset_all(settings, auth, users, services, args.workers)
-    if "drive" in services:
+    if "drive" in services and not args.user:      # a shared drive is everyone's: only a whole-tenant reset takes it
         n = _delete_ledger_shared_drives(settings, auth)
         print(f"Removed {n} shared drive(s) the migration made on {settings.target_domain}.")
     print(f"\nRemoved: {totals['drive']} drive root(s), {totals['gmail']} mail "

@@ -374,7 +374,25 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  [{n}/{len(rows)}] {result['user']}: {result['id_mapping_rows']} mapping row(s), "
               f"{result['audit_log_rows']} audit row(s){side} cleared"
               f"{was}{demoted}")
+    if "drive" in services and not args.user:
+        # reset_target deletes the shared drives a migration made on a whole-tenant reset; their records go with
+        # them, or the next run adds members to a drive that is gone (P3.7 run 8, 22 Nov 2026: 31 x 404).
+        n = clear_shared_drive_records(db)
+        print(f"  shared drives: {n} record(s) cleared")
     return 0
+
+
+SHARED_DRIVE_TYPES = ("shared_drive", "shared_drive_member")
+
+
+def clear_shared_drive_records(db: MigrationDB) -> int:
+    """Every shared-drive mapping and audit row, whoever's they are; a moved drive (one id on both sides) is kept,
+    as reset_target keeps the drive itself."""
+    with db.write() as conn:
+        n = conn.execute("DELETE FROM id_mapping WHERE type IN (?,?) AND target_id != source_id",
+                         SHARED_DRIVE_TYPES).rowcount
+        n += conn.execute("DELETE FROM audit_log WHERE item_type IN (?,?)", SHARED_DRIVE_TYPES).rowcount
+    return n
 
 
 if __name__ == "__main__":
