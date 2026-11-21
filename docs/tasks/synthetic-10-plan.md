@@ -541,6 +541,21 @@ old keys from root's `authorized_keys`; decide on rewriting the git history that
 
 ## 11. State (newest first)
 
+- 21 Nov 2026, ~09:35 UTC box (Opus): **P3.5 run 2: PARITY 41/41 after five fixes at the cause; run 3 starts.** Phase times (UTC):
+  migrate 20 Nov 06:26 (stopped at 06:41 by the live-run rule: three Sheets link rewrites lost to a 429) and 06:44-07:29 (45 min,
+  PASS); DMS tries 07:29-09:08, 09:14-10:49, 10:51-11:44 (each rc 2) and 21 Nov 06:20-07:10 (rc 0, check-only); verify-after-dms
+  07:10-09:05 (1 h 55 min, 41 users x 5 services); c03 re-verify 09:06-09:24; repair 09:24-09:26; t03/t04 Drive re-verify 09:26-09:33.
+  Google's imports: 0 failed, 0 skipped every time; users processed 38-41. Reconcile 12,161 checked, 11,635 verified, 0 blocked,
+  526 label-only aligned, 152 DMS draft duplicates trashed. What stopped it, each fixed with a test and deployed:
+  (1) every 429 gets the rate-limit budget (2ee11fe; Sheets per-minute quota); (2) a DMS twin adopted by a sibling worker after this
+  one's check shares the copy (6271230, c04); (3) Gmail's 400 failedPrecondition on a busy mailbox gets three tries (a45c965, c10);
+  (4) a 'complete' this watch saw running is accepted whatever its user count (8157391; a delta processed 39 of 41 and was refused --
+  missed overnight because the repeat incident was deduped: watch job-exits rc too); `check_only` restart: reconcile + labels, no
+  re-import (each restart had re-imported for ~1 h 40 min); (5) the verify heartbeat counts each compared file (99401ee, false stalls
+  #204/#205); (6) a failed native link rewrite stays owed: the walk re-queues it and repair re-walks its user (9fa1535; the failure had
+  cleared its marker, so the three Sheets were never retried -- they turned out to hold no links to repoint). c03's four extras were
+  fixture shortcuts left by runs before 9579874, unmapped and dangling: trashed by hand, nothing new leaves them. Run 3:
+  `/tmp/p35_run_nochat.sh 3`.
 - 20 Nov 2026, ~04:45 UTC box (Opus): **[opus] items coded and deployed; run 1b NOT_PARITY 40/41 on a reset gap; run 2 starts.**
   Run 1b: reset 44 min (permanent mail delete), migrate 45 min (0 failures, report PASS), DMS import + reconciliation 0 unresolved,
   labels 528 aligned, verify, gate 40/41: c03 had four extra shortcuts. Cause: the Drive reset deleted only the seeder's
