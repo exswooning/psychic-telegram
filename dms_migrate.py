@@ -873,8 +873,16 @@ APPROVE_BUTTONS = ("Authorize", "Approve", "Grant", "Allow", "Accept",
 def _source_login() -> tuple[str, str]:
     """The SOURCE super admin's console login (DWD_EMAIL_SOURCE/DWD_PASSWORD_SOURCE,
     from the root-only env file the job's environment is built from)."""
-    email = os.getenv("DWD_EMAIL_SOURCE") or os.getenv("SOURCE_ADMIN", "")
-    return email.strip(), os.getenv("DWD_PASSWORD_SOURCE", "")
+    email = (os.getenv("DWD_EMAIL_SOURCE") or os.getenv("SOURCE_ADMIN", "")).strip()
+    # Never a government source's console, and never a login from another tenant: the box keeps one file, and an
+    # account whose source is dharan.gov.np (target a.) would otherwise sign in as a.'s admin to approve dharan's
+    # request. The approval is then the source admin's own click, and the watch waits for it.
+    src = (os.getenv("SOURCE_DOMAIN") or "").strip().lower()
+    if src:
+        import domain_guard
+        if domain_guard.is_government(src) or not email.lower().endswith("@" + src):
+            return "", ""
+    return email, os.getenv("DWD_PASSWORD_SOURCE", "")
 
 
 def _approval_link_in(html: str) -> str | None:

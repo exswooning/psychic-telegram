@@ -249,6 +249,18 @@ def test_no_approval_mail_yet_is_said_not_raised(monkeypatch):
     assert dms_migrate.approve_as_source(10, False) == ["no approval mail for admin@src.test yet"]
 
 
+
+def test_a_government_source_or_another_tenants_login_is_never_signed_in(monkeypatch):
+    import dms_migrate
+    monkeypatch.setenv("DWD_EMAIL_SOURCE", "info@a.example.com")
+    monkeypatch.setenv("DWD_PASSWORD_SOURCE", "x")
+    monkeypatch.setattr(dms_migrate, "approval_link", lambda *a: (_ for _ in ()).throw(AssertionError("read mail")))
+    for src in ("dharan.gov.np", "other.example.com"):
+        monkeypatch.setenv("SOURCE_DOMAIN", src)
+        assert "waits for the source admin" in dms_migrate.approve_as_source(10, False)[0]
+    monkeypatch.setenv("SOURCE_DOMAIN", "a.example.com")
+    assert dms_migrate._source_login() == ("info@a.example.com", "x")
+
 def test_a_pending_request_is_approved_then_looked_at_again(monkeypatch):
     import dms_migrate
     monkeypatch.delenv("TARGET_DOMAIN", raising=False)
