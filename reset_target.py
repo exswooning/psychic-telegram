@@ -300,6 +300,31 @@ def _delete_ledger_drive_items(settings: Settings, auth: AuthManager, target_use
     return n
 
 
+def _delete_ledger_shared_drives(settings: Settings, auth: AuthManager) -> int:
+    """The shared drives the ledger says a migration made on the target, deleted with their contents as the target
+    admin. The per-user reset never reached them, so the next run adopted the previous run's files instead of
+    copying them (P3.7 run 7, 21 Nov 2026: info@'s SEEDED-SD-3). Only ids the ledger maps; one already gone is 404."""
+    import sqlite3
+    try:
+        conn = sqlite3.connect(f"file:{settings.db_path}?mode=ro", uri=True)
+        ids = [r[0] for r in conn.execute(
+            "SELECT DISTINCT target_id FROM id_mapping WHERE type='shared_drive' AND target_id != source_id")]
+        conn.close()
+    except Exception:  # noqa: BLE001 - no ledger to read is nothing to delete
+        return 0
+    if not ids:
+        return 0
+    admin, n = auth.target_drive(settings.target_admin), 0
+    for did in ids:
+        try:
+            admin.drives().delete(driveId=did, useDomainAdminAccess=True, allowItemDeletion=True).execute()
+            n += 1
+        except Exception as exc:  # noqa: BLE001 - gone already, or refused: say which
+            if "404" not in str(exc) and "notFound" not in str(exc):
+                print(f"    ! shared drive {did}: {str(exc)[:90]}")
+    return n
+
+
 def _delete_ledger_spaces(settings: Settings, auth: AuthManager, target_user: str) -> int:
     """The Chat spaces the ledger says were made for this user, by id. A migrated
     direct message or group chat has no name, so the seeder's name-based reset never
@@ -431,6 +456,9 @@ def main(argv: list[str] | None = None) -> int:
             return 1
 
     totals, unreached = reset_all(settings, auth, users, services, args.workers)
+    if "drive" in services:
+        n = _delete_ledger_shared_drives(settings, auth)
+        print(f"Removed {n} shared drive(s) the migration made on {settings.target_domain}.")
     print(f"\nRemoved: {totals['drive']} drive root(s), {totals['gmail']} mail "
           f"item(s), {totals['calendar']} calendar item(s), {totals['chat']} chat.")
     # A service it could not reach is not an empty one: "Removed: 0" with rc 0

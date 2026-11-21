@@ -420,3 +420,31 @@ def test_the_reset_deletes_what_the_ledger_says_the_migration_wrote_outside_the_
             return SimpleNamespace(files=lambda: Files())
     n = reset_target._delete_ledger_drive_items(SimpleNamespace(db_path=str(db)), Auth(), "u@b.example.com")
     assert n == 2 and sorted(deleted) == ["t1", "t2"]
+
+
+def test_the_shared_drives_the_ledger_maps_are_deleted_with_their_contents(tmp_path):
+    import sqlite3
+    from types import SimpleNamespace
+    import reset_target
+    path = tmp_path / "l.db"
+    c = sqlite3.connect(path)
+    c.execute("CREATE TABLE id_mapping (source_user, source_id, target_id, type)")
+    c.executemany("INSERT INTO id_mapping VALUES (?,?,?,?)", [
+        ("a", "S1", "T1", "shared_drive"), ("b", "S1", "T1", "shared_drive"), ("a", "S2", "T2", "shared_drive"),
+        ("a", "M1", "M1", "shared_drive"),          # a moved drive keeps its id: never deleted
+        ("a", "F1", "TF", "file")])
+    c.commit(); c.close()
+    calls = []
+
+    class Drives:
+        def delete(self, **kw):
+            calls.append(kw)
+            if kw["driveId"] == "T2":
+                return SimpleNamespace(execute=lambda: (_ for _ in ()).throw(RuntimeError("HttpError 404 notFound")))
+            return SimpleNamespace(execute=lambda: {})
+
+    auth = SimpleNamespace(target_drive=lambda who: SimpleNamespace(drives=lambda: Drives()))
+    st = SimpleNamespace(db_path=str(path), target_admin="admin@b.test")
+    assert reset_target._delete_ledger_shared_drives(st, auth) == 1
+    assert sorted(k["driveId"] for k in calls) == ["T1", "T2"]
+    assert all(k["useDomainAdminAccess"] and k["allowItemDeletion"] for k in calls)
