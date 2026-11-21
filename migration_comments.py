@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import html
+import failpoints
+import re
 from collections import Counter
 from link_rewrite import rewrite_text
 from db import utc_now
@@ -33,6 +36,63 @@ def list_threads(svc, fid, execute=lambda fn: fn()):
         seen.add(token)
 
 
+# "+name@x" (or "@name@x") in a comment mentions that person, and writing it can make Google email
+# them -- from dharan.gov.np, a new message in a SOURCE mailbox. A copy names them as plain text and
+# mails nobody (operator, 16 Nov 2026: the source must not change at all). "a+b@x" is an address.
+_MENTION = re.compile(r"(?<![\w.+-])[+@](?=[\w.%+'-]+@[\w-]+(?:\.[\w-]+)+)")
+
+
+def _unmention(text):
+    return _MENTION.sub("", text)
+
+
+def _text(value):
+    # Drive keeps a comment's text without the trailing space the engine writes after the
+    # "[Author, date]" prefix, so an exact comparison called every action-only reply
+    # (empty body) "differs" and refused it. Trailing whitespace is not a difference.
+    # Only text is trimmed: quotedFileContent is an object ({"mimeType", "value"}), and trimming it
+    # failed health@, ward15@ and ward4@ with "'dict' object has no attribute 'rstrip'" (7 Nov 2026).
+    # Nor is a mention's "+": a copy made before 16 Nov kept it and is the same comment.
+    if isinstance(value, str):
+        return _unmention(value).rstrip()
+    return "" if value is None else value
+
+
+def _quote(q):
+    """A quote as (mimeType, value); an empty one and none at all are the same (Drive drops an empty quote)."""
+    value = q.get("value") if isinstance(q, dict) else None
+    return (q.get("mimeType"), value) if value else None
+
+
+def quote_match(source, target) -> str:
+    """'same', 'escaped' or 'differs'. Drive HTML-escapes a quote when a comment is written, and the engine
+    used to post the value as read (already escaped), so every copy made before 15 Nov 2026 carries one more
+    level ('&amp;' -> '&amp;amp;'; health@, ward4@ on account 3). 'escaped' names exactly that and nothing else."""
+    a, b = _quote(source), _quote(target)
+    if a == b:
+        return "same"
+    if a and b and a[0] == b[0] and html.escape(a[1], quote=False) == b[1]:
+        return "escaped"
+    return "differs"
+
+
+def for_writing(quoted):
+    """The quote as it must be sent so Drive stores what the source shows: one level un-escaped."""
+    return {**quoted, "value": html.unescape(quoted["value"])} if _quote(quoted) else quoted
+
+
+def _body_matches(found, body):
+    # Only comment text has Drive's trailing-whitespace normalization. A quote matches exactly or with the one
+    # extra escaping level of an older copy of ours; any other change is a target edit and is preserved.
+    def same(key, value):
+        if key == "content":
+            return _text(found.get(key)) == _text(value)
+        if key == "quotedFileContent":
+            return quote_match(value, found.get(key)) != "differs"
+        return found.get(key) == value
+    return all(same(key, value) for key, value in body.items())
+
+
 def content(row, lookup):
     author = (row.get("author") or {}).get("displayName") or "unknown"
     return (
@@ -41,7 +101,7 @@ def content(row, lookup):
         + ", "
         + (row.get("createdTime") or "")[:10]
         + "] "
-        + rewrite_text(row.get("content", ""), lookup)[0]
+        + _unmention(rewrite_text(row.get("content", ""), lookup)[0])
     )
 
 
@@ -53,9 +113,14 @@ def differences(source, target, lookup):
         candidates = [
             c
             for c in remaining
-            if c.get("content", "")
-            in (wanted, rewrite_text(comment.get("content", ""), lookup)[0])
+            if _text(c.get("content"))
+            in (_text(wanted), _text(rewrite_text(comment.get("content", ""), lookup)[0]))
         ]
+        if len(candidates) > 1:
+            # Two threads with the same words on different spots (live, finance@s.: one PDF,
+            # "[FINANCE, 2023-01-13]" twice): the anchor tells them apart, as delivery does.
+            candidates = [c for c in candidates if c.get("anchor") == comment.get("anchor")
+                          and quote_match(comment.get("quotedFileContent"), c.get("quotedFileContent")) != "differs"]
         if len(candidates) != 1:
             diffs.append("comment thread missing or ambiguous")
             continue
@@ -63,19 +128,23 @@ def differences(source, target, lookup):
         remaining.remove(found)
         if bool(comment.get("resolved")) != bool(found.get("resolved")):
             diffs.append("comment resolution differs")
-        for field in ("anchor", "quotedFileContent"):
-            if comment.get(field) != found.get(field):
-                diffs.append("comment " + field + " differs")
+        if comment.get("anchor") != found.get("anchor"):
+            diffs.append("comment anchor differs")
+        quoted = quote_match(comment.get("quotedFileContent"), found.get("quotedFileContent"))
+        if quoted == "escaped":
+            diffs.append("comment quote escaped twice (Drive escapes on write; copy made before the fix)")
+        elif quoted == "differs":
+            diffs.append("comment quotedFileContent differs")
         want = Counter(
-            (content(r, lookup), r.get("action", ""))
+            (_text(content(r, lookup)), r.get("action", ""))
             for r in comment.get("replies", [])
         )
         actual = Counter(
-            (r.get("content", ""), r.get("action", ""))
+            (_text(r.get("content")), r.get("action", ""))
             for r in found.get("replies", [])
         )
         raw = Counter(
-            (rewrite_text(r.get("content", ""), lookup)[0], r.get("action", ""))
+            (_text(rewrite_text(r.get("content", ""), lookup)[0]), r.get("action", ""))
             for r in comment.get("replies", [])
         )
         if actual not in (want, raw):
@@ -120,25 +189,38 @@ def reconcile(migrator, sid, tid):
         if mapped:
             found = next((r for r in candidates if r["id"] == mapped), None)
             if not found:
-                raise RuntimeError(
-                    "Mapped comment/reply is missing; do not create another blindly"
-                )
-            if any(found.get(k, "") != v for k, v in body.items()):
-                raise RuntimeError(
-                    "Existing target comment/reply differs; preserve possible target edits"
-                )
-            return mapped
+                # A proven receipt for another target copy is not evidence
+                # about this freshly mapped file. Missing replies on the SAME
+                # copy, or without that receipt, remain a target-edit hold.
+                receipt = migrator.db.conn.execute(
+                    "SELECT target_file FROM comment_delivery_attempts WHERE source_user=? AND item_key=?",
+                    (migrator.source_user, key)).fetchone()
+                if not receipt or not str(receipt[0] or "").strip() or receipt[0] == tid:
+                    raise RuntimeError(
+                        "Mapped comment/reply is missing; do not create another blindly"
+                    )
+            else:
+                if not _body_matches(found, body):
+                    raise RuntimeError(
+                        "Existing target comment/reply differs; preserve possible target edits"
+                    )
+                return mapped
         matches = [
-            r for r in candidates if all(r.get(k, "") == v for k, v in body.items())
+            r for r in candidates if _body_matches(r, body)
         ]
         if len(matches) > 1:
             raise RuntimeError("Ambiguous comment/reply copies")
         if matches:
             target_id = matches[0]["id"]
         else:
+            # Only an attempt against THIS target file says anything about it. A file re-copied to a new
+            # target (repair, quarantine) clears its comments' mappings but not their attempt rows, and the
+            # old copy's rows then blocked the new copy's comments for good (finance@, it.department@:
+            # "needs reconciliation", live 7 Nov 2026) -- the user's comments never reached the new file.
             prior = migrator.db.conn.execute(
-                "SELECT state FROM comment_delivery_attempts WHERE source_user=? AND item_key=?",
-                (migrator.source_user, key),
+                "SELECT state FROM comment_delivery_attempts WHERE source_user=? AND item_key=? "
+                "AND target_file=?",
+                (migrator.source_user, key, tid),
             ).fetchone()
             if prior:
                 raise RuntimeError(
@@ -146,14 +228,14 @@ def reconcile(migrator, sid, tid):
                 )
             with migrator.db.write() as c:
                 c.execute(
-                    "INSERT INTO comment_delivery_attempts VALUES(?,?,?,'UNCERTAIN',?)",
+                    "INSERT OR REPLACE INTO comment_delivery_attempts VALUES(?,?,?,'UNCERTAIN',?)",
                     (migrator.source_user, key, tid, utc_now()),
                 )
             # No automatic request retry after an ambiguous create response.
             for limiter_name in ("_tgt_write_limiter", "_project_limiter"):
                 limiter=getattr(migrator,limiter_name,None)
                 if limiter is not None:limiter.acquire()
-            created = call().execute()
+            created = failpoints.hit("drive.comment.created", call().execute())
             target_id = created["id"]
             written += 1
         migrator.db.record_mapping(migrator.source_user, key, target_id, kind)
@@ -175,7 +257,9 @@ def reconcile(migrator, sid, tid):
             body,
             target,
             lambda: migrator.tgt.comments().create(
-                fileId=tid, body=body, fields=FIELDS
+                fileId=tid, fields=FIELDS,
+                body={**body, **({"quotedFileContent": for_writing(body["quotedFileContent"])}
+                                 if "quotedFileContent" in body else {})},
             ),
         )
         found = next((c for c in target if c["id"] == cid), {})

@@ -17,6 +17,8 @@ from __future__ import annotations
 import dataclasses
 import os
 
+import config
+
 # Setting -> the variable that turns it on or off for one run. All of these are
 # ON by default now (config.py): a migration moves everything it can. What makes
 # that safe is drop_ungranted below -- a pass whose scope a tenant has not
@@ -102,6 +104,11 @@ def plan(settings, probe, can_grant=None) -> tuple[dict, list[str]]:
     first, so the re-grant never even saw them."""
     env, off = {}, []
     for flag, var in OPTIONAL.items():
+        if flag == "migrate_chat" and not config.chat_by_default():
+            # Chat is opt-in (operator, 2026-10-31): a scope that mints is not a request for it. The
+            # launch used to switch it on for every run, Chat then answered 403 in the source manifest,
+            # and six users lost their calendar, contacts and tasks (account 3, 7 Nov 2026).
+            continue
         missing = []
         for tenant, scopes in extra_scopes(settings, flag).items():
             if scopes:

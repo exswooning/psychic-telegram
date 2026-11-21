@@ -975,7 +975,7 @@ const SeedPanel: React.FC<{ domain: string; onStarted: () => void }> = ({ domain
           {/* How much */}
           <Typography variant="overline" color="text.secondary">How much</Typography>
           <Stack direction="row" spacing={2} sx={{ flexWrap: 'wrap', gap: 1.5, mb: 1.5 }}>
-            <Tooltip title="Messages per user. Blank scales with the chosen size.">
+            <Tooltip title="Emails per user. Blank scales with the chosen size.">
               <TextField size="small" type="number" label="Mail / user" value={mail}
                          sx={{ width: 120 }} onChange={(e) => setMail(e.target.value)}
                          inputProps={{ 'data-testid': 'seed-mail', min: 0 }} />

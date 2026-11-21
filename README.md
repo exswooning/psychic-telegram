@@ -1,5 +1,8 @@
 # Tenant-to-Tenant Migration Engine
 
+> **Installing Bitport on a server? Start with [INSTALL.md](INSTALL.md).** It is written for someone
+> who has never done this before. The rest of this file is for developers.
+
 A modular Google Workspace migration engine (tenantA.com → tenantB.com) covering
 Drive with ACL translation, Gmail, and Calendar.
 
@@ -242,6 +245,9 @@ way to migrate a whole tenant, and the setup burden it carries is the price.
 ---
 
 ## 2. Installation
+
+*This section is for developers who run the engine by hand. To install Bitport on a server, use
+[INSTALL.md](INSTALL.md) instead.*
 
 ```bash
 python3 -m venv .venv && source .venv/bin/activate

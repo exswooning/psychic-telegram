@@ -9,6 +9,7 @@ import {
   ForensicDetail, fetchForensics, retryItem,
 } from '@/api/controlPlane'
 import ReasonCodeDialog from './ReasonCodeDialog'
+import { itemTypeLabel } from '@/utils/itemTypeLabel'
 
 /**
  * Everything known about one item, so diagnosing a failure stops requiring
@@ -152,7 +153,7 @@ const ForensicModal: React.FC<Props> = ({ open, sourceUser, itemId, onClose, onR
                         <TableCell sx={{ whiteSpace: 'nowrap' }}>
                           {new Date(a.timestamp).toLocaleString()}
                         </TableCell>
-                        <TableCell>{a.item_type}</TableCell>
+                        <TableCell>{itemTypeLabel(a.item_type)}</TableCell>
                         <TableCell>
                           <Chip size="small" label={a.status}
                                 color={statusColor(a.status)} variant="outlined" />

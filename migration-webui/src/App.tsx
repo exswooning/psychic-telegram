@@ -22,6 +22,7 @@ const Migrations = lazy(() => import('@/pages/Migrations'))
 const Mirror = lazy(() => import('@/pages/Mirror'))
 const MigrationDetail = lazy(() => import('@/pages/MigrationDetail'))
 const Metrics = lazy(() => import('@/pages/Metrics'))
+const Benchmarks = lazy(() => import('@/pages/Benchmarks'))
 const TestReport = lazy(() => import('@/pages/TestReport'))
 const MissionControl = lazy(() => import('@/pages/MissionControl'))
 const Users = lazy(() => import('@/pages/Users'))
@@ -35,6 +36,7 @@ const FinalReport = lazy(() => import('@/pages/FinalReport'))
 const Settings = lazy(() => import('@/pages/Settings'))
 const ActivityFeed = lazy(() => import('@/pages/ActivityFeed'))
 const ErrorHandling = lazy(() => import('@/pages/ErrorHandling'))
+const ErrorResolution = lazy(() => import('@/pages/ErrorResolution'))
 const HelpSystem = lazy(() => import('@/pages/HelpSystem'))
 const AdminAccounts = lazy(() => import('@/pages/AdminAccounts'))
 const Deploy = lazy(() => import('@/pages/Deploy'))
@@ -111,6 +113,7 @@ const App: React.FC = () => {
               <Route path="/migrations/:accountId" element={<MigrationDetail />} />
               <Route path="/mirror" element={<Mirror />} />
               <Route path="/metrics" element={<Metrics />} />
+              <Route path="/benchmarks" element={<Benchmarks />} />
               <Route path="/migrations/:accountId/metrics" element={<Metrics />} />
               <Route path="/tests" element={<TestReport />} />
               <Route path="/wizard" element={<Wizard />} />
@@ -127,6 +130,7 @@ const App: React.FC = () => {
               <Route path="/report" element={<FinalReport />} />
               <Route path="/activity" element={<ActivityFeed />} />
               <Route path="/errors" element={<ErrorHandling />} />
+              <Route path="/error-resolution" element={<ErrorResolution />} />
               <Route path="/help" element={<HelpSystem />} />
               <Route path="/settings" element={<Settings />} />
               {/* Operator/superadmin-only: hidden from nav for a regular

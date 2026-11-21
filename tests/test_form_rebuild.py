@@ -135,6 +135,27 @@ def test_a_strategy_that_raises_is_recorded_not_hidden_behind_a_skip(migrator, m
     assert row["status"] == "FAILED" and "429 rateLimitExceeded" in row["error_message"]
 
 
+def test_a_rebuild_after_an_unsupported_export_keeps_the_skip_reason(migrator, monkeypatch, caplog):
+    """Fresh account-3 run: successful Forms rebuilds were reported as broken exports."""
+    def declines(item, parent):
+        migrator.db.log_audit(migrator.source_user, item["id"], "file", "SKIPPED_UNEXPORTABLE",
+                              "no export mapping for " + native_api.FORM)
+
+    def copies(item, parent):
+        migrator.db.record_mapping(migrator.source_user, item["id"], "target-form", "file")
+        migrator.db.log_audit(migrator.source_user, item["id"], "file", "SUCCESS")
+
+    monkeypatch.setattr(migrator, "_strategies_for", lambda item, native: [
+        ("download_upload", declines), ("native_api", copies)])
+    with caplog.at_level("INFO", logger="drive_engine"):
+        migrator._sync_with_fallback({"id": "unsupported-form", "name": "Survey", "mimeType": native_api.FORM}, "p", True)
+    row = migrator.db.get_audit(migrator.source_user, "unsupported-form", "fallback")
+    assert "SKIPPED_UNEXPORTABLE: no export mapping" in row["error_message"]
+    assert "failed" not in migrator.db.get_audit(migrator.source_user, "unsupported-form", "file")["error_message"]
+    assert "failed" not in caplog.text
+    assert migrator.stats["failed"] == 0
+
+
 def test_a_line_break_in_displayed_text_becomes_a_space_and_is_counted():
     """Live, dharan.gov.np: 'Displayed text cannot contain newlines' for two Forms."""
     form = {"info": {"title": "Citizen\nReport"}, "items": [

@@ -1,0 +1,16 @@
+[Unit]
+Description=Bitport autopilot for account %i (autopilot.py: playbook, REPORT.md, INBOX.md)
+After=network.target bitport-api.service
+
+[Service]
+WorkingDirectory=/root/migration
+EnvironmentFile=-/etc/bitport/node.env
+ExecStart=/root/migration/.venv/bin/python -u autopilot.py --account-id %i
+Restart=on-failure
+RestartSec=30
+# Never kill the whole cgroup: it holds the jobs the autopilot resumed (see bitport-api.service).
+KillMode=process
+
+# Not enabled by deploy. Start one per account: systemctl enable --now bitport-autopilot@<account-id>
+[Install]
+WantedBy=multi-user.target

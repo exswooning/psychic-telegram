@@ -33,6 +33,7 @@ import concurrent.futures as futures
 import os
 import threading
 import random
+import zlib
 from datetime import datetime, timedelta, timezone
 
 from config import FOLDER_MIME
@@ -85,6 +86,22 @@ EXTRA_EXTERNAL_SHARE = "aryan@nestnepal.com.np"
 # ----------------------------------------------------------------------
 # Scale profiles: files per leaf folder, archive depth, etc.
 # ----------------------------------------------------------------------
+# One user's content key, from a cohort file (fixtures.entries_from_cohort): twins share one.
+CONTENT_KEYS: dict[str, str] = {}
+
+
+def stable_seed(user: str, salt: int = 0) -> int:
+    """The same number in every process, for the same campaign seed, content key and salt.
+
+    The seeder seeded its random numbers from the built-in string hash, which Python salts per process
+    (PYTHONHASHSEED): two runs for one user made different mail, so no result could be compared. The
+    campaign seed is SEED_CAMPAIGN (--seed); the content key defaults to the user and is SEED_CONTENT_KEY
+    (--content-key) when users must hold the same content (twins). The salt keeps one user's mail, drafts,
+    calendar and contacts from sharing a stream. (Message-IDs stay uuid4 on purpose: see _rfc822.)"""
+    key = CONTENT_KEYS.get(user.lower()) or os.getenv("SEED_CONTENT_KEY") or user
+    return zlib.crc32(f"{os.getenv('SEED_CAMPAIGN', '0')}\x1f{key}\x1f{salt}".encode("utf-8"))
+
+
 SCALES = {
     "tiny":   {"per_leaf": 2,  "archive_years": 1, "wide": 30,
                "accounts": 2, "deep": 8,  "big_native": False},
@@ -209,7 +226,7 @@ class CorpusBuilder:
         self.cfg = SCALES[scale]
         self._media = media_factory
         self._retry = retry
-        self.rng = random.Random(hash(user) & 0xFFFF if not rng_seed else rng_seed)
+        self.rng = random.Random(stable_seed(user) if not rng_seed else rng_seed)
         # _run_leaves creates files on several threads, and every counter
         # below is a read-modify-write. Guarded rather than trusted to the
         # GIL: `d[k] += 1` is three bytecodes, not one.

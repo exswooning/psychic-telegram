@@ -74,6 +74,26 @@ class TestSheets:
             "includeFormulas": True, "allSheets": True}}]
 
 
+    def test_a_cells_own_hyperlink_and_rich_text_links_are_repointed(self):
+        url, other = f"https://drive.google.com/open?id={SRC}", f"https://drive.google.com/open?id={OTHER}"
+        text = f"see {url} now"
+        doc = {"sheets": [{"properties": {"sheetId": 7}, "data": [{"startRow": 1, "startColumn": 2, "rowData": [{"values": [
+            {"userEnteredValue": {"stringValue": url}, "userEnteredFormat": {"textFormat": {"link": {"uri": url}}}},
+            {"userEnteredValue": {"stringValue": text}, "textFormatRuns": [
+                {"format": {}}, {"startIndex": 4, "format": {"link": {"uri": url}}}, {"startIndex": 4 + len(url), "format": {}}]},
+            {"userEnteredValue": {"stringValue": other}, "userEnteredFormat": {"textFormat": {"link": {"uri": other}}}},
+        ]}]}]}]}
+        reqs = [r["updateCells"] for r in L.sheet_link_requests(doc, lookup)]
+        assert len(reqs) == 2, "the unmapped link is left alone"
+        assert reqs[0]["range"] == {"sheetId": 7, "startRowIndex": 1, "endRowIndex": 2, "startColumnIndex": 2, "endColumnIndex": 3}
+        assert reqs[0]["rows"][0]["values"][0]["userEnteredFormat"]["textFormat"]["link"]["uri"] == url.replace(SRC, TGT)
+        cell = reqs[1]["rows"][0]["values"][0]
+        new_url = url.replace(SRC, TGT)
+        assert cell["userEnteredValue"]["stringValue"] == f"see {new_url} now"
+        assert [r["startIndex"] for r in cell["textFormatRuns"]] == [0, 4, 4 + len(new_url)]
+        assert cell["textFormatRuns"][1]["format"]["link"]["uri"] == new_url
+
+
 class _Exec:
     def __init__(self, result, log, what):
         self.result, self.log, self.what = result, log, what
@@ -106,7 +126,7 @@ class TestRewriteNative:
         class Sheets:
             def spreadsheets(self): return self
             def values(self): return self
-            def get(self, spreadsheetId, fields):
+            def get(self, spreadsheetId, fields, includeGridData=False):
                 return _Exec({"sheets": [{"properties": {"title": "Q1 'plan'"}}]}, log, "get")
             def batchGet(self, spreadsheetId, ranges, valueRenderOption):
                 log.append(("ranges", ranges, valueRenderOption))
@@ -239,6 +259,17 @@ class TestARedoRepointsNativesCopiedBefore:
         assert m._pending_native == []
 
 
+    def test_a_failed_rewrite_is_queued_again_and_its_user_repaired(self, settings, db):
+        import repair
+        settings.rewrite_drive_links, settings.redo_unrewritten_links = True, False
+        m = self._engine(settings, db)
+        db.conn.execute("INSERT INTO identity_map (source_email, target_email) VALUES ('u@a', 'u@b')")
+        assert repair.pending_share_users(db) == []
+        db.log_audit("u@a", "S1", "link_rewrite", "FAILED", "exhausted 6 retries on HTTP 429")
+        assert repair.pending_share_users(db) == ["u@a"]
+        m._sync_file({"id": "S1", "mimeType": "application/vnd.google-apps.document"}, "P")
+        assert [t for _, t in m._pending_native] == ["T1"]
+
 def test_the_setup_check_requires_the_three_native_apis():
     import ensure_apis
     assert {"docs.googleapis.com", "sheets.googleapis.com", "slides.googleapis.com"} <= set(
@@ -261,14 +292,14 @@ class TestItIsPacedToGooglesQuotas:
         class Sheets:
             def spreadsheets(self): return self
             def values(self): return self
-            def get(self, spreadsheetId, fields):
+            def get(self, spreadsheetId, fields, includeGridData=False):
                 return _Exec({"sheets": [{"properties": {"title": "A"}}]}, [], "get")
             def batchGet(self, spreadsheetId, ranges, valueRenderOption):
                 return _Exec({"valueRanges": [{"values": [[f'=IMPORTRANGE("{SRC}","A1")']]}]}, [], "bg")
             def batchUpdate(self, spreadsheetId, body): return _Exec({}, [], "u")
 
         L.rewrite_native("sheets", Sheets(), "T1", lookup, pace=seen.append)
-        assert seen == ["read", "read", "write"]
+        assert seen == ["read", "read", "read", "write"], "tabs, formulas, cell links -- then one write"
 
     def test_the_rates_are_ninety_percent_of_googles_published_quotas(self):
         import drive_engine as D
@@ -351,3 +382,63 @@ def test_a_copy_a_stopped_run_left_due_its_rewrite_gets_it_next_run(
     assert rewritten == [db.get_target_id(SRC_USER, fid, "file")]
     assert not db.links_pending(SRC_USER, fid)
     assert db.get_audit(SRC_USER, fid, "link_rewrite")["status"] == "SUCCESS"
+
+
+def test_linked_and_unset_link_display_are_the_same_cell():
+    from native_repair import _same_display
+    link = {"textFormat": {"link": {"uri": "https://x"}}}
+    assert _same_display({"userEnteredFormat": {**link, "hyperlinkDisplayType": "LINKED"}}) == {"userEnteredFormat": link}
+    assert _same_display({"userEnteredFormat": {"hyperlinkDisplayType": "LINKED"}}) == {}
+    plain = {"userEnteredFormat": {"hyperlinkDisplayType": "PLAIN_TEXT"}}
+    assert _same_display(plain) == plain, "plain text is a real difference"
+
+
+def test_text_written_by_replace_all_text_gets_its_neighbours_style_back():
+    """a. -> b., 17 Nov 2026: replaceAllText wrote the new id unstyled, splitting one Arial 11 run into three,
+    so every rewritten Doc differed from its source. The inserted id takes the run's style; Docs merges them."""
+    import link_rewrite as L
+    arial = {"fontSize": {"magnitude": 11, "unit": "PT"}, "weightedFontFamily": {"fontFamily": "Arial", "weight": 400}}
+    doc = {"body": {"content": [{"paragraph": {"elements": [
+        {"startIndex": 1, "endIndex": 40, "textRun": {"content": "The numbers are in .../spreadsheets/d/", "textStyle": arial}},
+        {"startIndex": 40, "endIndex": 84, "textRun": {"content": "NEWID", "textStyle": {}}},
+        {"startIndex": 84, "endIndex": 90, "textRun": {"content": "/edit\n", "textStyle": arial}}]}}]}}
+    reqs = L.doc_restyle_requests(doc, {"NEWID"})
+    assert reqs == [{"updateTextStyle": {"range": {"startIndex": 40, "endIndex": 84}, "textStyle": arial,
+                                         "fields": "fontSize,weightedFontFamily"}}]
+
+
+def test_a_run_that_is_not_an_inserted_id_or_whose_neighbours_differ_is_left_alone():
+    import link_rewrite as L
+    a, b = {"bold": True}, {"italic": True}
+    doc = {"body": {"content": [{"paragraph": {"elements": [
+        {"startIndex": 1, "endIndex": 5, "textRun": {"content": "x", "textStyle": a}},
+        {"startIndex": 5, "endIndex": 9, "textRun": {"content": "plain", "textStyle": {}}},
+        {"startIndex": 9, "endIndex": 13, "textRun": {"content": "NEWID", "textStyle": {}}},
+        {"startIndex": 13, "endIndex": 15, "textRun": {"content": "y\n", "textStyle": b}}]}}]}}
+    assert L.doc_restyle_requests(doc, {"NEWID"}) == []
+
+
+def test_the_restyle_pass_runs_after_the_rewrite_in_rewrite_native():
+    import link_rewrite as L
+    OLD, NEW = "1vOgo-bKb2gp3kDlKZzx9CI85txxKxwxZxAZvsztyWZQ", "16B2K3Tj_r-ejHaO4O_NDu5nHvU5lvu69rkN22xhBWcI"
+    url = "https://docs.google.com/spreadsheets/d/"
+    first = [{"startIndex": 1, "endIndex": 90, "textRun": {"content": url + OLD + "/edit\n", "textStyle": {"bold": True}}}]
+    after = [{"startIndex": 1, "endIndex": 40, "textRun": {"content": url, "textStyle": {"bold": True}}},
+             {"startIndex": 40, "endIndex": 84, "textRun": {"content": NEW, "textStyle": {}}},
+             {"startIndex": 84, "endIndex": 90, "textRun": {"content": "/edit\n", "textStyle": {"bold": True}}}]
+
+    class Docs:
+        def __init__(self):
+            self.batches, self.reads = [], 0
+        def documents(self):
+            return self
+        def get(self, documentId):
+            self.reads += 1
+            el = first if self.reads == 1 else after
+            return type("R", (), {"execute": lambda s: {"body": {"content": [{"paragraph": {"elements": el}}]}}})()
+        def batchUpdate(self, documentId, body):
+            self.batches.append(body["requests"])
+            return type("R", (), {"execute": lambda s: {}})()
+    d = Docs()
+    L.rewrite_native("docs", d, "f1", lambda i: NEW if i == OLD else None)
+    assert len(d.batches) == 2 and "replaceAllText" in d.batches[0][0] and "updateTextStyle" in d.batches[1][0]

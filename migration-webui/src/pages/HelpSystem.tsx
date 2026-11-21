@@ -129,6 +129,7 @@ const HelpSystem: React.FC = () => {
         <TextField
           fullWidth
           placeholder="Search…"
+          inputProps={{ 'aria-label': 'Search help' }}
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           InputProps={{

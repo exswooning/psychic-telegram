@@ -191,3 +191,15 @@ class TestTheTwoLaunchersDoNotStealEachOthersWork:
             + inspect.getsource(webui._job_finished)
         assert src.count("job_queue.RUNNER_WEBUI") == 2
         assert '"webui"' not in src, "hardcoded runner name"
+
+
+class TestTheQueueIsAboutTheAccountBeingViewed:
+    def test_the_route_resolves_the_account_like_api_job_does(self):
+        """A superadmin viewing account 3 saw that account's own verify labelled "another
+        account": 'mine' was relative to the login. /api/queue takes ?account= through the same
+        resolve_target_account gate as /api/job, so only an operator can look at another's."""
+        import inspect
+        src = inspect.getsource(webui.Handler._do_GET)
+        route = src.split('"/api/queue"', 1)[1].split('"/api/job"', 1)[0]
+        assert "resolve_target_account" in route and 'query.get("account"' in route
+        assert "queue_payload(viewing)" in route

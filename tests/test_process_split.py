@@ -124,7 +124,7 @@ def test_each_child_spends_its_share_of_the_project_rate(monkeypatch):
     class DB:
         saved = []
 
-        def load_rate_ceiling(self, t):
+        def load_rate_ceiling(self, t, max_age_hours=None):
             return 300.0
 
         def save_rate_ceiling(self, t, c):
@@ -144,3 +144,72 @@ def test_the_launch_passes_the_process_count(monkeypatch):
     assert A._tuning_env(body, None)["MIGRATE_PROCESSES"] == "2"
     with pytest.raises(Exception):
         A.StartMigration(reason="too many", services=["drive"], processes=9)
+
+
+def test_the_launch_can_ask_for_write_time_receipts():
+    import api_server as A
+    body = A.StartMigration(reason="as the winning arm ran", mail_completion_check="full")
+    assert A._tuning_env(body, None)["MAIL_COMPLETION_CHECK"] == "full"
+    assert A._tuning_env(A.StartMigration(reason="default"), None) is None      # unset: the server's own
+
+
+def test_the_launch_can_set_the_mail_rate_inside_one_mailbox():
+    import api_server as A
+    env = A._tuning_env(A.StartMigration(reason="info@ tail", mail_workers=8, per_user_qps=15), None)
+    assert env["MAIL_WORKERS"] == "8" and env["PER_USER_QPS"] == "15.0"
+    with pytest.raises(Exception):
+        A.StartMigration(reason="past Gmail's quota", per_user_qps=100)
+
+
+def test_the_launch_can_leave_the_checks_for_after_the_run():
+    import api_server as A
+    env = A._tuning_env(A.StartMigration(reason="memory", checks_after_run=True), None)
+    assert env["FIRST_PASS_ACCEPTANCE"] == "false" and env["VERIFY_ON_COMPLETE"] == "false"
+
+
+@pytest.mark.parametrize('users,only,expected', [
+    (['one@source.example'], None, 1),
+    ([f'u{i}@source.example' for i in range(20)], ['u0@source.example'], 1),
+    (['a@source.example', 'b@source.example'], None, 2),
+    ([f'u{i}@source.example' for i in range(20)], None, 8),
+    ([], None, 1),
+])
+def test_auto_processes_are_bounded_by_eligible_users(monkeypatch, users, only, expected):
+    monkeypatch.delenv('MIGRATE_SHARD', raising=False)
+    monkeypatch.setattr(main, '_auto_processes', lambda: 8)
+    calls = []
+    monkeypatch.setattr(main, 'run_batch', lambda *a, **k: calls.append(1) or [])
+    monkeypatch.setattr(main, '_run_pass_in_processes', lambda *a, **k: calls.append(a[-1]) or [])
+    settings = S(); settings.migrate_processes = 0
+    main._run_pass(None, FakeDB(users), settings, {'drive'}, False, 0, only)
+    assert calls == [expected]
+
+
+def test_completed_services_do_not_reserve_empty_processes(monkeypatch):
+    class DB(FakeDB):
+        def all_identities(self):
+            rows = super().all_identities()
+            for r in rows: r['status'] = 'DONE'
+            return rows
+        def services_done(self, source):
+            return {'drive'} if source != 'a@source.example' else {'gmail'}
+    monkeypatch.delenv('MIGRATE_SHARD', raising=False)
+    monkeypatch.setattr(main, '_auto_processes', lambda: 8)
+    calls = []
+    monkeypatch.setattr(main, 'run_batch', lambda *a, **k: calls.append('here') or [])
+    monkeypatch.setattr(main, '_run_pass_in_processes', lambda *a, **k: calls.append('split') or [])
+    settings = S(); settings.migrate_processes = 0
+    main._run_pass(None, DB(['a@source.example', 'b@source.example']), settings, {'drive'}, False, 0, None)
+    assert calls == ['here']
+    assert len(main._pass_user_pairs(DB(['a@source.example', 'b@source.example']), settings, {'drive'}, True, None)) == 2
+    settings.redo_unrewritten_links = settings.rewrite_drive_links = True
+    assert len(main._pass_user_pairs(DB(['a@source.example', 'b@source.example']), settings, {'drive'}, False, None)) == 2
+
+
+def test_a_tally_never_re_moves_mail_or_starts_a_repair_while_repairs_are_paused():
+    """10 Nov 2026: a tally's SHORT fix re-moved environment@'s mail by the engine (owed-to-DMS counted as
+    missing), then chained a repair with repairs paused."""
+    import inspect
+    import api_server as A
+    src = inspect.getsource(A._tally_follow_repair) if hasattr(A, "_tally_follow_repair") else inspect.getsource(A)
+    assert 's != "mail"' in src and "repairs_on" in src and "if differs and repairs_on" in src

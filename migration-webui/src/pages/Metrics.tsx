@@ -1,4 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react'
+import { MailLinkScans } from '../components/MailLinkScans'
+import DeadLinksPanel from '../components/DeadLinksPanel'
 import { useParams } from 'react-router-dom'
 import {
   Alert, Box, Chip, CircularProgress, IconButton, Paper, Stack,
@@ -12,6 +14,7 @@ import {
   fetchMetrics, fetchMyMetrics, MetricsSnapshot, LimiterState,
 } from '@/api/controlPlane'
 import { bytes, latency } from '@/utils/metricsSeries'
+import { itemTypeLabel } from '@/utils/itemTypeLabel'
 
 /** Past this, the page says so rather than presenting an old run as current.
  *  A migration can legitimately be quiet for a while; three days cannot. */
@@ -163,6 +166,18 @@ export const Metrics: React.FC = () => {
       </Stack>
 
       {error && <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>}
+      {m?.metricsScope && <Alert severity="info" sx={{ mb: 2 }}>
+        API metrics: {m.metricsScope}. Process latency is not a combined tenant benchmark.
+      </Alert>}
+      {m?.mailCountCheck && <Alert severity={m.mailCountCheck.blocked ? 'warning' : 'info'} sx={{ mb: 2 }}>
+        {m.mailCountCheck.scope}. Checked {m.mailCountCheck.checkedAt}.
+        {m.mailCountCheck.users.map((u) => <Typography variant="body2" key={u.source}>
+          {u.source}: source {u.sourceMessages?.toLocaleString() ?? 'unknown'};
+          target {u.targetMessages?.toLocaleString() ?? 'unknown'} — {u.verdict}
+        </Typography>)}
+      </Alert>}
+      <MailLinkScans scans={m?.mailLinkScans} />
+      {(scoped ? id : m?.accountId) ? <DeadLinksPanel accountId={scoped ? id : m!.accountId} /> : null}
       {m?.error && (
         <Alert severity="info" sx={{ mb: 2 }} data-testid="metrics-empty">
           {m.error}
@@ -338,7 +353,7 @@ export const Metrics: React.FC = () => {
                     {m.volume.map((v) => (
                       <TableRow key={`${v.itemType}-${v.status}`}
                                 data-testid={`vol-${v.itemType}-${v.status}`}>
-                        <TableCell sx={{ fontSize: 12 }}>{v.itemType}</TableCell>
+                        <TableCell sx={{ fontSize: 12 }}>{itemTypeLabel(v.itemType)}</TableCell>
                         <TableCell sx={{ fontSize: 12 }}>
                           <Chip size="small" variant="outlined"
                                 color={isFailure(v.status) ? 'error'

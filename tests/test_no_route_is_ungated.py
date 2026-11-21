@@ -39,6 +39,8 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 AUTH_MARKERS = (
     "require_reader", "require_login", "require_admin", "require_superadmin",
     "require_active_subscription", "node_auth", "operator",
+    # error_resolution_api.runner_auth: a scoped bearer credential (E.authenticate), 401 without it.
+    "runner_auth",
 )
 
 # Routes that MUST stay reachable without one, with the reason. A route may

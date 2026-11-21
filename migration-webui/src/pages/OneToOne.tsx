@@ -67,6 +67,10 @@ const Findings: React.FC<{ s: OneToOneService }> = ({ s }) => {
         {s.completion === 'INCOMPLETE' ? ' · check incomplete' : ''} · {when(s.verifiedAt)}
       </Typography>
       <RetainedCopyResolutions rows={s.copyResolutions} />
+      {(s.diagnostics ?? []).map((diagnosis) => <Alert key={diagnosis.code} severity="info" sx={{ my: 1 }}>
+        <Typography variant="body2">{diagnosis.summary}</Typography>
+        <Typography variant="caption">Next step: {diagnosis.nextAction}</Typography>
+      </Alert>)}
       {rows.slice(0, 8).map((r, i) => (
         <Typography key={i} variant="body2" sx={{ fontFamily: 'ui-monospace, monospace', fontSize: 12, wordBreak: 'break-word' }}>{r}</Typography>
       ))}
@@ -112,7 +116,7 @@ const UserRow: React.FC<{ u: OneToOneUser; selected: boolean; onSelect: (on: boo
         <TableCell><Typography variant="caption">{when(u.verifiedAt)}</Typography></TableCell>
         <TableCell padding="checkbox">
           {u.services.length > 0 && (
-            <IconButton size="small" onClick={() => setOpen((o) => !o)} aria-label={open ? `hide ${u.user}` : `show ${u.user}`}>
+            <IconButton size="small" sx={{ width: 32, height: 32 }} onClick={() => setOpen((o) => !o)} aria-label={open ? `hide ${u.user}` : `show ${u.user}`}>
               {open ? <CloseIcon fontSize="small" /> : <OpenIcon fontSize="small" />}
             </IconButton>
           )}
@@ -155,7 +159,7 @@ const OneToOne: React.FC = () => {
   const [picked, setPicked] = useState<Set<string>>(new Set())
   const [asking, setAsking] = useState(false)
   const [everything, setEverything] = useState(false)
-  const [repairToo, setRepairToo] = useState(true)
+  const [repairToo, setRepairToo] = useState(false)
   const [busy, setBusy] = useState(false)
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null)
 

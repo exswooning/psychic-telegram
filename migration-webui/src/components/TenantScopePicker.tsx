@@ -32,7 +32,8 @@ export const TenantScopePicker: React.FC<{
   /** The account currently selected, or undefined for the session's own. */
   accountId?: number
   onAccountChange: (accountId: number | undefined) => void
-}> = ({ accountId, onAccountChange }) => {
+  locked?: boolean
+}> = ({ accountId, onAccountChange, locked = false }) => {
   const [accounts, setAccounts] = useState<Account[]>([])
   const [mine, setMine] = useState<Account | null>(null)
   const [domains, setDomains] = useState<VerifiedDomain[]>([])
@@ -41,11 +42,11 @@ export const TenantScopePicker: React.FC<{
   useEffect(() => {
     fetchMe().then((me) => {
       setMine(me as Account)
-      if ((me as Account).is_superadmin) {
+      if (!locked && (me as Account).is_superadmin) {
         fetchAdminAccounts().then(setAccounts).catch(() => {})
       }
     }).catch(() => {})
-  }, [])
+  }, [locked])
 
   // Verified DOMAINS, not account logins.
   //
@@ -99,7 +100,7 @@ export const TenantScopePicker: React.FC<{
           Acting on
         </Typography>
 
-        {accounts.length > 1 ? (
+        {!locked && accounts.length > 1 ? (
           <TextField select size="small" label="Domain"
                      sx={{ minWidth: 300 }}
                      value={accountId ?? mine?.id ?? ''}

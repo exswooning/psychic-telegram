@@ -6,7 +6,7 @@ from benchmark_run import judge
 
 def test_reset_failure_cannot_clear_ledger_or_launch_migration(monkeypatch):
     calls=[]
-    monkeypatch.setattr(AB,'run',lambda argv,env:calls.append(argv) or (2,0))
+    monkeypatch.setattr(AB,'run_tail',lambda argv,env:calls.append(argv) or (2,'refused'))
     monkeypatch.setattr(AB,'MigrationDB',lambda *a:pytest.fail('ledger must not be opened after refused reset'))
     with pytest.raises(RuntimeError,match='ledger is unchanged'):
         AB.one_mode('server_side',SimpleNamespace(target_domain='t.test'),None,['u@s.test'],['u@t.test'],{})

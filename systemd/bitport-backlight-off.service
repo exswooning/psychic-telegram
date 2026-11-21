@@ -1,0 +1,11 @@
+[Unit]
+Description=Turn the laptop screen backlight off (headless server)
+After=systemd-backlight@backlight:intel_backlight.service
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c "echo 0 > /sys/class/backlight/intel_backlight/brightness; echo 1 > /sys/class/graphics/fb0/blank 2>/dev/null || true"
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -69,11 +69,52 @@ def fmt_duration(seconds: float) -> str:
     return f"{h:02d}:{m:02d}:{s:02d}"
 
 
+PLACEHOLDER_DOMAINS = {"", "tenanta.com", "tenantb.com", "example.com"}
+
+
+def is_connected(settings, snapshot=None) -> bool:
+    """True once real domains are set (the Setup Wizard does it) or the ledger already holds users.
+
+    A new install ships the demo pair tenanta.com -> tenantb.com. Showing it with "press m to start a
+    migration" invited a first-time user to run a migration between two companies that do not exist."""
+    if snapshot is not None and getattr(snapshot, "users", None):
+        return True
+    return (str(getattr(settings, "source_domain", "") or "").lower() not in PLACEHOLDER_DOMAINS
+            and str(getattr(settings, "target_domain", "") or "").lower() not in PLACEHOLDER_DOMAINS)
+
+
+def web_app_url() -> str:
+    """The address the installer recorded, or a generic hint if it did not."""
+    try:
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "install-info.txt"), encoding="utf-8") as fh:
+            for line in fh:
+                if line.startswith("URL="):
+                    return line.strip()[4:]
+    except OSError:
+        pass
+    return "http://<this-server's-address>/app"
+
+
+def welcome_lines(url: str) -> list[str]:
+    return ["Welcome to Bitport.",
+            "",
+            "Nothing is connected yet, so there is nothing to show on this screen.",
+            "",
+            "What to do next (in a web browser):",
+            f"   1. Open  {url}",
+            "   2. Sign in with the email and password the installer showed you.",
+            "   3. Click 'Setup Wizard' in the left menu and follow the steps to connect",
+            "      the two Google Workspace accounts: the one you move FROM and the one you move TO.",
+            "",
+            "This screen fills in by itself once a migration is running.",
+            "Press q to leave it. You can open it again any time with:  bitport ui"]
+
+
 def bar(fraction: Optional[float], width: int) -> str:
     """Render a progress bar. `None` means 'expected total unknown'."""
     width = max(4, width)
     if fraction is None:
-        return "?" * width
+        return "." * width      # no total yet: an empty bar (a row of "?" read as a fault to a first-time user)
     fraction = min(1.0, max(0.0, fraction))
     filled = int(round(fraction * width))
     return "#" * filled + "." * (width - filled)
@@ -467,6 +508,9 @@ class Dashboard:
         body_top, body_bottom = 6, h - 3
         if self.snapshot.error:
             self._put(body_top, 2, self.snapshot.error, self._c(C_ERR, True))
+        elif self.screen == DASHBOARD and not is_connected(self.settings, self.snapshot):
+            for i, line in enumerate(welcome_lines(web_app_url())):
+                self._put(body_top + i, 2, line[: max(0, w - 4)], self._c(C_HEAD, i == 0))
         elif self.screen == DASHBOARD:
             self._draw_dashboard(body_top, body_bottom, w)
         elif self.screen == USERS:
@@ -482,7 +526,8 @@ class Dashboard:
 
     def _draw_header(self, w: int) -> None:
         s, t = self.snapshot.totals, self.settings
-        title = f" {t.source_domain}  ->  {t.target_domain} "
+        title = (f" {t.source_domain}  ->  {t.target_domain} " if is_connected(t, self.snapshot)
+                 else " Bitport  -  not connected to Google Workspace yet ")
         mode = " DRY RUN " if self.dry_run else ""
         job = self.runner.status()
         self._put(0, 0, " " * w, self._c(C_HEAD, True))
@@ -492,7 +537,7 @@ class Dashboard:
 
         frac = s.get("fraction")
         bw = max(10, w - 46)
-        pct = "  n/a" if frac is None else f"{frac*100:5.1f}%"
+        pct = " wait" if frac is None else f"{frac*100:5.1f}%"
         self._put(1, 1, "Overall", self._c(C_DIM, True))
         self._put(1, 10, f"[{bar(frac, bw)}]",
                   self._c(C_OK if (frac or 0) > 0 else C_DIM))
@@ -775,6 +820,9 @@ class Dashboard:
         return ["--services", ",".join(chosen)] if chosen else []
 
     def _launch(self, argv: list[str], confirm_msg: Optional[str] = None) -> None:
+        if not is_connected(self.settings, self.snapshot):
+            self._flash("Not connected yet: use the Setup Wizard in the web app first (see the welcome screen).", 8.0)
+            return
         if self.runner.is_running():
             self._flash("a job is already running — press k to stop it first")
             return

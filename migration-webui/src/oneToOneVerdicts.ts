@@ -10,9 +10,10 @@ export const VERDICT: Record<OneToOneVerdict, { color: 'success' | 'error' | 'wa
   IDENTICAL: { color: 'success', label: 'Identical', hint: 'Every item compared matched its original and nothing was left over.' },
   DIFFERENCES: { color: 'error', label: 'Differences', hint: 'Something copied does not match its original, is missing, or was copied twice.' },
   INCOMPLETE: { color: 'warning', label: 'Incomplete', hint: 'Some check could not be made. That is not a pass.' },
+  EMPTY: { color: 'default', label: 'Empty source', hint: 'The source holds nothing here, so no item was compared. Not a match, not a gap.' },
   NOT_VERIFIED: { color: 'default', label: 'Not verified', hint: 'Nobody has compared this user against both tenants yet.' },
 }
-export const ORDER: OneToOneVerdict[] = ['DIFFERENCES', 'INCOMPLETE', 'NOT_VERIFIED', 'IDENTICAL']
+export const ORDER: OneToOneVerdict[] = ['DIFFERENCES', 'INCOMPLETE', 'NOT_VERIFIED', 'IDENTICAL', 'EMPTY']
 
 const WRONG: Array<[keyof NonNullable<OneToOneService['counts']>, string]> = [
   ['differences', 'not identical'], ['missing', 'missing on the target'], ['notCopied', 'copy or access findings'],
@@ -23,11 +24,12 @@ const WRONG: Array<[keyof NonNullable<OneToOneService['counts']>, string]> = [
  *  file missing when all 15 were there and one differed by a line break. */
 export const serviceSummary = (s: OneToOneService): string => {
   const completion = s.completion === 'INCOMPLETE' ? ['check incomplete'] : []
+  if (s.itemChecksPending) completion.push(`${s.itemChecksPending} item checks need recheck`)
   if (!s.checked) return [`${s.service}: nothing to compare`, ...completion].join(' · ')
   const of = s.sampledOf && s.sampledOf > s.checked ? ` of ${s.sampledOf.toLocaleString()}` : ''
   const wrong = WRONG.filter(([k]) => (s.counts?.[k] ?? 0) > 0)
     .map(([k, what]) => `${(s.counts?.[k] ?? 0).toLocaleString()} ${what}`)
-  const same = s.identical === s.checked && !wrong.length ? 'all identical' : `${s.identical.toLocaleString()} identical`
+  const same = s.identical === s.checked && !wrong.length && !s.itemChecksPending ? 'all identical' : `${s.identical.toLocaleString()} identical`
   return [`${s.service}: ${s.checked.toLocaleString()} checked${of}`, same, ...wrong, ...completion].join(' · ')
 }
 

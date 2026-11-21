@@ -266,6 +266,25 @@ def _dump_dialog(page, dialog, tag: str) -> None:
         logging.getLogger(__name__).debug("ignored an error", exc_info=True)
 
 
+def _authorize_settled(text: str) -> bool:
+    """Has the Add-new dialog finished saving? It has an answer once it names the duplicate, or once
+    nothing in it says it is still working."""
+    t = text.lower()
+    return "already exists" in t or "progress indicator" not in t
+
+
+def _settle_authorize(page, dialog, timeout_ms: int = 30000) -> None:
+    waited = 0
+    while waited < timeout_ms and _dialog_open(dialog):
+        try:
+            if _authorize_settled(dialog.inner_text()):
+                return
+        except Exception:      # noqa: BLE001 - the dialog closing under us is the success path
+            return
+        page.wait_for_timeout(1000)
+        waited += 1000
+
+
 def _tick_overwrite(dialog, label) -> bool:
     """Tick "Overwrite existing client ID" and PROVE it is ticked. A click on the
     label text did not toggle it live, and Authorize then reads as an inline
@@ -567,6 +586,34 @@ DWD_URL = "https://admin.google.com/ac/owl/domainwidedelegation"
 AUTHORIZE = re.compile(r"authori[sz]e", re.I)
 
 
+NETWORK_ERRORS = ("ERR_NAME_NOT_RESOLVED", "ERR_INTERNET_DISCONNECTED", "ERR_NETWORK_CHANGED",
+                  "ERR_CONNECTION_RESET", "ERR_CONNECTION_REFUSED", "ERR_CONNECTION_CLOSED",
+                  "ERR_CONNECTION_TIMED_OUT", "ERR_ADDRESS_UNREACHABLE")
+NETWORK_BACKOFF = (5, 15, 30, 60, 120)      # seconds: rides out a Wi-Fi drop of about four minutes
+
+
+def retry_navigation(page, sleep=None):
+    """Make every page.goto on this page survive a network drop.
+
+    13 Nov 2026 (account 3): one net::ERR_NAME_NOT_RESOLVED while the box's Wi-Fi re-associated ended
+    the DMS import job 1.6 s after it started, and nothing started it again. A navigation that fails
+    for the network is tried again after a growing wait; any other failure is raised as before."""
+    sleep = sleep or time.sleep
+    real = page.goto
+
+    def goto(url, **kw):
+        for wait in (*NETWORK_BACKOFF, None):
+            try:
+                return real(url, **kw)
+            except Exception as exc:      # noqa: BLE001 - re-raised unless it is the network
+                if wait is None or not any(e in str(exc) for e in NETWORK_ERRORS):
+                    raise
+                log(f"network error opening {str(url).split('?')[0]}; trying again in {wait}s")
+                sleep(wait)
+    page.goto = goto
+    return page
+
+
 def _open_dwd_console(p, headful: bool, timeout: int, url: str = DWD_URL,
                       ready_prefix: str = "https://admin.google.com/ac/owl/",
                       ready_text: str = "Add new"):
@@ -586,7 +633,7 @@ def _open_dwd_console(p, headful: bool, timeout: int, url: str = DWD_URL,
     caller only needs to turn that into its own return code.
     """
     browser = _installed_browser_launch(p, headful)
-    page = browser.new_page()
+    page = retry_navigation(browser.new_page())
     # A single redirect must not consume the entire sign-in deadline.
     nav = min(max(timeout * 1000, 1000), 30000)
     page.goto(url, wait_until="domcontentloaded", timeout=nav)
@@ -946,6 +993,10 @@ def run(client_id: str, scopes: str, timeout: int, headful: bool,
             auth_btn = page.locator("[role=button]", has_text=AUTHORIZE)
         auth_btn.first.click()
         page.wait_for_timeout(2500)
+        # Authorize can still be saving after 2.5 s (the dialog reads "Progress indicator"): an open dialog is a
+        # duplicate client only once it says so. Read too early, a first Authorize that had worked was taken
+        # for "already delegated" and refused as "could not tick Overwrite" (live, 17 Nov 2026: the seed entry).
+        _settle_authorize(page, dialog)
 
         # A client ID that is already delegated cannot be added again: the
         # console refuses with "Client ID already exists. Check the
@@ -1147,8 +1198,9 @@ def main(argv: list[str] | None = None) -> int:
     from config import Settings
     st = Settings(account_id=args.account_id) if args.account_id else Settings()
     if args.key and args.tenant:
-        import dataclasses
-        st = dataclasses.replace(st, **{f"{args.tenant}_sa_key": args.key})
+        import copy
+        st = copy.copy(st)      # not dataclasses.replace: it reloads the account's own key over this one
+        setattr(st, f"{args.tenant}_sa_key", args.key)
     if args.tenant == "source":
         _sign_in_as_source_admin(st)
 

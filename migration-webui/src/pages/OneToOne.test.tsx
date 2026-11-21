@@ -141,18 +141,18 @@ describe('Verify now', () => {
   it('asks for every user by default, with the usual sample', async () => {
     show()
     await confirm()
-    await waitFor(() => expect(cp.run).toHaveBeenCalledWith('checking after the fix', { accountId: 3, users: [], limit: undefined, repair: true }))
+    await waitFor(() => expect(cp.run).toHaveBeenCalledWith('checking after the fix', { accountId: 3, users: [], limit: undefined, repair: false }))
     expect(await screen.findByText('started pid 1')).toBeInTheDocument()
   })
 
-  it('can check without repairing anything', async () => {
+  it('can explicitly enable repair on the target', async () => {
     show()
     fireEvent.click(await screen.findByTestId('verify-now'))
     fireEvent.click(screen.getByLabelText('repair what it finds'))
     fireEvent.change(screen.getByLabelText('Reason Code'), { target: { value: 'first-pass benchmark' } })
     fireEvent.click(screen.getByRole('button', { name: 'Confirm' }))
     await waitFor(() => expect(cp.run).toHaveBeenCalledWith('first-pass benchmark',
-      expect.objectContaining({ repair: false })))
+      expect.objectContaining({ repair: true })))
   })
 
   it('asks for just the users that were ticked', async () => {
@@ -260,4 +260,16 @@ describe('what a service line says', () => {
     expect(serviceSummary(s)).toBe('drive: 15 checked · 14 identical · 1 not identical')
     expect(serviceSummary({ ...s, identical: 15, counts: {} })).toBe('drive: 15 checked · all identical')
   })
+})
+
+it('shows an automatic diagnosis and its guarded next step', async () => {
+  cp.view.mockResolvedValue(view({ users: [{
+    user: 'u@a.com', target: 'u@b.com', status: 'DONE', verdict: 'DIFFERENCES', verifiedAt: '2026-11-11T00:00:00Z',
+    services: [svc('gmail', 'DIFFERENCES', { diagnostics: [{ code: 'MAIL_MAPPING_GAP',
+      summary: 'Destination coverage is not established.', nextAction: 'Reconcile DMS before inserting another message.' }] })],
+  }] }))
+  show()
+  fireEvent.click(await screen.findByLabelText('show u@a.com'))
+  expect(await screen.findByText('Destination coverage is not established.')).toBeInTheDocument()
+  expect(screen.getByText(/Next step: Reconcile DMS/)).toBeInTheDocument()
 })

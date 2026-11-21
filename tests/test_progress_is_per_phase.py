@@ -108,3 +108,14 @@ def test_a_migrations_progress_is_never_a_sub_steps_counter(monkeypatch):
     monkeypatch.setattr(webui, "_ledger_progress_fraction", lambda *a, **k: 0.42)
     lines = ["PASS 1/3 pid=7: drive", "  [0/1] shared drives", "  [1/1] Finance"]
     assert webui._job_progress("migrate", lines, 600, None, None)[0] == 42
+
+
+def test_detached_dispatch_does_not_reuse_previous_user_completion():
+    import webui
+    lines=["verify: [1/1] old@src checked", "2026-11-11 08:50:10 verify + repair dispatched for health@src (bitport-verify-12)"]
+    assert webui._job_progress("verify",lines,3600)==(None,None)
+
+
+def test_counted_phase_done_is_not_whole_live_job_complete():
+    import webui
+    assert webui._job_progress("verify",["verify: [1/1] a@src checked"],60)==(None,None)

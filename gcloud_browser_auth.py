@@ -56,6 +56,7 @@ import tempfile
 import time
 
 import signin_challenge
+import setup_notices
 
 
 def log(msg: str) -> None:
@@ -71,9 +72,16 @@ def log(msg: str) -> None:
 # shows them is pasted on the setup card and lands in CODE_FILE.
 HANDOFF: "Callable[[dict | None], None] | None" = None
 CODE_FILE = ""
+NOTICE_FILE = ""
 _HANDED_OVER = "\0handed-over"
 
 _AUTH_URL_RE = re.compile(r"https://accounts\.google\.com/o/oauth2/auth\S+")
+
+
+def _safe_auth_detail(text: str) -> str:
+    text = re.sub(r"https?://\S+", "[Google sign-in link]", text)
+    text = re.sub(r"(?i)\b(code_challenge|state|code|rapt|xsrf)=[^\s&]+", r"\1=[redacted]", text)
+    return re.sub(r"[A-Za-z0-9_./~+-]{32,}", "[redacted]", text)
 
 
 def login(email: str, password: str, timeout: int = 180) -> tuple[bool, str, str]:
@@ -127,19 +135,24 @@ def login(email: str, password: str, timeout: int = 180) -> tuple[bool, str, str
         proc.kill()
         rest = proc.stdout.read() if proc.stdout else ""
         shutil.rmtree(cloudsdk_config, ignore_errors=True)
-        return False, (buf + rest).strip()[-300:] or "gcloud printed no sign-in URL", ""
+        return False, _safe_auth_detail((buf + rest).strip())[-300:] or "gcloud printed no sign-in URL", ""
 
     log(f"driving browser sign-in for {email}")
     no = _drive_browser(proc, url, email, password, timeout)
     if no == _HANDED_OVER:
-        _await_device(proc, url, timeout)
+        completed = _await_device(proc, url, timeout)
+        if completed is False:
+            if proc.poll() is None:
+                proc.kill()
+            shutil.rmtree(cloudsdk_config, ignore_errors=True)
+            return False, "On-device sign-in expired. Start setup again for a fresh Google link; old codes cannot resume it.", ""
         if proc.poll() is None:
             proc.kill()
         no = ""
     if no:
         proc.kill()
         shutil.rmtree(cloudsdk_config, ignore_errors=True)
-        return False, f"Google refused the sign-in for {email}: {no}", ""
+        return False, f"Google refused the sign-in for {email}: {_safe_auth_detail(no)}", ""
 
     try:
         rc = proc.wait(timeout=max(timeout - 20, 10))
@@ -147,7 +160,7 @@ def login(email: str, password: str, timeout: int = 180) -> tuple[bool, str, str
         proc.kill()
         rc = -1
     rest = proc.stdout.read() if proc.stdout else ""
-    full_out = (buf + rest).strip()
+    full_out = _safe_auth_detail((buf + rest).strip())
 
     if rc == 0 and "You are now logged in as" in full_out:
         log(f"signed in as {email}")
@@ -183,7 +196,9 @@ def cleanup(cloudsdk_config_dir: str) -> None:
 # present on the identifier page.
 _EMAIL_SEL = '#identifierId, input[name="identifier"], input[type="email"]'
 _PW_SEL = 'input[type="password"][name="Passwd"], input[type="password"]'
-_CONSENT_LABELS = ("Allow", "Continue", "I agree", "Got it")
+# Account acknowledgements and Cloud SDK access require the run-scoped review
+# below. Never treat an arbitrary "I agree"/"Allow" as navigation.
+_CONSENT_LABELS = ("Continue",)
 
 # Where Google shows the verification code at the end of the out-of-band
 # sign-in flow. It has moved between a readonly <input>, a <textarea>, and a
@@ -245,12 +260,12 @@ def _fill_visible(pg, selector: str, value: str) -> bool:
     return False
 
 
-def _await_device(proc, url: str, timeout: int) -> None:
+def _await_device(proc, url: str, timeout: int) -> bool:
     """The same gcloud sign-in, finished on the operator's device: they open `url`
     where they are already signed in, Google shows them a code, they paste it on the
     setup card, and it is handed to the gcloud still waiting for it here."""
-    HANDOFF({"kind": "signin", "url": url})
     deadline = time.time() + timeout
+    HANDOFF({"kind": "signin", "url": url, "expiresAt": deadline})
     try:
         while time.time() < deadline and proc.poll() is None:
             if CODE_FILE and os.path.exists(CODE_FILE):
@@ -262,8 +277,32 @@ def _await_device(proc, url: str, timeout: int) -> None:
                     proc.stdin.flush()
                     log("  handed the operator's code to gcloud")
             time.sleep(1)
+        return proc.poll() is not None
     finally:
         HANDOFF(None)
+
+
+def _signin_screen_summary(pages) -> str:
+    """Visible-page context for the authenticated UI log, without auth codes/URLs."""
+    for page in pages:
+        try:
+            body = page.inner_text("body")
+            if any(marker in body.lower() for marker in signin_challenge._NOT_A_CHALLENGE):
+                return "Google's terminal verification page is open; waiting for the sign-in callback."
+            body = re.sub(r"https?://\S+", "[link on Google page]", body)
+            body = re.sub(r"[A-Za-z0-9_./-]{24,}", "[redacted]", body)
+            body = re.sub(r"\b\d{6,}\b", "[redacted]", body)
+            text = " / ".join(line.strip() for line in body.splitlines() if line.strip())
+            if text:
+                return text[:700]
+        except Exception:  # the page can be navigating between reads
+            continue
+    return "Google's sign-in screen could not be read."
+
+
+def _device_handoff_due(password_at: float | None, sent_code: bool, clock: float) -> bool:
+    return bool(HANDOFF is not None and password_at is not None
+                and not sent_code and clock - password_at >= 60)
 
 
 def _drive_browser(proc, url: str, email: str, password: str, timeout: int) -> str:
@@ -281,8 +320,10 @@ def _drive_browser(proc, url: str, email: str, password: str, timeout: int) -> s
         page.goto(url, wait_until="domcontentloaded", timeout=30000)
 
         typed_email = typed_pw = sent_code = False
+        password_at = None
         challenge = signin_challenge.Watcher(log)
         deadline = time.time() + timeout
+        next_screen_note = time.time() + 30
         while time.time() < deadline and proc.poll() is None:
             for pg in list(browser.contexts[0].pages):
                 try:
@@ -295,10 +336,27 @@ def _drive_browser(proc, url: str, email: str, password: str, timeout: int) -> s
                         log("  entered the password")
                         pg.wait_for_timeout(4000)
                         typed_pw = True
+                        password_at = time.time()
                         continue
                     if typed_pw:
+                        notice = setup_notices.detect(pg.url, pg.inner_text("body"), email)
+                        if notice:
+                            if HANDOFF is None or not NOTICE_FILE:
+                                browser.close()
+                                return "Google needs an account-specific notice review. Use the setup UI."
+                            outcome = setup_notices.await_review(
+                                pg, email, proc, HANDOFF, NOTICE_FILE,
+                                max(deadline - time.time(), 1), log)
+                            if outcome in ("declined", "expired"):
+                                browser.close()
+                                return "Google setup notice review " + outcome + ". Start setup again when ready."
+                            password_at = time.time()
+                            pg.wait_for_timeout(1000)
+                            # Do not click any second consent button using this
+                            # notice's approval; inspect the next page afresh.
+                            continue
                         for label in _CONSENT_LABELS:
-                            btn = pg.get_by_role("button", name=label)
+                            btn = pg.get_by_role("button", name=label, exact=True)
                             if btn.count() > 0 and btn.first.is_visible():
                                 btn.first.click()
                                 pg.wait_for_timeout(1500)
@@ -335,32 +393,81 @@ def _drive_browser(proc, url: str, email: str, password: str, timeout: int) -> s
                     log(f"  REFUSED: {no}")
                     browser.close()
                     return no
+            if _device_handoff_due(password_at, sent_code, time.time()):
+                # Google changes its prompt wording. An unrecognised page must
+                # not wait fifteen minutes just because the phrase list missed it.
+                log("  sign-in did not finish on the server; continue on this device in the setup UI")
+                log("  last Google screen: " + _signin_screen_summary(browser.contexts[0].pages))
+                browser.close()
+                return _HANDED_OVER
+            if typed_pw and time.time() >= next_screen_note:
+                log("  waiting on Google: " + _signin_screen_summary(browser.contexts[0].pages))
+                next_screen_note = time.time() + 60
             time.sleep(1)
 
         if proc.poll() is None:
             stuck = challenge.check(browser.contexts[0].pages)
             if stuck:
                 log(f"  stalled ON A 2-STEP PROMPT, unanswered: {stuck}")
-            log("  stalled -- likely 2FA/captcha. Saving a screenshot for "
-                "diagnosis; connect over VNC (see connect_vps.sh) to finish "
-                "signing in by hand, then re-run.")
+            detail = stuck or _signin_screen_summary(browser.contexts[0].pages)
+            log("  sign-in timed out: " + detail)
             try:
                 for i, pg in enumerate(browser.contexts[0].pages):
                     pg.screenshot(path=f"/tmp/gcloud-auth-timeout-{i}.png")
             except Exception:      # noqa: BLE001 - diagnostics only
                 logging.getLogger(__name__).debug("ignored an error", exc_info=True)
+            browser.close()
+            # A non-empty result ends login() immediately. Previously this fell
+            # through to a second proc.wait(timeout), doubling the silent wait.
+            return "Sign-in timed out. " + detail
         else:
             # gcloud caught the OAuth redirect -- sign-in genuinely
-            # succeeded. Same authenticated session, one more thing to
-            # clear before handing back to the caller: see
-            # _accept_cloud_console_tos()'s own docstring for why.
-            try:
-                outcome = _accept_cloud_console_tos(page, timeout=30)
-                log(f"  Cloud Console ToS check: {outcome}")
-            except Exception as exc:      # noqa: BLE001 - best-effort
-                log(f"  Cloud Console ToS check raised ({exc}) -- continuing anyway")
+            # succeeded; return control to the provisioning caller.
+            # Keep this signed-in browser alive for a separately reviewed Cloud
+            # first-use dialog; no generic legal-button acceptance.
+            detail = _review_cloud_console_terms(page, email, max(deadline - time.time(), 1))
+            if detail:
+                browser.close()
+                return detail
         browser.close()
     return ""
+
+
+def _review_cloud_console_terms(page, email: str, timeout: float) -> str:
+    """Prepare the visible Cloud dialog and continue only after its own approval."""
+    try:
+        page.goto("https://console.cloud.google.com/projectcreate", wait_until="domcontentloaded", timeout=30000)
+        notice = None
+        # The console shell can precede its account/terms dialog by seconds.
+        # A loaded navigation response is not proof that no agreement is due.
+        for attempt in range(25):
+            page.wait_for_timeout(1000)
+            notice = setup_notices.current_notice(page, email)
+            if notice:
+                break
+            dialog = page.get_by_role("dialog", name="Google Cloud", exact=True)
+            if dialog.count() == 1 and dialog.is_visible():
+                continue  # allow the account and country to finish rendering
+            field = page.get_by_role("textbox", name="Project name", exact=True)
+            if attempt >= 7 and field.count() == 1 and field.is_visible():
+                log("  Cloud project form ready; no first-use notice is present")
+                return ""
+        if not notice:
+            summary = _signin_screen_summary([page])
+            log("  Cloud first-use review unavailable: " + summary)
+            return "Google Cloud first-use review could not be confirmed. Visible screen: " + summary
+        if HANDOFF is None or not NOTICE_FILE:
+            return "Google Cloud Platform terms require account-specific review in the setup UI."
+        result = setup_notices.await_review(page, email, None, HANDOFF, NOTICE_FILE, timeout, log)
+        if result == "approved":
+            page.wait_for_timeout(2000)
+            if setup_notices.current_notice(page, email):
+                return "Google Cloud terms were submitted but Google has not confirmed them. Retry setup after reviewing the console."
+            return ""
+        return "Google Cloud terms review " + result + ". Restart setup when ready."
+    except Exception:
+        logging.getLogger(__name__).debug("Cloud terms review unavailable", exc_info=True)
+        return "Google Cloud first-use review could not be read. Open the Cloud console as this administrator and review its required notice."
 
 
 # Wording changes without notice (same caveat dwd_helper.py's own

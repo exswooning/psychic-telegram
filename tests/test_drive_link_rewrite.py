@@ -176,3 +176,13 @@ class TestCommentsTravelByDefault:
         monkeypatch.setenv("MIGRATE_COMMENTS", "0")
         from config import Settings
         assert Settings().migrate_comments is False
+
+
+def test_a_link_to_a_shortcut_resolves_like_one_to_a_file(tmp_path):
+    """Control run a. -> b., 18 Nov 2026: c01's mail linked to its own Drive shortcut, mapped as type
+    'shortcut', and the split mail pass held the user on an 'unresolved' link."""
+    from db import MigrationDB
+    d = MigrationDB(str(tmp_path / "l.db"))
+    d.record_mapping("u@a.test", "SRC_SHORTCUT", "TGT_SHORTCUT", "shortcut")
+    assert d.target_for_source_id("SRC_SHORTCUT") == "TGT_SHORTCUT"
+    assert d.targets_for_source_id("SRC_SHORTCUT") == ["TGT_SHORTCUT"]

@@ -1,0 +1,267 @@
+{
+ "name": "fableplan2",
+ "note": "30 users: c01-c10 hold one shape each, t01-t20 are twins (same content key); t01 is the control",
+ "users": [
+  {
+   "localpart": "c01",
+   "scale": "small",
+   "mail": 60,
+   "events": 10,
+   "edge_cases": true,
+   "fixtures": [
+    "big_native_doc"
+   ]
+  },
+  {
+   "localpart": "c02",
+   "scale": "tiny",
+   "mail": 40,
+   "events": 10,
+   "fixtures": [
+    "sharing_extras"
+   ]
+  },
+  {
+   "localpart": "c03",
+   "scale": "tiny",
+   "mail": 40,
+   "events": 10,
+   "fixtures": [
+    "apps_script",
+    "drive_comments",
+    "drive_shortcuts",
+    "big_sheet",
+    "doc_with_image"
+   ]
+  },
+  {
+   "localpart": "c04",
+   "scale": "tiny",
+   "mail": 60,
+   "events": 6,
+   "fixtures": [
+    "mail_shapes",
+    "mail_threads"
+   ]
+  },
+  {
+   "localpart": "c05",
+   "scale": "tiny",
+   "mail": 30,
+   "events": 6,
+   "fixtures": [
+    "mail_settings"
+   ]
+  },
+  {
+   "localpart": "c06",
+   "scale": "tiny",
+   "mail": 20,
+   "events": 20,
+   "fixtures": [
+    "calendar_shapes",
+    "calendar_extras"
+   ]
+  },
+  {
+   "localpart": "c07",
+   "scale": "tiny",
+   "mail": 20,
+   "events": 6,
+   "fixtures": [
+    "tasks_shapes"
+   ]
+  },
+  {
+   "localpart": "c08",
+   "scale": "tiny",
+   "mail": 20,
+   "events": 6,
+   "fixtures": []
+  },
+  {
+   "localpart": "c09",
+   "scale": "tiny",
+   "mail": 20,
+   "events": 6,
+   "fixtures": [
+    "eicar",
+    "person_only_check",
+    "forms_basic"
+   ]
+  },
+  {
+   "localpart": "c10",
+   "scale": "tiny",
+   "mail": 20,
+   "events": 6,
+   "fixtures": [
+    "bulk"
+   ],
+   "params": {
+    "bulk_messages": 5000,
+    "bulk_files": 3000
+   }
+  },
+  {
+   "localpart": "t01",
+   "scale": "tiny",
+   "mail": 300,
+   "events": 20,
+   "content_key": "twin",
+   "fixtures": []
+  },
+  {
+   "localpart": "t02",
+   "scale": "tiny",
+   "mail": 300,
+   "events": 20,
+   "content_key": "twin",
+   "fixtures": []
+  },
+  {
+   "localpart": "t03",
+   "scale": "tiny",
+   "mail": 300,
+   "events": 20,
+   "content_key": "twin",
+   "fixtures": []
+  },
+  {
+   "localpart": "t04",
+   "scale": "tiny",
+   "mail": 300,
+   "events": 20,
+   "content_key": "twin",
+   "fixtures": []
+  },
+  {
+   "localpart": "t05",
+   "scale": "tiny",
+   "mail": 300,
+   "events": 20,
+   "content_key": "twin",
+   "fixtures": []
+  },
+  {
+   "localpart": "t06",
+   "scale": "tiny",
+   "mail": 300,
+   "events": 20,
+   "content_key": "twin",
+   "fixtures": []
+  },
+  {
+   "localpart": "t07",
+   "scale": "tiny",
+   "mail": 300,
+   "events": 20,
+   "content_key": "twin",
+   "fixtures": []
+  },
+  {
+   "localpart": "t08",
+   "scale": "tiny",
+   "mail": 300,
+   "events": 20,
+   "content_key": "twin",
+   "fixtures": []
+  },
+  {
+   "localpart": "t09",
+   "scale": "tiny",
+   "mail": 300,
+   "events": 20,
+   "content_key": "twin",
+   "fixtures": []
+  },
+  {
+   "localpart": "t10",
+   "scale": "tiny",
+   "mail": 300,
+   "events": 20,
+   "content_key": "twin",
+   "fixtures": []
+  },
+  {
+   "localpart": "t11",
+   "scale": "tiny",
+   "mail": 300,
+   "events": 20,
+   "content_key": "twin",
+   "fixtures": []
+  },
+  {
+   "localpart": "t12",
+   "scale": "tiny",
+   "mail": 300,
+   "events": 20,
+   "content_key": "twin",
+   "fixtures": []
+  },
+  {
+   "localpart": "t13",
+   "scale": "tiny",
+   "mail": 300,
+   "events": 20,
+   "content_key": "twin",
+   "fixtures": []
+  },
+  {
+   "localpart": "t14",
+   "scale": "tiny",
+   "mail": 300,
+   "events": 20,
+   "content_key": "twin",
+   "fixtures": []
+  },
+  {
+   "localpart": "t15",
+   "scale": "tiny",
+   "mail": 300,
+   "events": 20,
+   "content_key": "twin",
+   "fixtures": []
+  },
+  {
+   "localpart": "t16",
+   "scale": "tiny",
+   "mail": 300,
+   "events": 20,
+   "content_key": "twin",
+   "fixtures": []
+  },
+  {
+   "localpart": "t17",
+   "scale": "tiny",
+   "mail": 300,
+   "events": 20,
+   "content_key": "twin",
+   "fixtures": []
+  },
+  {
+   "localpart": "t18",
+   "scale": "tiny",
+   "mail": 300,
+   "events": 20,
+   "content_key": "twin",
+   "fixtures": []
+  },
+  {
+   "localpart": "t19",
+   "scale": "tiny",
+   "mail": 300,
+   "events": 20,
+   "content_key": "twin",
+   "fixtures": []
+  },
+  {
+   "localpart": "t20",
+   "scale": "tiny",
+   "mail": 300,
+   "events": 20,
+   "content_key": "twin",
+   "fixtures": []
+  }
+ ]
+}

@@ -843,3 +843,87 @@ def test_a_draft_in_the_trash_is_copied_and_put_in_the_trash(gmail_migrator, aut
     assert any(name == "messages.trash" for name, _ in tgt.calls)
     lists = [kw for name, kw in src.calls if name == "drafts.list"]
     assert lists and all(kw.get("includeSpamTrash") for kw in lists)
+
+
+def test_a_signature_logo_hosted_on_drive_points_at_the_target_copy(gmail_migrator, auth, settings, db):
+    """9 Nov 2026: hundreds of account 3's emails carry a Drive-hosted signature image; a signature
+    copied verbatim would keep pointing at the source until teardown broke it."""
+    settings.migrate_gmail_settings = True
+    settings.rewrite_drive_links = True
+    src_logo, tgt_logo = "19Pg6l6DyHJaIIKO_VrlYpuAbCdEfGhIj", "1TgtLogoTgtLogoTgtLogoTgtLogo00"
+    db.record_mapping(SRC_USER, src_logo, tgt_logo, "file")
+    auth.source_gmail(SRC_USER).set_signature(
+        f'<img src="https://docs.google.com/uc?export=download&amp;id={src_logo}"> Ward 8')
+    gmail_migrator.run()
+    sig = auth.target_gmail(TGT_USER).signature_for()
+    assert tgt_logo in sig and src_logo not in sig and "Ward 8" in sig
+
+
+def test_the_gmail_display_language_is_carried():
+    """Not carried before 9 Nov 2026."""
+    import types
+    import gmail_engine
+
+    class Settings:
+        def __init__(self, lang): self.lang, self.updated = lang, None
+        def getLanguage(self, userId): return types.SimpleNamespace(execute=lambda: {"displayLanguage": self.lang})
+        def updateLanguage(self, userId, body):
+            self.updated = body["displayLanguage"]
+            return types.SimpleNamespace(execute=lambda: body)
+    src, tgt = Settings("ne"), Settings("en")
+    svc = lambda s: types.SimpleNamespace(users=lambda: types.SimpleNamespace(settings=lambda: s))  # noqa: E731
+    gm = gmail_engine.GmailMigrator.__new__(gmail_engine.GmailMigrator)
+    gm._src_override, gm._tgt_override = svc(src), svc(tgt)
+    gm.settings = types.SimpleNamespace(dry_run=False, max_retries=1, base_backoff=0, max_backoff=0)
+    gm.stats, gm.source_user = {}, "u@s"
+    gm._migrate_language()
+    assert tgt.updated == "ne" and gm.stats["language_migrated"] == 1
+
+
+def test_a_filter_already_on_the_target_is_adopted_not_failed(gmail_migrator, auth, settings, db):
+    """10 Nov 2026: a wipe leaves a mailbox's filters; the re-migration got 'Filter already exists' x17."""
+    import types
+    from resilience import PermanentAPIError
+    settings.migrate_gmail_settings = True
+    body = {"criteria": {"from": "boss@x.com"}, "action": {"addLabelIds": ["STARRED"]}}
+    src_f = {"id": "f1", **body}
+    tgt_f = {"id": "t9", **body}
+
+    class Filters:
+        def __init__(self, items, fail): self.items, self.fail = items, fail
+        def list(self, userId): return types.SimpleNamespace(execute=lambda: {"filter": self.items})
+        def create(self, userId, body):
+            def go():
+                if self.fail:
+                    raise PermanentAPIError("HTTP 400 (failedPrecondition): Filter already exists")
+                return {"id": "new"}
+            return types.SimpleNamespace(execute=go)
+    svc = lambda f: types.SimpleNamespace(users=lambda: types.SimpleNamespace(settings=lambda: types.SimpleNamespace(filters=lambda: f)))  # noqa: E731
+    gmail_migrator.src, gmail_migrator.tgt = svc(Filters([src_f], False)), svc(Filters([tgt_f], True))
+    gmail_migrator._migrate_filters()
+    assert db.get_target_id(gmail_migrator.source_user, "f1", "filter") == "t9"
+    assert gmail_migrator.stats.get("filters_failed", 0) == 0
+
+
+class TestSmallMailGoesUpAsItsOwnBytes:
+    """P1.7, engine half: under 5 MB an ASCII message is uploaded as message/rfc822 bytes, not base64 inside JSON."""
+
+    def test_an_ascii_message_carries_no_raw_in_its_json_body(self, auth, db, settings, identity, monkeypatch):
+        import gmail_engine
+        seen = []
+        real = gmail_engine.GmailMigrator._insert_once
+
+        def spy(self, body, media, raw, **kw):
+            seen.append(("raw" in body, media is not None))
+            return real(self, body, media, raw, **kw)
+        monkeypatch.setattr(gmail_engine.GmailMigrator, "_insert_once", spy)
+        auth.source_gmail(SRC_USER).add_message(b"Message-ID: <a@x>\\r\\nSubject: plain\\r\\n\\r\\nascii body\\r\\n", ["INBOX"])
+        gmail_engine.GmailMigrator(auth, db, settings, SRC_USER, TGT_USER).run()
+        assert seen == [(False, True)]
+        assert len(auth.target_gmail(TGT_USER).messages) == 1
+
+    def test_non_ascii_bytes_and_the_switch_off_still_go_in_the_body(self, auth, db, settings, identity, monkeypatch):
+        import gmail_engine
+        assert gmail_engine._small_upload(base64.urlsafe_b64encode("Subject: नमस्ते\\r\\n\\r\\nx".encode()).decode()) is None
+        monkeypatch.setenv("GMAIL_RAW_UPLOAD", "0")
+        assert gmail_engine._small_upload(base64.urlsafe_b64encode(b"Subject: a\\r\\n\\r\\nx").decode()) is None

@@ -205,7 +205,8 @@ class TestServiceResolution:
     def test_all_expands_to_every_per_user_service(self):
         import main
 
-        assert main.resolve_services("all") == set(main.PER_USER_SERVICES)
+        assert main.resolve_services("all") == set(main.PER_USER_SERVICES) - {"chat"}    # opt-in since 2026-10-31
+        assert "chat" in main.resolve_services("chat")           # naming it still selects it
 
     def test_shared_drives_is_not_a_per_user_service(self):
         """Listing it per user would run a tenant-wide pass 141 times."""

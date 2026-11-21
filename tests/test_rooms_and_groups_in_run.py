@@ -135,3 +135,15 @@ def test_subscriptions_follow_only_the_users_of_the_run(monkeypatch, db, setting
                         lambda self: seen.append(self.s) or 1)
     main._sync_calendar_subscriptions(db, object(), settings, only=["B@s.com"])
     assert seen == ["b@s.com"]
+
+
+def test_the_one_to_one_check_maps_a_room_guest_the_way_the_engine_does(db):
+    """c06's Ward Hall: the target event names the target's room; the check read it as another guest."""
+    import verify_sample
+    db.record_mapping(calendar_resources.LEDGER_USER, "c_src@resource.calendar.google.com",
+                      "c_tgt@resource.calendar.google.com", "resource")
+    v = object.__new__(verify_sample.Verifier)
+    v.db = db
+    assert verify_sample.compare_event(
+        {"summary": "s", "attendees": [{"email": "c_src@resource.calendar.google.com"}]},
+        {"summary": "s", "attendees": [{"email": "c_tgt@resource.calendar.google.com"}]}, v._translate) == []

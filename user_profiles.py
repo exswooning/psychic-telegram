@@ -17,6 +17,14 @@ import time
 from datetime import datetime, timezone
 
 # Seconds between read-backs of an updated profile (Directory shows writes late).
+CREATION_PAUSES = (5, 10, 20, 40, 60)
+
+
+def _creation_pending(exc) -> bool:
+    return getattr(getattr(exc, "resp", None), "status", None) == 412 and \
+        "creation is not complete" in str(exc).lower()
+
+
 READBACK_PAUSES = (2, 4, 8, 16, 30, 30)
 _sleep = time.sleep
 
@@ -344,7 +352,17 @@ def sync_profiles(
                         raise ValueError("Target profile version is unavailable; compare again before updating")
                     request = writer.users().update(userKey=current["id"], body=body)
                     request.headers["If-Match"] = current["etag"]
-                    request.execute(num_retries=3)
+                    # A just-created account answers 412 "User creation is not complete" for a
+                    # while (5 of account 3's new accounts, 2026-11-02): wait and ask again.
+                    # A 412 for a changed etag says something else and still fails at once.
+                    for pause in CREATION_PAUSES + (None,):
+                        try:
+                            request.execute(num_retries=3)
+                            break
+                        except Exception as exc:
+                            if pause is None or not _creation_pending(exc):
+                                raise
+                            _sleep(pause)
                     # Google's Directory shows an update a little later, not at once:
                     # live (dharan), revenue@ and ward14@ read back their old names
                     # straight after the write and matched on the next pass. Read again,
@@ -481,3 +499,46 @@ def main(argv=None):
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+def sync_photos(auth, db, settings, pairs, *, apply=False, progress=print) -> dict:
+    """Copy each user's profile photo (Directory API users.photos) source -> target.
+
+    Profile photos were listed as "separate review" and never carried (9 Nov 2026): a migrated user
+    arrived with a blank avatar. Read on the source, written on the target only when it differs, so a
+    re-run changes nothing. A user without a photo is left as is; one that cannot be read or written
+    is recorded, never fatal -- the user's data still migrates."""
+    import domain_guard
+    domain_guard.require_not_source(settings.target_domain, settings.source_domain)
+    out = {"copied": 0, "same": 0, "none": 0, "failed": []}
+    src = auth.directory("source")
+    tgt = auth.directory("target", writable=True) if apply else auth.directory("target")
+    for source, target in pairs:
+        try:
+            try:
+                photo = src.users().photos().get(userKey=source).execute()
+            except Exception as exc:      # noqa: BLE001
+                if "404" in str(exc):
+                    out["none"] += 1
+                    continue
+                raise
+            try:
+                have = tgt.users().photos().get(userKey=target).execute()
+            except Exception as exc:      # noqa: BLE001
+                if "404" not in str(exc):
+                    raise
+                have = {}
+            if have.get("photoData") == photo.get("photoData"):
+                out["same"] += 1
+                continue
+            if apply and not settings.dry_run:
+                tgt.users().photos().update(userKey=target, body={
+                    "photoData": photo["photoData"], "mimeType": photo.get("mimeType") or "JPEG"}).execute()
+                db.log_audit(source, f"photo:{source}", "profile_photo", "SUCCESS", f"-> {target}")
+            out["copied"] += 1
+        except Exception as exc:      # noqa: BLE001 - a photo is never worth a user
+            out["failed"].append((source, str(exc)[:200]))
+            db.log_audit(source, f"photo:{source}", "profile_photo", "FAILED", str(exc)[:300])
+    progress(f"profile photos: {out['copied']} copied, {out['same']} already the same, "
+             f"{out['none']} without a photo, {len(out['failed'])} failed")
+    return out

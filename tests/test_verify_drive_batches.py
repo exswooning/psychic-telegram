@@ -79,7 +79,7 @@ def test_drive_windows_are_bounded_and_every_mapping_is_checked(db,settings,monk
         calls.append((side,ids))
         return {fid:{'id':fid,'name':fid[1:],'mimeType':'application/pdf','ownedByMe':True} for fid in ids},{}
     monkeypatch.setattr(v,'_drive_meta_many',many)
-    monkeypatch.setattr(v,'_drive_path',lambda svc,fid,cache:'/'+fid[1:])
+    monkeypatch.setattr(v,'_drive_path',lambda svc,fid,cache,**kw:'/'+fid[1:])
     monkeypatch.setattr(v,'_content',lambda *a:[])
     monkeypatch.setattr(v,'_sharing',lambda *a:[])
     monkeypatch.setattr(v,'_target_files',lambda svc:[])

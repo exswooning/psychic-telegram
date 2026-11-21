@@ -21,6 +21,7 @@ import {
   decideMirrorDeletions, fetchMe, fetchMirror, runMirrorCycle, saveMirrorSettings, fetchMirrorMigrations, MirrorMigration, migrationOf } from '@/api/controlPlane'
 import type { MirrorCycle, MirrorDeletionMode, MirrorView } from '@/api/controlPlane'
 import { KINDS, duration } from '@/mirrorKinds'
+import { itemTypeLabel } from '@/utils/itemTypeLabel'
 
 const STATUS: Record<string, { color: 'success' | 'warning' | 'error' | 'info' | 'default'; label: string }> = {
   ok: { color: 'success', label: 'Good' },
@@ -177,7 +178,7 @@ const Mirror: React.FC = () => {
                 {(view?.held ?? []).map((h) => (
                   <TableRow key={h.id}>
                     <TableCell>{h.sourceUser}</TableCell>
-                    <TableCell>{h.service} {h.itemType}</TableCell>
+                    <TableCell>{h.service} {itemTypeLabel(h.itemType)}</TableCell>
                     <TableCell>{h.name || h.targetId}</TableCell>
                     <TableCell>{when(h.createdAt)}</TableCell>
                   </TableRow>

@@ -84,7 +84,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import Settings  # noqa: E402
 from resilience import retry_on_google_error, AdaptiveRateLimiter  # noqa: E402
-from corpus import ORG, SCALES, CorpusBuilder  # noqa: E402
+from corpus import ORG, SCALES, CorpusBuilder, stable_seed  # noqa: E402
 
 # The labels seed_gmail() creates. Reset removes exactly these -- deleting
 # every user label would take labels the account's owner made themselves.
@@ -928,11 +928,33 @@ SUBJECTS = [
 ]
 
 
+def insert_message(gmail, retry, raw: bytes, labels: list[str]):
+    """One seeded message into a mailbox, by the cheapest route Google accepts.
+
+    The message goes up as its own bytes (message/rfc822), not as base64 inside JSON: a third fewer bytes on a
+    line whose upload is the limit (0.9 MB/s on the box, 16 Nov 2026). The engine does the same above 5 MB.
+    googleapiclient's non-resumable multipart upload cannot carry a message with non-ASCII bytes ("'ascii'
+    codec can't encode", seen live 17 Nov on the first raw-upload seed): such a message goes up as before,
+    base64 inside the JSON body. Only the plain-ASCII ones save the third."""
+    if not raw.isascii():
+        return retry(lambda: gmail.users().messages().insert(
+            userId="me",
+            body={"raw": base64.urlsafe_b64encode(raw).decode(), "labelIds": labels},
+            internalDateSource="dateHeader",
+        ).execute())()
+    return retry(lambda: gmail.users().messages().insert(
+        userId="me",
+        body={"labelIds": labels},
+        media_body=_media(raw, "message/rfc822"),
+        internalDateSource="dateHeader",
+    ).execute())()
+
+
 def seed_gmail(gmail, settings: Settings, user: str, peers: list[str],
                external: str, count: int, drive_items: dict | None = None) -> dict:
     """Seed a mailbox with mail from the other four users, in every state."""
     retry = _retry_factory(settings)
-    rng = random.Random(hash(user) & 0xFFFF)
+    rng = random.Random(stable_seed(user))
     m = {"messages": 0, "unread": 0, "starred": 0, "in_spam": 0, "in_trash": 0,
          "with_attachment": 0, "labels": [], "thread_size": 3,
          "with_drive_link": 0}
@@ -949,12 +971,7 @@ def seed_gmail(gmail, settings: Settings, user: str, peers: list[str],
         ).execute())()
 
     def insert(raw: bytes, labels: list[str]):
-        return retry(lambda: gmail.users().messages().insert(
-            userId="me",
-            body={"raw": base64.urlsafe_b64encode(raw).decode(),
-                  "labelIds": labels},
-            internalDateSource="dateHeader",
-        ).execute())()
+        return insert_message(gmail, retry, raw, labels)
 
     # Look the labels up before creating any, exactly as seed_contacts does
     # for its contact groups -- and for a consequence that is much worse
@@ -1123,7 +1140,7 @@ def seed_drafts(gmail, settings: Settings, user: str, peers: list[str],
     a user had half-written, and nobody notices until they go looking for it.
     """
     retry = _retry_factory(settings)
-    rng = random.Random((hash(user) & 0xFFFF) + 7)
+    rng = random.Random(stable_seed(user, 7))
     m = {"drafts": 0}
     subjects = ["Re: budget question (WIP)", "Draft — team update",
                 "Notes for Monday", "Reply to vendor — needs review",
@@ -1133,10 +1150,13 @@ def seed_drafts(gmail, settings: Settings, user: str, peers: list[str],
                       rng.randint(1, 400),
                       body="Still drafting this. Not sent yet.\n")
         try:
-            retry(lambda r=raw: gmail.users().drafts().create(
+            retry(lambda r=raw: (gmail.users().drafts().create(
                 userId="me",
-                body={"message": {"raw": base64.urlsafe_b64encode(r).decode()}},
-            ).execute())()
+                media_body=_media(r, "message/rfc822"),       # raw bytes, not base64 in JSON
+            ) if r.isascii() else gmail.users().drafts().create(
+                userId="me",
+                body={"message": {"raw": base64.urlsafe_b64encode(r).decode()}},   # non-ASCII: see insert()
+            )).execute())()
             m["drafts"] += 1
         except Exception as exc:  # noqa: BLE001
             print(f"  ! draft {i}: {exc}")
@@ -1492,7 +1512,7 @@ def seed_contacts(people, settings: Settings, user: str, peers: list[str],
             group_ids.append(get_or_create_group(name))
             m["groups"] += 1
 
-        rng = random.Random(hash(user) & 0xFFFFFFFF)
+        rng = random.Random(stable_seed(user, 3))
         for i in range(count):
             given, family = rng.choice(first_names), rng.choice(last_names)
             email = f"{given.lower()}.{family.lower()}{i}@{rng.choice(domains)}"
@@ -1625,7 +1645,7 @@ def seed_calendar(cal, settings: Settings, user: str, peers: list[str],
                   drive_items: dict | None = None) -> dict:
     """Seed events using import (not insert), so seeding is itself silent."""
     retry = _retry_factory(settings)
-    rng = random.Random(hash(user) & 0xFFFF)
+    rng = random.Random(stable_seed(user, 5))
     m = {"events": 0, "recurring": 0, "with_external": 0, "all_day": 0,
          "with_drive_link": 0, "with_attachment": 0}
     # A meeting whose description says "agenda is in <drive link>" rots
@@ -1764,7 +1784,7 @@ def seed_secondary_calendars(cal, settings: Settings, user: str,
     meeting, which is exactly the fidelity loss this corpus exists to catch.
     """
     retry = _retry_factory(settings)
-    rng = random.Random((hash(user) & 0xFFFF) + 13)
+    rng = random.Random(stable_seed(user, 13))
     m = {"calendars": 0, "calendar_events": 0}
     names = ["Team Roadmap", "On-Call Rota", "Recruiting Pipeline",
              "Release Schedule", "Budget Reviews"]
@@ -1931,8 +1951,10 @@ def reset_gmail(gmail, settings: Settings, _purge_client=None) -> int:
         #
         # includeSpamTrash stays: seeded mail that landed in Spam still has
         # to be found, and the q filter excludes only the trash half.
+        # With a purge client the Trash is purged too: a copy left there is revived by Google's import and by the
+        # engine's own Message-ID lookups (P3.5, 19 Nov 2026: 705 messages ended with two live copies).
         resp = retry(lambda t=token: gmail.users().messages().list(
-            userId="me", maxResults=500, pageToken=t, q="-in:trash",
+            userId="me", maxResults=500, pageToken=t, q="" if purge is not None else "-in:trash",
             includeSpamTrash=True).execute())()
         msgs = resp.get("messages", [])
         for m in msgs:
@@ -2535,6 +2557,10 @@ def fit_entries(entries: list[dict], available: int,
 # The per-user services this seeder writes, in the order it writes them.
 # Named here so --only can be validated against the real list rather than a
 # second copy of it that drifts.
+# --fixtures-only: run each cohort user's named fixtures and nothing else, on users already seeded too
+# (every fixture is idempotent). How a fixture added after the cohort's seed reaches it.
+FIXTURES_ONLY = False
+
 SEEDABLE = ("drive", "gmail", "calendar", "chat", "contacts", "tasks",
            "gmail_settings")
 
@@ -2625,6 +2651,11 @@ def seed_one_user(settings: Settings, entry: dict, all_users: list[str],
                   fill_percent: float = 100.0,
                   account_limit_bytes: int | None = None) -> dict:
     user = entry["email"]
+    # A cohort entry (fableplan2 P2.4) carries its own size, edge cases and fixtures; every key is optional.
+    scale = entry.get("scale", scale)
+    mail_count = entry.get("mail", mail_count)
+    event_count = entry.get("events", event_count)
+    edge_cases = entry.get("edge_cases", edge_cases)
     peers = [] if getattr(settings, "seed_solo", False) else [u for u in all_users if u != user]
     t0 = time.time()
     print(f"  [{user}] starting ({entry['dept']}, {entry['project']})")
@@ -2636,7 +2667,7 @@ def seed_one_user(settings: Settings, entry: dict, all_users: list[str],
     # `only` narrows the run to one or more services -- everything not named
     # is skipped and reports zeroes, so a partial pass is visibly partial
     # rather than looking like a service that produced nothing.
-    base_want = (lambda svc: only is None or svc in only)
+    base_want = (lambda svc: not FIXTURES_ONLY and (only is None or svc in only))
     empty = {"note": "not requested"}
 
     # Corpus-building services duplicate on a second pass (see
@@ -2706,6 +2737,17 @@ def seed_one_user(settings: Settings, entry: dict, all_users: list[str],
     _content_step(user, base_want("contacts"))
     _content_step(user, base_want("tasks"))
 
+    # The cohort's named fixtures (data-generator/fixtures.py), after the standard content so they can link to it.
+    fixture_m = {}
+    if entry.get("fixtures") and (FIXTURES_ONLY or not already):
+        import fixtures
+        fixture_m = fixtures.run_all(entry["fixtures"], fixtures.Ctx(
+            seed=sys.modules[__name__], settings=settings, user=user, peers=peers, external=external,
+            drive=drive, gmail=gmail, cal=cal, retry=retry, items=items, params=entry.get("params") or {},
+            build_people_tasks=lambda: build_people_tasks(settings, user)))
+        print(f"  [{user}] fixtures: " + ", ".join(f"{k}={v.get('made', 0)}" + (f" ({len(v['notes'])} note(s))" if v.get("notes") else "")
+                                                   for k, v in fixture_m.items()))
+
     # Last: every other pass has to finish first so storageQuota.usage
     # reflects everything they wrote, not just some of it.
     fill_m = {"filler_files": 0, "filler_bytes": 0, "note": ""}
@@ -2763,7 +2805,7 @@ def seed_one_user(settings: Settings, entry: dict, all_users: list[str],
     return {"user": user, "dept": entry["dept"], "project": entry["project"],
             "drive": drive_m, "gmail": gmail_m, "calendar": cal_m,
             "chat": chat_m, "contacts": contacts_m, "tasks": tasks_m,
-            "storage": fill_m, "elapsed_sec": elapsed}
+            "storage": fill_m, "fixtures": fixture_m, "elapsed_sec": elapsed}
 
 
 def account_shares(settings: Settings, users: list[str]) -> dict[str, int]:
@@ -2855,6 +2897,15 @@ def main(argv: list[str] | None = None) -> int:
                                     "alice,bob,carol,dave,erin if that "
                                     "lookup cannot run.")
     ap.add_argument("--scale", default="medium", choices=list(SCALES))
+    ap.add_argument("--seed", type=int, default=0,
+                    help="the campaign seed: the same seed makes the same content in every process "
+                         "(default 0)")
+    ap.add_argument("--cohort", metavar="FILE",
+                    help="a cohort file (data-generator/cohorts/*.json): each user's name, size, content key and "
+                         "named fixtures; replaces --users")
+    ap.add_argument("--content-key", default="",
+                    help="users seeded with the same key get the same content (twins). Default: each "
+                         "user's own address, so every user differs but a re-run repeats")
     ap.add_argument("--external-email", default="external.tester@example.com")
     ap.add_argument("--mail", type=int, help="messages per user "
                                              "(default scales with --scale)")
@@ -2960,6 +3011,8 @@ def main(argv: list[str] | None = None) -> int:
                          "skipped and reports zero. For topping up one "
                          "service on an existing corpus -- e.g. chat, once "
                          "the Chat app is configured and the 404s stop.")
+    ap.add_argument("--fixtures-only", action="store_true",
+                    help="with --cohort: run each user's named fixtures only (idempotent), nothing else")
     ap.add_argument("--top-up-only", action="store_true",
                     help="skip every seeding step and only check/top up "
                          "storage toward --target-gb-per-user or "
@@ -3023,6 +3076,12 @@ def main(argv: list[str] | None = None) -> int:
     # opt-in extra is more edit than the extra is worth.
     if args.big_file_mb:
         os.environ["SEED_BIG_FILE_MB"] = str(args.big_file_mb)
+    # Same channel for the randomness (corpus.stable_seed reads both).
+    os.environ["SEED_CAMPAIGN"] = str(args.seed)
+    if args.content_key:
+        os.environ["SEED_CONTENT_KEY"] = args.content_key
+    else:
+        os.environ.pop("SEED_CONTENT_KEY", None)
     # Same channel, for the same reason, read by resources.seed_payload_mb()
     # when it sizes the pool below: _media() copies its buffer into a
     # BytesIO, so a filler chunk is resident once per user in flight. Left
@@ -3040,6 +3099,12 @@ def main(argv: list[str] | None = None) -> int:
                  "--reset, --top-up-only, --fill-until-full, --create-users or "
                  "--target-gb-per-user.")
 
+    global FIXTURES_ONLY
+    if args.fixtures_only:
+        if not args.cohort:
+            sys.exit("--fixtures-only needs --cohort")
+        FIXTURES_ONLY = True
+        args.groups, args.shared_drives = False, 0
     settings = Settings()
     assert_sandbox(settings, args.confirm_domain)
     _use_own_key(settings)
@@ -3127,6 +3192,10 @@ def main(argv: list[str] | None = None) -> int:
         # -- same wait the shared --create-users block below uses.
         print("\nWaiting 20s for new accounts to become usable ...")
         time.sleep(20)
+    elif args.cohort:
+        import fixtures
+        entries = fixtures.entries_from_cohort(fixtures.load_cohort(args.cohort), settings.source_domain)
+        print(f"\nCohort {args.cohort}: {len(entries)} user(s).")
     elif args.users:
         locals_ = [u.strip() for u in args.users.split(",")]
         entries = []
@@ -3172,6 +3241,11 @@ def main(argv: list[str] | None = None) -> int:
             print(f"\nFound {len(entries)} existing user(s) in "
                   f"{settings.source_domain}; seeding all of them.")
     all_users = [e["email"] for e in entries]
+    if args.cohort and args.users:
+        # --users narrows a cohort to these members; their peers stay the whole cohort.
+        keep = {u.strip().lower() for u in args.users.split(",") if u.strip()}
+        entries = [e for e in entries if e["local"] in keep]
+        print(f"  narrowed to {len(entries)} of the cohort: {', '.join(e['local'] for e in entries)}")
 
     # --- Optionally create the accounts first ----------------------------
     # --create-until-full already created its accounts (and built `entries`

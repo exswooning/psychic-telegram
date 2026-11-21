@@ -357,3 +357,66 @@ def test_chat_spaces_the_ledger_made_are_deleted_by_id(tmp_path):
     auth = type("A", (), {"target_chat": lambda self, u: Chat()})()
     assert reset_target._delete_ledger_spaces(st, auth, "u@b.example.com") == 1
     assert deleted == ["spaces/TGT1"]
+
+
+def test_a_reset_with_no_services_leaves_chat_alone_unless_chat_is_on(monkeypatch):
+    import reset_target as R
+    monkeypatch.delenv("MIGRATE_CHAT", raising=False)
+    assert "chat" not in R.default_services() and "drive" in R.default_services()
+    monkeypatch.setenv("MIGRATE_CHAT", "true")
+    assert "chat" in R.default_services()
+
+
+@pytest.fixture(autouse=True)
+def _no_purge_client(monkeypatch):
+    """A laptop has the real target key on disk, which would build a client that deletes for good: never in a test."""
+    import reset_target
+    monkeypatch.setattr(reset_target, "_purge_client", lambda settings, user: None)
+
+
+def test_the_mail_reset_is_given_a_purge_client_when_the_target_key_can_delete(monkeypatch):
+    got = {}
+
+    class Seed:
+        def reset_drive(self, svc, st): return 0
+        def reset_gmail(self, svc, st, _purge_client=None): got["purge"] = _purge_client; return 3
+        def reset_calendar(self, svc, st): return 0
+        def reset_chat(self, svc, st, local): return 0
+        def reset_contacts(self, svc, st): return 0
+        def reset_tasks(self, svc, st): return 0
+    monkeypatch.setattr(reset_target, "_load_seeder", lambda: Seed())
+    monkeypatch.setattr(reset_target, "trash_google_welcome_mail", lambda g: 0)
+    monkeypatch.setattr(reset_target, "_purge_client", lambda settings, user: "PURGE")
+    reset_target.reset_one(settings(), _FakeAuth(), "a@a.example.com", services=("gmail",))
+    assert got["purge"] == "PURGE"
+
+
+def test_the_reset_deletes_what_the_ledger_says_the_migration_wrote_outside_the_seeded_tree(tmp_path):
+    """c03, P3.5 run 1b: fixture shortcuts at the My Drive root outlived every reset and were made again beside the old."""
+    import sqlite3
+    from types import SimpleNamespace
+    db = tmp_path / "l.db"
+    c = sqlite3.connect(db)
+    c.execute("CREATE TABLE identity_map (source_email TEXT, target_email TEXT)")
+    c.execute("CREATE TABLE id_mapping (source_user TEXT, source_id TEXT, target_id TEXT, type TEXT)")
+    c.execute("INSERT INTO identity_map VALUES ('u@a.example.com', 'u@b.example.com')")
+    c.executemany("INSERT INTO id_mapping VALUES (?,?,?,?)", [
+        ("u@a.example.com", "s1", "t1", "shortcut"), ("u@a.example.com", "s2", "t2", "file"),
+        ("u@a.example.com", "m1", "m1", "file"),                    # moved: one id on both sides, never deleted
+        ("u@a.example.com", "s3", "t3", "message"), ("other@a.example.com", "s4", "t4", "file")])
+    c.commit(); c.close()
+    deleted = []
+
+    class Files:
+        def list(self, **_):         # what is at the root of the target My Drive: two mapped, one the user's own
+            return SimpleNamespace(execute=lambda: {"files": [{"id": "t1"}, {"id": "t2"}, {"id": "theirs"}]})
+
+        def delete(self, fileId, **_):
+            deleted.append(fileId)
+            return SimpleNamespace(execute=lambda: {})
+
+    class Auth:
+        def target_drive(self, user):
+            return SimpleNamespace(files=lambda: Files())
+    n = reset_target._delete_ledger_drive_items(SimpleNamespace(db_path=str(db)), Auth(), "u@b.example.com")
+    assert n == 2 and sorted(deleted) == ["t1", "t2"]

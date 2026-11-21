@@ -20,6 +20,7 @@ then `events.patch(sendUpdates='none')` it with the modified fields.
 from __future__ import annotations
 
 import logging
+import failpoints
 import re
 import uuid
 
@@ -586,15 +587,15 @@ class CalendarMigrator:
                                           "colorId") if k in body}
             typed.update(eventType=item["eventType"], **{prop: item[prop]})
             try:
-                return self._retry(lambda: self.tgt.events().insert(
-                    calendarId="primary", body=typed, sendUpdates="none").execute())
+                return self._retry(lambda: failpoints.hit("calendar.imported", self.tgt.events().insert(
+                    calendarId="primary", body=typed, sendUpdates="none").execute()))
             except (PermanentAPIError, RuntimeError) as exc:
                 log.warning("[%s] could not create %s event %s as its own type (%s); "
                             "importing it as an ordinary event", self.source_user,
                             item["eventType"], item.get("id"), exc)
-        return self._retry(lambda b=body: self.tgt.events().import_(
+        return self._retry(lambda b=body: failpoints.hit("calendar.imported", self.tgt.events().import_(
             calendarId=tgt_cal_id, body=b, conferenceDataVersion=0,
-        ).execute())
+        ).execute()))
 
     def _give_future_meeting_a_meet(self, item: dict, target_id: str,
                                     tgt_cal_id: str) -> None:
@@ -727,7 +728,7 @@ class CalendarMigrator:
         original_start = (item.get("originalStartTime") or {}).get("dateTime")
         try:
             inst_resp = self._retry(lambda: self.tgt.events().instances(
-                eventId=target_master_id, originalStart=original_start,
+                calendarId=tgt_cal_id, eventId=target_master_id, originalStart=original_start,
             ).execute())
         except (PermanentAPIError, RuntimeError) as exc:
             self.db.log_audit(self.source_user, eid, "event", "FAILED", str(exc))

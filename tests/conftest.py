@@ -20,6 +20,7 @@ os.environ.setdefault("TRANSFER_MODE", "download_upload")
 # readiness.gate asks Google about the configured tenants before every run; a test's
 # fake pair has none. tests/test_readiness.py drives it directly.
 os.environ.setdefault("BITPORT_READINESS_GATE", "0")
+os.environ.setdefault("BITPORT_PREFLIGHT", "0")      # start_checks.py asks the network and the box
 # Never the developer's own ledger: Settings() defaults to ./migration.db, and a run
 # claims its ledger for the configured pair -- a test's fake pair archived the real one.
 import tempfile as _tempfile  # noqa: E402
@@ -38,7 +39,7 @@ import gmail_engine  # noqa: E402
 from config import Settings  # noqa: E402
 from db import MigrationDB  # noqa: E402
 from resilience import DailyQuotaGuard  # noqa: E402
-from tests.fakes import FakeAuth, FakeDownloader, FakeMediaUpload  # noqa: E402
+from tests.fakes import FakeAuth, FakeDownloader, FakeIoUpload, FakeMediaUpload  # noqa: E402
 
 SRC_USER = "alice@tenanta.com"
 TGT_USER = "alice@tenantb.com"
@@ -57,6 +58,10 @@ def _own(name: str) -> bool:
 @pytest.fixture
 def settings(tmp_path) -> Settings:
     s = Settings()
+    # Legacy fidelity regressions deliberately exercise full checks. New default
+    # counts policy has its own tests and never substitutes for these comparisons.
+    s.mail_completion_check = "full"
+    s.mail_link_scan = "exhaustive"
     s.db_path = str(tmp_path / "migration.db")
     s.scratch_dir = str(tmp_path / "scratch")
     s.source_domain = "tenanta.com"
@@ -106,6 +111,14 @@ def identity(db):
 
     bulk_seed_identities(db, [(SRC_USER, TGT_USER)])
     return db
+
+
+@pytest.fixture(autouse=True)
+def _gmail_quota_state_in_tmp(tmp_path, monkeypatch):
+    """verify_gmail_quota keeps its shared budget under ~/.cache; a test must never read or write the
+    real one (a cooldown left by one run would pace the next)."""
+    import verify_gmail_quota
+    monkeypatch.setattr(verify_gmail_quota.Path, "home", lambda: tmp_path)
 
 
 @pytest.fixture(autouse=True)
@@ -284,6 +297,7 @@ def auth(settings, monkeypatch) -> FakeAuth:
     monkeypatch.setattr(drive_engine, "MediaFileUpload", FakeMediaUpload)
     monkeypatch.setattr(drive_engine, "MediaIoBaseDownload", FakeDownloader)
     monkeypatch.setattr(gmail_engine, "MediaFileUpload", FakeMediaUpload)
+    monkeypatch.setattr(gmail_engine, "MediaIoBaseUpload", FakeIoUpload)
     return FakeAuth(settings)
 
 

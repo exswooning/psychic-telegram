@@ -223,17 +223,15 @@ def delete_project(project: str, env: dict | None = None) -> tuple[bool, str]:
 # Known, real gates a brand-new Google account can hit here, none of
 # which look anything like "fix your gcloud command" -- matched by a
 # substring of gcloud's own error text so whoever reads the Result box
-# knows immediately whether this is something the automation should have
-# already cleared (ToS), something only the account owner can clear
+# knows immediately whether this is something the automation must review
+# explicitly (ToS), something only the account owner can clear
 # (billing), or something that just needs time (quota).
 _KNOWN_PROJECT_CREATE_ERRORS = (
     ("Callers must accept Terms of Service",
-     "This Google account has never used Google Cloud before, and Google "
-     "gates project creation on a one-time Terms of Service acceptance "
-     "that gcloud_browser_auth.py's sign-in step should already have "
-     "cleared automatically. Seeing this anyway means that step didn't "
-     "land -- visit https://console.cloud.google.com once as this "
-     "account, accept the terms shown there, then try again."),
+     "Google requires a first-use Cloud Platform terms review before this account can create projects. "
+     "Restart setup and review the account-specific notice in Bitport. If the notice cannot be read, "
+     "open https://console.cloud.google.com as this administrator, review the terms, then retry. "
+     "Sign-in success alone does not satisfy this separate agreement."),
     ("billing account",
      "This project needs a billing account, which is not something this "
      "tool can create on your behalf (it needs real payment details). "
@@ -645,7 +643,10 @@ def create_key(project: str, sa_email: str, dest: str, steps: list[Step],
                 return False
         if os.path.isfile(dest) and os.path.getsize(dest) == 0:
             os.unlink(dest)     # do not leave an empty file that looks like a key
-        if "disableServiceAccountKeyCreation" not in out or attempt == len(backoffs):
+        # Also a service account created moments ago: IAM answers NOT_FOUND "does not exist" for it
+        # until it propagates (live, 17 Nov 2026: the seed key's account, created one call earlier).
+        just_made = "NOT_FOUND" in out and "does not exist" in out and attempt < 3
+        if ("disableServiceAccountKeyCreation" not in out and not just_made) or attempt == len(backoffs):
             break
         retried = True
         time.sleep(backoffs[attempt])

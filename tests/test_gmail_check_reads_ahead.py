@@ -14,7 +14,7 @@ def test_batches_come_back_in_order_with_a_bounded_number_in_flight(monkeypatch)
     v.src_user, v.tgt_user = "s", "t"
     v.auth = type("A", (), {"source_gmail": lambda s, u: "S", "target_gmail": lambda s, u: "T"})()
 
-    def raw_many(svc, ids, side, offset, total):
+    def raw_many(svc, ids, side, offset, total, **_):
         with lock:
             live[0] += 1
             peak[0] = max(peak[0], live[0])

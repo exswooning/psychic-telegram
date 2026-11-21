@@ -121,7 +121,7 @@ export const Nodes: React.FC = () => {
       <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
         One migration spread across several machines. Each node claims users
         from this coordinator before touching anything, so no two machines can
-        start the same mailbox — which would insert every message twice.
+        start the same mailbox — which would insert every email twice.
       </Typography>
 
       {error && <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>}

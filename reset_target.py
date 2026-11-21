@@ -48,6 +48,9 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from auth import AuthManager        # noqa: E402
+
+# Parallel deletes per user for the ledger's root items; Drive's per-user write quota is far above 8 in flight.
+RESET_DELETE_WORKERS = int(os.environ.get("RESET_DELETE_WORKERS", "8"))
 from config import Settings         # noqa: E402
 from db import MigrationDB          # noqa: E402
 
@@ -111,6 +114,14 @@ def assert_sandbox(settings: Settings, confirm_domain: str,
 # what carries its marker, as migrated copies do.
 ALL_SERVICES = ("drive", "gmail", "calendar", "chat", "contacts", "tasks")
 
+
+def default_services() -> tuple:
+    """What a reset with no --services clears: everything, and Chat only when Chat is on (MIGRATE_CHAT). With it off
+    the reset listed Chat spaces for every user, got 403 and retried 11 times each: 40 failure lines and ~40 minutes on
+    41 users (a. -> b., 19 Nov 2026)."""
+    from config import chat_by_default
+    return ALL_SERVICES if chat_by_default() else tuple(x for x in ALL_SERVICES if x != "chat")
+
 # What Google puts in every new mailbox ("Tips for using your new inbox", "Get the official Gmail
 # app"). The seeder's own reset only trashes @seed.test mail, so these survive it -- and the source
 # mailboxes hold the same two, which a migration copies. Every reset-and-rerun cycle then leaves
@@ -164,6 +175,21 @@ def reset_all(settings: Settings, auth: AuthManager, users: list[str],
     return totals, unreached
 
 
+def _purge_client(settings: Settings, user: str):
+    """A Gmail client on the TARGET key that may delete for good, or None when the grant is missing (the reset then trashes)."""
+    try:
+        import google_auth_httplib2
+        import httplib2
+        from google.oauth2 import service_account
+        from googleapiclient.discovery import build
+        creds = service_account.Credentials.from_service_account_file(
+            settings.target_sa_key, scopes=["https://mail.google.com/"]).with_subject(user)
+        return build("gmail", "v1", http=google_auth_httplib2.AuthorizedHttp(creds, http=httplib2.Http(timeout=120)),
+                     cache_discovery=False)
+    except Exception:      # noqa: BLE001 - absence is an answer: the reset trashes
+        return None
+
+
 def reset_one(settings: Settings, auth: AuthManager, user: str,
               services: tuple[str, ...] = ALL_SERVICES) -> dict:
     domain_guard.require_not_source(settings.target_domain, settings.source_domain)
@@ -184,10 +210,24 @@ def reset_one(settings: Settings, auth: AuthManager, user: str,
         if key not in services:
             continue
         try:
-            out[key] = fn(svc(user), settings)
+            if key == "gmail":
+                # Permanently, when the target key may (its `mail.google.com` scope): a trashed copy is revived by the
+                # next run (P3.5, 19 Nov 2026), and trashing one message at a time ran at 46 a minute.
+                purge = _purge_client(settings, user)
+                out[key] = fn(svc(user), settings, _purge_client=purge) if purge is not None else fn(svc(user), settings)
+            else:
+                out[key] = fn(svc(user), settings)
         except Exception as exc:  # noqa: BLE001 - one service must not lose the rest
             unreachable.add(key)
             print(f"    ! {user} {key}: {str(exc)[:90]}")
+    if "drive" in services and "drive" not in unreachable:
+        try:
+            gone = _delete_ledger_drive_items(settings, auth, user)
+            out["drive"] += gone
+            if gone:
+                print(f"    {user}: deleted {gone} migrated Drive item(s) outside the seeded tree")
+        except Exception as exc:  # noqa: BLE001 - the seeded tree is already gone; this is tidying
+            print(f"    ! {user} migrated Drive items: {str(exc)[:90]}")
     # Not for a mailbox the seeder's own reset could not reach (an account the target does not have):
     # that error has been reported once already, and a second one for the same cause is only noise.
     if "gmail" in services and "gmail" not in unreachable:
@@ -206,6 +246,58 @@ def reset_one(settings: Settings, auth: AuthManager, user: str,
         out["chat"] += _delete_ledger_spaces(settings, auth, user)
     out["unreachable"] = sorted(unreachable)
     return out
+
+
+def _delete_ledger_drive_items(settings: Settings, auth: AuthManager, target_user: str) -> int:
+    """Every Drive item the ledger says the migration wrote for this user, by id -- not only the seeded tree. A
+    fixture made at the root of a source My Drive was copied to the root of the target's, outside MIGRATION-TEST, so
+    the seeder's reset never matched it; a plain file was adopted by the next run, but a shortcut was made again
+    beside the old one (c03, P3.5 run 1b, 20 Nov 2026: four extra shortcuts held the gate at 40/41). Only ids the
+    ledger maps, on the target; a file already gone answers 404."""
+    import sqlite3
+    try:
+        conn = sqlite3.connect(f"file:{settings.db_path}?mode=ro", uri=True)
+        ids = [r[0] for r in conn.execute(
+            "SELECT m.target_id FROM id_mapping m JOIN identity_map i ON i.source_email = m.source_user "
+            "WHERE lower(i.target_email) = lower(?) AND m.type IN ('file','folder','shortcut') "
+            "AND m.target_id != m.source_id", (target_user,))]
+        conn.close()
+    except Exception:  # noqa: BLE001 - no ledger to read is nothing to delete
+        logging.getLogger(__name__).debug("ignored an error", exc_info=True)
+        return 0
+    drive, n = auth.target_drive(target_user), 0
+    # Only what still sits at the root of the user's My Drive: the seeded tree has just taken everything under it, and
+    # a delete per mapped id cost a call each, nearly all of them 404s (run 2, 20 Nov 2026: c10's 3,000). Anything
+    # nested outside the tree goes with the root folder it sits in, which the ledger maps too.
+    wanted, at_root, token = set(ids), [], None
+    while True:
+        resp = drive.files().list(q="'root' in parents and 'me' in owners and trashed = false", pageSize=1000,
+                                  pageToken=token, fields="nextPageToken,files(id)").execute()
+        at_root += [f["id"] for f in resp.get("files", []) if f["id"] in wanted]
+        token = resp.get("nextPageToken")
+        if not token:
+            break
+    from resilience import retry_on_google_error
+
+    def delete_slice(fids: list) -> int:
+        # One client per thread (httplib2 is not thread-safe). In parallel: one at a time, c10's ~3,000 root files
+        # held the whole reset ~90 min after the other 40 users had finished in 4 (P3.5 run 3, 21 Nov 2026).
+        mine, done = auth.target_drive(target_user), 0
+        delete = retry_on_google_error(label="reset.drive.delete")(
+            lambda fid: mine.files().delete(fileId=fid, supportsAllDrives=True).execute())
+        for fid in fids:
+            try:
+                delete(fid)
+                done += 1
+            except Exception as exc:  # noqa: BLE001 - gone already, or not this user's
+                if "404" not in str(exc) and "notFound" not in str(exc):
+                    print(f"    ! {target_user} drive item {fid}: {str(exc)[:90]}")
+        return done
+
+    workers = max(1, min(RESET_DELETE_WORKERS, len(at_root)))
+    with futures.ThreadPoolExecutor(max_workers=workers) as pool:
+        n = sum(pool.map(delete_slice, [at_root[i::workers] for i in range(workers)]))
+    return n
 
 
 def _delete_ledger_spaces(settings: Settings, auth: AuthManager, target_user: str) -> int:
@@ -247,7 +339,7 @@ def main(argv: list[str] | None = None) -> int:
                          "this the whole tenant is emptied, which is right for "
                          "a rehearsal and wrong for a controlled experiment "
                          "that only needs a few mailboxes reset.")
-    ap.add_argument("--services", default=",".join(ALL_SERVICES),
+    ap.add_argument("--services", default=",".join(default_services()),
                     help="comma-separated subset of drive,gmail,calendar,chat -- "
                          "e.g. --services drive to reset only Drive and leave "
                          "already-migrated Gmail/Calendar/Chat data untouched")

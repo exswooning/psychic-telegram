@@ -132,6 +132,13 @@ def ensure_users(directory, emails: list[str], dry_run: bool = False, *,
             # three wipes of a 200-user tenant left 600 held deletions,
             # re-provisioning died at 172 of 201, and every one of the 29
             # missing accounts restored without consuming a single new slot.
+            # Someone else made it between our check and our create -- another run, an admin,
+            # Google finishing a create it had answered slowly. Two runs of account 3 started 72 s
+            # apart logged 23 of these as failures (2026-11-02) for accounts that were there.
+            if exc.resp.status == 409 and _already_there(directory, email):
+                result["existing"].append(email)
+                log.info("%s already exists (created alongside this run)", email)
+                continue
             if _is_domain_full(exc):
                 restored = _undelete(directory, email)
                 if restored:
@@ -142,6 +149,15 @@ def ensure_users(directory, emails: list[str], dry_run: bool = False, *,
             log.warning("could not create %s: %s", email, exc)
 
     return result
+
+
+def _already_there(directory, email: str) -> bool:
+    """A 409 is only "it exists" when the account is really there under that name; a conflicting
+    ALIAS of some other user is a real failure and stays one."""
+    try:
+        return user_exists(directory, email)
+    except HttpError:
+        return False
 
 
 def _is_domain_full(exc: HttpError) -> bool:

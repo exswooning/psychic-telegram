@@ -6,10 +6,13 @@ const fetchMigrationDetail = vi.fn()
 const runRepair = vi.fn()
 
 vi.mock('@/components/RunReports', () => ({ default: () => null }))
+vi.mock('@/components/SharingPanel', () => ({ default: () => null }))
 vi.mock('@/components/QuickVerification', () => ({ default: () => null }))
 vi.mock('@/components/CopySafetyCard', () => ({ default: () => null }))
+vi.mock('@/components/ParityGateCard', () => ({ default: () => null }))
 vi.mock('@/components/OneToOneSummary', () => ({ default: () => null }))
 vi.mock('@/api/controlPlane', () => ({
+  fetchDmsPerUser: () => Promise.resolve({ at: null, users: [] }),
   fetchSourceGuard: () => Promise.resolve({ snapshotTakenAt: null, snapshotUsers: 0, latest: null }),
   runSourceGuard: () => Promise.resolve({ ok: true, actionId: 1, detail: '' }),
   fetchUserProfiles: () => Promise.resolve({ profiles: [] }),
@@ -50,7 +53,7 @@ const survey = (over: Record<string, unknown> = {}) => ({
     },
     {
       key: 'gmail_invalid_label', count: 32967,
-      label: 'messages rejected — label pointed at a deleted mailbox',
+      label: 'emails rejected — label pointed at a deleted mailbox',
       fix: 'retried on the next migration',
     },
   ],

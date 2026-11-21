@@ -273,3 +273,18 @@ class TestAnExistingContactGroupIsAdopted:
                                              SRC_USER, TGT_USER)
         m._migrate_groups()
         assert m.stats["failed"] == 1
+
+
+def test_a_task_list_deleted_on_the_target_is_made_again_with_its_tasks(auth, db, settings, identity):
+    import tasks_engine
+    settings.migrate_tasks = True
+    src = auth.source_tasks(SRC_USER)
+    tl = src.add_list("My Tasks")
+    src.add_task(tl, "Book the window")
+    tasks_engine.TasksMigrator(auth, db, settings, SRC_USER, TGT_USER).run()
+    tgt = auth.target_tasks(TGT_USER)
+    assert len(tgt.lists) == 1
+    tgt.lists.clear(); tgt.task_store.clear()           # the target mailbox was emptied
+    stats = tasks_engine.TasksMigrator(auth, db, settings, SRC_USER, TGT_USER).run()
+    assert stats.get("recopied_missing") == 1 and stats["lists"] == 1 and stats["tasks"] == 1
+    assert len(tgt.lists) == 1 and sum(len(v) for v in tgt.task_store.values()) == 1

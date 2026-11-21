@@ -14,6 +14,8 @@
 export interface LabelledAccount {
   id: number
   email: string
+  /** The wizard names a migration account after its pair before any tenant is set up. */
+  name?: string | null
   source_domain?: string | null
   target_domain?: string | null
 }
@@ -26,9 +28,11 @@ export const domainsOf = (a: LabelledAccount): string =>
 
 export const labelFor = (a: LabelledAccount, all: LabelledAccount[]): string => {
   const d = domainsOf(a)
-  // No domain at all: the wizard has not run, so the login is the only
-  // thing left to name it by. A blank row would be unpickable.
-  if (!d) return a.email
+  // No domain at all: setup has not run. The account's own name is what the operator typed or the
+  // wizard made from the pair ("a.x.com → b.x.com"); the machine-made login ("migration-2-4c22631c@...")
+  // read as a stranger's account and could not be picked out (17 Nov 2026). Only when there is no
+  // name is the login left -- a blank row would be unpickable.
+  if (!d) return a.name && a.name !== a.email ? `${a.name} (setup not run)` : a.email
   const shared = all.filter((o) => domainsOf(o) === d).length > 1
   return shared ? `${d} (${a.email})` : d
 }

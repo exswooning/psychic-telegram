@@ -92,10 +92,11 @@ class TestTheLimiterLearnsFromTheFirstRejectionNotOnlyTheLast:
     def test_it_fires_once_per_rejection_including_the_one_that_exhausts_the_budget(self, monkeypatch):
         monkeypatch.setattr(R.time, "sleep", lambda *_: None)
         seen = []
-        boom, calls = self._call_that_always_429s("rateLimitExceeded", on_quota_rejection=lambda: seen.append(1))
+        boom, calls = self._call_that_always_429s("rateLimitExceeded", on_quota_rejection=lambda r: seen.append(r))
         with pytest.raises(RuntimeError, match="exhausted"):
             boom()
         assert len(seen) == calls["n"] == R.RATE_LIMIT_RETRY_BUDGET + 1
+        assert set(seen) == {"rateLimitExceeded"}      # the limiter is told WHICH limit
 
     def test_a_project_limiter_does_not_hear_one_users_budget(self, monkeypatch):
         """Live: one seeduser94 userRateLimitExceeded ratcheted the source
@@ -104,13 +105,13 @@ class TestTheLimiterLearnsFromTheFirstRejectionNotOnlyTheLast:
         monkeypatch.setattr(R.time, "sleep", lambda *_: None)
         seen = []
         boom, _ = self._call_that_always_429s(
-            "userRateLimitExceeded", on_quota_rejection=lambda: seen.append(1),
+            "userRateLimitExceeded", on_quota_rejection=lambda r: seen.append(r),
             quota_reasons=drive_engine.PROJECT_QUOTA_REASONS)
         with pytest.raises(RuntimeError):
             boom()
         assert seen == []
         boom, _ = self._call_that_always_429s(
-            "rateLimitExceeded", on_quota_rejection=lambda: seen.append(1),
+            "rateLimitExceeded", on_quota_rejection=lambda r: seen.append(r),
             quota_reasons=drive_engine.PROJECT_QUOTA_REASONS)
         with pytest.raises(RuntimeError):
             boom()
@@ -119,7 +120,7 @@ class TestTheLimiterLearnsFromTheFirstRejectionNotOnlyTheLast:
     def test_it_is_not_called_for_a_permanent_403(self, monkeypatch):
         monkeypatch.setattr(R.time, "sleep", lambda *_: None)
         seen = []
-        boom, _ = self._call_that_always_429s("insufficientPermissions", on_quota_rejection=lambda: seen.append(1))
+        boom, _ = self._call_that_always_429s("insufficientPermissions", on_quota_rejection=lambda r: seen.append(r))
         with pytest.raises(Exception):
             boom()
         assert seen == []
@@ -160,3 +161,52 @@ class TestWhichLimitRefusedIsRecorded:
             ("drive.files.copy", 429, "rateLimitExceeded", "Write requests per minute per user"): 1,
             ("drive.files.copy", 403, "userRateLimitExceeded", "User Rate Limit Exceeded"): 1}
         assert "Write requests per minute per user" in caplog.text      # the first of a kind, in full
+
+
+def test_a_429_resource_exhausted_gets_the_rate_limit_budget_too(monkeypatch):
+    """The Sheets per-minute read quota: 429 RESOURCE_EXHAUSTED, not one of the three 403 reasons."""
+    monkeypatch.setattr(R.time, "sleep", lambda *_: None)
+    calls = {"n": 0}
+
+    @R.retry_on_google_error(max_retries=6, base_delay=0, max_delay=0)
+    def boom():
+        calls["n"] += 1
+        raise R.HttpError(
+            resp=type("R", (), {"status": 429, "reason": "Too Many Requests",
+                                "get": lambda self, k, d=None: None})(),
+            content=b'{"error":{"code":429,"status":"RESOURCE_EXHAUSTED","message":"Quota exceeded for quota metric"}}')
+    with pytest.raises(RuntimeError, match="exhausted"):
+        boom()
+    assert calls["n"] == R.RATE_LIMIT_RETRY_BUDGET + 1, calls
+
+
+class TestGmailBusyMailbox:
+    """Gmail's 400 failedPrecondition on a busy mailbox (c10 during the DMS import, 20 Nov 2026) gets a few tries."""
+
+    def _boom(self, uri, reason="failedPrecondition"):
+        calls = {"n": 0}
+
+        @R.retry_on_google_error(max_retries=6, base_delay=0, max_delay=0)
+        def boom():
+            calls["n"] += 1
+            raise R.HttpError(
+                resp=type("R", (), {"status": 400, "reason": "Bad Request",
+                                    "get": lambda self, k, d=None: None})(),
+                content=('{"error":{"errors":[{"reason":"%s"}],"message":"Precondition check failed."}}'
+                         % reason).encode(), uri=uri)
+
+        return boom, calls
+
+    def test_a_gmail_read_is_retried_a_few_times(self, monkeypatch):
+        monkeypatch.setattr(R.time, "sleep", lambda *_: None)
+        boom, calls = self._boom("https://gmail.googleapis.com/gmail/v1/users/me/messages?q=x")
+        with pytest.raises(Exception):
+            boom()
+        assert calls["n"] == R.GMAIL_PRECONDITION_RETRY_BUDGET + 1, calls
+
+    def test_the_same_400_elsewhere_still_fails_fast(self, monkeypatch):
+        monkeypatch.setattr(R.time, "sleep", lambda *_: None)
+        boom, calls = self._boom("https://www.googleapis.com/drive/v3/files/x")
+        with pytest.raises(Exception):
+            boom()
+        assert calls["n"] == 1, calls

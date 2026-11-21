@@ -69,9 +69,15 @@ def test_server_side_sets_created_on_the_copy_and_the_rest_as_the_target(
     copy_body = src.calls_to("files.copy")[-1]["body"]
     assert copy_body["createdTime"] == EXTRA["createdTime"]
     assert "starred" not in copy_body
+    assert "writersCanShare" not in copy_body        # a shared drive refuses it (403); the move sets it
     move = next(c for c in tgt.calls_to("files.update") if c.get("removeParents"))
-    for k in ("starred", "properties", "copyRequiresWriterPermission", "writersCanShare"):
+    for k in ("starred", "properties", "copyRequiresWriterPermission"):
         assert move["body"][k] == EXTRA[k], k
+    # writersCanShare: refused while the file is still in the shared staging drive, so it is set
+    # once the move has put it in My Drive (9 Nov 2026)
+    assert "writersCanShare" not in move["body"]
+    after = [c for c in tgt.calls_to("files.update") if not c.get("removeParents") and "writersCanShare" in (c.get("body") or {})]
+    assert after and after[0]["body"]["writersCanShare"] == EXTRA["writersCanShare"]
 
 
 def test_a_locked_file_is_locked_last(auth, db, settings, identity, quota):
@@ -116,3 +122,45 @@ def test_a_refusal_with_nothing_carried_is_not_retried():
     with pytest.raises(PermanentAPIError):
         drive_engine.with_carried_fallback(send, {"name": "x"})
     assert len(calls) == 1
+
+
+def test_a_shared_drive_sharing_refusal_retries_without_the_carried_settings():
+    """finance@, 9 Nov 2026: 403 teamDrivesSharingRestrictionNotAllowed failed the whole copy."""
+    import drive_engine
+    from resilience import PermanentAPIError
+    calls = []
+
+    def send(b):
+        calls.append(b)
+        if "writersCanShare" in b:
+            raise PermanentAPIError("HTTP 403 (teamDrivesSharingRestrictionNotAllowed): x")
+        return {"id": "ok"}
+
+    assert drive_engine.with_carried_fallback(send, {"name": "x", "writersCanShare": False}) == {"id": "ok"}
+    assert len(calls) == 2 and "writersCanShare" not in calls[1]
+
+
+def test_a_refused_setting_is_recorded_against_the_item_the_worker_is_on(db):
+    """ss@, 9 Nov 2026: writersCanShare and appProperties were dropped and only a log line said so."""
+    import types
+    import drive_engine
+    from resilience import PermanentAPIError
+    me = types.SimpleNamespace(db=db, source_user="u@s.x")
+    drive_engine._CURRENT_ITEM.set((me, {"id": "f1"}))
+
+    def send(b):
+        if "writersCanShare" in b:
+            raise PermanentAPIError("HTTP 403 (teamDrivesSharingRestrictionNotAllowed): x")
+        return {"id": "ok"}
+    drive_engine.with_carried_fallback(send, {"name": "x", "writersCanShare": False})
+    row = db.get_audit("u@s.x", "f1", "carried")
+    assert row["status"] == "CARRIED_DROPPED" and row["error_message"].startswith("writersCanShare:")
+
+
+def test_a_rebuilt_form_gets_its_time_checked_again_after_it_settles():
+    """9 Nov 2026: the restore after a Form rebuild stuck when made, then the Forms service re-stamped
+    the time; Forms now join the late check commented files get."""
+    import inspect
+    import drive_engine
+    src = inspect.getsource(drive_engine.DriveMigrator._finish_item)
+    assert 'item.get("mimeType") == "application/vnd.google-apps.form"' in src and "late_bump=late" in src

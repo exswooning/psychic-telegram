@@ -96,6 +96,7 @@ class TestContactsStopsMidList:
         m.source_user = "u@src.test"
         m.stats = {"contacts": 0, "groups": 0, "skipped": 0, "failed": 0}
         m._migrate_groups = lambda: {}
+        m._forget_gone_contacts = lambda: None
         return m
 
     def test_stops_before_the_next_contact_once_flagged(self, settings, monkeypatch):

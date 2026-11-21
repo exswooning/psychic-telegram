@@ -508,11 +508,34 @@ class TestIncidentsCloseThemselves:
         i = self._open("mirror_lag", job="mirror")
         assert W.sweep_cleared(self._ledger(tmp_path)) == [(i, "the mirror was switched off")]
 
-    def test_dms_not_started_closes_when_a_dms_run_starts(self, cp, tmp_path):
+    def test_dms_not_started_closes_only_once_the_dms_is_really_going(self, cp, tmp_path, monkeypatch):
+        """8 Nov 2026: a DMS stopped a minute after launch, still signing in, closed this as "started", and the
+        hourly retry never asked again. Launching is not evidence; running half an hour, finishing, or a person's
+        Stop is."""
         i = self._open("dms_not_started", job="dms")
         assert W.sweep_cleared(self._ledger(tmp_path)) == []
         W.record_started(2, "dms", 9)
-        assert W.sweep_cleared(self._ledger(tmp_path))[0][0] == i
+        assert W.sweep_cleared(self._ledger(tmp_path)) == []                 # just launched: not yet
+        monkeypatch.setattr(W, "DMS_SETTLE_SEC", 0)
+        assert W.sweep_cleared(self._ledger(tmp_path))[0][0] == i            # still running after the settle time
+
+    def test_a_dms_that_died_on_its_own_leaves_it_open_and_a_clean_finish_closes_it(self, cp, tmp_path):
+        self._open("dms_not_started", job="dms")
+        W.record_started(2, "dms", 9)
+        W.record_finished(2, "dms", -2, pid=9)
+        assert W.sweep_cleared(self._ledger(tmp_path)) == []                 # died: the retry should ask again
+        W.record_started(2, "dms", 10)
+        W.record_finished(2, "dms", 0, pid=10)
+        assert "finished" in W.sweep_cleared(self._ledger(tmp_path))[0][1]
+
+    def test_a_dms_a_person_stopped_closes_it(self, cp, tmp_path):
+        self._open("dms_not_started", job="dms")
+        W.record_started(2, "dms", 77)
+        a = cpdb.begin_action(actor="Ops <ops@x>", actor_role="operator", action="stop job", reason="deploy first",
+                              target="77", params={}, node_id=None, account_id=2)
+        cpdb.finish_action(a, "OK", "stopped pid 77")
+        W.record_finished(2, "dms", -2, pid=77)
+        assert "stopped by" in W.sweep_cleared(self._ledger(tmp_path))[0][1]
 
     def test_the_watcher_sweeps_on_its_own(self, cp, tmp_path):
         box = Box()

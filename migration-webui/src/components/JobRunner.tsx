@@ -5,6 +5,7 @@ import {
 } from '@mui/material'
 import { PlayArrow as RunIcon, Stop as StopIcon } from '@mui/icons-material'
 import { runAction, stopJob, fetchJob, ActionSpec } from '@/api/client'
+import { useAccountPair } from '@/hooks/useAccountPair'
 
 /**
  * One button that runs a whitelisted ACTIONS entry and streams its output.
@@ -23,13 +24,16 @@ const JobRunner: React.FC<{
   /** Which tenant to act on, and to watch. Omitted means the session's own
    *  -- the behaviour every caller had before this existed. */
   accountId?: number | string
+  extra?: Record<string, unknown>
+  disabled?: boolean
 }> = ({
-  name, spec, onDone, accountId,
+  name, spec, onDone, accountId, extra, disabled = false,
 }) => {
   const [running, setRunning] = useState(false)
   const [lines, setLines] = useState<string[]>([])
   const [rc, setRc] = useState<number | null>(null)
   const [confirmOpen, setConfirmOpen] = useState(false)
+  const pair = useAccountPair(accountId)
   const [typed, setTyped] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [queued, setQueued] = useState<string | null>(null)
@@ -84,14 +88,43 @@ const JobRunner: React.FC<{
 
   useEffect(() => () => { if (pollRef.current) clearInterval(pollRef.current) }, [])
 
+  // Attach to this action's job when it is already running: one the queue started after the
+  // press said "queued", or one running when the page was opened. Only a press that started
+  // at once was ever watched, so the Regression set card sat blank, no log and no bar,
+  // through a run that had started on its own (2026-11-01). While queued it looks every 5 s.
+  const acct = accountId === undefined || accountId === null ? undefined : String(accountId)
+  useEffect(() => {
+    let alive = true
+    const look = async () => {
+      if (pollRef.current) return true
+      try {
+        const job = await fetchJob(0, acct, spec.label)
+        if (!alive || !job.running) return false
+        setQueued(null)
+        setLines(job.lines)
+        sinceRef.current = job.total
+        setRunning(true)
+        pollRef.current = setInterval(poll, 1000)
+        return true
+      } catch { return false }
+    }
+    look()
+    const t = queued ? setInterval(() => { look().then((on) => { if (on) clearInterval(t) }) }, 5000) : undefined
+    return () => { alive = false; if (t) clearInterval(t) }
+  }, [acct, spec.label, poll, queued])
+
   const start = useCallback(async (confirm?: string) => {
     setError(null)
     setQueued(null)
     setLines([])
     sinceRef.current = 0
     const res = await runAction(name, confirm, accountId,
-                                name === 'discover' && workers ? { workers: Number(workers) } : undefined)
+                                name === 'discover' && workers
+                                  ? { ...extra, workers: Number(workers) } : extra)
     if (!res.ok) {
+      // "already queued for this account" is the server saying the earlier press worked, not a
+      // failure: say it as information, beside the queue that shows where it stands.
+      if (/already queued/i.test(res.error || '')) { setQueued(res.error as string); return }
       setError(res.error || 'could not start')
       return
     }
@@ -105,7 +138,7 @@ const JobRunner: React.FC<{
     setRunning(true)
     pollRef.current = setInterval(poll, 1000)
     poll()
-  }, [name, poll, accountId, workers])
+  }, [name, poll, accountId, workers, extra])
 
   const handleClick = () => {
     if (spec.destructive) {
@@ -129,10 +162,11 @@ const JobRunner: React.FC<{
           color={spec.destructive ? 'error' : 'primary'}
           size="small"
           startIcon={running ? <StopIcon /> : <RunIcon />}
-          onClick={running ? () => stopJob() : handleClick}
+          onClick={running ? () => stopJob(accountId == null ? undefined : String(accountId)) : handleClick}
           // Keyed by action name so a harness can address any action without
           // matching on button TEXT, which is a label people reword.
           data-testid={`action-${name}`}
+          disabled={disabled && !running}
         >
           {running ? 'Stop' : spec.label}
         </Button>
@@ -168,13 +202,14 @@ const JobRunner: React.FC<{
         </Box>
       )}
       {error && (
-        <Typography variant="caption" color="error" sx={{ display: 'block', mt: 0.5 }}>
+        <Typography variant="caption" color="error" sx={{ display: 'block', mt: 0.5 }}
+                    data-testid={`action-error-${name}`}>
           {error}
         </Typography>
       )}
       {queued && (
         <Typography variant="caption" color="info.main"
-                    sx={{ display: 'block', mt: 0.5 }}>
+                    sx={{ display: 'block', mt: 0.5 }} data-testid={`action-queued-${name}`}>
           {queued}
         </Typography>
       )}
@@ -203,6 +238,7 @@ const JobRunner: React.FC<{
       <Dialog open={confirmOpen} onClose={() => setConfirmOpen(false)}>
         <DialogTitle>Confirm: {spec.label}</DialogTitle>
         <DialogContent>
+          {pair && <Typography variant="body2" sx={{ mb: 1, fontWeight: 700 }} data-testid="confirm-account">Runs for {pair}</Typography>}
           <Typography variant="body2" sx={{ mb: 2 }}>{spec.blurb}</Typography>
           <Typography variant="body2" sx={{ mb: 1 }}>
             Type <strong>{spec.confirm}</strong> to run this.
@@ -211,7 +247,7 @@ const JobRunner: React.FC<{
             fullWidth size="small" autoFocus value={typed}
             onChange={(e) => setTyped(e.target.value)}
             placeholder={spec.confirm}
-            inputProps={{ 'data-testid': `action-confirm-input-${name}` }}
+            inputProps={{ 'data-testid': `action-confirm-input-${name}`, 'aria-label': `Type ${spec.confirm} to confirm` }}
           />
         </DialogContent>
         <DialogActions>

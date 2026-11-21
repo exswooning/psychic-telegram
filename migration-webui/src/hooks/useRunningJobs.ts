@@ -4,6 +4,7 @@ import {
   fetchActiveJobs, fetchMe, fetchMigrations, stopJob as stopFleetJob,
   fetchProvisionStatus, ProvisionStatus } from '@/api/controlPlane'
 import { fetchJob, stopJob as stopSeedJob } from '@/api/client'
+import type { FullSetupStatus } from '@/api/controlPlane'
 
 /** What the job IS, so a card can say so rather than showing a bare name.
  *  Derived from the job's own name because that is the only thing every
@@ -32,7 +33,7 @@ export interface RunningJob {
   startedAt?: string
   key: string; label: string; detail: string; pct: number | null
   /** A setup waiting on the operator's own device: the card carries what to open. */
-  handoff?: { side: 'source' | 'target'; kind: 'signin' | 'dwd'; url: string; clientId?: string; scopes?: string } | null
+  handoff?: (NonNullable<FullSetupStatus['handoff']> & { side: 'source' | 'target' }) | null
   /** seed | migrate | ... -- what the rectangle announces. */
   kind: JobKind
   /** The tenant this is happening to, when the source knows it. */
@@ -80,6 +81,17 @@ export const describeElapsed = (sec: number): string => {
 /** The newest line that says something, skipping blanks and the warnings
  *  every Google client prints on import -- those are the last lines of a
  *  transcript far more often than anything about the actual work. */
+/** A verify's heartbeat is one pipe-separated line of counters; an operator wants the sentence:
+ *  "info@s.… · Drive: Drive compare files · 326 of 1,403".  Anything else is left as printed. */
+export const plainLine = (t: string): string => {
+  const m = /^verify: (?:heartbeat|progress) (\S+) \| service=(\w+) \| operation=([^|]*?) *\| *(?:.*?\| *)?items=([\d,]+)(?:\/([\d,]+))?/.exec(t)
+  if (!m) return t
+  const [, who, service, op, done, total] = m
+  const name = service.charAt(0).toUpperCase() + service.slice(1)
+  const what = op.trim().replace(/^(drive|gmail) /i, '').replace(/^./, (c) => c.toLowerCase())
+  return `${who} · ${name}: ${what} · ${total ? `${done} of ${total}` : `${done} so far`}`
+}
+
 const latestLine = (lines?: string[]): string | null => {
   if (!lines?.length) return null
   for (let i = lines.length - 1; i >= 0; i--) {
@@ -87,7 +99,8 @@ const latestLine = (lines?: string[]): string | null => {
     if (!t) continue
     if (/^(warnings\.warn|FutureWarning|\s*$)/.test(t)) continue
     if (t.startsWith('/') && t.includes('site-packages')) continue
-    return t.length > 160 ? `${t.slice(0, 157)}…` : t
+    const p = plainLine(t)
+    return p.length > 160 ? `${p.slice(0, 157)}…` : p
   }
   return null
 }
@@ -209,7 +222,14 @@ export function useRunningJobs() {
         // are the viewer's account, and a superadmin watching another account's run saw it
         // labelled with their own pair (dharan.gov.np -> mdharan.com for account 7's run).
         const ownPair = admission?.account_id != null ? pairs[admission.account_id] : undefined
-        const jobDomain = ownPair && kind === 'migrate' ? ownPair
+        // A verify reads both tenants too, and "gorkhatweed.com" on account 3's verify was the
+        // viewer's own source (live, 2026-11-01): any job of a known account, bar the ones that
+        // name a single side, is labelled with that account's pair.
+        // The configs above belong to the VIEWER's account: another account's job never borrows them,
+        // whatever its pair is known as (live, 2026-11-07: account 3's repair read "gorkhatweed.com").
+        const foreign = admission?.account_id != null && admission.account_id !== myAccountId
+        const jobDomain = foreign ? ownPair
+          : ownPair && (kind === 'migrate' || kind === 'verify') ? ownPair
           : kind !== 'migrate' && /\btarget\b/i.test(job.name)
           ? tgtCfg?.domain
           // A migration (or delta) reads the source and writes the target -- naming only
@@ -361,8 +381,12 @@ export function useRunningJobs() {
 
   useEffect(() => {
     refresh()
-    const id = setInterval(refresh, 5000)
-    return () => clearInterval(id)
+    // A tab nobody is looking at has no use for a 40 KB job transcript every five seconds;
+    // it catches up the moment it is shown again.
+    const id = setInterval(() => { if (!document.hidden) refresh() }, 5000)
+    const shown = () => { if (!document.hidden) refresh() }
+    document.addEventListener('visibilitychange', shown)
+    return () => { clearInterval(id); document.removeEventListener('visibilitychange', shown) }
   }, [refresh])
 
   return { jobs, loading, refresh }

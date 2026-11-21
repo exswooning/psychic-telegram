@@ -81,7 +81,7 @@ const Pricing: React.FC = () => {
 
       <Container maxWidth="lg" sx={{ py: { xs: 6, md: 9 } }}>
         <Stack spacing={1.5} sx={{ textAlign: 'center', mb: 6 }} alignItems="center">
-          <Typography variant="h3" sx={{ fontWeight: 700, maxWidth: '20ch' }}>
+          <Typography variant="h3" component="h1" sx={{ fontWeight: 700, maxWidth: '20ch' }}>
             Migrate with proof, not promises
           </Typography>
           <Typography variant="body1" color="text.secondary" sx={{ maxWidth: '55ch' }}>
