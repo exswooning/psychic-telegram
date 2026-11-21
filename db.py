@@ -24,12 +24,18 @@ import logging
 import os
 import sqlite3
 import threading
+import time
 from collections import OrderedDict
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Iterable, Iterator, Optional
 
 log = logging.getLogger(__name__)
+
+# How long a writer waits for another's transaction before "database is locked". Seven processes (a run's
+# shards, its verify threads, the API) share one ledger; 30 s was outlasted on 21 Nov 2026.
+BUSY_MS = int(os.getenv("BITPORT_DB_BUSY_MS", "120000"))
+SLOW_HOLD_SEC = float(os.getenv("BITPORT_DB_SLOW_HOLD_SEC", "5"))
 
 # preload_mappings() caches a user's WHOLE id_mapping in RAM the first time
 # their engine touches them, and until this existed nothing ever evicted a
@@ -615,7 +621,7 @@ class MigrationDB:
         """One connection per thread, created lazily."""
         c = getattr(self._local, "conn", None)
         if c is None:
-            c = sqlite3.connect(self.path, timeout=30.0, isolation_level=None)
+            c = sqlite3.connect(self.path, timeout=BUSY_MS / 1000, isolation_level=None)
             c.row_factory = sqlite3.Row
             # journal_mode is persisted in the database file; the other two are
             # NOT. `synchronous` and `foreign_keys` are per-connection, so
@@ -632,7 +638,7 @@ class MigrationDB:
             c.execute("PRAGMA journal_mode=WAL;")
             c.execute("PRAGMA synchronous=NORMAL;")
             c.execute("PRAGMA foreign_keys=ON;")
-            c.execute("PRAGMA busy_timeout=30000;")
+            c.execute(f"PRAGMA busy_timeout={BUSY_MS};")
             self._local.conn = c
         return c
 
@@ -642,9 +648,16 @@ class MigrationDB:
         with self._write_lock:
             conn = self.conn
             conn.execute("BEGIN IMMEDIATE")
+            held = time.monotonic()
             try:
                 yield conn
                 conn.execute("COMMIT")
+                if time.monotonic() - held > SLOW_HOLD_SEC:
+                    # Name whoever holds the ledger: a hold past every writer's wait failed six items and two
+                    # users' Drive passes at once (a. -> b., 21 Nov 2026) and nothing said who held it.
+                    import traceback
+                    log.warning("ledger write lock held %.1fs by:\n%s", time.monotonic() - held,
+                                "".join(traceback.format_stack(limit=8)[:-2]))
             except Exception:
                 # SQLite may have rolled back already (a full disk does): a second ROLLBACK
                 # then raised "no transaction is active" and hid the real error -- live,

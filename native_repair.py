@@ -109,6 +109,32 @@ def _is_default_text(key, value, default):
     return default.get(key) == value
 
 
+def _display_cell(cell, default, default_text):
+    """One cell's format as displayed, in place (see _displayed_formats)."""
+    fmt = cell.get("userEnteredFormat")
+    shown = _pad(fmt.pop("padding")) if isinstance(fmt, dict) and "padding" in fmt else default
+    if shown != NATIVE_PADDING:
+        cell.setdefault("userEnteredFormat", {})["padding"] = shown
+    fmt = cell.get("userEnteredFormat")
+    if isinstance(fmt, dict) and isinstance(fmt.get("textFormat"), dict):
+        tf = {k: v for k, v in fmt["textFormat"].items() if not _is_default_text(k, v, default_text)}
+        if tf:
+            fmt["textFormat"] = tf
+        else:
+            del fmt["textFormat"]
+    if cell.get("userEnteredFormat") == {}:
+        del cell["userEnteredFormat"]
+    return cell
+
+
+def _sheet_defaults(doc):
+    """(padding, text format) a side's cells inherit, or None when its metadata does not say."""
+    df = (doc.get("properties") or {}).get("defaultFormat")
+    if not isinstance(df, dict) or "padding" not in df:
+        return None
+    return _pad(df["padding"]), df.get("textFormat") or {}
+
+
 def _displayed_formats(doc):
     """Cell formats as a person sees them. An Office import's default lacks top/bottom padding (text ~2 px lower);
     native_styles writes the source's padding on the cells, and Sheets then stamps the default text style on them
@@ -126,19 +152,7 @@ def _displayed_formats(doc):
             for row in rows:
                 cells = row.get("values") or []
                 for cell in cells:
-                    fmt = cell.get("userEnteredFormat")
-                    shown = _pad(fmt.pop("padding")) if isinstance(fmt, dict) and "padding" in fmt else default
-                    if shown != NATIVE_PADDING:
-                        cell.setdefault("userEnteredFormat", {})["padding"] = shown
-                    fmt = cell.get("userEnteredFormat")
-                    if isinstance(fmt, dict) and isinstance(fmt.get("textFormat"), dict):
-                        tf = {k: v for k, v in fmt["textFormat"].items() if not _is_default_text(k, v, default_text)}
-                        if tf:
-                            fmt["textFormat"] = tf
-                        else:
-                            del fmt["textFormat"]
-                    if cell.get("userEnteredFormat") == {}:
-                        del cell["userEnteredFormat"]
+                    _display_cell(cell, default, default_text)
                 while cells and cells[-1] == {}:
                     cells.pop()
                 if "values" in row and not cells:
@@ -606,7 +620,11 @@ def compare_sheets_streamed(source, target, sid, tid, lookup=lambda fid: None,
                 int(s['properties'].get('gridProperties', {}).get('columnCount',0)) for s in a.get('sheets',[]))
     if cells > max_cells:
         raise RuntimeError('Streaming Sheet comparison exceeds qualified cell budget; coverage incomplete')
-    def content(doc, sheet_id):
+    shown = {id(a): _sheet_defaults(a), id(b): _sheet_defaults(b)}
+    def display(cell, side):
+        d = shown[id(side)]
+        return _display_cell(copy.deepcopy(cell), *d) if d else cell
+    def content(doc, sheet_id, side):
         matches=[s for s in doc.get('sheets',[]) if s.get('properties',{}).get('sheetId')==sheet_id]
         if len(matches)!=1:
             raise RuntimeError('Sheet window response omitted or duplicated its sheet identity')
@@ -615,6 +633,7 @@ def compare_sheets_streamed(source, target, sid, tid, lookup=lambda fid: None,
             row0,col0=grid.get('startRow',0),grid.get('startColumn',0)
             for ri,row in enumerate(grid.get('rowData',[])):
                 for ci,cell in enumerate(row.get('values',[])):
+                    cell=display(cell, side) if cell else cell
                     if cell:values[f'{row0+ri}:{col0+ci}']=_same_display(cell)
         return values
     for sa,sb in zip(a.get('sheets',[]),b.get('sheets',[])):
@@ -628,8 +647,8 @@ def compare_sheets_streamed(source, target, sid, tid, lookup=lambda fid: None,
             for row in range(0,height,step):
                 rng="'"+props['title'].replace("'","''")+"'!"+_a1(col,row)+':'+_a1(end-1,min(height,row+step)-1)
                 fields='sheets(properties.sheetId,data(startRow,startColumn,rowData(values('+CELL_FIELDS+'))))'
-                x=content(get(source,sid,ranges=[rng],includeGridData=True,fields=fields),props['sheetId'])
-                y=content(get(target,tid,ranges=[rng],includeGridData=True,fields=fields),sb['properties']['sheetId'])
+                x=content(get(source,sid,ranges=[rng],includeGridData=True,fields=fields),props['sheetId'],a)
+                y=content(get(target,tid,ranges=[rng],includeGridData=True,fields=fields),sb['properties']['sheetId'],b)
                 if _rewrite(x, lookup)!=y:
                     diffs.append('native Sheet cell content/style differs in '+rng)
                     # Even after a mismatch, continue reading every range; output alone is bounded.

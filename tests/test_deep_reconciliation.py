@@ -133,3 +133,30 @@ def test_unmapped_custom_labels_cannot_silently_pass(db,auth,settings,identity):
     out=reconcile_dms(auth,db,settings,progress=lambda _:None)
     assert out['blocked'] and out['verified']==0
     assert 'label mapping' in out['errors'][0]['error']
+
+
+class PaddedSheets(Sheets):
+    """A native source (default padding 2/3/2/3) against an Office import repaired by native_styles: the import's
+    default lacks top/bottom padding, its cells carry the source's padding and the default text style Sheets
+    stamps with it (a. -> b., 21 Nov 2026)."""
+    def __init__(self, fid, imported=False, stamped=True):
+        super().__init__(fid, height=50); self.imported=imported; self.stamped=stamped
+    def get(self, **kw):
+        props={'sheetId':self.fid,'title':'Data','gridProperties':{'rowCount':self.height,'columnCount':100}}
+        default={'padding':{'right':3,'left':3} if self.imported else {'top':2,'right':3,'bottom':2,'left':3},
+                 'textFormat':{'foregroundColor':{},'fontFamily':'Arial' if self.imported else 'arial,sans,sans-serif',
+                               'foregroundColorStyle':{'rgbColor':{}}}}
+        if 'ranges' not in kw:
+            return SimpleNamespace(execute=lambda:{'properties':{'defaultFormat':default},'sheets':[{'properties':props}]})
+        cell={'userEnteredValue':{'numberValue':1}}
+        if self.imported and self.stamped:
+            cell['userEnteredFormat']={'padding':{'top':2,'right':3,'bottom':2,'left':3},'textFormat':{
+                'foregroundColor':{},'fontFamily':'Arial','foregroundColorStyle':{'themeColor':'TEXT'}}}
+        return SimpleNamespace(execute=lambda:{'sheets':[{'properties':props,'data':[{'rowData':[{'values':[cell]}]}]}]})
+
+
+def test_streamed_sheet_compares_cells_as_displayed():
+    from native_repair import compare_sheets_streamed
+    assert compare_sheets_streamed(PaddedSheets(1),PaddedSheets(2,imported=True),'a','b')==[]
+    # Not repaired: the text really sits ~2 px lower, and the check says so.
+    assert compare_sheets_streamed(PaddedSheets(1),PaddedSheets(2,imported=True,stamped=False),'a','b')

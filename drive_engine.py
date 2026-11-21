@@ -2564,6 +2564,7 @@ class DriveMigrator:
             body["createdTime"] = item["createdTime"]
         body.update(carried_metadata(item))
         try:
+            self._strip_exported_comments(path)
             media = MediaFileUpload(path, mimetype=export_mime,
                                     resumable=size > LARGE_UPLOAD_THRESHOLD)
             result = with_carried_fallback(lambda b: self._retry(lambda: failpoints.hit(
@@ -2614,31 +2615,35 @@ class DriveMigrator:
             needs_restore = self._after_round_trip(item, tgt_id) or needs_restore
         self._finish_item(item, tgt_id, force_mtime_restore=needs_restore)
 
+    @staticmethod
+    def _strip_exported_comments(path: str) -> None:
+        """An Office export carries the file's comments and the import recreates them under their source-domain
+        authors, which the target can neither delete nor match; the comment pass posts the faithful copies
+        (office_strip)."""
+        import office_strip
+        with open(path, "rb") as fh:
+            data = fh.read()
+        clean = office_strip.strip_comments(data)
+        if clean is not data:
+            with open(path, "wb") as fh:
+                fh.write(clean)
+
     def _after_round_trip(self, item: dict, tgt_id: str) -> bool:
-        """A native rebuilt from an Office export: drop the comments the import made from the exported file (the
-        comment pass posts the faithful copies, with replies and resolution; live, a. -> b. 21 Nov 2026, every
-        commented file held each comment twice), then put back the styles the round trip loses (native_styles).
-        Only our own just-created file is touched. Never fails the file. Returns whether it wrote."""
+        """A native rebuilt from an Office export: put back the styles the round trip loses (native_styles). Runs
+        after every import of the file -- the link rewrite re-imports it. Never fails the file. Returns whether
+        it wrote."""
         import native_styles
-        kind, wrote = _NATIVE_KIND[item["mimeType"]], False
-        try:
-            found = self._retry(lambda: self.tgt.comments().list(
-                fileId=tgt_id, fields="comments(id)", pageSize=100).execute()).get("comments", [])
-            for c in found:
-                self._retry(lambda cid=c["id"]: self.tgt.comments().delete(fileId=tgt_id, commentId=cid).execute())
-            wrote = bool(found)
-        except Exception as exc:      # noqa: BLE001 - a duplicate comment is a finding, not a lost file
-            log.warning("[%s] could not clear imported comments on %s: %s", self.source_user, item.get("name"), exc)
+        kind = _NATIVE_KIND[item["mimeType"]]
         try:
             def paced(fn, op="read"):
                 _native_project_limiter(kind, op).acquire()
                 return self._retry(fn, label=f"{kind}.realign")
-            n = native_styles.realign(kind, self.auth.api("source", kind, self.source_user),
-                                      self.auth.api("target", kind, self.target_user), item["id"], tgt_id, paced)
-            wrote = wrote or n > 0
+            return native_styles.realign(kind, self.auth.api("source", kind, self.source_user),
+                                         self.auth.api("target", kind, self.target_user), item["id"], tgt_id,
+                                         paced) > 0
         except Exception as exc:      # noqa: BLE001 - the file migrated; the style check will name what is left
             log.warning("[%s] could not realign styles on %s: %s", self.source_user, item.get("name"), exc)
-        return wrote
+            return False
 
     def _rewrite_pending_links(self) -> None:
         """Point migrated documents at their migrated neighbours.
@@ -2683,6 +2688,8 @@ class DriveMigrator:
                     # not move, and inventing a target for it would break a
                     # link that currently works.
                     continue
+                import office_strip
+                out = office_strip.strip_comments(out)
                 with open(path, "wb") as fh:
                     fh.write(out)
                 media = MediaFileUpload(path, mimetype=export_mime,
@@ -2690,6 +2697,8 @@ class DriveMigrator:
                 self._retry(lambda: self.tgt.files().update(
                     fileId=tgt_id, media_body=media, fields="id",
                     supportsAllDrives=True).execute())
+                if _NATIVE_KIND.get(item.get("mimeType")) in ("docs", "sheets"):
+                    self._after_round_trip(item, tgt_id)     # a re-import loses the restored styles again
                 self.db.log_audit(self.source_user, item["id"], "link_rewrite",
                                   "SUCCESS", f"{hits} Drive link(s) repointed")
                 self._restore_modified_time(tgt_id, item, hits, late_bump=True)     # re-uploading content moved it
