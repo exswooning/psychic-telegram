@@ -442,3 +442,29 @@ def test_the_restyle_pass_runs_after_the_rewrite_in_rewrite_native():
     d = Docs()
     L.rewrite_native("docs", d, "f1", lambda i: NEW if i == OLD else None)
     assert len(d.batches) == 2 and "replaceAllText" in d.batches[0][0] and "updateTextStyle" in d.batches[1][0]
+
+
+def test_a_failed_rebuild_removes_only_its_own_half_made_file(settings, db):
+    import threading
+    from types import SimpleNamespace as NS
+    import drive_engine
+    m = object.__new__(drive_engine.DriveMigrator)
+    m.settings, m.db, m.source_user = settings, db, "u@a"
+    m.stats, m._stats_lock = {}, threading.Lock()
+    m._retry = lambda fn, **kw: fn()
+    db.record_mapping("u@a", "OLD", "MAPPED", "file")
+    asked, deleted = [], []
+
+    class Files:
+        def list(self, q, **kw):
+            asked.append(q)
+            return NS(execute=lambda: {"files": [{"id": "HALF"}, {"id": "MAPPED"}]})
+
+        def delete(self, fileId):
+            deleted.append(fileId)
+            return NS(execute=lambda: {})
+
+    m.tgt = NS(files=lambda: Files())
+    m._discard_rebuild({"name": "Oversized Doc"}, "application/vnd.google-apps.document", "2026-11-22T00:00:00")
+    assert deleted == ["HALF"]
+    assert "createdTime >= '2026-11-22T00:00:00'" in asked[0] and "'root' in parents" in asked[0]

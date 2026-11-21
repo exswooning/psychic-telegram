@@ -1666,6 +1666,22 @@ class DriveMigrator:
         self._form_sheets_cache = found
         return found
 
+    def _discard_rebuild(self, item: dict, mime: str, started: str) -> None:
+        """A rebuild creates the file at the user's root, then fills it; when the fill fails the empty file stayed,
+        unmapped, one more each run (c01's "Oversized Doc": a Docs 503 on every run, six copies by run 7). Deleted:
+        only this name and type, at the root, created since the rebuild began, and mapped by nothing."""
+        name = item["name"].replace("\\", "\\\\").replace("'", "\\'")
+        try:
+            found = self._retry(lambda: self.tgt.files().list(
+                q=f"name = '{name}' and mimeType = '{mime}' and 'root' in parents and trashed = false "
+                  f"and createdTime >= '{started}'", fields="files(id)", pageSize=10).execute()).get("files", [])
+            for f in found:
+                if not self.db.conn.execute("SELECT 1 FROM id_mapping WHERE target_id=?", (f["id"],)).fetchone():
+                    self._retry(lambda fid=f["id"]: self.tgt.files().delete(fileId=fid).execute())
+                    log.info("[%s] removed the half-made rebuild of %s", self.source_user, item.get("name"))
+        except Exception as exc:      # noqa: BLE001 - the item's own failure is what matters; say this one too
+            log.warning("[%s] could not remove a half-made rebuild of %s: %s", self.source_user, item.get("name"), exc)
+
     def _strategies_for(self, item: dict, is_native: bool) -> list:
         strategies = self._file_strategies(is_native)
         mime = item.get("mimeType") or ""
@@ -1771,8 +1787,13 @@ class DriveMigrator:
         # dharan.gov.np: 3 of 9 Forms in one repair burst were lost to an unretried call).
         extra = ({"run": lambda req: self._retry(req.execute, label="forms", tenant="target")}
                  if mime == native_api.FORM else {})
-        tgt_id, note = native_api.REBUILDERS[mime](
-            src_api, tgt_api, item["id"], item["name"], **extra)
+        started = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+        try:
+            tgt_id, note = native_api.REBUILDERS[mime](
+                src_api, tgt_api, item["id"], item["name"], **extra)
+        except Exception:
+            self._discard_rebuild(item, mime, started)
+            raise
 
         # Created at the API's own default location -- the user's root -- so
         # MOVE it rather than adding a parent. addParents alone leaves the
