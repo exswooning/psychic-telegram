@@ -9,7 +9,8 @@ from collections import Counter
 from link_rewrite import rewrite_text
 from db import utc_now
 
-FIELDS = "id,content,anchor,quotedFileContent,createdTime,resolved,author(displayName),replies(id,content,createdTime,action,author(displayName))"
+FIELDS = ("id,content,anchor,quotedFileContent,createdTime,resolved,author(displayName,me,permissionId),"
+          "replies(id,content,createdTime,action,author(displayName,me,permissionId))")
 
 
 def list_threads(svc, fid, execute=lambda fn: fn()):
@@ -105,6 +106,19 @@ def content(row, lookup):
     )
 
 
+def authored(row, lookup):
+    """A comment posted as its own author: their words, and the date no API lets a copy keep (a comment's
+    createdTime is read-only everywhere, the Docs UI included). An action-only reply stays empty."""
+    text = _unmention(rewrite_text(row.get("content", ""), lookup)[0])
+    return text + "\n\n(originally " + (row.get("createdTime") or "")[:10] + ")" if text.strip() else text
+
+
+def _forms(row, lookup):
+    """Every text a faithful copy of this comment may carry: posted as its author, by the owner with the author
+    named (when the author has no account or no access), or as an old copy wrote it."""
+    return (_text(authored(row, lookup)), _text(content(row, lookup)), _text(rewrite_text(row.get("content", ""), lookup)[0]))
+
+
 def differences(source, target, lookup):
     remaining = list(target)
     diffs = []
@@ -113,8 +127,7 @@ def differences(source, target, lookup):
         candidates = [
             c
             for c in remaining
-            if _text(c.get("content"))
-            in (_text(wanted), _text(rewrite_text(comment.get("content", ""), lookup)[0]))
+            if _text(c.get("content")) in _forms(comment, lookup)
         ]
         if len(candidates) > 1:
             # Two threads with the same words on different spots (live, finance@s.: one PDF,
@@ -135,20 +148,18 @@ def differences(source, target, lookup):
             diffs.append("comment quote escaped twice (Drive escapes on write; copy made before the fix)")
         elif quoted == "differs":
             diffs.append("comment quotedFileContent differs")
-        want = Counter(
-            (_text(content(r, lookup)), r.get("action", ""))
-            for r in comment.get("replies", [])
-        )
-        actual = Counter(
-            (_text(r.get("content")), r.get("action", ""))
-            for r in found.get("replies", [])
-        )
-        raw = Counter(
-            (_text(rewrite_text(r.get("content", ""), lookup)[0]), r.get("action", ""))
-            for r in comment.get("replies", [])
-        )
-        if actual not in (want, raw):
-            diffs.append("comment replies differ")
+        actual = [(_text(r.get("content")), r.get("action", "")) for r in found.get("replies", [])]
+        pending = list(actual)
+        for r in comment.get("replies", []):
+            forms = {(f, r.get("action", "")) for f in _forms(r, lookup)}
+            hit = next((a for a in pending if a in forms), None)
+            if hit is None:
+                diffs.append("comment replies differ")
+                break
+            pending.remove(hit)
+        else:
+            if pending:
+                diffs.append("comment replies differ")
     if remaining:
         diffs.append("extra target comment threads")
     return diffs
@@ -175,7 +186,9 @@ def reconcile(migrator, sid, tid):
             source_user TEXT,item_key TEXT,target_file TEXT,state TEXT,updated_at TEXT,
             PRIMARY KEY(source_user,item_key))""")
 
-    def deliver(key, kind, body, candidates, call):
+    def deliver(key, kind, options, candidates):
+        """options: (body, call) pairs, best first. A later one is tried only when Google definitely refused
+        the one before (nothing was created), so a copy is never made twice."""
         nonlocal written
         # Keyed by file: a comment id is unique within one file only -- live, ss@'s two
         # copies of one Doc both carried AAABghWPKe8, the second found the first's mapping
@@ -200,13 +213,13 @@ def reconcile(migrator, sid, tid):
                         "Mapped comment/reply is missing; do not create another blindly"
                     )
             else:
-                if not _body_matches(found, body):
+                if not any(_body_matches(found, b) for b, _ in options):
                     raise RuntimeError(
                         "Existing target comment/reply differs; preserve possible target edits"
                     )
                 return mapped
         matches = [
-            r for r in candidates if _body_matches(r, body)
+            r for r in candidates if any(_body_matches(r, b) for b, _ in options)
         ]
         if len(matches) > 1:
             raise RuntimeError("Ambiguous comment/reply copies")
@@ -235,7 +248,13 @@ def reconcile(migrator, sid, tid):
             for limiter_name in ("_tgt_write_limiter", "_project_limiter"):
                 limiter=getattr(migrator,limiter_name,None)
                 if limiter is not None:limiter.acquire()
-            created = failpoints.hit("drive.comment.created", call().execute())
+            for i, (_body, call) in enumerate(options):
+                try:
+                    created = failpoints.hit("drive.comment.created", call().execute())
+                    break
+                except Exception as exc:      # noqa: BLE001 - only a definite refusal moves to the next way
+                    if i == len(options) - 1 or not _refused(exc):
+                        raise
             target_id = created["id"]
             written += 1
         migrator.db.record_mapping(migrator.source_user, key, target_id, kind)
@@ -246,34 +265,88 @@ def reconcile(migrator, sid, tid):
             )
         return target_id
 
+    writers = _Writers(migrator, sid)
+
+    def ways(row, extra, create):
+        """(body, call) for each way to post this row: as its author's target account, then by the owner with
+        the author named in the text."""
+        out = []
+        who = writers.account(row)
+        if who:
+            body = {"content": authored(row, lookup), **extra}
+            out.append((body, lambda b=body, w=who: create(writers.client(w), b)))
+        body = {"content": content(row, lookup), **extra}
+        out.append((body, lambda b=body: create(migrator.tgt, b)))
+        return out
+
     for comment in source:
-        body = {"content": content(comment, lookup)}
-        for field in ("anchor", "quotedFileContent"):
-            if comment.get(field):
-                body[field] = comment[field]
+        extra = {f: comment[f] for f in ("anchor", "quotedFileContent") if comment.get(f)}
         cid = deliver(
             comment["id"],
             "comment",
-            body,
-            target,
-            lambda: migrator.tgt.comments().create(
+            ways(comment, extra, lambda svc, b: svc.comments().create(
                 fileId=tid, fields=FIELDS,
-                body={**body, **({"quotedFileContent": for_writing(body["quotedFileContent"])}
-                                 if "quotedFileContent" in body else {})},
-            ),
+                body={**b, **({"quotedFileContent": for_writing(b["quotedFileContent"])}
+                              if "quotedFileContent" in b else {})})),
+            target,
         )
         found = next((c for c in target if c["id"] == cid), {})
         for reply in comment.get("replies", []):
-            rb = {"content": content(reply, lookup)}
-            if reply.get("action"):
-                rb["action"] = reply["action"]
+            extra = {"action": reply["action"]} if reply.get("action") else {}
             deliver(
                 comment["id"] + "::" + reply["id"],
                 "comment_reply",
-                rb,
+                ways(reply, extra, lambda svc, b, c=cid: svc.replies().create(
+                    fileId=tid, commentId=c, body=b, fields="id,content,action")),
                 found.get("replies", []),
-                lambda: migrator.tgt.replies().create(
-                    fileId=tid, commentId=cid, body=rb, fields="id,content,action"
-                ),
             )
     return written
+
+
+def _refused(exc) -> bool:
+    """Google said no and created nothing: no access to the file (403/404), or no such account to act as."""
+    status = getattr(getattr(exc, "resp", None), "status", None)
+    return status in (403, 404) or type(exc).__name__ == "RefreshError"
+
+
+class _Writers:
+    """Who wrote each source comment, as a target account Bitport can act as (domain-wide delegation: no password).
+    Drive names a comment's author only by display name and permission id, so the id is read against the source
+    file's sharing list; an author no longer on it, outside the source domain, or with no mapping is not guessed."""
+
+    def __init__(self, migrator, sid):
+        self.m, self.sid, self._accounts, self._clients = migrator, sid, None, {}
+
+    def account(self, row):
+        if not getattr(self.m.settings, "comments_as_author", True):
+            return None
+        author = row.get("author") or {}
+        if author.get("me"):
+            return self.m.target_user
+        pid = author.get("permissionId")
+        return self._map().get(pid) if pid else None
+
+    def _map(self):
+        if self._accounts is None:
+            self._accounts = {}
+            domain = (getattr(self.m.settings, "source_domain", "") or "").lower()
+            try:
+                perms = self.m._retry(lambda: self.m.src.permissions().list(
+                    fileId=self.sid, fields="permissions(id,type,emailAddress)", supportsAllDrives=True).execute(),
+                    write=False, tenant="source").get("permissions", [])
+            except Exception:      # noqa: BLE001 - unknown authors are posted by the owner, named in the text
+                perms = []
+            for p in perms:
+                email = (p.get("emailAddress") or "").lower()
+                if p.get("type") == "user" and email.endswith("@" + domain):
+                    target = self.m.db.resolve_identity(email)
+                    if target:
+                        self._accounts[p["id"]] = target
+        return self._accounts
+
+    def client(self, account):
+        if account == self.m.target_user:
+            return self.m.tgt
+        if account not in self._clients:
+            self._clients[account] = self.m.auth.target_drive(account)
+        return self._clients[account]

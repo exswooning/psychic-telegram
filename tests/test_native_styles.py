@@ -55,13 +55,13 @@ NATIVE = {"top": 2, "right": 3, "bottom": 2, "left": 3}
 IMPORTED = {"right": 3, "left": 3}
 
 
-def test_sheet_padding_is_written_on_the_cells_that_hold_anything():
+def test_sheet_padding_is_repeated_over_each_sheet_without_reading_its_cells():
     src = _sheet(NATIVE, [{"userEnteredValue": {"numberValue": 1}}, {"userEnteredValue": {"stringValue": "x"}}])
     tgt = _sheet(IMPORTED, [{"userEnteredValue": {"numberValue": 1}}, {"userEnteredValue": {"stringValue": "x"}}])
     reqs = ns.sheet_requests(src, tgt)
-    assert reqs == [{"repeatCell": {"range": {"sheetId": 3, "startRowIndex": 0, "endRowIndex": 1, "startColumnIndex": 0,
-                                              "endColumnIndex": 2},
+    assert reqs == [{"repeatCell": {"range": {"sheetId": 3},
                                     "cell": {"userEnteredFormat": {"padding": NATIVE}}, "fields": "userEnteredFormat.padding"}}]
+    assert "data" not in ns.SHEET_FIELDS            # never the grid: a big sheet read twice per shard filled memory
 
 
 def test_the_check_compares_displayed_padding_and_one_font_in_two_spellings():

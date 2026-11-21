@@ -6,7 +6,7 @@ grid size (a 20,000 x 120 sheet came back 1,000 x 26, values intact). Each is wr
 the app's own API, so one batchUpdate per file makes it identical. Reads the source only; writes the target only.
 
 A Sheet's default top/bottom cell padding cannot be set back as a default (the import sets it, the API ignores it),
-so it is written on the cells that hold anything; the default font's spelling ("arial,sans,sans-serif" -> "Arial")
+so it is repeated over each sheet; the default font's spelling ("arial,sans,sans-serif" -> "Arial")
 is the same font (operator, 21 Nov 2026: font does not matter).
 """
 from __future__ import annotations
@@ -54,22 +54,19 @@ def sheet_requests(source: dict, target: dict) -> list:
                 "fields": ",".join("gridProperties." + k for k in keys)}})
     # The import drops the spreadsheet's default top/bottom padding (2 -> 0: every cell's text sits ~2 px lower,
     # measured on rendered PDFs) and the API will not take it back as a default, so the source's padding is
-    # written on the cells that hold anything -- never the empty grid, which would add a format to every cell.
+    # repeated over each sheet. Whole sheets, so nothing is read to find where the data is: reading every cell
+    # of a 20,000 x 120 sheet on both sides, in several shards at once, swapped out 5 GB and the memory watchdog
+    # paused P3.7 run 6 (21 Nov 2026). The check folds a format equal to the default away (native_repair).
     pad = (sp.get("defaultFormat") or {}).get("padding")
     if pad and pad != ((tp.get("defaultFormat") or {}).get("padding")):
-        for ss, ts in zip(source.get("sheets") or [], target.get("sheets") or []):
-            rows = [r for d in ss.get("data") or [] for r in d.get("rowData") or []]
-            cols = max((len(r.get("values") or []) for r in rows), default=0)
-            if rows and cols:
-                reqs.append({"repeatCell": {
-                    "range": {"sheetId": ts["properties"]["sheetId"], "startRowIndex": 0, "endRowIndex": len(rows),
-                              "startColumnIndex": 0, "endColumnIndex": cols},
-                    "cell": {"userEnteredFormat": {"padding": pad}}, "fields": "userEnteredFormat.padding"}})
+        for ts in target.get("sheets") or []:
+            reqs.append({"repeatCell": {"range": {"sheetId": ts["properties"]["sheetId"]},
+                                        "cell": {"userEnteredFormat": {"padding": pad}},
+                                        "fields": "userEnteredFormat.padding"}})
     return reqs
 
 
-SHEET_FIELDS = ("properties(timeZone,defaultFormat(padding)),"
-                "sheets(properties(sheetId,gridProperties),data(rowData(values(userEnteredValue,userEnteredFormat))))")
+SHEET_FIELDS = "properties(timeZone,defaultFormat(padding)),sheets.properties(sheetId,gridProperties)"
 
 
 def realign(kind: str, src_api, tgt_api, sid: str, tid: str, execute=lambda fn: fn()) -> int:
