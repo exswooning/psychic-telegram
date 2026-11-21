@@ -1,0 +1,16 @@
+[Unit]
+Description=Bitport nightly campaign for account %i (campaign_nightly.py: runs the scenarios not yet passing, one line to monitor/INBOX.md)
+After=network-online.target bitport-api.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/migration
+EnvironmentFile=-/etc/bitport/node.env
+# Nice: the campaign drives the product's own API on this box, beside whatever else runs.
+Nice=10
+# No --allow here: the scenarios that cut the network or reboot the box need the operator's word, never a timer.
+ExecStart=/root/migration/.venv/bin/python -u campaign_nightly.py --account-id %i --name nightly
+# A night can run long (a scenario waits for the box to go idle); do not let one run into the next.
+TimeoutStartSec=6h
+StandardOutput=append:/root/migration/logs/campaign-nightly.log
+StandardError=append:/root/migration/logs/campaign-nightly.log
