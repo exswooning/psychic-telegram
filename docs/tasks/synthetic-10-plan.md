@@ -413,6 +413,11 @@ Phase 1 and the code of Phase 2 need no tenant. Start them while Phase 0 is open
   and counts for each.
 - [ ] P3.6 From the measured rates, estimate the 300-user run: seeding hours, Drive hours, DMS days,
   verify hours. Write the numbers in State. They are the inputs of P4.3 and P5.1.
+- [ ] P3.7 (added 21 Nov, operator: dharan.gov.np moves into a. after this plan) dharan's route, end to end, on the cohort:
+  a. protected (not a sandbox; `/tmp/p35_dharan.sh N` restores protection and keeps a.'s sandbox record in
+  `/tmp/a-sandbox-revocation.json`), Drive by `download_upload` (a government grant is read-only: no server-side copy), Forms
+  rebuilt, the source tripwire at 0 changes, split mail + DMS, verify, gate PARITY. Twice in a row, plus one stop-and-restart
+  mid-Drive. The DMS approval never signs in to a government source or with another tenant's login (fba3e8d).
 
 ## 7. Phase 4: the seeder simulates real user data
 
@@ -541,6 +546,11 @@ old keys from root's `authorized_keys`; decide on rewriting the git history that
 
 ## 11. State (newest first)
 
+- 21 Nov 2026, ~12:00 UTC box (Opus): **Run 3 (server-side) stopped at 11:52 for P3.7, dharan's route; reset made parallel.**
+  Operator: dharan.gov.np moves into a. (DMS mail, access pending) once this plan is finished. Run 3's reset took 1 h 38 min: c10's
+  ~3,000 root items deleted one at a time since 9579874 (run 2's 1 h 42 min had the same cause); 71539fd deletes in 8 slices (deployed
+  11:53, the next reset reached 40/41 in under 2 min). Run 3's migrate was stopped 38 min in and restarted as P3.7 run 1
+  (`/tmp/p35_dharan.sh 3`): a. re-protected, `transfer_mode=download_upload`. P3.5 needs two more control (server-side) runs after it.
 - 21 Nov 2026, ~09:35 UTC box (Opus): **P3.5 run 2: PARITY 41/41 after five fixes at the cause; run 3 starts.** Phase times (UTC):
   migrate 20 Nov 06:26 (stopped at 06:41 by the live-run rule: three Sheets link rewrites lost to a 429) and 06:44-07:29 (45 min,
   PASS); DMS tries 07:29-09:08, 09:14-10:49, 10:51-11:44 (each rc 2) and 21 Nov 06:20-07:10 (rc 0, check-only); verify-after-dms
