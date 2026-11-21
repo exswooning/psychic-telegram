@@ -398,3 +398,94 @@ def test_a_run_kind_filed_under_a_service_classifies_its_finding():
     assert known_issues.classify("drive", "allocated cells exceed the explicit per-read budget") == "drive.sheet_too_large"
     # an ISSUES entry still wins where both match
     assert known_issues.classify("drive", "native Sheet entered values, formatting, or structures differ") == "drive.native_structure"
+# ---- P2.7 the failure rows, P2.11 the watchers: each is defined, not a stub ----------------------------
+PLAN_ROWS = ("F-kill", "F-lost", "F-kill-random", "F-stop", "F-api", "F-webui", "F-reboot", "F-net-3", "F-net-12",
+             "F-disk", "F-memory", "F-rate", "F-scope", "F-suspend", "F-source-delete", "F-source-edit", "F-tamper",
+             "F-double", "F-deploy", "F-dms-held", "F-licence")
+
+
+def _steps(inject, out=None):
+    out = [] if out is None else out
+    for st in inject.get("steps", ()):
+        out.append(st)
+        for sub in (st.get("each") or []) + (st.get("steps") or []):
+            _steps({"steps": [sub]}, out)
+    return out
+
+
+def test_every_failure_row_of_the_plan_is_defined_with_its_cause_and_restart():
+    import campaign_failures as CF
+    plan = open(C.os.path.join(C.HERE, "docs", "tasks", "synthetic-10-plan.md"), encoding="utf-8").read()
+    for fid in PLAN_ROWS:
+        assert f"| {fid} |" in plan and S.by_id()[f"fail:{fid}"] is CF.FAILURES[f"fail:{fid}"], fid
+    for fid in set(PLAN_ROWS) - {"F-licence"}:
+        sc = S.by_id()[f"fail:{fid}"]
+        assert sc.inject["twin"] >= 1 and sc.inject["steps"] and sc.expect["ends_as"], fid
+        assert ("no_item_twice" in sc.expect) and ("equal_to_control" in sc.expect or fid == "F-source-delete"), fid
+        assert {"do": "disarm"} in sc.inject["steps"] or fid in ("F-memory", "F-net-3", "F-source-delete"), fid
+    licence = S.by_id()["fail:F-licence"]
+    assert licence.how == "unseedable" and licence.unit_test and C.os.path.isfile(C.os.path.join(C.HERE, licence.unit_test))
+
+
+def test_failure_steps_use_the_known_vocabulary_real_endpoints_and_real_failpoints():
+    import campaign_changes
+    import campaign_failures as CF
+    import failpoints
+    api_src = open(C.os.path.join(C.HERE, "api_server.py"), encoding="utf-8").read()
+    web_src = open(C.os.path.join(C.HERE, "webui.py"), encoding="utf-8").read()
+    for fid in PLAN_ROWS:
+        for st in _steps(S.by_id()[f"fail:{fid}"].inject):
+            assert st["do"] in CF.STEPS, (fid, st["do"])
+            if st["do"] == "api":
+                assert f'"{st["path"]}"' in api_src, (fid, st["path"])
+            if st["do"] == "webui":
+                assert f'"{st["path"]}"' in web_src, (fid, st["path"])
+            if st["do"] == "change" and "needs_primitive" not in st:
+                assert st["kind"] in campaign_changes.CHANGES, (fid, st["kind"])
+            if st["do"] in ("directory", "source"):
+                assert st.get("needs_primitive"), (fid, st)       # named, so the executor's author knows what is missing
+            for point in st.get("points", []) + ([st["fault"]] if "fault" in st else []):
+                assert point.split("@")[0] in failpoints.NAMES, (fid, point)
+                assert point.endswith(":lost") == (fid == "F-lost"), (fid, point)
+
+
+def test_f_disk_never_touches_the_real_disk_and_a_net_cut_needs_the_operators_word():
+    import campaign_failures as CF
+    steps = S.by_id()["fail:F-disk"].inject["steps"]
+    mount = next(s for s in steps if "mount -t tmpfs" in s.get("cmd", ""))
+    assert "size=64m" in mount["cmd"] and CF.TMPFS in mount["cmd"] and "stat -f -c %T" in mount["cmd"]
+    assert CF.TMPFS.startswith("/mnt/") and all(CF.TMPFS in s["cmd"] for s in steps if "fallocate" in s.get("cmd", ""))
+    assert any("SCRATCH_DIR=" + CF.TMPFS in s.get("cmd", "") for s in steps)
+    assert S.by_id()["fail:F-net-12"].needs == ("net",) and "./netdrop.sh 720" in str(S.by_id()["fail:F-net-12"].inject)
+
+
+def test_netdrop_schedules_its_own_removal_first_and_never_touches_tailscale():
+    import re
+    import subprocess
+    path = C.os.path.join(C.HERE, "netdrop.sh")
+    text = open(path, encoding="utf-8").read()
+    assert C.os.access(path, C.os.X_OK) and subprocess.run(["bash", "-n", path]).returncode == 0
+    body = "\n".join(ln for ln in text.splitlines() if not ln.lstrip().startswith("#"))
+    assert body.index("systemd-run") < body.index("-I OUTPUT") and "--on-active" in body
+    assert re.search(r"tailscale\.\*\)\$.*exit 64", body)                              # refused by name, never a target
+    assert not re.search(r"(iptables|ip6tables|\$fw)[^\n]*tailscale", body)
+    assert "-D OUTPUT" in body and "1800" in body and "EUID == 0" in body
+
+
+def test_every_watcher_and_incident_kind_has_its_own_defined_pair_and_the_teardown_is_not_caused():
+    import os
+
+    import campaign_watchers as CW
+    ids = S.by_id()
+    for name in [c.__name__ for c in oversight.CHECKS] + list(S.INCIDENT_KINDS):
+        for phase in ("opens", "closes"):
+            sc = ids[f"watch:{name}:{phase}"]
+            assert sc is CW.SCENARIOS[sc.id] and sc.expect["incident"] == name and sc.expect[phase]
+            if name == "teardown":
+                assert sc.how == "unseedable" and sc.inject["why"] and os.path.isfile(os.path.join(C.HERE, sc.unit_test))
+                continue
+            path, _, test = sc.inject["offline_test"].partition("::")
+            assert f"def {test}(" in open(os.path.join(C.HERE, path), encoding="utf-8").read(), sc.id
+            live = sc.inject["opens_in"]
+            assert (sc.how == "check_only") == bool(live) and (live in ids if live else sc.unit_test.endswith(test)), sc.id
+    assert set(CW.WATCHERS) | set(CW.NOT_CAUSED) == {c.__name__ for c in oversight.CHECKS} | set(S.INCIDENT_KINDS)

@@ -29,6 +29,15 @@ def disk(path: str = "/") -> dict:
     return {"total": u.total, "used": u.used, "free": u.free, "pct": round(u.used * 100 / u.total)}
 
 
+def worst_disk(scratch_dir: str = "") -> dict:
+    """The fuller of the root disk and the filesystem the scratch folder is on (a 64 MB tmpfs in campaign F-disk)."""
+    root = disk()
+    if scratch_dir and os.path.isdir(scratch_dir):
+        mine = disk(scratch_dir)
+        return mine if mine["pct"] > root["pct"] else root
+    return root
+
+
 def _open_paths() -> set[str]:
     """Every file any process on the box has open (Linux /proc)."""
     out: set[str] = set()
@@ -80,9 +89,9 @@ def sweep_scratch(scratch_dir: str, stale_min: int = STALE_MIN, open_paths=None,
 
 def run(scratch_dir: str) -> dict:
     """One pass: sweep scratch; trim the system journal when the disk is getting full."""
-    result = {"scratch": sweep_scratch(scratch_dir), "disk": disk()}
+    result = {"scratch": sweep_scratch(scratch_dir), "disk": worst_disk(scratch_dir)}
     if result["disk"]["pct"] >= TRIM_AT_PCT and shutil.which("journalctl"):
         subprocess.run(["journalctl", "--vacuum-size=500M"], capture_output=True, timeout=120)
         result["journal_trimmed"] = True
-        result["disk"] = disk()
+        result["disk"] = worst_disk(scratch_dir)
     return result
