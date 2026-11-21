@@ -573,6 +573,16 @@ rebuilt layouts (its slides render identical).
 
 ## 11. State (newest first)
 
+- 22 Nov 2026, ~03:00 NPT (Opus): **P3.7 run 7: gate NOT_PARITY 37/41, every remainder understood; the .docx route itself changes how Docs look.**
+  Complete check on the new code: mail, calendar, contacts, tasks, Sheets and Slides IDENTICAL for all 41. Left: c01's 7 half-made
+  "Oversized Doc" rebuilds (a Docs 503 each run; fixed: a failed rebuild removes its own file; trashed), my own probe on carol
+  (trashed), and 4 Docs. Rendered (Google's PDF export, pixel compare): the .docx round trip changes line layout on 16 of 16 text
+  Docs (10k-125k px; no API-writable style explains it -- forcing spacing and font changed nothing), RTF and HTML give 0 px on all
+  16; the one Doc with an image is 0 px by .docx, 1,202 by RTF, 4,074 by HTML; the >10 MB Doc exports only as HTML (0 px).
+  None of the three formats imports comments. Structure differs after every import, so for Docs structure cannot decide fidelity.
+  Next (P3.7): export a Doc by what it holds (RTF without images, .docx with, HTML when too big), and judge a Doc by its rendered
+  pages when its structure differs (PyMuPDF on the box), as Slides already are. Seeder gap: the cohort's Docs have no tables or
+  hyperlinks, so those cannot be judged yet.
 - 22 Nov 2026, ~00:30 NPT (Opus): **Scorecard re-scored (6.5/10) and a path to 10 written (section 10).** Run 7 (P3.7): migrate PASS 0 failed, DMS clean (12,240 / 0 blocked), complete check on the new code running (25 files deployed 23:48 NPT: rendered Slides, comments as authors, shared-drive reset, retry by class, one log per run, campaign executor).
 - 21 Nov 2026, ~12:35 UTC box (Opus): **P3.7 run 1 stopped (incident #208); the read-only route's losses found and fixed; run 2 started.**
   #208 was a 409 "conflict" on a new Doc upload (judy@): no file left, the cascade fell back to a Docs API rebuild (drops images).
