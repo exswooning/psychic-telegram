@@ -38,6 +38,7 @@ need a pip install on a migration host at 2am.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import html
 import hmac
 import json
@@ -922,10 +923,9 @@ class Job:
             self._log_offset = 0
             try:
                 os.makedirs(os.path.dirname(self.log_path), exist_ok=True)
-                # Truncated per run: this is "the current run's output", the
-                # same contract the in-memory list had. The previous run's
-                # transcript is already preserved by _save_result().
-                self._log_fh = open(self.log_path, "w", encoding="utf-8")
+                # A file of its own per run (start_run_log); log_path is the
+                # pointer to it, so readers keep the one path they know.
+                self._log_fh = open(start_run_log(self.account_id, name), "w", encoding="utf-8")
                 try:
                     with open(os.path.join(HERE, 'DEPLOYED_COMMIT'), encoding='utf-8') as version_file:
                         version = version_file.read().strip()
@@ -1204,6 +1204,35 @@ def job_log_path(account_id: int | None, name: str) -> str:
     freshly restarted server that never held this job in memory.
     """
     return job_result_path(account_id, name)[: -len(".json")] + ".log"
+
+
+def start_run_log(account_id: int | None, name: str) -> str:
+    """A file of its own for the run about to start; `job_log_path` then points at it.
+
+    Until now every run appended to (or truncated) the one `<job>.log`, so a long job's log mixed
+    several runs and a truncating launcher erased the last one. The run's file is
+    `runs/<job>.<UTC time>.log` beside it, and `<job>.log` becomes a symlink to it: every reader
+    that opens, stats or lists `<job>.log` is unchanged. A plain `<job>.log` from before per-run
+    files is kept as `runs/<job>.<its mtime>.log`, not lost.
+    """
+    path = job_log_path(account_id, name)
+    folder = os.path.dirname(path)
+    runs = os.path.join(folder, "runs")
+    os.makedirs(runs, exist_ok=True)
+    stem = os.path.basename(path)[: -len(".log")]
+    if os.path.isfile(path) and not os.path.islink(path):
+        os.replace(path, os.path.join(runs, f"{stem}.{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime(os.path.getmtime(path)))}.old.log"))
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    run, n = os.path.join(runs, f"{stem}.{stamp}.log"), 1
+    while os.path.exists(run):          # two runs in one second
+        n += 1
+        run = os.path.join(runs, f"{stem}.{stamp}-{n}.log")
+    tmp = f"{path}.{os.getpid()}.tmp"
+    with contextlib.suppress(OSError):
+        os.unlink(tmp)
+    os.symlink(os.path.relpath(run, folder), tmp)
+    os.replace(tmp, path)               # atomic: a reader sees the old run's file or the new one
+    return run
 
 
 # <stem>.<epoch seconds>.json -- one finished run. The stem itself never

@@ -1852,15 +1852,14 @@ def _child_output(job_name: str, account_id: int | None):
     the ledger's last write was the moment the buffer filled. It looked
     exactly like a hung network call and was nothing of the kind.
 
-    Appended, not truncated, so a re-run does not erase the evidence of the
-    run before it.
+    One file per run (webui.start_run_log), so a re-run does not erase the evidence of the
+    run before it and a log holds one run.
     """
     # webui.job_log_path owns the layout, and the Logs page reads the files
     # it names. A second copy of the same convention here would drift, and
     # the transcript would quietly stop being visible in the UI.
-    from webui import job_log_path
-    path = job_log_path(account_id, job_name)
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+    from webui import start_run_log
+    path = start_run_log(account_id, job_name)     # this run's own file; <job>.log points at it
     fh = open(path, "ab", buffering=0)
     # Where this run begins: the Jobs page's log shows only what follows the newest one
     # (live, a migrate card's log opened on the previous day's run).

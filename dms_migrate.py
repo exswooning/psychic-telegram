@@ -390,6 +390,7 @@ def cache_metrics(got: dict, path: str) -> dict:
 
     Empty console reads must not erase progress history or manufacture completion.
     Never merge partial counters from different observations into one snapshot.
+    Each reading is also appended to `<name>.history.jsonl` beside the cache, never overwritten.
     """
     import tempfile
     snapshot = dict(got)
@@ -403,6 +404,11 @@ def cache_metrics(got: dict, path: str) -> dict:
         snapshot["lastCounters"] = {k: last[k] for k in ("status", "metrics", "read_at") if k in last}
     parent = os.path.dirname(os.path.abspath(path))
     os.makedirs(parent, exist_ok=True)
+    try:       # every reading is kept: the cache holds only the newest one
+        with open(os.path.splitext(path)[0] + ".history.jsonl", "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(got) + "\n")
+    except OSError:
+        logging.getLogger(__name__).warning("could not append the DMS reading to its history", exc_info=True)
     fd, tmp = tempfile.mkstemp(prefix=".metrics-", dir=parent)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
