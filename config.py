@@ -860,7 +860,7 @@ class Settings:
         default_factory=lambda: _env_bool("MIGRATE_COMMENTS", True)
     )
     # Post each migrated comment as its author's target account (domain-wide delegation), not as the file's
-    # owner with the author named in the text. The original date is kept as a note: no API can set it.
+    # owner with the author named in the text. The original date is not carried: no API can set it.
     comments_as_author: bool = field(
         default_factory=lambda: _env_bool("COMMENTS_AS_AUTHOR", True))
     # When a file is shared through its parent folder, Drive reports the grant

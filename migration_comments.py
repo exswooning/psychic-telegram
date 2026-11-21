@@ -107,10 +107,9 @@ def content(row, lookup):
 
 
 def authored(row, lookup):
-    """A comment posted as its own author: their words, and the date no API lets a copy keep (a comment's
-    createdTime is read-only everywhere, the Docs UI included). An action-only reply stays empty."""
-    text = _unmention(rewrite_text(row.get("content", ""), lookup)[0])
-    return text + "\n\n(originally " + (row.get("createdTime") or "")[:10] + ")" if text.strip() else text
+    """A comment posted as its own author: their words alone. Its date cannot be carried (createdTime is read-only
+    everywhere, the Docs UI included) and the operator chose no note for it (21 Nov 2026)."""
+    return _unmention(rewrite_text(row.get("content", ""), lookup)[0])
 
 
 def _forms(row, lookup):

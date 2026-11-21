@@ -74,14 +74,14 @@ def _comment(cid, text, author, when="2026-11-17T13:58:40Z", replies=()):
     return {"id": cid, "content": text, "createdTime": when, "author": author, "replies": list(replies)}
 
 
-def test_a_colleagues_comment_is_posted_as_them_with_its_date(db, settings):
+def test_a_colleagues_comment_is_posted_as_them(db, settings):
     src = [_comment("a", "Numbers in row 12 look off.", {"displayName": "Carol", "permissionId": "p-carol"},
                     replies=[{"id": "r", "content": "Fixed.", "createdTime": "2026-11-18T09:00:00Z", "action": "resolve",
                               "author": {"displayName": "Dave", "me": True}}])]
     m, target = _migrator(db, settings, src)
     mc.reconcile(m, "S1", "T1")
     (c,) = target
-    assert c["author"]["displayName"] == "carol@b.test" and c["content"] == "Numbers in row 12 look off.\n\n(originally 2026-11-17)"
+    assert c["author"]["displayName"] == "carol@b.test" and c["content"] == "Numbers in row 12 look off."
     assert c["replies"][0]["author"]["displayName"] == "Dave B" and c["replies"][0]["action"] == "resolve"
     assert mc.differences(src, target, lambda _: None) == []
     mc.reconcile(m, "S1", "T1")          # a second pass adopts what is there
