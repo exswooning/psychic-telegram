@@ -37,6 +37,7 @@ import metrics
 
 from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload, MediaUpload  # noqa: F401
 
+DOC_RTF_FOR = "application/vnd.google-apps.document"
 from config import (EXPORT_MIME_MAP, FOLDER_MIME, MOVE_PENDING, OVER_DAILY_CAP, OWED_GRANT,
                     SHORTCUT_MIME, STAGING_MODES, Settings)
 from sample_budget import Budget
@@ -1666,6 +1667,19 @@ class DriveMigrator:
         self._form_sheets_cache = found
         return found
 
+    def _image_free(self, item: dict) -> bool:
+        """Whether a Doc holds no image (one read, its inline objects only). Rendered on a. -> b. (22 Nov 2026): the
+        .docx round trip re-lays every text Doc's lines (16 of 16 differ, 10k-125k px) while RTF renders them
+        pixel-identical; with an image .docx is the one that matches (RTF 1,202 px). Unknown keeps .docx."""
+        try:
+            doc = self._retry(lambda: self.auth.api("source", "docs", self.reader or self.source_user).documents().get(
+                documentId=item["id"], includeTabsContent=True,
+                fields="tabs(documentTab(inlineObjects,positionedObjects))").execute(), label="docs.images")
+        except Exception:      # noqa: BLE001 - .docx, the long-standing route
+            return False
+        return not any((t.get("documentTab") or {}).get("inlineObjects") or (t.get("documentTab") or {}).get("positionedObjects")
+                       for t in doc.get("tabs") or [])
+
     def _discard_rebuild(self, item: dict, mime: str, started: str) -> None:
         """A rebuild creates the file at the user's root, then fills it; when the fill fails the empty file stayed,
         unmapped, one more each run (c01's "Oversized Doc": a Docs 503 on every run, six copies by run 7). Deleted:
@@ -2526,6 +2540,8 @@ class DriveMigrator:
 
     def _sync_native(self, item: dict, tgt_parent: str) -> None:
         export_mime, _ext = EXPORT_MIME_MAP.get(item["mimeType"], (None, None))
+        if item.get("mimeType") == DOC_RTF_FOR and self._image_free(item):
+            export_mime = "application/rtf"
         if not export_mime:
             self.db.log_audit(self.source_user, item["id"], "file",
                               "SKIPPED_UNEXPORTABLE", _named(item, f"no export mapping for {item['mimeType']}"))
@@ -2701,7 +2717,12 @@ class DriveMigrator:
             try:
                 with open(path, "rb") as fh:
                     data = fh.read()
-                out, hits = link_rewrite.rewrite_zip(
+                out, hits = (link_rewrite.rewrite_text(data.decode("latin-1"), self.db.target_for_source_id)
+                             if export_mime in ("application/rtf", "text/html") else (None, None))
+                if out is not None:
+                    out = out.encode("latin-1")
+                else:
+                    out, hits = link_rewrite.rewrite_zip(
                     data, self.db.target_for_source_id)
                 if not hits:
                     # Every id in it pointed outside this migration. Leaving

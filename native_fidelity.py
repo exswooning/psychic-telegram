@@ -271,9 +271,44 @@ def compare_native(auth, source_user, target_user, sid, tid, mime, lookup, fetch
         if not differs:
             return [], scope + "; slides compared as rendered (their stored structure differs)"
         return [f"slide {n} renders differently" for n in differs], scope
+    if a != b and mime.endswith(".document"):
+        # Every import of an Office export stores a Doc its own way, while what a person sees may be identical
+        # (22 Nov 2026: RTF imports render pixel-identical with a different structure). Judged by Google's own
+        # rendering, page by page, when it can be made; otherwise the structure verdict stands.
+        pages = _doc_pages_render_differently(auth, source_user, target_user, sid, tid)
+        if pages == []:
+            return [], scope + "; pages compared as rendered (their stored structure differs)"
+        if pages:
+            return [f"page {n} renders differently" for n in pages], scope
     return (
         [] if a == b else ["native document content, formatting or structure differs"]
     ), scope
+
+
+def _render_pdf(data: bytes) -> list:
+    """A PDF's pages as images (PyMuPDF). Kept apart so a test can stand in for the renderer: PyMuPDF's native
+    library segfaults inside pytest on macOS / Python 3.14 (22 Nov 2026), never in the verify's own process."""
+    import io
+    import pymupdf
+    from PIL import Image
+    doc = pymupdf.open(stream=io.BytesIO(data), filetype="pdf")
+    pages = [p.get_pixmap(dpi=80) for p in doc]
+    return [Image.frombytes("RGB", (p.width, p.height), p.samples) for p in pages]
+
+
+def _doc_pages_render_differently(auth, source_user, target_user, sid, tid):
+    """Page numbers whose rendering differs ([] when none), or None when the pages cannot be rendered here: no PDF
+    renderer installed (PyMuPDF), or Google will not export the Doc as PDF (over its export ceiling)."""
+    try:
+        from PIL import ImageChops
+        a, b = (_render_pdf(d.files().export(fileId=i, mimeType="application/pdf").execute())
+                for d, i in ((auth.source_drive(source_user), sid), (auth.target_drive(target_user), tid)))
+    except Exception:      # noqa: BLE001 - not renderable here: the structure verdict stands
+        return None
+    if len(a) != len(b):
+        return list(range(1, max(len(a), len(b)) + 1))
+    return [n + 1 for n, (ia, ib) in enumerate(zip(a, b))
+            if ia.size != ib.size or ImageChops.difference(ia, ib).convert("L").point(lambda v: 255 if v > 16 else 0).getbbox()]
 
 
 def _slides_render_differently(auth, source_user, target_user, sid, tid, source, target, fetch, pace=lambda: None):

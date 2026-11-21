@@ -1,4 +1,6 @@
 """The Office round trip's losses, as measured on a. -> b. (21 Nov 2026), are put back on the target."""
+import pytest
+
 import native_fidelity as nf
 import native_styles as ns
 
@@ -115,3 +117,54 @@ def test_a_slide_that_renders_differently_is_named():
     src = {"slides": [{"objectId": "p1", "x": 1}, {"objectId": "p2"}]}
     tgt = {"slides": [{"objectId": "q1", "x": 2}, {"objectId": "q2"}]}
     assert _compare(src, tgt, {"p1": "white", "q1": "white", "p2": "white", "q2": "black"}) == ["slide 2 renders differently"]
+
+
+def _pdf(text):
+    return text.encode()          # stands in for a PDF; _render_pdf is replaced below (PyMuPDF and pytest, see it)
+
+
+@pytest.fixture(autouse=True)
+def _render_without_pymupdf(monkeypatch):
+    from PIL import Image
+    monkeypatch.setattr(nf, "_render_pdf", lambda data: [Image.new("RGB", (8, 8), "white" if data.endswith(b"2") else "black")])
+
+
+class _Docs:
+    def __init__(self, doc):
+        self.doc = doc
+
+    def documents(self):
+        from types import SimpleNamespace as NS
+        return NS(get=lambda **kw: NS(execute=lambda: self.doc))
+
+
+def _drive(pdf):
+    from types import SimpleNamespace as NS
+
+    def export(**kw):
+        if pdf is None:
+            raise RuntimeError("exportSizeLimitExceeded")
+        return NS(execute=lambda: pdf)
+    return NS(files=lambda: NS(export=export))
+
+
+def _compare_doc(src_pdf, tgt_pdf):
+    from types import SimpleNamespace as NS
+    s = {"tabs": [{"documentTab": {"body": {"content": [{"paragraph": {"elements": [], "x": 1}}]}}}]}
+    t = {"tabs": [{"documentTab": {"body": {"content": [{"paragraph": {"elements": [], "x": 2}}]}}}]}
+    auth = NS(api=lambda side, kind, user: _Docs(s if side == "source" else t),
+              source_drive=lambda u: _drive(src_pdf), target_drive=lambda u: _drive(tgt_pdf))
+    return nf.compare_native(auth, "u@a", "u@b", "S", "T", "application/vnd.google-apps.document",
+                             lambda _: None, fetch=lambda url: b"")[0]
+
+
+def test_a_doc_whose_structure_differs_but_renders_the_same_is_identical():
+    assert _compare_doc(_pdf("Personal note 2"), _pdf("Personal note 2")) == []
+
+
+def test_a_doc_page_that_renders_differently_is_named():
+    assert _compare_doc(_pdf("Personal note 2"), _pdf("Personal note 3")) == ["page 1 renders differently"]
+
+
+def test_a_doc_that_cannot_be_rendered_keeps_the_structure_verdict():
+    assert _compare_doc(None, None) == ["native document content, formatting or structure differs"]

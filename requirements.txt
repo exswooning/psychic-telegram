@@ -29,3 +29,5 @@ playwright
 reportlab
 # Stack dumps for a stuck job (System Health → "Where is it?"; host_ops.stack_dump).
 py-spy
+# Docs and Slides are judged by their rendered pages when their stored structure differs (native_fidelity).
+PyMuPDF==1.28.2
