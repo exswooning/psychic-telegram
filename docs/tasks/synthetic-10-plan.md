@@ -298,7 +298,7 @@ Phase 1 and the code of Phase 2 need no tenant. Start them while Phase 0 is open
 
 ### Errors (row 2)
 
-- [ ] P2.6 One scenario per id. Read the id's cause and fix in `known_issues.py` first. A scenario
+- [~] P2.6 (21 Nov, Sonnet 6f95ae0: every id has a scenario with its cause and judge; `ends_as` from known_issues; UNVERIFIED until live: drive.source_changed, drive.parent_folder, drive.ab_test_residue need a live driver; run.db_rollback judged finding_absent since F-disk cannot fail a ledger write) One scenario per id. Read the id's cause and fix in `known_issues.py` first. A scenario
   passes when the finding is classified with that id, ends as its entry says (automatic: a RESOLVED
   row in `issue_fix_log`; accepted: in the gate's remainder; a person's: listed with the next step),
   and the gate treats it that way. How to make each one happen:
@@ -336,7 +336,7 @@ Phase 1 and the code of Phase 2 need no tenant. Start them while Phase 0 is open
 
 ### Failures (row 3)
 
-- [ ] P2.7 One scenario per row. Each takes an unused twin, causes the failure, restarts the way the
+- [~] P2.7 (21 Nov, Sonnet aaa59e7: all 21 rows in campaign_failures.py, `netdrop.sh` written not run; needs P3.4's step executor; primitives still missing: Directory suspend on b., a source delete on a., an extra grant on b.) One scenario per row. Each takes an unused twin, causes the failure, restarts the way the
   row says, and compares the twin with `t01`: equal counts per service on b., equal verdict, no item
   twice. One twin may take several kill points one after another; use a new twin for each new kind.
 
@@ -373,7 +373,7 @@ Phase 1 and the code of Phase 2 need no tenant. Start them while Phase 0 is open
 
 ### Benchmarks and speed (rows 4 and 9)
 
-- [ ] P2.8 (a) The truth table. For each check in `benchmarks.py` (14 for a migration, 7 for a
+- [~] P2.8 (21 Nov, Sonnet 501556e: proven offline for all 14 + 7 checks, docs/benchmark-truth-table.md; no benchmark needed fixing; blocked_items, quota_pushbacks, warnings_per_user are WARN-only by design; live faults come with P2.7) (a) The truth table. For each check in `benchmarks.py` (14 for a migration, 7 for a
   seed): PASS on the control, and FAIL or UNVERIFIED when its fault is caused. Most faults are the
   failure scenarios above: `users_failed` by F-suspend, `count_parity` and `checksum_failures` by
   F-tamper, `quota_pushbacks` by F-rate, `run_completed` by F-kill. A benchmark that cannot be made
@@ -393,7 +393,7 @@ Phase 1 and the code of Phase 2 need no tenant. Start them while Phase 0 is open
 
 ### Watchers (row 5)
 
-- [ ] P2.11 For each `oversight.watch_*` check (12) and each incident kind in `run_watch.py`: one
+- [~] P2.11 (21 Nov, Sonnet aaa59e7: every watch_* and incident kind has open/close scenarios, 20 tested offline on crafted ledgers; disk_full and source_changed now close on evidence; the teardown incident's closer is untested) For each `oversight.watch_*` check (12) and each incident kind in `run_watch.py`: one
   scenario that opens it and one that closes it. Most open inside a failure scenario; note which.
   The rest run the check against a crafted copy of the ledger (`BITPORT_LEDGER`). The teardown
   incident is not caused: teardown is the operator's.
@@ -447,7 +447,7 @@ a Drive link.
   `label_map`). It writes `data-generator/profiles/org45.json`: sorted per-user vectors and
   histograms. Numbers and file types only. No name, address, subject, file name or id leaves the
   box; a test asserts that. Check its output against the table above.
-- [~] P4.2 (21 Nov, Sonnet, 0e7ded7: `profile_plan.py`, `profile_seed.py`; plan by nearest rank, Drive volume by files.copy from a pool; OPEN: departments as groups, shared mailbox, shared drives and outside sharing for profile users; calendars/contacts/tasks at the seeder's defaults; link-mail kind split assumed; pool's largest file 50 MB by default vs the profile's 10.1 GB (`--pool-max-file-mb`)) `seed_sandbox.py --profile PATH --users N --seed S`:
+- [~] P4.2 (21 Nov, Sonnet, 0e7ded7 + 594c25e sharing: departments as groups, a shared mailbox by delegation, shared drives from the pool, outside shares to P0.6 only; still approximated: an outside-owned link target, never run live; `profile_plan.py`, `profile_seed.py`; plan by nearest rank, Drive volume by files.copy from a pool; OPEN: departments as groups, shared mailbox, shared drives and outside sharing for profile users; calendars/contacts/tasks at the seeder's defaults; link-mail kind split assumed; pool's largest file 50 MB by default vs the profile's 10.1 GB (`--pool-max-file-mb`)) `seed_sandbox.py --profile PATH --users N --seed S`:
   - each user's totals come from the per-user vectors, interpolated by rank, so the tail survives:
     one mailbox near 40,000 messages, one Drive near 5,600 files, several users with almost nothing;
   - file types follow the histogram; names come from a name model with Latin and Devanagari names,
