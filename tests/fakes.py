@@ -555,6 +555,8 @@ class _DriveFiles:
             meta["owners"] = []
         if body.get("shortcutDetails"):
             meta["shortcutDetails"] = body["shortcutDetails"]
+        if body.get("appProperties"):
+            meta["appProperties"] = dict(body["appProperties"])
 
         result = {"id": fid}
         if media_body is not None:
@@ -621,11 +623,15 @@ class _DriveFiles:
             "modifiedTime": body.get("modifiedTime") or meta.get("modifiedTime"),
             "description": body.get("description") or meta.get("description"),
             "trashed": False,
-            # Files inside a shared drive have no individual owner.
-            "owners": [],
+            # Files inside a shared drive have no individual owner; a copy into a My Drive is the copier's.
+            "owners": [] if parents and parents[0] in dest.shared_drives else [{"emailAddress": dest.owner}],
             "driveId": parents[0] if parents and parents[0] in dest.shared_drives else None,
             "capabilities": {"canDownload": True},
         }
+        if body.get("appProperties"):
+            new_meta["appProperties"] = dict(body["appProperties"])
+        if body.get("createdTime"):
+            new_meta["createdTime"] = body["createdTime"]
         result = {"id": new_id}
         if fileId in src.content:
             data = src.content[fileId]
@@ -711,6 +717,8 @@ class _DriveFiles:
         for k in ("name", "modifiedTime", "description", "starred", "trashed"):
             if body and k in body and not (k == "modifiedTime" and moving_native):
                 meta[k] = body[k]
+        if body and body.get("appProperties"):
+            meta.setdefault("appProperties", {}).update(body["appProperties"])
 
         # Re-parenting. Moving out of a shared drive is what confers real
         # ownership on the impersonated user, so mirror that here.

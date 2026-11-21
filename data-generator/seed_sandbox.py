@@ -2677,15 +2677,30 @@ def seed_one_user(settings: Settings, entry: dict, all_users: list[str],
     # Only these six are worth the one extra Drive lookup to guard.
     corpus_services = frozenset({"drive", "gmail", "calendar", "chat",
                                 "contacts", "tasks"})
-    already = (base_want("drive") and not force_reseed
+    # A planned (--profile) user is made of marked items, so it resumes by itself; its finished services are
+    # recorded on its root folder (profile_seed.done_services), which is what a rerun skips.
+    plan = entry.get("plan")
+    S = sys.modules[__name__]
+    if plan:
+        import profile_seed
+    done = profile_seed.done_services(drive, retry) if plan and not force_reseed else set()
+    already = (base_want("drive") and not force_reseed and not plan
               and _already_seeded(drive, settings))
     if already:
         print(f"  [{user}] already seeded (MIGRATION-TEST exists) -- "
               f"skipping corpus, re-run with --reseed to force a second one")
     want = (lambda svc: base_want(svc)
-           and not (already and svc in corpus_services))
+           and not (already and svc in corpus_services) and svc not in done)
 
-    if want("drive"):
+    litems = {}
+    if plan:
+        drive_m = profile_seed.build_drive(S, drive, user, plan, entry["pool"], retry) if want("drive") else dict(empty)
+        if want("drive"):
+            profile_seed.mark_done(drive, retry, "drive")
+        if want("gmail") or want("calendar") or want("chat"):
+            litems = profile_seed.link_items(S, drive, plan, entry["pool"], retry)
+        items = {f"own-{i}": f for i, f in enumerate(litems.get("own", [])[:6])} or None
+    elif want("drive"):
         builder = CorpusBuilder(drive, settings, user, peers, external, scale,
                                 _media, retry, groups=groups)
         drive_m = builder.build(entry["dept"], entry["project"], edge_cases)
@@ -2697,7 +2712,12 @@ def seed_one_user(settings: Settings, entry: dict, all_users: list[str],
             if (want("gmail") or want("calendar") or want("chat")) else None
     _content_step(user, base_want("drive"))
 
-    if want("gmail"):
+    if want("gmail") and plan:
+        gmail_m = profile_seed.seed_mail(S, gmail, drive, user, peers, external, plan, litems, entry["msg_bytes"],
+                                         _retry_factory(settings))
+        if not gmail_m["failed"]:        # a message that failed is sent on the rerun (the chunk was not recorded)
+            profile_seed.mark_done(drive, retry, "gmail")
+    elif want("gmail"):
         gmail_m = seed_gmail(gmail, settings, user, peers, external, mail_count,
                              drive_items=items)
         gmail_m.update(seed_drafts(gmail, settings, user, peers))
@@ -2714,6 +2734,8 @@ def seed_one_user(settings: Settings, entry: dict, all_users: list[str],
         cal_m = seed_calendar(cal, settings, user, peers, external, event_count,
                               drive_items=items)
         cal_m.update(seed_secondary_calendars(cal, settings, user, peers))
+        if plan:
+            profile_seed.mark_done(drive, retry, "calendar")
     else:
         cal_m = dict(empty)
     _content_step(user, base_want("calendar"))
@@ -2721,6 +2743,8 @@ def seed_one_user(settings: Settings, entry: dict, all_users: list[str],
     chat_m = seed_chat(chat, settings, user, peers, external,
                        user.split("@")[0], drive_items=items) \
         if want("chat") else dict(empty)
+    if plan and want("chat"):
+        profile_seed.mark_done(drive, retry, "chat")
     _content_step(user, base_want("chat"))
 
     # Separate credential (build_people_tasks, not build_services): contacts
@@ -2734,6 +2758,9 @@ def seed_one_user(settings: Settings, entry: dict, all_users: list[str],
         tasks_m = seed_tasks(tasks, settings) if want("tasks") else dict(empty)
     else:
         contacts_m = tasks_m = dict(empty)
+    for svc in ("contacts", "tasks"):
+        if plan and want(svc):
+            profile_seed.mark_done(drive, retry, svc)
     _content_step(user, base_want("contacts"))
     _content_step(user, base_want("tasks"))
 
@@ -2884,6 +2911,77 @@ def reset_one_user(settings: Settings, user: str) -> dict:
 
 
 # ======================================================================
+# --profile: a synthetic organisation drawn from a real one's shape (profile_plan.py, profile_seed.py)
+# ======================================================================
+def _profile_step(args, settings, total_users: int):
+    """Plan, price and (live) probe, before anything is written. Returns (exit code or None, plans, context)."""
+    import profile_plan as pp
+    import profile_seed
+    import resources
+    profile = pp.load(args.profile)
+    n_cohort = 0
+    if args.cohort:
+        import fixtures
+        n_cohort = len(fixtures.load_cohort(args.cohort)["users"])
+    n = total_users - n_cohort
+    if n < 1:
+        sys.exit(f"--users {total_users} leaves no room for profile users beside the cohort's {n_cohort}")
+    plans = pp.plan(profile, n, args.seed)
+    mix = pp.file_mix(profile)
+    largest = profile["summary"]["largest_bytes"]["max"]
+    cap = min(largest, int(args.pool_max_file_mb * 2**20))
+    sizes = pp.pool_sizes(mix, int(args.pool_gb * 1e9), cap)
+    pool_bytes = sum(sum(v) for v in sizes.values())
+    rate = args.upload_mb_per_sec
+    if rate is None:
+        if args.plan_only:
+            sys.exit("--plan-only does not probe the line: give --upload-mb-per-sec")
+        who = args.pool_user or os.getenv("SOURCE_ADMIN") or settings.source_admin
+        print(f"\nProbing the upload rate for {args.probe_seconds:g}s as {who} ...", flush=True)
+        rate = profile_seed.probe_upload(sys.modules[__name__], settings, who, args.probe_seconds) / 1e6
+    workers = args.workers
+    if not workers:
+        try:
+            workers = resources.recommend()["seed_workers"]
+        except Exception:      # noqa: BLE001
+            workers = 3
+    drive_rate = args.drive_per_sec or resources.DRIVE_WRITES_PER_SEC
+    mail_rate = args.mail_per_sec or float(os.getenv("SEED_WRITES_PER_SEC_PER_USER", "2.0"))
+    b = pp.budget(plans, upload_bps=rate * 1e6, drive_per_sec=drive_rate, mail_per_sec=mail_rate, workers=workers,
+                  pool_bytes=pool_bytes, pool_files=profile_seed.pool_file_count(mix, int(args.pool_gb * 1e9), cap),
+                  max_hours=args.max_hours)
+    print(f"\nProfile plan: {b['users']} profile users + {n_cohort} cohort, seed {args.seed}")
+    print(f"  items       : {b['items']:,} ({b['files']:,} files, {b['folders']:,} folders, {b['messages']:,} messages, "
+          f"{b['items'] - b['files'] - b['folders'] - b['messages']:,} pool files)")
+    print(f"  across this box: {b['bytes_crossing_box'] / 1e9:,.1f} GB = pool {b['pool_bytes'] / 1e9:,.2f} GB + mail "
+          f"{b['mail_bytes'] / 1e9:,.1f} GB ({b['msg_bytes'] / 1e3:,.1f} KB a message)")
+    print(f"  Drive content copied inside the tenant: {b['drive_bytes_planned'] / 1e9:,.0f} GB planned; "
+          f"largest pool file {max(max(v) for v in sizes.values()) / 1e6:,.0f} MB against the profile's {largest / 1e9:,.1f} GB")
+    if b["count_factor"] < 1:
+        print(f"  MAIL COUNT FACTOR {b['count_factor']:.3f}: {b['messages_planned']:,} planned messages cut to {b['messages']:,}")
+    print(f"  hours       : {b['hours']:.1f} (Drive {b['drive_hours']:.1f}, mail API {b['mail_api_hours']:.1f}, upload "
+          f"{b['upload_hours']:.1f}) at {rate:.2f} MB/s up, {drive_rate:g} Drive writes/s, {mail_rate:g} mail/s per mailbox "
+          f"x {min(workers, b['users'])}; limit --max-hours {args.max_hours:g}")
+    if b["refuse"]:
+        print(f"REFUSED: {b['refuse']}. Nothing was written. Raise --max-hours, measure a faster rate, or seed fewer users.")
+        return 1, plans, {}
+    if b["count_factor"] < 1:
+        plans = pp.scale_messages(plans, b["count_factor"])
+    return (0 if args.plan_only else None), plans, {"mix": mix, "pool_bytes": pool_bytes, "cap": cap, "msg_bytes": b["msg_bytes"]}
+
+
+def _profile_entries(plans: list, domain: str) -> list[dict]:
+    width = max(3, len(str(len(plans))))
+    out = []
+    for i, p in enumerate(plans):
+        local = f"{GENERATED_PREFIX}p{i + 1:0{width}d}"
+        template = ORG[i % len(ORG)]
+        out.append({"local": local, "email": f"{local}@{domain}", "dept": template["dept"], "project": template["project"],
+                    "plan": p})
+    return out
+
+
+# ======================================================================
 # CLI
 # ======================================================================
 def main(argv: list[str] | None = None) -> int:
@@ -3011,6 +3109,26 @@ def main(argv: list[str] | None = None) -> int:
                          "skipped and reports zero. For topping up one "
                          "service on an existing corpus -- e.g. chat, once "
                          "the Chat app is configured and the 404s stop.")
+    ap.add_argument("--profile", metavar="FILE",
+                    help="a profile (data-generator/profiles/*.json: numbers only): seed users whose files, folders, "
+                         "file types, mail, threads and labels follow its shape. With it --users is a NUMBER (in all, the "
+                         "cohort's users counted) and --seed makes the same plan. Prints items, bytes across this box and "
+                         "hours first, and refuses past --max-hours")
+    ap.add_argument("--plan-only", action="store_true", help="with --profile: print the plan and its cost, write nothing "
+                                                              "(needs --upload-mb-per-sec: it does not probe)")
+    ap.add_argument("--max-hours", type=float, default=12.0, help="with --profile: refuse a plan that takes longer (default 12)")
+    ap.add_argument("--upload-mb-per-sec", type=float, default=None,
+                    help="with --profile: this box's upload rate in MB/s. Default: measured by a --probe-seconds upload")
+    ap.add_argument("--probe-seconds", type=float, default=60.0)
+    ap.add_argument("--drive-per-sec", type=float, default=None,
+                    help="with --profile: tenant-wide Drive writes a second (default resources.DRIVE_WRITES_PER_SEC)")
+    ap.add_argument("--mail-per-sec", type=float, default=None,
+                    help="with --profile: messages a second per mailbox (default env SEED_WRITES_PER_SEC_PER_USER, 2)")
+    ap.add_argument("--pool-gb", type=float, default=5.0,
+                    help="with --profile: the unique files uploaded once, from which every file is a server-side copy")
+    ap.add_argument("--pool-max-file-mb", type=float, default=_FILLER_CHUNK_BYTES / 2**20,
+                    help="with --profile: the largest pool file (it sits in memory twice while it uploads)")
+    ap.add_argument("--pool-user", default="", help="with --profile: whose Drive holds the pool (default SOURCE_ADMIN)")
     ap.add_argument("--fixtures-only", action="store_true",
                     help="with --cohort: run each user's named fixtures only (idempotent), nothing else")
     ap.add_argument("--top-up-only", action="store_true",
@@ -3044,6 +3162,22 @@ def main(argv: list[str] | None = None) -> int:
                          "(default 80). Only meaningful together with "
                          "--fill-until-full.")
     args = ap.parse_args(argv)
+
+    profile_users = 0
+    if args.plan_only and not args.profile:
+        sys.exit("--plan-only needs --profile")
+    if args.profile:
+        try:
+            profile_users = int(args.users or "")
+        except ValueError:
+            sys.exit("--profile: --users is a number (how many users in all), not a list of names")
+        if profile_users < 1:
+            sys.exit("--profile: --users must be at least 1")
+        if (args.reset or args.top_up_only or args.trim_filler or args.fill_until_full or args.create_until_full
+                or args.all_users or args.fit_to_licenses):
+            sys.exit("--profile seeds new users; it cannot be combined with --reset, --top-up-only, --trim-filler, "
+                     "--fill-until-full, --create-until-full, --all-users or --fit-to-licenses")
+        args.users = None
 
     only = None
     if args.only:
@@ -3106,11 +3240,17 @@ def main(argv: list[str] | None = None) -> int:
         FIXTURES_ONLY = True
         args.groups, args.shared_drives = False, 0
     settings = Settings()
-    assert_sandbox(settings, args.confirm_domain)
-    _use_own_key(settings)
+    if not args.plan_only:      # a dry plan touches no tenant
+        assert_sandbox(settings, args.confirm_domain)
+        _use_own_key(settings)
     settings.seed_solo = args.solo
     if args.solo:
         args.groups, args.shared_drives = False, 0
+    profile_plans, profile_ctx = None, {}
+    if args.profile:
+        rc, profile_plans, profile_ctx = _profile_step(args, settings, profile_users)
+        if rc is not None:
+            return rc
 
     if args.fit_to_licenses and not args.create_users:
         sys.exit("--fit-to-licenses requires --create-users: it decides how "
@@ -3196,6 +3336,8 @@ def main(argv: list[str] | None = None) -> int:
         import fixtures
         entries = fixtures.entries_from_cohort(fixtures.load_cohort(args.cohort), settings.source_domain)
         print(f"\nCohort {args.cohort}: {len(entries)} user(s).")
+    elif args.profile:
+        entries = []
     elif args.users:
         locals_ = [u.strip() for u in args.users.split(",")]
         entries = []
@@ -3240,6 +3382,8 @@ def main(argv: list[str] | None = None) -> int:
         else:
             print(f"\nFound {len(entries)} existing user(s) in "
                   f"{settings.source_domain}; seeding all of them.")
+    if profile_plans is not None:
+        entries = entries + _profile_entries(profile_plans, settings.source_domain)
     all_users = [e["email"] for e in entries]
     if args.cohort and args.users:
         # --users narrows a cohort to these members; their peers stay the whole cohort.
@@ -3556,7 +3700,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  estimated ~{est_calls:,} API writes, roughly {pretty} "
           f"at {args.workers} parallel users "
           f"({writes_per_sec:g} writes/sec/user)\n")
-    if est_min > 5 and not args.yes:
+    if est_min > 5 and not args.yes and profile_plans is None:     # a profile run printed its own, from rates
         if input("This is a long run. Continue? [y/N] ").strip().lower() != "y":
             print("Aborted.")
             return 1
@@ -3588,6 +3732,18 @@ def main(argv: list[str] | None = None) -> int:
                     print(f"    ! {note}")
             except Exception as exc:  # noqa: BLE001 - never fatal to a seed
                 print(f"  ! groups: {str(exc)[:140]}")
+
+    if profile_plans is not None:
+        import profile_seed
+        pool_user = args.pool_user or os.getenv("SOURCE_ADMIN") or settings.source_admin
+        print(f"\nPool: uploading unique files once as {pool_user} (the only Drive bytes that cross this box) ...", flush=True)
+        pool = profile_seed.build_pool(sys.modules[__name__], settings, pool_user, profile_ctx["mix"],
+                                       int(args.pool_gb * 1e9), profile_ctx["cap"], share_domain=not args.solo)
+        print(f"  pool: {len(pool['ids'])} files, {pool['bytes'] / 1e6:,.0f} MB, {pool['uploaded'] / 1e6:,.0f} MB sent now, "
+              f"largest {pool['largest'] / 1e6:,.0f} MB", flush=True)
+        for e in entries:
+            if e.get("plan"):
+                e["pool"], e["msg_bytes"] = pool, profile_ctx["msg_bytes"]
 
     t0 = time.time()
     results = []
