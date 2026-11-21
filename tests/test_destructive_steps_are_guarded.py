@@ -30,6 +30,8 @@ OPERATOR = {
     "contract_probe.py": "probes on a scratch tenant",
     "link_transfer.py": "benchmark-only link_flip; restores what it changed",
     "form_relink.py": "operator relinking of a form it created",
+    "reset_target.py": "Reset target: sandbox only, typed domain; deletes only what the ledger says a migration wrote",
+    "campaign_changes.py": "campaign primitives: refused off a declared sandbox and on any government domain",
 }
 
 

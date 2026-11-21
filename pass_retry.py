@@ -102,7 +102,7 @@ def end_of_pass(db, auth, settings, services, pass_results: list[dict], migrate_
     this module). Returns what it did, for the log and the tests."""
     wait = wait or _wait
     done = {"rounds": 0, "retried": 0, "held": [], "stalled": False, "left": {}}
-    if getattr(settings, "dry_run", False) or not getattr(settings, "auto_repair", True):
+    if settings is None or getattr(settings, "dry_run", False) or not getattr(settings, "auto_repair", True):
         return done
     pairs = {r["source"]: r.get("target") for r in pass_results if r.get("source") and r.get("target")}
     users = sorted(pairs)

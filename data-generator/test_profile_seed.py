@@ -1,7 +1,6 @@
 """fableplan2 P4.2-P4.5: a synthetic organisation drawn from a real one's shape, priced before it is written, and
 safe to start again after a kill. Runs against the in-memory Drive and Gmail; no tenant, no network."""
 import copy
-import json
 import os
 import re
 

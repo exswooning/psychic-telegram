@@ -88,3 +88,8 @@ def _sandbox_is_unprotected(tmp_path_factory, monkeypatch):
         str(tmp_path_factory.mktemp("guard") / "unprotected.json"))
     monkeypatch.setattr(domain_guard, "configured_domains", lambda: set())
     yield
+
+
+# The profile seeder's fixture, shared with test_profile_sharing.py without a module-level import there (an imported
+# fixture named as a test parameter reads as a redefinition to the linter).
+from test_profile_seed import profile  # noqa: E402,F401

@@ -2,7 +2,6 @@
 address, and link mail that names the real items. In-memory Drive and Gmail; no tenant, no network."""
 import base64
 import copy
-import re
 
 import pytest
 
@@ -10,7 +9,7 @@ import profile_plan as pp
 import profile_seed
 import seed_shared_drives as ssd
 import seed_sandbox as seed
-from test_profile_seed import PROFILE, _mini_profile, _NoLimiter, _Media, profile, _run  # noqa: F401
+from test_profile_seed import PROFILE, _mini_profile, _NoLimiter, _Media, _run  # noqa: F401
 from tests.fakes import FakeDrive, FakeGmail
 
 POOL_USER = "admin@tenanta.com"

@@ -230,6 +230,9 @@ def test_other_401s_still_fail_immediately():
         assert calls["n"] == 1, f"401 {reason}/{message!r} must not be retried"
 
 
+import resilience as R  # noqa: E402
+
+
 def test_5xx_and_429_are_retried_then_give_up():
     for status in (429, 500, 502, 503, 504):
         calls = {"n": 0}
@@ -241,7 +244,9 @@ def test_5xx_and_429_are_retried_then_give_up():
 
         with pytest.raises(RuntimeError):
             down()
-        assert calls["n"] == 3, f"HTTP {status} should be attempted 1+2 times"
+        # A 429 is Google pacing us: it gets the rate-limit budget whatever the caller asked (2ee11fe, 20 Nov 2026).
+        want = 1 + (max(2, R.RATE_LIMIT_RETRY_BUDGET) if status == 429 else 2)
+        assert calls["n"] == want, f"HTTP {status} should be attempted {want} times"
 
 
 def test_retry_after_header_is_honoured():

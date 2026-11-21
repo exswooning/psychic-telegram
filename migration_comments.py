@@ -6,7 +6,6 @@ import html
 import failpoints
 import re
 import threading
-from collections import Counter
 from link_rewrite import rewrite_text
 from db import utc_now
 
@@ -123,7 +122,6 @@ def differences(source, target, lookup):
     remaining = list(target)
     diffs = []
     for comment in source:
-        wanted = content(comment, lookup)
         candidates = [
             c
             for c in remaining
