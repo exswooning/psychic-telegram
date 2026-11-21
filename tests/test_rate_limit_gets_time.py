@@ -210,3 +210,34 @@ class TestGmailBusyMailbox:
         with pytest.raises(Exception):
             boom()
         assert calls["n"] == 1, calls
+
+
+class TestDriveUploadConflict:
+    """Drive's 409 conflict on a new upload (judy@a., 21 Nov 2026) is retried; an update's 409 is not."""
+
+    def _boom(self, uri):
+        calls = {"n": 0}
+
+        @R.retry_on_google_error(max_retries=6, base_delay=0, max_delay=0)
+        def boom():
+            calls["n"] += 1
+            raise R.HttpError(
+                resp=type("R", (), {"status": 409, "reason": "Conflict",
+                                    "get": lambda self, k, d=None: None})(),
+                content=b'{"error":{"errors":[{"reason":"conflict"}],"message":"Conflict"}}', uri=uri)
+
+        return boom, calls
+
+    def test_a_new_upload_is_retried(self, monkeypatch):
+        monkeypatch.setattr(R.time, "sleep", lambda *_: None)
+        boom, calls = self._boom("https://www.googleapis.com/upload/drive/v3/files?fields=id&uploadType=multipart")
+        with pytest.raises(Exception):
+            boom()
+        assert calls["n"] == R.DRIVE_UPLOAD_CONFLICT_RETRY_BUDGET + 1, calls
+
+    def test_an_update_conflict_fails_fast(self, monkeypatch):
+        monkeypatch.setattr(R.time, "sleep", lambda *_: None)
+        boom, calls = self._boom("https://www.googleapis.com/upload/drive/v3/files/abc?uploadType=multipart")
+        with pytest.raises(Exception):
+            boom()
+        assert calls["n"] == 1, calls

@@ -153,6 +153,15 @@ NO_ACCOUNT_RETRY_BUDGET = 1
 # search a minute later answered. A mailbox with Gmail switched off answers it every time, so a few tries, not the
 # full ladder.
 GMAIL_PRECONDITION_RETRY_BUDGET = 3
+# Drive answers a new upload (files.create on /upload/) with 409 "conflict" now and then, with no file left behind
+# (judy@a., P3.7 run 1, 21 Nov 2026: the cascade fell back to a Docs API rebuild that drops images). Retried twice,
+# create uploads only; an update's 409 is a real conflict and stays permanent.
+DRIVE_UPLOAD_CONFLICT_RETRY_BUDGET = 2
+
+
+def _is_drive_upload_conflict(status, reason, exc) -> bool:
+    text = str(exc)
+    return status == 409 and reason == "conflict" and "/upload/drive/v3/files?" in text
 
 
 def _is_gmail_precondition(status: int, reason: str, exc) -> bool:
@@ -331,6 +340,8 @@ def _is_permanent(status: int, reason: str, exc: HttpError | None = None) -> boo
     if status == 401 and exc is not None and _is_transient_401(reason, exc):
         return False
     if status == 400 and (_is_transient_400(exc) or _is_gmail_precondition(status, reason, exc)):
+        return False
+    if _is_drive_upload_conflict(status, reason, exc):
         return False
     if status in RETRYABLE_STATUSES:
         return False
@@ -544,6 +555,8 @@ def retry_on_google_error(
                         budget = min(max_retries, NO_ACCOUNT_RETRY_BUDGET)
                     elif _is_gmail_precondition(status, reason, exc):
                         budget = min(max_retries, GMAIL_PRECONDITION_RETRY_BUDGET)
+                    elif _is_drive_upload_conflict(status, reason, exc):
+                        budget = min(max_retries, DRIVE_UPLOAD_CONFLICT_RETRY_BUDGET)
                     elif _is_transient_403(exc):
                         budget = max(max_retries, SCOPE_RETRY_BUDGET)
                     elif reason in TRANSIENT_403_REASONS or status == 429:

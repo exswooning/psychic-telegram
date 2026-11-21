@@ -122,6 +122,10 @@ def canonical_native(document, lookup=lambda _: None):
             item = value[key]
             if not path and key in ROOT_VOLATILE:
                 continue
+            if key == "useCustomHeaderFooterMargins":
+                # Derived by Docs and unwritable ("Unallowed field"); an imported Doc reads True. The margins it
+                # describes are compared themselves (a. -> b., 21 Nov 2026).
+                continue
             if key in ID_FIELDS:
                 out[key] = identity(item)
             elif key in ID_MAPS and isinstance(item, dict):

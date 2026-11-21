@@ -2610,7 +2610,35 @@ class DriveMigrator:
             # next week's folder is ordinary -- so the mapping it needs does
             # not exist until the whole tree is done.
             self._pending_link_rewrites.append((item, tgt_id, export_mime))
+        if _NATIVE_KIND.get(item["mimeType"]) in ("docs", "sheets"):
+            needs_restore = self._after_round_trip(item, tgt_id) or needs_restore
         self._finish_item(item, tgt_id, force_mtime_restore=needs_restore)
+
+    def _after_round_trip(self, item: dict, tgt_id: str) -> bool:
+        """A native rebuilt from an Office export: drop the comments the import made from the exported file (the
+        comment pass posts the faithful copies, with replies and resolution; live, a. -> b. 21 Nov 2026, every
+        commented file held each comment twice), then put back the styles the round trip loses (native_styles).
+        Only our own just-created file is touched. Never fails the file. Returns whether it wrote."""
+        import native_styles
+        kind, wrote = _NATIVE_KIND[item["mimeType"]], False
+        try:
+            found = self._retry(lambda: self.tgt.comments().list(
+                fileId=tgt_id, fields="comments(id)", pageSize=100).execute()).get("comments", [])
+            for c in found:
+                self._retry(lambda cid=c["id"]: self.tgt.comments().delete(fileId=tgt_id, commentId=cid).execute())
+            wrote = bool(found)
+        except Exception as exc:      # noqa: BLE001 - a duplicate comment is a finding, not a lost file
+            log.warning("[%s] could not clear imported comments on %s: %s", self.source_user, item.get("name"), exc)
+        try:
+            def paced(fn, op="read"):
+                _native_project_limiter(kind, op).acquire()
+                return self._retry(fn, label=f"{kind}.realign")
+            n = native_styles.realign(kind, self.auth.api("source", kind, self.source_user),
+                                      self.auth.api("target", kind, self.target_user), item["id"], tgt_id, paced)
+            wrote = wrote or n > 0
+        except Exception as exc:      # noqa: BLE001 - the file migrated; the style check will name what is left
+            log.warning("[%s] could not realign styles on %s: %s", self.source_user, item.get("name"), exc)
+        return wrote
 
     def _rewrite_pending_links(self) -> None:
         """Point migrated documents at their migrated neighbours.
