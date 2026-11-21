@@ -794,7 +794,8 @@ class TestResetIsActuallyComplete:
         import seed_sandbox
 
         src = inspect.getsource(seed_sandbox.reset_gmail)
-        assert 'q="-in:trash"' in src
+        # Without a purge client the Trash is still skipped; with one it is purged too (19 Nov 2026).
+        assert 'q="" if purge is not None else "-in:trash"' in src
 
     def test_it_still_looks_in_spam(self):
         """The filter must exclude only the trash half -- seeded mail that
