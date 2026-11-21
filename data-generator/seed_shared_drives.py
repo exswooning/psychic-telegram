@@ -155,12 +155,29 @@ def _existing_members(drive, retry, drive_id: str) -> set:
     return out
 
 
+def _children(drive, retry, drive_id: str) -> dict:
+    """name -> id of everything already inside a shared drive (the profile seeder's resume: its names are fixed)."""
+    out, token = {}, None
+    while True:
+        resp = retry(lambda t=token: drive.files().list(
+            q="trashed = false", corpora="drive", driveId=drive_id, includeItemsFromAllDrives=True, supportsAllDrives=True,
+            pageSize=1000, pageToken=t, fields="nextPageToken,files(id,name)").execute())()
+        out.update({f["name"]: f["id"] for f in resp.get("files", [])})
+        token = resp.get("nextPageToken")
+        if not token:
+            return out
+
+
 def seed(settings: Settings, admin: str, members: list[str],
-         n_drives: int = 2, files_per_folder: int = 4) -> dict:
+         n_drives: int = 2, files_per_folder: int = 4, *, member_sets: list[list[str]] | None = None,
+         pool: list[str] | None = None) -> dict:
+    """`member_sets` gives each drive its own members (default: `members` on every drive). `pool` (file ids) makes every
+    file a files.copy of one of them, not an upload (the profile seeder: no byte crosses this box), and a drive already
+    holding a name is not given it twice; the result's `drive_files` maps each drive id to the ids of its files."""
     drive = _drive_client(settings, admin)
     retry = _retry(settings)
     made = {"drives": [], "files": 0, "folders": 0, "members": 0, "acls": 0,
-            "reused": 0}
+            "reused": 0, "drive_files": {}}
 
     # Idempotent by name. This used to create unconditionally, so every
     # re-run added another SEEDED-SD-1 -- the tenant has two. Now that a
@@ -174,6 +191,7 @@ def seed(settings: Settings, admin: str, members: list[str],
 
     for d in range(n_drives):
         name = f"{PREFIX}-{d + 1}"
+        drive_members = member_sets[d] if member_sets else members
         just_created = name not in have
         if not just_created:
             did = have[name]
@@ -208,7 +226,7 @@ def seed(settings: Settings, admin: str, members: list[str],
         # notFound)", scary-looking noise for a fact already known, on an
         # API call whose only possible correct answer was empty.
         already: set = set() if just_created else _existing_members(drive, retry, did)
-        for i, member in enumerate(members):
+        for i, member in enumerate(drive_members):
             role = ROLES[i % len(ROLES)]
             if member.lower() in already:
                 continue          # idempotent, like the drive itself
@@ -220,26 +238,38 @@ def seed(settings: Settings, admin: str, members: list[str],
                     fields="id").execute())()
                 made["members"] += 1
             except Exception as exc:      # noqa: BLE001
-                print(f"    ! member {members[i]} as {role}: {str(exc)[:90]}")
+                print(f"    ! member {drive_members[i]} as {role}: {str(exc)[:90]}")
 
         # Nested, so the traversal is not flat. A shared drive's id doubles
         # as its root folder id, which is exactly how DriveMigrator is
         # pointed at one.
+        have_in = _children(drive, retry, did) if pool and not just_created else {}
         parent = did
         for depth in range(2):
-            folder = retry(lambda p=parent, n=f"Level-{depth + 1}":
-                           drive.files().create(
-                               body={"name": n, "mimeType": FOLDER_MIME,
-                                     "parents": [p]},
-                               supportsAllDrives=True, fields="id").execute())()
-            parent = folder["id"]
-            made["folders"] += 1
+            if f"Level-{depth + 1}" in have_in:
+                parent = have_in[f"Level-{depth + 1}"]
+            else:
+                folder = retry(lambda p=parent, n=f"Level-{depth + 1}":
+                               drive.files().create(
+                                   body={"name": n, "mimeType": FOLDER_MIME,
+                                         "parents": [p]},
+                                   supportsAllDrives=True, fields="id").execute())()
+                parent = folder["id"]
+                made["folders"] += 1
 
             for f in range(files_per_folder):
+                if pool and f"sd{d+1}-{depth}-{f}" in have_in:
+                    made["drive_files"].setdefault(did, []).append(have_in[f"sd{d+1}-{depth}-{f}"])
+                    continue
                 # Alternate native and binary: server_side copies natives
                 # without export, download_upload round-trips them through
                 # OOXML, and only one of those paths can be wrong at a time.
-                if f % 2 == 0:
+                if pool:
+                    made_file = retry(lambda nm=f"sd{d+1}-{depth}-{f}", par=parent, src=pool[(d * 8 + depth * 4 + f) % len(pool)]:
+                                      drive.files().copy(fileId=src, body={"name": nm, "parents": [par]},
+                                                         supportsAllDrives=True, fields="id").execute())()
+                    made["drive_files"].setdefault(did, []).append(made_file["id"])
+                elif f % 2 == 0:
                     body = {"name": f"sd{d+1}-doc-{depth}-{f}",
                             "mimeType": "application/vnd.google-apps.document",
                             "parents": [parent]}
@@ -258,11 +288,11 @@ def seed(settings: Settings, admin: str, members: list[str],
                 # docstring records this case as unverified, so leaving it
                 # out would leave the one genuinely unknown behaviour
                 # untested.
-                if f == 0 and members:
+                if f == 0 and drive_members:
                     try:
                         retry(lambda fid=made_file["id"]: drive.permissions().create(
                             fileId=fid, body={"type": "user", "role": "reader",
-                                              "emailAddress": members[-1]},
+                                              "emailAddress": drive_members[-1]},
                             supportsAllDrives=True, sendNotificationEmail=False,
                             fields="id").execute())()
                         made["acls"] += 1

@@ -26,6 +26,7 @@ ROOT = "MIGRATION-TEST"            # the seeder's own root: reset and the existi
 POOL = "BITPORT-SEED-POOL"
 CHUNK = 100                        # messages sent together, and at most what a kill can leave half-done
 OWN_LINKS = 20                     # own file ids kept for link mail
+DEPT_FILES = 4                     # files in a department's shared folder
 
 
 def _mark(**extra) -> dict:
@@ -249,11 +250,12 @@ def build_drive(s, drive, user: str, p: dict, pool: dict, retry) -> dict:
     return m
 
 
-def link_items(s, drive, p: dict, pool: dict, retry) -> dict:
-    """The ids Drive-link mail points at: this user's own files and a folder, one file that is deleted, and the pool's
-    files (owned by the pool user: a colleague's, or a user outside the run's). A user who has not been through
-    build_drive yet has no own files, and those links fall back to the pool's."""
-    items = {"pool": list(pool["ids"]) if pool else []}
+def link_items(s, drive, p: dict, pool: dict, retry, shared: dict | None = None) -> dict:
+    """The ids Drive-link mail points at: this user's own files and a folder, one file that is deleted, a colleague's
+    file (the department folder's) and a shared-drive file when seed_sharing made them (`shared`), and the pool's files
+    (owned by the pool user) for what has no real item: a user outside the run's, and every kind before sharing exists.
+    A user who has not been through build_drive yet has no own files, and those links fall back to the pool's."""
+    items = {"pool": list(pool["ids"]) if pool else [], **{k: v for k, v in (shared or {}).items() if k in ("colleague", "shared_drive")}}
     root = _root(drive, retry, create=False)
     if root:
         mine = sorted(_existing(drive, retry).items())
@@ -416,6 +418,109 @@ def _link_id(items: dict, kind: str, rng):
         pool = [items["folder"]] if items.get("folder") else None
     elif kind == "deleted":
         pool = [items["deleted"]] if items.get("deleted") else None
-    else:      # a colleague's and a user outside the run's file are both a pool file (owned by the pool user)
-        pool = items.get("pool")
+    else:      # a colleague's, a shared drive's: the real item when there is one; a user outside the run's: a pool file
+        pool = items.get(kind) or items.get("pool")
     return rng.choice(pool) if pool else None
+
+
+# ---- sharing --------------------------------------------------------------------------------------------------
+def _has_grant(drive, retry, fid: str, email: str) -> bool:
+    res = _call(retry, lambda: drive.permissions().list(fileId=fid, supportsAllDrives=True, fields="permissions(emailAddress)").execute())
+    return any((x.get("emailAddress") or "").lower() == email.lower() for x in res.get("permissions", []))
+
+
+def _slug(dept: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", dept.lower()).strip("-")
+
+
+def seed_sharing(s, settings, entries: list, pool: dict, external: str, sh: dict, admin: str) -> dict:
+    """The tenant-level sharing of a profile run (profile_plan.sharing), made before any user's mail is written so link mail
+    can name real items. It reuses what ordinary seeding does: seed_groups (one group a department, its lead the owner),
+    CorpusBuilder.share_group (the department's folder, owned by its lead, files copied from the pool), seed_shared_drives
+    (drives with their own members, files copied from the pool) and a Gmail delegation (the shared mailbox). Every step looks
+    before it writes, so a rerun adds nothing, and none is fatal. `per_user`: email -> the colleague and shared-drive files
+    that user can reach, and how many of their own files go outside (share_outside)."""
+    who = [e["email"] for e in sorted((e for e in entries if e.get("plan")), key=lambda e: e["plan"]["index"])]
+    prefix, dom = s.GENERATED_PREFIX, settings.source_domain
+    out = {"groups": 0, "group_members": 0, "dept_files": 0, "dept_grants": 0, "drives": 0, "drive_members": 0, "readers": 0,
+           "mailbox": who[sh["mailbox"]] if who and sh["mailbox"] is not None else "", "notes": [],
+           "per_user": {u: {"colleague": [], "shared_drive": [], "outside": sh["outside"].get(i, 0)} for i, u in enumerate(who)}}
+    ids = pool["ids"]
+    members = {d: [who[i] for i, x in enumerate(sh["dept"]) if x == d] for d in sh["lead"]}
+    try:
+        g = s.seed_groups(s.build_directory_groups(settings, admin), settings, who, external, prefix=prefix,
+                          shapes=[(f"{prefix}dept-{_slug(d)}", d, m, "OWNER") for d, m in members.items()])
+        out["groups"], out["group_members"] = g["groups"], g["members"]
+        out["notes"] += ([g["note"]] if g["note"] else []) + g["member_notes"]
+    except Exception as exc:      # noqa: BLE001 - never fatal to a seed
+        out["notes"].append(f"department groups: {str(exc)[:120]}")
+    for d, team in members.items():
+        if len(team) < 2 or not ids:
+            continue
+        try:
+            drive, _, _ = s.build_services(settings, team[0])
+            retry = s._retry_factory(settings, limiter=s._seed_drive_limiter(settings))
+            tag, root = f"dept-{_slug(d)}", _root(drive, retry)
+            have = {f["appProperties"]["bpi"]: f["id"] for f in _list(
+                drive, retry, "'me' in owners and trashed = false and appProperties has { key='bpseed' and value='1' }", "id,appProperties")
+                if (f.get("appProperties") or {}).get("bpi", "").startswith("dept-")}
+            folder = have.get(tag) or _call(retry, lambda: drive.files().create(body={
+                "name": f"Department {d}", "mimeType": pp.FOLDER, "parents": [root["id"]], "appProperties": _mark(bpi=tag)},
+                fields="id").execute())["id"]
+            files = []
+            for k in range(DEPT_FILES):
+                fid = have.get(f"{tag}-{k}") or _call(retry, lambda k=k: drive.files().copy(
+                    fileId=ids[zlib.crc32(f"{tag}{k}".encode()) % len(ids)], fields="id", supportsAllDrives=True,
+                    body={"name": f"{d} {k + 1}", "parents": [folder], "appProperties": _mark(bpi=f"{tag}-{k}")}).execute())["id"]
+                out["dept_files"] += fid not in have.values()
+                files.append(fid)
+            group = f"{prefix}dept-{_slug(d)}@{dom}"
+            if not _has_grant(drive, retry, folder, group):
+                cb = s.CorpusBuilder(drive, settings, team[0], [], external, "tiny", s._media, retry)
+                cb.share_group(folder, group, "writer")
+                out["dept_grants"] += cb.m["grants"]["group"]
+                out["notes"] += cb.m["grants_rejected"]
+            for u in team[1:]:
+                out["per_user"][u]["colleague"] = files       # the lead owns them: for the lead they are not a colleague's
+        except Exception as exc:      # noqa: BLE001
+            out["notes"].append(f"department folder {d}: {str(exc)[:120]}")
+    if sh["drives"] and ids:
+        try:
+            import seed_shared_drives
+            sets = [[who[i] for i in idx] for idx in sh["drives"]]
+            made = seed_shared_drives.seed(settings, admin, who, len(sets), member_sets=sets, pool=ids)
+            out["drives"], out["drive_members"] = len(made["drives"]), made["members"]
+            for idx, dr in zip(sh["drives"], made["drives"]):
+                for i in idx:
+                    out["per_user"][who[i]]["shared_drive"] = made["drive_files"].get(dr["id"], [])
+        except Exception as exc:      # noqa: BLE001
+            out["notes"].append(f"shared drives: {str(exc)[:120]}")
+    if out["mailbox"] and sh["readers"]:
+        try:
+            gmail = s.build_gmail_settings(settings, out["mailbox"])
+            if gmail is None:
+                raise RuntimeError("the Gmail settings and sharing scopes are not granted")
+            retry = s._retry_factory(settings)
+            have = {(x.get("delegateEmail") or "").lower() for x in _call(retry, lambda: gmail.users().settings().delegates().list(
+                userId="me").execute()).get("delegates", [])}
+            for i in sh["readers"]:
+                if who[i].lower() not in have:
+                    _call(retry, lambda a=who[i]: gmail.users().settings().delegates().create(userId="me", body={"delegateEmail": a}).execute())
+                    out["readers"] += 1
+        except Exception as exc:      # noqa: BLE001
+            out["notes"].append(f"shared mailbox: {str(exc)[:120]}")
+    return out
+
+
+def share_outside(s, settings, drive, user: str, p: dict, n: int, external: str, retry) -> int:
+    """n of this user's own files shared with the outside address, and with no one else outside. Refuses any address but
+    profile_plan.OUTSIDE_ADDRESS (P0.6). A file already shared with it is left alone."""
+    if external != pp.OUTSIDE_ADDRESS:
+        raise ValueError(f"outside sharing goes only to {pp.OUTSIDE_ADDRESS}, not {external}")
+    own = [fid for i, fid in sorted(_existing(drive, retry).items()) if p["folders"] <= i < p["folders"] + p["files"] - p["shortcuts"]]
+    cb, shared = s.CorpusBuilder(drive, settings, user, [], external, "tiny", s._media, retry), 0
+    for fid in pp._rng(p["key"], "outside").sample(own, min(n, len(own))):
+        if not _has_grant(drive, retry, fid, external):
+            cb.share_external(fid)
+            shared += 1
+    return shared
