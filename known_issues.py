@@ -106,7 +106,7 @@ ISSUES = [
      "Engine resolves to any copy of the target file; repair re-walks the user's Drive "
      "(repair.unresolved_shortcut_users -> retry_drive_stragglers).", True),
     # Also before drive.mtime: a removed grant moves the file's time too, and the grant is what to put back.
-    ("drive.grant_missing", "drive", lambda t: "grant missing on the target" in t,
+    ("drive.grant_missing", "drive", lambda t: "grant missing on the target" in t and "target: ['group'" not in t,
      "A share did not come across",
      "A grant refused or skipped during the run.",
      "Re-apply the grant on the target (finding_repairs._repair_grants).", True),
@@ -266,6 +266,11 @@ def classify(service: str, item) -> str:
     for issue_id, svc, matches, *_ in ISSUES:
         if svc == service and matches(text):
             return issue_id
+    # A run kind filed under the whole service ("drive") is a 1:1 finding too: "mapped parent folder IDs
+    # differ" was queued as unclassified and never reached its entry (found writing the P2.6 scenarios).
+    for kind, types, matches, *_ in RUN_KINDS:
+        if types == service and matches(text):
+            return kind
     return "unclassified"
 
 

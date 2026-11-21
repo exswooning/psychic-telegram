@@ -390,3 +390,11 @@ def test_chat_is_opt_in_and_outside_the_score():
     assert not [s for s in C.select(every, None, None) if s.group == "chat"]
     assert len(C.select(every, "chat", None)) == 6 and C.select(every, None, {"err:chat.text"})
     assert "NOT RUN" not in C.render_md("n", [s for s in every if s.group == "chat"], {}).splitlines()[2]
+
+
+def test_a_run_kind_filed_under_a_service_classifies_its_finding():
+    import known_issues
+    assert known_issues.classify("drive", "mapped parent folder IDs differ") == "drive.parent_folder"
+    assert known_issues.classify("drive", "allocated cells exceed the explicit per-read budget") == "drive.sheet_too_large"
+    # an ISSUES entry still wins where both match
+    assert known_issues.classify("drive", "native Sheet entered values, formatting, or structures differ") == "drive.native_structure"
