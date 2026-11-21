@@ -558,3 +558,19 @@ def test_the_speed_matrix_really_launches_with_its_user_and_needs_the_typed_word
     assert sent[-1][0] == 400 and not launched
     sent, launched = _run_handler(monkeypatch, {"action": "ab_matrix", "confirm": "NEW ACCOUNTS"}, db, settings)
     assert sent[-1][0] == 400 and "exactly one" in sent[-1][1]["error"] and not launched
+
+
+def test_a_complete_this_watch_saw_running_is_accepted_whatever_its_user_count(db, settings, monkeypatch):
+    """A delta's "Users processed" is whoever it touched: 39 of 41, seen In progress then complete, was refused as
+    another import's result (a. -> b. P3.5 run 2, 20 Nov 2026)."""
+    import dms_migrate
+    import config
+    _ledger_with(db, ["a", "b", "c"])
+    monkeypatch.setattr(config, "Settings", lambda *a, **k: settings)
+    monkeypatch.setattr(dms_migrate, "DONE_POLL_SEC", 0)
+    monkeypatch.setattr("mail_completion.compare_mail_counts", lambda *a, **k: {"blocked": 0})
+    monkeypatch.setattr(dms_migrate, "record_deliveries", lambda *a: 0)
+    reads = iter([{"status": "In progress", "metrics": {"Users processed": 2}},
+                  {"status": "complete", "metrics": {"Users processed": 2}}])
+    monkeypatch.setattr(dms_migrate, "status", lambda *a, **k: next(reads))
+    assert dms_migrate.wait_then_tally(1, 10, False, tally=False, users=None) == 0

@@ -161,6 +161,8 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--account-id", type=int, required=True)
     ap.add_argument("--identities", required=True)
+    ap.add_argument("--check-only", action="store_true",
+                    help="no import: check what the last import delivered (dms_migrate --reconcile-only), then labels")
     args, passthrough = ap.parse_known_args(argv)
     from auth import AuthManager
     from config import Settings
@@ -197,6 +199,9 @@ def main(argv=None) -> int:
 
     # The account's own ledger, named outright: dms_migrate finds its account (and its metrics file) from it.
     env = {**os.environ, "MIGRATION_DB": st.db_path}
+    if args.check_only:
+        rc = subprocess.call([PY, "dms_migrate.py", "--reconcile-only", "--identities", ready_path], cwd=HERE, env=env)
+        return rc or align_labels(auth, st)
     base = [PY, "dms_migrate.py", "--apply", "--identities", ready_path, *passthrough]
     rc = run_confirmed(base, float(os.getenv("DMS_START_CONFIRM_MIN", "30")) * 60, env=env)
     if rc == 3:
@@ -215,6 +220,10 @@ def main(argv=None) -> int:
         return rc
     # The import is finished. A few emails Google will not import (17 of 141,977 on account 3) are an open
     # incident and show as missing in the verify that follows; they must not hold that verify back for ever.
+    return align_labels(auth, st)
+
+
+def align_labels(auth, st) -> int:
     if os.getenv("DMS_ALIGN_LABELS", "1").lower() not in ("0", "false", "no"):
         import dms_label_alignment
         from db import MigrationDB

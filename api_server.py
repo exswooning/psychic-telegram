@@ -2290,7 +2290,8 @@ def _dms_needs_fresh(account_id: int | None) -> bool:
     return False
 
 
-def _start_dms(account_id: int | None, *, require_clean: bool, why: str, fresh: bool = False) -> tuple[bool, str]:
+def _start_dms(account_id: int | None, *, require_clean: bool, why: str, fresh: bool = False,
+               check_only: bool = False) -> tuple[bool, str]:
     """Ask Google's Data Migration Service to move this account's mail.
 
     dms_migrate.py --apply drives the Admin console: it asks the SOURCE super admin to
@@ -2353,6 +2354,8 @@ def _start_dms(account_id: int | None, *, require_clean: bool, why: str, fresh: 
         # ready users, confirmed to have started, then deltas until zero failed -- and after it, a verify of
         # every item with repair (the verify-after-dms follow-on), as its own job so its progress shows.
         argv = [PY, "dms_pipeline.py", "--account-id", str(account_id), "--identities", csv_path] + dms_args
+        if check_only:
+            argv.append("--check-only")
         then = ["verify-after-dms"]
     action = cpdb.begin_action("auto", "system", "dms.start", why, st.target_domain, {"users": n}, None, account_id)
     ok, detail = _run_admitted(argv, account_id, "dms", env=env, **({"then": then} if then else {}))
@@ -3247,6 +3250,9 @@ class DmsStart(WriteAction):
     # A new import with these users, replacing the console's map. Needed when the users changed: a delta on
     # another run's map re-runs THAT run's users (a. -> b., 18 Nov 2026: the 11-user pilot map, 0 imported).
     fresh_import: bool = False
+    # No import: only the check of what the last one delivered, labels, the verify and the gate -- for a restart
+    # after a fix to the check itself, where re-importing every email costs about 1h40m (a. -> b., 20 Nov 2026).
+    check_only: bool = False
 
 
 @app.post("/api/v2/dms/start")
@@ -3263,6 +3269,7 @@ async def dms_start(body: DmsStart, op: Operator = Depends(operator)):
             raise HTTPException(409, why)
     return await _gated(op, "dms.start", body, f"account:{account_id}",
                         lambda: _start_dms(account_id, require_clean=False, fresh=body.fresh_import,
+                                           check_only=body.check_only,
                                            why=f"started by {op.name}: {body.reason}"))
 
 

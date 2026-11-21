@@ -1056,11 +1056,13 @@ def wait_then_tally(minutes: int, timeout: int, headful: bool, tally: bool = Tru
     import subprocess
 
     deadline = time.time() + minutes * 60
+    ran = False         # this watch saw the import running: its "complete" is this import's own
     while time.time() < deadline:
         time.sleep(min(DONE_POLL_SEC, max(deadline - time.time(), 0)))
         got = status(timeout, headful)
         state = got.get("status", "unknown")
         log(f"import status: {state} {got.get('metrics') or ''}")
+        ran = ran or state == "In progress"
         if state in ("complete", "Stopped"):
             if not tally and state != "complete":
                 return 1
@@ -1073,10 +1075,12 @@ def wait_then_tally(minutes: int, timeout: int, headful: bool, tally: bool = Tru
                 try:
                     # Google's "complete" is about the import it holds, not the one we asked for: a stale
                     # 1-user import read "complete" for 45 users (8 Nov 2026). Accept it only when the
-                    # import's user count is the number we expected.
+                    # import's user count is the number we expected -- unless this watch saw it running: a delta's
+                    # "Users processed" is whoever it touched (38-41 of 41 on a. -> b., 20 Nov 2026), and the
+                    # reconciliation below checks every user's mail either way.
                     expected = len(users) if users else sum(1 for r in db.all_identities() if r["entity_type"] == "user")
                     seen = (got.get("metrics") or {}).get("Users processed")
-                    if seen is not None and expected and seen != expected:
+                    if not ran and seen is not None and expected and seen != expected:
                         log(f"NOT ACCEPTED: the console reports complete for {seen} user(s), but this run is for "
                             f"{expected} -- it is another import's result, so nothing is recorded as delivered")
                         return 2

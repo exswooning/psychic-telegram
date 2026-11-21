@@ -334,3 +334,26 @@ def test_the_dms_starts_when_the_mail_pass_ends_and_not_again_at_the_exit(tmp_pa
     api_server._follow_on("dms", 5)            # the exit follow-on
     assert started == [5], "started twice"
     assert 5 not in api_server._EARLY_DMS
+
+
+def test_check_only_checks_and_aligns_and_never_imports(tmp_path, monkeypatch):
+    """A restart after a fix to the check itself re-imported all the mail (about 1h40m, twice, 20 Nov 2026)."""
+    import auth
+    import config
+    import dms_label_alignment
+    ids = tmp_path / "ids.csv"
+    ids.write_text("source,target\na@s.example,a@t.example\n")
+    monkeypatch.setattr(dms_pipeline, "HERE", str(tmp_path))
+    monkeypatch.setattr(config, "Settings", lambda **k: type("S", (), {"db_path": str(tmp_path / "l.db")})())
+    monkeypatch.setattr(auth, "AuthManager", lambda st: type("A", (), {"source_gmail": None})())
+    monkeypatch.setattr(dms_handoff, "assess", lambda conn, g: ({}, {}))
+    monkeypatch.setattr(dms_handoff, "nothing_owed", lambda conn, notes: {})
+    monkeypatch.setattr(dms_pipeline, "console_map", lambda *a: None)
+    sqlite3.connect(tmp_path / "l.db").close()
+    calls = []
+    monkeypatch.setattr(dms_pipeline.subprocess, "call", lambda argv, **k: calls.append(argv) or 0)
+    monkeypatch.setattr(dms_pipeline, "run_confirmed", lambda *a, **k: pytest.fail("no import on a check-only run"))
+    monkeypatch.setattr(dms_label_alignment, "run", lambda *a, **k: calls.append("labels") or {})
+    assert dms_pipeline.main(["--account-id", "5", "--identities", str(ids), "--check-only"]) == 0
+    assert "--reconcile-only" in calls[0] and "--apply" not in calls[0]
+    assert calls[-1] == "labels"
