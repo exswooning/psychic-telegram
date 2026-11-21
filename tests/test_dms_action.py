@@ -244,6 +244,7 @@ def test_without_a_source_login_it_leaves_the_click_to_a_person(monkeypatch):
 def test_no_approval_mail_yet_is_said_not_raised(monkeypatch):
     import dms_migrate
     monkeypatch.setenv("DWD_EMAIL_SOURCE", "admin@src.test")
+    monkeypatch.setenv("SOURCE_DOMAIN", "src.test")      # the login must be the source's own
     monkeypatch.setenv("DWD_PASSWORD_SOURCE", "x")
     monkeypatch.setattr(dms_migrate, "approval_link", lambda *a: None)
     assert dms_migrate.approve_as_source(10, False) == ["no approval mail for admin@src.test yet"]
