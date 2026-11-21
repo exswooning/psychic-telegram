@@ -405,7 +405,7 @@ Phase 1 and the code of Phase 2 need no tenant. Start them while Phase 0 is open
 - [x] P3.2 (18 Nov, ~06:10 UTC: 57 covered, 0 absent, 0 unprobed, 21 not migrated, 1 unseedable; `logs/coverage-5.txt` on the box) `coverage_audit.py`: row 1.
 - [x] P3.3 Control run from the UI: all services, split mail, DMS after, server-side, ordered. Let
   every follow-on finish. The gate must read PARITY. Fix until it does (rule 4).
-- [ ] P3.4 First one scenario of each group (`--only`), to prove the runner itself. Then the
+- [~] P3.4 (21 Nov, Sonnet 637b5aa: step executor for the failure rows with a strict shell allow-list, --allow reboot/net, primitives suspend on b. / source delete on a. (sandbox only) / extra grant on b., judge reads stopped-not-crashed and failed items; all offline. OPEN: F-reboot cannot resume itself in-process (persist the step index or re-run with --redo after boot); F-deploy is operator-side; the live log/job-name details are unverified until the first live scenario) First one scenario of each group (`--only`), to prove the runner itself. Then the
   `campaign.py` groups in this order: `errors`, `failures`, `benchmarks`, `watchers`,
   `chat`. A failed scenario is a bug: fix, test, deploy, `--redo` that scenario. After each group
   run `ui_check.py --account-id ID` once, so the UI's numbers are compared with the ledger.
