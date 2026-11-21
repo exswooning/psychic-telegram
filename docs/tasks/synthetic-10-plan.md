@@ -447,7 +447,7 @@ a Drive link.
   `label_map`). It writes `data-generator/profiles/org45.json`: sorted per-user vectors and
   histograms. Numbers and file types only. No name, address, subject, file name or id leaves the
   box; a test asserts that. Check its output against the table above.
-- [ ] P4.2 `seed_sandbox.py --profile PATH --users N --seed S`:
+- [~] P4.2 (21 Nov, Sonnet, 0e7ded7: `profile_plan.py`, `profile_seed.py`; plan by nearest rank, Drive volume by files.copy from a pool; OPEN: departments as groups, shared mailbox, shared drives and outside sharing for profile users; calendars/contacts/tasks at the seeder's defaults; link-mail kind split assumed; pool's largest file 50 MB by default vs the profile's 10.1 GB (`--pool-max-file-mb`)) `seed_sandbox.py --profile PATH --users N --seed S`:
   - each user's totals come from the per-user vectors, interpolated by rank, so the tail survives:
     one mailbox near 40,000 messages, one Drive near 5,600 files, several users with almost nothing;
   - file types follow the histogram; names come from a name model with Latin and Devanagari names,
@@ -461,7 +461,7 @@ a Drive link.
     outside sharing only to the P0.6 address;
   - calendars, contacts, tasks and mail settings at plausible rates;
   - the cohort keeps its fixtures; the profile content is added beside them.
-- [ ] P4.3 A budget computed from inputs, never from constants. Before writing anything the seeder
+- [x] P4.3 (21 Nov, 0e7ded7: `--plan-only`, `--max-hours`, `--upload-mb-per-sec` or a 60 s probe, `--pool-gb`; probe tested on fakes only) A budget computed from inputs, never from constants. Before writing anything the seeder
   prints users, items, bytes that cross the box and hours, from a 60-second upload probe and the API
   rates measured in P3.6. It refuses when the hours exceed `--max-hours`. How the bytes fit:
   - Drive: the seeder uploads everything today and has no server-side copy. Add one. Upload a pool
@@ -475,8 +475,8 @@ a Drive link.
     import rate (141,977 messages in about 23 h), 943,000 messages take about six days, more than
     Phase 5's ten days can carry beside seeding and verification. Expect a factor below 1 unless
     the cohort shows the DMS is faster with more users.
-- [ ] P4.4 A killed seed, started again, adds nothing twice. All seven seed benchmarks pass.
-- [ ] P4.5 Tests in `data-generator/`: same seed, same plan; the p50 and p90 of files, folders and
+- [~] P4.4 (21 Nov, 0e7ded7: appProperties markers + done services on the root folder; tested on fakes; the seven seed benchmarks still to pass live) A killed seed, started again, adds nothing twice. All seven seed benchmarks pass.
+- [x] P4.5 (21 Nov, 0e7ded7: 19 tests; data-generator suite green after de61340) Tests in `data-generator/`: same seed, same plan; the p50 and p90 of files, folders and
   messages per user within 15% of the profile; file-type shares within 3 points; the budget
   refusal; the profile file holds numbers only; every cohort shape still present.
 
@@ -546,6 +546,16 @@ old keys from root's `authorized_keys`; decide on rewriting the git history that
 
 ## 11. State (newest first)
 
+- 21 Nov 2026, ~12:35 UTC box (Opus): **P3.7 run 1 stopped (incident #208); the read-only route's losses found and fixed; run 2 started.**
+  #208 was a 409 "conflict" on a new Doc upload (judy@): no file left, the cascade fell back to a Docs API rebuild (drops images).
+  The per-user checks on this route read DIFFERENCES for most users: 106 Docs, 64 Sheets, 6 doubled comment threads, 1 time.
+  Measured on single files: every Doc lost each paragraph's `spacingMode` (COLLAPSE_LISTS) and its header margin; Sheets came back in
+  the importer's time zone and a 1,000 x 26 grid (values intact); the Office export carries comments, the import recreated them and the
+  comment pass posted its own. Fixed (9378a02, deployed 12:30): `native_styles.realign` writes them back on the target (one batchUpdate),
+  the import's comments are dropped first, the unwritable `useCustomHeaderFooterMargins` is not compared, a new upload's 409 is retried.
+  NOT fixable by any route measured (asked of the operator): a Sheet's default top/bottom padding (2 -> 0) and default font spelling
+  (`arial,sans,sans-serif` -> `Arial`); a fresh native Sheet has the source's, an xlsx import (create or update) the other.
+  P4.2-P4.5 merged (0e7ded7, Sonnet). Run 2: `/tmp/p35_dharan.sh 4`.
 - 21 Nov 2026, ~12:00 UTC box (Opus): **Run 3 (server-side) stopped at 11:52 for P3.7, dharan's route; reset made parallel.**
   Operator: dharan.gov.np moves into a. (DMS mail, access pending) once this plan is finished. Run 3's reset took 1 h 38 min: c10's
   ~3,000 root items deleted one at a time since 9579874 (run 2's 1 h 42 min had the same cause); 71539fd deletes in 8 slices (deployed
