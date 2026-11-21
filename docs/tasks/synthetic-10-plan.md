@@ -534,18 +534,46 @@ old keys from root's `authorized_keys`; decide on rewriting the git history that
 
 ## 10. Scorecard
 
-| Area | 13 Nov | What lifts it to 10 |
-|---|---|---|
-| Drive | 8 | rows 1, 3 and 6; one write per file, measured |
-| Mail | 5 | rows 2 and 6; the bulk DMS check; the DMS per user; the duplicates explained |
-| Verification | 6 | rows 4 and 6; the index reused; nothing UNVERIFIED |
-| Orchestration | 4 | the run record; box scripts for any account; row 10 |
-| Operations | 4 | the preflight; one log per run; the nightly run; wipe safety |
-| Security | 3 | the operator's items above; rule 6 kept |
-| Tests | 6 | a green baseline; the campaign and its completeness tests; failpoints |
+| Area | 13 Nov | 22 Nov | Evidence now | What lifts it to 10 |
+|---|---|---|---|---|
+| Drive | 8 | 8.5 | server-side PARITY (P3.5 run 2); read-only route: Docs, Sheets, comments identical, Slides pixel-identical, run 7 0 failed | P3.7 run 8 PARITY + stop-and-restart; rows 1, 3, 6 live; one 300-user run |
+| Mail | 5 | 7 | split + DMS: 12,240 reconciled, 0 blocked; check-only restart | DMS per user (opus); `gmail.duplicate` explained; DMS measured at 300 users (P3.6) |
+| Verification | 6 | 7 | per-user check, gate, displayed-format Sheets, rendered Slides | full check under 1 h for the cohort (big-Sheet windows); the mail verify reuses the bulk index; nothing INCOMPLETE |
+| Orchestration | 4 | 6 | follow-on chain, memory-pause resume, retry by class | the run record of phases (resume from the recorded phase); F-api, F-reboot live |
+| Operations | 4 | 5.5 | incidents, oversight, one log per run, nightly units written | nightly campaign installed; deploys through `sync_vps.sh`; row 3 live |
+| Security | 3 | 3 | unchanged (operator items) | the OPERATOR security items in section 9 |
+| Tests | 6 | 7 | scenarios for every error/failure/watcher, truth table offline | the full suite green in one run; every scenario run live |
+
+Overall 22 Nov: 6.5 / 10.
+
+### Path to 10 (in order; each step's result goes into State)
+
+1. P3.7, dharan's route: run 7 to PARITY on a complete check, run 8 (`/tmp/p35_dharan.sh 8`, proves the
+   shared-drive reset), then F-stop on it (stop mid-Drive, restart, equal to control).
+2. P3.5: two server-side runs back to back with no code change between them (`/tmp/p35_run_nochat.sh N`).
+3. The full suite green in one run (`pytest tests/ data-generator/`); fix what fails before any live scenario.
+4. P3.4 live: the first scenario of each group (`campaign.py --only`), fixing the executor's live details
+   (log markers, job names, the F-webui body). Then every P2.6 error and P2.7 failure row live, P2.11
+   openers inside them, P2.8's live faults. A failing scenario is a fix, a test and a re-run.
+5. P2.9 and P2.10: the A/B arms and what binds each phase, measured on twins; speed fixes where a phase is
+   bound by "nothing". Includes the [opus] items: DRIVE_FINISH_IN_STAGING and DMS_AT_MAIL_PASS on or off
+   by measurement, the per-user DMS start probe.
+6. Phase 6 left: the run record of phases (proved by F-api, F-reboot), `gmail.duplicate` explained, the
+   verify's bulk index.
+7. P3.6: the 300-user estimate from measured rates; P4 live (`--plan-only` budget, then the seven seed
+   benchmarks on a small `--profile` seed); P5.1 the operator's go.
+8. Phase 5: seed 300, the full run with row 8's interruptions, the gate, the tally, the delta, the final
+   report and this scorecard filled with measured numbers.
+9. OPERATOR, in parallel and any time: the security items. Security, and so the total, cannot reach 10
+   without them.
+
+Limits no code removes, recorded so they are not re-litigated: the box's 0.9 MB/s upload caps engine mail and
+the read-only route's Drive; a copied comment cannot keep its date; a deck that went through .pptx keeps
+rebuilt layouts (its slides render identical).
 
 ## 11. State (newest first)
 
+- 22 Nov 2026, ~00:30 NPT (Opus): **Scorecard re-scored (6.5/10) and a path to 10 written (section 10).** Run 7 (P3.7): migrate PASS 0 failed, DMS clean (12,240 / 0 blocked), complete check on the new code running (25 files deployed 23:48 NPT: rendered Slides, comments as authors, shared-drive reset, retry by class, one log per run, campaign executor).
 - 21 Nov 2026, ~12:35 UTC box (Opus): **P3.7 run 1 stopped (incident #208); the read-only route's losses found and fixed; run 2 started.**
   #208 was a 409 "conflict" on a new Doc upload (judy@): no file left, the cascade fell back to a Docs API rebuild (drops images).
   The per-user checks on this route read DIFFERENCES for most users: 106 Docs, 64 Sheets, 6 doubled comment threads, 1 time.
