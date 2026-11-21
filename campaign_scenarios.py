@@ -5,6 +5,10 @@ executes them; tests/test_campaign.py fails when a known error, a benchmark, a w
 no scenario -- that is what makes "every possible" checkable. `act`, `inject` and `expect` are the plan's
 words made structured; a Sonnet session refines each one when its group first runs live (P3.4).
 
+How a scenario ends (`expect`, from its known_issues entry): `fixed` (automatic: a row in issue_fix_log, or in
+item_retries for a run failure), `accepted` (in the parity gate's accepted list) or `listed` (the gate names it for
+a person). `act["body"]` may say "$user": the twin, or the fixture user when the scenario has a fixture.
+
 How a scenario is caused (`how`):
   seeded            the cohort's data makes it happen inside an ordinary run
   must_not_happen   a fixed defect: the scenario fails if the finding comes back
@@ -14,8 +18,8 @@ How a scenario is caused (`how`):
   failpoint         a failpoint (failpoints.py, P2.3) loses or kills at one call
   failure           a failure scenario of group `failures` causes it
   protected_source  a. is un-declared a sandbox for this one scenario
-  google            only Google decides when; tried live three times, else its unit test stands
-  unseedable        cannot be caused on a fresh tenant; `unit_test` names what covers it
+  google            only Google decides when; tried live three times (`act["tries"]`), else its unit test stands
+  unseedable        cannot be caused on a fresh tenant; `unit_test` names what covers it, `inject["cause"]` says why
   chat              opt-in, outside the score
 """
 from __future__ import annotations
@@ -54,7 +58,8 @@ _ERRORS = {
     "must_not_happen": ({
         "gmail.link_scan_fixed": "c04", "drive.sheets_scope": "c03", "drive.office_compared_as_native": "c01",
         "drive.comment_quote_escaped": "c03"}, "fixed defect: the finding must not return"),
-    "arm": ({"drive.native_structure": "c03", "drive.content_export": "c03"}, "download_upload arm only"),
+    "arm": ({"drive.native_structure": "a twin's Drive moved by download_upload",
+             "drive.content_export": "a twin's Drive moved by download_upload"}, "download_upload arm only"),
     "changed_after": ({
         "gmail.labels_missing": "change a label on b.", "gmail.unmapped_source": "new mail on a.",
         "drive.mtime": "touch a file on b.", "drive.content_changed": "edit a file on a.",
@@ -68,13 +73,15 @@ _ERRORS = {
     "failure": ({"run.disk_full": "F-disk", "run.db_rollback": "F-disk"}, "through a failure scenario"),
     "protected_source": ({"drive.source_changed": "lift a.'s sandbox declaration, edit a file mid-run"},
                          "needs a protected source"),
-    "google": ({"drive.read_refused": "verify beside a migration of one mailbox", "drive.unverified_transient":
-                "verify beside a migration", "gmail.rate_limited": "verify beside a migration of one mailbox"},
-               "Google decides when"),
-    "unseedable": ({"run.resource_key": "needs a link-shared file from before Google's 2021 change"},
+    # A full verify beside a delta of the same user (c03: the 20,000 x 120 Sheet; c10: 5,000 messages), three tries.
+    "google": ({"drive.read_refused": "c03", "drive.unverified_transient": "c03", "gmail.rate_limited": "c10",
+                "run.rate_limited": "c03"}, "Google decides when"),
+    "unseedable": ({"run.resource_key": "needs a link-shared file from before Google's 2021 change",
+                    "gmail.reset_leftover": "needs a reset, then a rerun (P3.5 runs 2 and 3 read it on the gate)"},
                    "likely unseedable"),
-    "chat": ({"chat.attributed": "c07", "chat.space_type": "c07", "chat.members": "c07", "chat.sender": "c07",
-              "chat.text": "c07", "chat.not_migrated": "a run with Chat off"}, "opt-in, outside the score"),
+    # not_migrated first: it needs c07's Chat still unmigrated, the rest migrate it.
+    "chat": ({"chat.not_migrated": "c07", "chat.attributed": "c07", "chat.space_type": "c07", "chat.members": "c07",
+              "chat.sender": "c07", "chat.text": "c07"}, "opt-in, outside the score"),
 }
 # What covers an unseedable or google-decided kind when it cannot be caused live.
 UNIT_TESTS = {
@@ -82,6 +89,8 @@ UNIT_TESTS = {
     "drive.read_refused": "tests/test_verify_sample.py",
     "drive.unverified_transient": "tests/test_verify_sample.py",
     "gmail.rate_limited": "tests/test_verify_gmail_quota.py",
+    "run.rate_limited": "tests/test_rate_limit_gets_time.py",
+    "gmail.reset_leftover": "tests/test_split_mail_duplicates.py",
 }
 
 
@@ -98,25 +107,84 @@ EVIDENCE = {
 SOURCE_PROBES = ("drive.sheet_too_large", "drive.embedded_images", "run.form_rebuild", "drive.group_grant", "gmail.no_message_id", "gmail.body_link_copy", "gmail.link_owner_not_migrated", "tasks.untitled", "drive.comments", "drive.shortcut_target", "run.malware_flag", "drive.comment_quote_escaped")
 
 
+def _ends(kid: str) -> str:
+    """How a finding of this kind must end, from its known_issues entry and the parity gate's accepted kinds."""
+    import known_issues
+    import parity_gate
+    entry = known_issues.BY_ID.get(kid) or known_issues.RUN_BY_ID[kid]
+    return "fixed" if entry[6] else "accepted" if kid in parity_gate.ACCEPTED_KINDS else "listed"
+
+
+def _migrate(**body) -> dict:
+    return {"path": "/api/v2/migrate/start", "body": {"users": ["$user"], **body}}
+
+
+_DRIVE = {"services": ["drive"]}
+_DU = _migrate(**_DRIVE, transfer_mode="download_upload")
+_VERIFY_DRIVE = {"verify_after": "drive"}      # a verify with repair once the run is over: where a fix is read from
+
+
+def _beside(service: str) -> dict:
+    """A delta over 90 days for the fixture user, a full verify started at the same moment, three tries."""
+    return {"path": "/api/v2/migrate/delta", "body": {"users": ["$user"], "services": [service], "days": 90},
+            "beside_verify": service, "tries": 3}
+
+
+def _check(service: str) -> dict:
+    return {"path": "/api/v2/one-to-one/run", "body": {"users": ["$user"], "services": [service], "limit": 0, "repair": False}}
+
+
+def _lost(point: str) -> dict:
+    return {"env": {"BITPORT_FAULT": f"{point}@1:lost"}}
+
+
+# kind -> (act, inject, more expect). A cause the driver cannot make (an `inject` that is only a "cause") reads
+# UNVERIFIED, "not automated yet", before any twin or run is spent: parent_folder, source_changed, ab_test_residue.
+_ACT = {
+    "drive.native_structure": (_DU, {}, _VERIFY_DRIVE), "drive.content_export": (_DU, {}, _VERIFY_DRIVE),
+    "drive.duplicate": (_migrate(**_DRIVE), _lost("drive.copy.landed"), _VERIFY_DRIVE),
+    "run.comment_prior_attempt": (_migrate(**_DRIVE), _lost("drive.comment.created"), {}),
+    "drive.parent_folder": (_migrate(**_DRIVE), {"cause": "two folders of one name and creation time on b., made before the run"},
+                            _VERIFY_DRIVE),
+    "drive.source_changed": (_migrate(**_DRIVE), {"cause": "restore a.'s protection (domain-guard/restore), edit a source "
+                                                         "file mid-run, declare the sandbox again (domain-guard/revoke)"}, {}),
+    "drive.ab_test_residue": (_check("drive"), {"cause": "the Benchmarks page's A/B on the twin (ab_transfer), which leaves "
+                                                         "grants to its throwaway accounts"}, {}),
+    "drive.read_refused": (_beside("drive"), {}, _VERIFY_DRIVE), "drive.unverified_transient": (_beside("drive"), {}, _VERIFY_DRIVE),
+    "run.rate_limited": (_beside("drive"), {}, _VERIFY_DRIVE), "gmail.rate_limited": (_beside("gmail"), {}, {"verify_after": "gmail"}),
+    "chat.not_migrated": (_check("chat"), {}, {}),
+    **{k: (_migrate(services=["chat"]), {}, {"verify_after": "chat"})
+       for k in ("chat.attributed", "chat.space_type", "chat.members", "chat.sender", "chat.text")},
+}
+# Kinds a failure scenario causes: this one reads what that one left on its twin (so that one runs first).
+_VIA_FAILURE = {"run.disk_full": "fail:F-disk", "run.db_rollback": "fail:F-disk"}
+
+
 def _errors() -> list:
     out = []
     for how, (ids, why) in _ERRORS.items():
         for kid, what in ids.items():
             group = "chat" if how == "chat" else "errors"
             expect = ({"finding_absent": kid, **({"needs_source": kid} if kid in SOURCE_PROBES else {})} if how == "must_not_happen"
-                      else {"finding_classified": kid, "ends_as": "its known_issues entry", "or_evidence": EVIDENCE.get(kid),
+                      else {"finding_classified": kid, "ends_as": _ends(kid), "or_evidence": EVIDENCE.get(kid),
                                                                  "or_source": kid if kid in SOURCE_PROBES else None}
-                      if how == "seeded" else {"finding_classified": kid, "ends_as": "its known_issues entry"})
+                      if how == "seeded" else {"finding_classified": kid, "ends_as": _ends(kid)})
+            end = _ends(kid)
             if how == "changed_after":
-                import known_issues
-                auto = {i[0] for i in known_issues.ISSUES if i[6]}
-                expect = {"finding_classified": kid, "ends_as": "its known_issues entry",
-                          "service": kid.split(".")[0], **({"fixed": kid} if kid in auto else {})}
+                expect = {"finding_classified": kid, "ends_as": end, "service": kid.split(".")[0],
+                          **({end: kid} if end != "listed" else {})}
+            act, inject, more = _ACT.get(kid, ({}, None, {}))
+            if kid in _ACT or kid in _VIA_FAILURE:
+                # a fixed defect must not return; every other kind is classified, then ends as its entry says
+                expect = ({"finding_absent": kid, "ends_as": end} if kid == "run.db_rollback"
+                          else {"finding_classified": kid, "ends_as": end, end: kid, **more})
             out.append(Scenario(
-                id=f"err:{kid}", group=group, title=f"{kid} ({why})", how=how,
+                id=f"err:{kid}", group=group, title=f"{kid} ({why})", how=how, act=act,
                 fixtures=(what,) if what in {f"c{n:02d}" for n in range(1, 11)} else (),
-                inject={"cause": what} if how in ("changed_after", "on_target", "failpoint", "failure",
-                                                  "protected_source", "google", "unseedable") else {},
+                inject=inject if inject is not None else (
+                    {"failure": _VIA_FAILURE[kid]} if kid in _VIA_FAILURE else
+                    {"cause": what} if how in ("changed_after", "on_target", "failpoint", "failure",
+                                               "protected_source", "unseedable") else {}),
                 expect=expect, unit_test=UNIT_TESTS.get(kid, "")))
     return out
 
