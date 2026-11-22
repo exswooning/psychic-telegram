@@ -575,6 +575,12 @@ rebuilt layouts (its slides render identical).
 
 ## 11. State (newest first)
 
+- 22 Nov 2026, ~5:10 pm NPT (Opus): **Run 14: F-stop recorded STOPPED (rc 130), restart clean; then #258, fixed, restarted 11:22Z.**
+  One Stop at 2,000 mapped (10:33Z) read STOPPED, not crashed; the restart went on. At 11:13Z the router's DNS dropped ~2 min and
+  55 Drive items failed in 0.1 s each: httplib2's ServerNotFoundError is not a gaierror, so the network-down ride-out never saw
+  it (pass retry then left them "explained"). Added to `resilience.TRANSPORT_ERRORS`, test, deployed; stopped by the live-run
+  rule and restarted (the re-walk retries what failed). Operator, 22 Nov: dharan credentials coming; route ready after run 14.
+
 - 22 Nov 2026, ~3:20 pm NPT (Opus): **P3.7 run 13: PARITY 41/41 on a complete check. Run 14 (F-stop) started 09:35Z.**
   The 6 users re-verified IDENTICAL (0 extras); remainders as named (1 encrypted mail, 3 unexportable, 1 deleted grantee).
   The complete check's long pole was c03's "big sheet" (20,000 x 120, no values): 480 paced 10,000-cell reads, a 300 s budget
