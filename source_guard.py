@@ -232,7 +232,9 @@ def check(auth, settings, db, client_id: str, read=read_user, audit_fn=audit, ex
     if not snap:
         return {"verdict": "NO_SNAPSHOT"}
     last = db.conn.execute("SELECT MAX(checked_at) FROM source_guard_checks").fetchone()[0]
-    since = last or min(r[0] for r in db.conn.execute("SELECT taken_at FROM source_guard_snapshot"))
+    taken = min(r[0] for r in db.conn.execute("SELECT taken_at FROM source_guard_snapshot"))
+    # Never before the baseline: a check from before a re-taken baseline would replay what the baseline holds.
+    since = max(last, taken, key=lambda t: str(t).replace(".000Z", "Z")) if last else taken
     changes, unread = [], []
     for u, before in snap.items():
         after = read(auth, settings, u)

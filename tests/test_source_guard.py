@@ -213,3 +213,32 @@ def test_a_seed_on_the_source_is_never_stopped_by_the_guard(monkeypatch, tmp_pat
         "byBitport": [{"event": "create", "item": "Policies tracker 001", "app": "drive"}], "byGoogle": []})
     assert api_server._source_guard_fast(5) == [] and stops == []
     assert api_server._source_guard_one(5) is None and stops == []
+
+
+def test_the_fast_watch_never_reads_from_before_the_baseline(monkeypatch, tmp_path):
+    """Incident #263 (22 Nov 2026): the read position a seed left was replayed when the next job started --
+    24 of the seed's own writes, all before the re-taken baseline, stopped a reset of b."""
+    import json
+    import api_server
+    import source_guard
+    ledger = tmp_path / "m.db"
+    ledger.write_text("")
+    key = tmp_path / "k.json"
+    key.write_text(json.dumps({"client_id": "42"}))
+    monkeypatch.setattr(api_server, "_account_db_path", lambda aid: str(ledger))
+    monkeypatch.setattr(api_server, "_account_jobs", lambda aid: [{"pid": 77, "job_name": "reset target"}])
+
+    class St:
+        source_domain, source_sa_key = "a.example", str(key)
+    monkeypatch.setattr("config.Settings", lambda account_id=None: St())
+
+    class D:
+        def __init__(self, path): pass
+        def close(self): pass
+    monkeypatch.setattr("db.MigrationDB", D)
+    monkeypatch.setattr(source_guard, "snapshot_taken", lambda d: "2026-11-22T19:41:50Z")
+    monkeypatch.setitem(api_server._GUARD_AUDIT_SINCE, 5, "2026-11-22T19:16:00.000Z")
+    seen = []
+    monkeypatch.setattr(source_guard, "audit", lambda st, since, cid: seen.append(since) or {"byBitport": [], "byGoogle": []})
+    api_server._source_guard_fast(5)
+    assert seen == ["2026-11-22T19:41:50Z"]

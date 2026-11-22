@@ -5869,6 +5869,12 @@ def _account_jobs(aid) -> list[dict]:
 SOURCE_WRITERS = frozenset({"seed", "wipe source"})
 
 
+def _audit_instant(stamp: str):
+    from datetime import datetime, timezone
+    t = datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
+    return t if t.tzinfo else t.replace(tzinfo=timezone.utc)
+
+
 def _source_writer_running(aid) -> bool:
     try:
         return any(r.get("job_name") in SOURCE_WRITERS for r in _account_jobs(aid))
@@ -5915,7 +5921,8 @@ def _source_guard_fast(aid) -> list[dict]:
         return []
     d = MigrationDB(path)
     try:
-        if not source_guard.snapshot_taken(d):
+        taken = source_guard.snapshot_taken(d)
+        if not taken:
             return []
     finally:
         d.close()
@@ -5927,6 +5934,9 @@ def _source_guard_fast(aid) -> list[dict]:
         _GUARD_AUDIT_SINCE[aid] = now      # the writer's own changes are never read back as Bitport's
         return []
     since = _GUARD_AUDIT_SINCE.get(aid) or time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(time.time() - 600))
+    # Never before the baseline: what happened earlier is in it. The read position left by a seed was replayed when
+    # the next job started -- 24 of the seed's own writes stopped a reset of b. (incident #263, 22 Nov 2026).
+    since = max(since, taken, key=_audit_instant)
     found = source_guard.audit(st, since, client_id)
     _GUARD_AUDIT_SINCE[aid] = now
     hits = [r for r in found.get("byBitport") or [] if r.get("app") != "admin"] + (found.get("byGoogle") or [])
