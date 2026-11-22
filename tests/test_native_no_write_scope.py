@@ -220,17 +220,3 @@ class TestTheBugsFoundByReadingItBack:
                     and not s.endswith("directory.group.readonly")]
         assert writable == [], writable
 
-
-def test_zipped_html_is_tried_before_plain_text_and_imported_as_html(tmp_path):
-    """P3.7 run 10: text/html is capped at 10 MB like every other export, so the >10 MB Doc
-    fell to plain text; Google's zipped HTML export is not capped."""
-    import zipfile
-    import native_api as na
-    from drive_engine import DriveMigrator
-    mimes = [m for m, _e, _n in na.alt_formats(na.DOC)]
-    assert mimes.index("application/zip") < mimes.index("text/plain")
-    z = tmp_path / "x.zip"
-    with zipfile.ZipFile(z, "w") as f:
-        f.writestr("images/a.png", b"png")
-        f.writestr("Doc.html", b"<p>hi</p>")
-    assert open(DriveMigrator._html_from_zip(str(z)), "rb").read() == b"<p>hi</p>"

@@ -65,8 +65,6 @@ ALT_EXPORTS: dict[str, list[tuple[str, str, str]]] = {
          "RTF -- keeps formatting and tables, drops comments and some layout"),
         ("text/html", ".html",
          "HTML -- keeps text, headings, tables and links; drops page layout"),
-        ("application/zip", ".html",
-         "HTML (zipped export, not capped at 10 MB) -- keeps text, headings, tables and links"),
         ("text/plain", ".txt",
          "PLAIN TEXT -- content only. All formatting, tables and images lost"),
     ],

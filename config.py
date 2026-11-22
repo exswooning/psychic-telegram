@@ -250,16 +250,18 @@ CHAT_MEMBERSHIP_READONLY_SCOPE = (
 CHAT_IMPORT_SCOPE = "https://www.googleapis.com/auth/chat.import"
 
 
-def exact_copy_flag(account_id) -> str:
+def read_only_flag(account_id) -> str:
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "accounts",
-                        str(account_id), "government-exact-copy")
+                        str(account_id), "government-read-only")
 
 
 def government_exact_copy(account_id) -> bool:
-    """Has the operator switched on server-side (exact) copies from this migration's
-    government source? Live, dharan.gov.np: download_upload rebuilt a Slides deck through
-    .pptx and Google dropped its one soft line break. Off unless the file is there."""
-    return account_id is not None and os.path.isfile(exact_copy_flag(account_id))
+    """May this migration's government source be copied server-side (exact copies)? On
+    unless the operator switched it off (operator, 22 Nov 2026: do not force
+    download_upload; the default route is the fastest). Live, dharan.gov.np:
+    download_upload rebuilt a Slides deck through .pptx and Google dropped its one soft
+    line break. A launch that asks for download_upload still gets it, read-only."""
+    return account_id is None or not os.path.isfile(read_only_flag(account_id))
 
 
 def source_scopes(settings: "Settings") -> list[str]:
@@ -1001,19 +1003,22 @@ class Settings:
         if self.transfer_mode == "adaptive" and self.adaptive_sandbox_only and (
                 self.source_domain.lower(), self.target_domain.lower()) != ("s.sarafgloabalexim.com", "t.sarafgloabalexim.com"):
             raise ValueError("Adaptive transfer is restricted to the explicit s. to t. sandbox pair")
-        # A government source is only ever READ, and Google enforces it: no Drive write
-        # scope is asked for (server-side copy needs one), so every file goes by
-        # download_upload whatever a launch asked for. Bitport's own guard
+        # A government source is only ever READ. A server-side copy (the default since
+        # 22 Nov 2026) asks for `drive` and auth.ReadOnlyDrive holds the source to reads
+        # plus files.copy into staging; a launch that asks for download_upload asks for no
+        # Drive write scope at all, and Google enforces it. Bitport's own guard
         # (auth.ReadOnlyDrive) stays, but no longer has to be the thing that holds.
         # The one exception is the operator's own switch (government_exact_copy): a
         # server-side copy, so the grant holds `drive` and auth.ReadOnlyDrive is what
         # holds the source to reads plus that one copy. Only server_side: move and
         # link_flip still fall to download_upload.
         import domain_guard
-        if domain_guard.is_government(self.source_domain or "") and not (
-                self.transfer_mode == "server_side" and government_exact_copy(self.account_id)):
-            self.source_read_only = True
-            self.transfer_mode = "download_upload"
+        if domain_guard.is_government(self.source_domain or ""):
+            if self.transfer_mode in ("move", "link_flip") and government_exact_copy(self.account_id):
+                self.transfer_mode = "server_side"     # both write to the source; a copy does not
+            if not (self.transfer_mode == "server_side" and government_exact_copy(self.account_id)):
+                self.source_read_only = True
+                self.transfer_mode = "download_upload"
         # An unrecognised transfer mode used to be accepted and silently behave
         # as download_upload, because every check was `== "server_side"`. So a
         # typo, or a mode that is documented but not yet wired, quietly

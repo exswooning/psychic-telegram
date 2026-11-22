@@ -2528,9 +2528,6 @@ class DriveMigrator:
                 if "exportSizeLimitExceeded" not in str(exc):
                     raise
                 continue          # too big in this format; try a smaller one
-            if mime == "application/zip":
-                path, mime = self._html_from_zip(path), "text/html"
-                size = os.path.getsize(path)
             if size <= self.settings.export_size_limit:
                 return path, size, mime, note
             # Google built it but it is over the ceiling -- the same
@@ -2540,17 +2537,6 @@ class DriveMigrator:
             log.debug("[%s] every export format exceeded the ceiling for %s",
                       self.source_user, item.get("name"))
         return None
-
-    @staticmethod
-    def _html_from_zip(path: str) -> str:
-        """Google's zipped HTML export (the only Doc export not capped at 10 MB, P3.7 run 10): the
-        page itself, written over the zip, to be imported as text/html."""
-        import zipfile
-        with zipfile.ZipFile(path) as z:
-            html = z.read(next(n for n in z.namelist() if n.lower().endswith(".html")))
-        with open(path, "wb") as fh:
-            fh.write(html)
-        return path
 
     def _sync_native(self, item: dict, tgt_parent: str) -> None:
         export_mime, _ext = EXPORT_MIME_MAP.get(item["mimeType"], (None, None))

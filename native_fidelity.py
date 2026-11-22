@@ -285,30 +285,32 @@ def compare_native(auth, source_user, target_user, sid, tid, mime, lookup, fetch
     ), scope
 
 
-def _render_pdf(data: bytes) -> list:
-    """A PDF's pages as images (PyMuPDF). Kept apart so a test can stand in for the renderer: PyMuPDF's native
+def _render_pdf(data: bytes):
+    """A PDF's pages as images (PyMuPDF), ONE AT A TIME: all 1,163 pages of the Oversized Doc held 4.8 GB per side
+    and drained P3.7 runs 10 and 11 on memory. Kept apart so a test can stand in for the renderer: PyMuPDF's native
     library segfaults inside pytest on macOS / Python 3.14 (22 Nov 2026), never in the verify's own process."""
     import io
     import pymupdf
     from PIL import Image
-    doc = pymupdf.open(stream=io.BytesIO(data), filetype="pdf")
-    pages = [p.get_pixmap(dpi=80) for p in doc]
-    return [Image.frombytes("RGB", (p.width, p.height), p.samples) for p in pages]
+    for p in pymupdf.open(stream=io.BytesIO(data), filetype="pdf"):
+        pm = p.get_pixmap(dpi=80)
+        yield Image.frombytes("RGB", (pm.width, pm.height), pm.samples)
 
 
 def _doc_pages_render_differently(auth, source_user, target_user, sid, tid):
-    """Page numbers whose rendering differs ([] when none), or None when the pages cannot be rendered here: no PDF
-    renderer installed (PyMuPDF), or Google will not export the Doc as PDF (over its export ceiling)."""
+    """Page numbers whose rendering differs ([] when none; a page only one side has differs), or None when the pages
+    cannot be rendered here: no PDF renderer installed (PyMuPDF), or Google will not export the Doc as PDF (over
+    its export ceiling)."""
+    from itertools import zip_longest
     try:
         from PIL import ImageChops
         a, b = (_render_pdf(d.files().export(fileId=i, mimeType="application/pdf").execute())
                 for d, i in ((auth.source_drive(source_user), sid), (auth.target_drive(target_user), tid)))
+        return [n for n, (ia, ib) in enumerate(zip_longest(a, b), 1)
+                if ia is None or ib is None or ia.size != ib.size
+                or ImageChops.difference(ia, ib).convert("L").point(lambda v: 255 if v > 16 else 0).getbbox()]
     except Exception:      # noqa: BLE001 - not renderable here: the structure verdict stands
         return None
-    if len(a) != len(b):
-        return list(range(1, max(len(a), len(b)) + 1))
-    return [n + 1 for n, (ia, ib) in enumerate(zip(a, b))
-            if ia.size != ib.size or ImageChops.difference(ia, ib).convert("L").point(lambda v: 255 if v > 16 else 0).getbbox()]
 
 
 def _slides_render_differently(auth, source_user, target_user, sid, tid, source, target, fetch, pace=lambda: None):

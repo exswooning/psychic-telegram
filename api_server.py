@@ -1474,8 +1474,8 @@ async def exact_copy_set(body: ExactCopy, op: Operator = Depends(operator)):
     def _go() -> tuple[bool, str]:
         if not domain_guard.is_government(src):
             return False, f"{src or 'this source'} is not a government domain; nothing to switch"
-        path = config.exact_copy_flag(aid)
-        if body.on:
+        path = config.read_only_flag(aid)        # exact copies are on unless this file is there
+        if not body.on:
             os.makedirs(os.path.dirname(path), exist_ok=True)
             with open(path, "w", encoding="utf-8") as fh:
                 fh.write(f"{op.name} {datetime.now(_dt.timezone.utc).isoformat()}\n")
