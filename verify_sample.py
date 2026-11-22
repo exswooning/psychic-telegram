@@ -70,7 +70,20 @@ DRIVE_METADATA_BATCH_SIZE = 25
 # Metadata can run in parallel, but each content read may materialise a large
 # native document plus canonical copies and embedded images. Share this slot
 # across ALL user workers, including the separate native-link read path.
-_CONTENT_SLOT = threading.BoundedSemaphore(1)
+def _content_slots() -> int:
+    """VERIFY_CONTENT_SLOTS pins it; otherwise one per 2 GB available (a large comparison peaked
+    near 2 GB, info@ 14 Nov), 1 to 4. One slot for the whole box made P3.7 run 8's verify serial:
+    c01's Drive took 64 minutes with the CPU idle, 41 users would have taken most of a day."""
+    if os.getenv("VERIFY_CONTENT_SLOTS"):
+        return max(1, int(os.environ["VERIFY_CONTENT_SLOTS"]))
+    try:
+        import resources
+        return max(1, min(4, int(resources.probe().ram_usable_gb // 2)))
+    except Exception:      # noqa: BLE001 - unknown memory: the old safe value
+        return 1
+
+
+_CONTENT_SLOT = threading.BoundedSemaphore(_content_slots())
 
 
 def _glibc():
