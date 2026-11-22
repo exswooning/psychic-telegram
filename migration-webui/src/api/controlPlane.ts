@@ -2011,6 +2011,20 @@ export interface ParityGate {
 export const fetchParityGate = (accountId?: number) =>
   cpFetch<ParityGate>(`/api/v2/parity-gate${accountId ? `?account_id=${accountId}` : ''}`)
 
+/** One migrate run's phases in order (`GET /api/v2/runs/{id}/phases`): a restart resumes at `resumeFrom`. */
+export type PhaseState = 'PENDING' | 'RUNNING' | 'DONE' | 'STOPPED' | 'FAILED'
+export interface RunPhase {
+  seq: number; name: string; kind: 'pass' | 'follow_on'; state: PhaseState; attempts: number
+  startedAt: string | null; endedAt: string | null; note: string | null
+}
+export interface RunPhases {
+  accountId: number
+  record: { run: string; startedAt: string; pid: number | null; resumes: number; resumedFrom: string | null
+            state: PhaseState; phases: RunPhase[]; resumeFrom: string | null } | null
+}
+
+export const fetchRunPhases = (accountId: number) => cpFetch<RunPhases>(`/api/v2/runs/${accountId}/phases`)
+
 export const fetchKnownIssues = (accountId?: number) =>
   cpFetch<KnownIssues>(`/api/v2/known-issues${accountId ? `?account_id=${accountId}` : ''}`)
 

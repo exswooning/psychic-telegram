@@ -123,6 +123,8 @@ try_rsync() {
 #    exists in production -- were copied into the live directory.
 #  * node_modules/ is a build dependency of the frontend, which is built HERE
 #    and shipped as dist/. It was 432 MB of dead weight on a small disk.
+#  * .claude/ holds agent worktrees (whole checkouts): a 22 Nov dry run would have shipped 9,197
+#    of their files into the live directory. *.history.jsonl is local console history.
 SRC_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # Ship only a tree the quick gate passed (gate.sh records it in .gate-passed): the 13 Nov lint failure reached
@@ -174,6 +176,7 @@ SYNC_EXCLUDES=(
   --exclude 'keys/' --exclude 'oauth/' --exclude 'env.sh'
   --exclude 'run_state.json' --exclude 'dms_metrics.json' --exclude '.gate-passed'
   --exclude 'logs/' --exclude 'node_modules/'
+  --exclude '.claude/' --exclude '*.history.jsonl'
   --exclude '._*' --exclude '.DS_Store'
 )
 

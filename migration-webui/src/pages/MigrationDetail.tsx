@@ -29,6 +29,7 @@ import RunReports from '@/components/RunReports'
 import QuickVerification from '@/components/QuickVerification'
 import OneToOneSummary from '@/components/OneToOneSummary'
 import ParityGateCard from '@/components/ParityGateCard'
+import RunPhasesCard from '@/components/RunPhasesCard'
 import SharingPanel from '@/components/SharingPanel'
 import CopySafetyCard from '@/components/CopySafetyCard'
 import { itemTypeLabel } from '@/utils/itemTypeLabel'
@@ -382,6 +383,7 @@ export const MigrationDetail: React.FC = () => {
           {/* Every user's own one-to-one verdict, rolled up -- distinct from the quick
               migration's single self-check above: this fills in continuously as each
               user's migration finishes. Hides itself until there is something to say. */}
+          <RunPhasesCard accountId={Number(accountId)} />
           <ParityGateCard accountId={Number(accountId)} />
           <OneToOneSummary accountId={Number(accountId)} />
           {Number.isFinite(id) && id > 0 && <SharingPanel accountId={id} />}
