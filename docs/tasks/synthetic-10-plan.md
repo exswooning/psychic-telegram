@@ -575,6 +575,11 @@ rebuilt layouts (its slides render identical).
 
 ## 11. State (newest first)
 
+- 22 Nov 2026, ~2:45 pm NPT (Opus): **Run 13 gate: NOT_PARITY 35/41, only `drive.extras` -- my own probe leftovers.**
+  DMS 12,484/12,484, 0 failed. The 6 users' extras were 49 "bitport probe fmt2 (delete)" Docs a format probe of mine left on
+  b. on 21 Nov (its delete was skipped by an error); not the migration. Deleted (each checked: name, made 21 Nov), Drive
+  re-verified for the 6, gate re-run. DMS time estimate + run.dns / run.google_unavailable deployed 08:55Z.
+
 - 22 Nov 2026, ~12:35 NPT (Opus): **P3.7 run 13 (dharan's route, now server-side): migrate PASS, 0 failed, 62 min.**
   41/41 users, 5,002 files server-side, 2 Apps Script by download, 1 Form rebuilt; the one Sheets 503 (incident #255) cleared by
   the automatic repair. Staging drives all deleted (b. holds only the 3 migrated shared drives). Source guard CLEAN, nothing by
