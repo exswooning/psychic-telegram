@@ -15,8 +15,11 @@ real government tenant, never a sandbox; a. is a sandbox. **Nothing on dharan ma
    are refused before a run (dharan on 24 Oct: 16 of 16 refused).
 2. **Bitport's own source writers refuse dharan.** `auth.source_drive(writable=True)` calls
    `domain_guard.require_not_source`, which a government domain can never pass. Server-side
-   copy, move, link-flip and exact copies all need write access, so **Drive moves by
-   download-and-upload**. Your standing "Drive: server-side copy" rule can't apply here: a
+   copy, move, link-flip and exact copies all need write access. **Since 22 Nov 2026
+   (operator) the default is an exact server-side copy** (Docs, Sheets, Slides, Drawings and
+   binaries; Forms rebuilt, Form-response Sheets and Apps Script by download), which needs
+   dharan's admin to add Drive write to the grant; download-and-upload stays available,
+   read-only, when a launch asks for it or the operator switches exact copies off. Your standing "Drive: server-side copy" rule can't apply here: a
    server-side copy is what left the 12 copies on dharan in October. A new account has no
    `government-exact-copy` flag.
 3. **Nothing lands in a dharan mailbox or Drive.** Drive shares are silent, and a share to a

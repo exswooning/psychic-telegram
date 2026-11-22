@@ -573,6 +573,15 @@ rebuilt layouts (its slides render identical).
 
 ## 11. State (newest first)
 
+- 22 Nov 2026, ~11:25 NPT (Opus): **Runs 9-11 stopped by the live-run rule, each fixed; run 12 started 11:22.**
+  Run 9: no image-free Doc was queued for its link repoint (has_drive_ref reads the same split RTF); every imported native is
+  now checked in place. Run 10: the >10 MB Doc went over as plain text (every rich export of it is capped -- zip, HTML, PDF,
+  EPUB, Markdown all refused; only text/plain passes: a known limit of download_upload, none of server-side); the style
+  realign read whole Docs (masked now). Run 11: the rendered-page check held every page (Oversized Doc: 1,163 pages, 4.8 GB a
+  side) and the memory watchdog drained the run; it streams one page at a time now. Operator: a government source is no longer
+  forced to download_upload -- exact (server-side) copies by default, download_upload when asked, the default route is the
+  fastest. P3.7 goes on by download_upload (dharan's read-only option); P3.5 rehearses the server-side default.
+
 - 22 Nov 2026, ~08:45 NPT (Opus): **P3.7 run 8 stopped by the live-run rule at its check; fixed; run 9 started 08:25.**
   Before it: three stops fixed -- the source guard read a Drive search (`files.list` with a query) as a change (190ecc1); the
   wrapper's old deploy line rolled `reset_target` back (removed); a target reset deleted shared drives the ledger still mapped,

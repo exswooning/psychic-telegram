@@ -3,8 +3,8 @@ import { Alert, Box, Button, Chip, Stack, Typography } from '@mui/material'
 import { ExactCopy, fetchExactCopy, setExactCopy } from '@/api/controlPlane'
 import ReasonCodeDialog from './ReasonCodeDialog'
 
-/** A government source is copied by download and upload unless the operator switches
- *  exact (server-side) copies on. The grant only changes when the source is set up again. */
+/** A government source is copied exactly (server-side) unless the operator switches exact
+ *  copies off (since 22 Nov 2026). The grant only changes when the source is set up again. */
 const GovExactCopy: React.FC = () => {
   const [state, setState] = useState<ExactCopy | null>(null)
   const [asking, setAsking] = useState(false)
