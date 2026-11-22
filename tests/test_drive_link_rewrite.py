@@ -136,6 +136,14 @@ class TestTheEngineRunsItAtTheRightTime:
         assert "_pending_link_rewrites.append" in src
         assert "rewrite_zip" not in src
 
+    def test_an_imported_native_is_repointed_in_place(self):
+        """Run 8: Google's RTF export splits a plain-text URL into one run per word,
+        so the export-and-reimport rewrite found nothing in every image-free Doc.
+        An imported native goes to the in-place route a server-side copy uses."""
+        src = self._src("_sync_native")
+        assert "_pending_native.append((item, tgt_id))" in src
+        assert "mark_links_pending" in src
+
     def test_it_runs_after_the_pool_and_the_shortcuts(self):
         """Both can still add mappings; a rewrite is only correct when no
         more are coming."""

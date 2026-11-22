@@ -2647,7 +2647,15 @@ class DriveMigrator:
             # that has not migrated yet -- a Sheet's IMPORTRANGE pointing at
             # next week's folder is ordinary -- so the mapping it needs does
             # not exist until the whole tree is done.
-            self._pending_link_rewrites.append((item, tgt_id, export_mime))
+            if item["mimeType"] in _NATIVE_KIND:
+                # The import is a native copy: repoint in place, as for a server-side
+                # copy. Google's RTF export splits a plain-text URL into one run per
+                # word (run 8: "https", "docs", ...), so no byte pattern finds it,
+                # and a second import would lose the realigned styles again.
+                self._pending_native.append((item, tgt_id))
+                self.db.mark_links_pending(self.source_user, item["id"])
+            else:
+                self._pending_link_rewrites.append((item, tgt_id, export_mime))
         if _NATIVE_KIND.get(item["mimeType"]) in ("docs", "sheets"):
             needs_restore = self._after_round_trip(item, tgt_id) or needs_restore
         self._finish_item(item, tgt_id, force_mtime_restore=needs_restore)
