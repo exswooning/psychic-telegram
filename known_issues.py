@@ -407,6 +407,14 @@ def users_for(conn, issue: str) -> list[dict]:
 # from dharan.gov.np -> s. (2026-10-25), where all 194 failures read "not yet classified".
 # id, item types (None = any), matches(error text), title, cause, fix, auto
 RUN_KINDS = [
+    ("run.dns", None,
+     lambda t: "Unable to find the server" in t or "Name or service not known" in t
+     or "Temporary failure in name resolution" in t,
+     "The server could not look up Google's address for a moment",
+     "A DNS lookup failed on this server's Wi-Fi for longer than one call's retries (P3.7 run 11, a. -> b., "
+     "22 Nov 2026: one link repoint, 'Unable to find the server at docs.googleapis.com').",
+     "Nothing was written. Repair re-runs a FAILED link repoint (repair.pending_share_users) and re-copies a "
+     "FAILED file (repair.retry_drive_stragglers).", True),
     ("run.backend_500", ("file", "folder", "shortcut"),
      lambda t: "exhausted" in t and "HTTP 500" in t and "internalError" in t,
      "Google's backend failed an upload repeatedly",
