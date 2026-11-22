@@ -582,6 +582,11 @@ rebuilt layouts (its slides render identical).
 
 ## 11. State (newest first)
 
+- 23 Nov 2026, ~4:25 am NPT (Opus): **Run 15 stopped a fourth time (#266), a guard defect; fixed, deployed, restarted
+  22:35Z as 15v.** The full check read my 21:45:15.87 write, which Google logged at 21:45:16.062, against a baseline kept
+  to the second (21:45:16). The audit log is now read from 3 s after the baseline (`source_guard.audit_floor`, both
+  checks, test). Deployed with the reset Stop fix and the seeder's star and description.
+
 - 23 Nov 2026, ~3:50 am NPT (Opus): **Run 15 stopped a third time (#265), by my own write; restarted 21:58Z as 15w.**
   I starred and described c03's file on a. while the reset of b. ran, then asked for a baseline: it counts in the
   background, and the guard's fast watch read the write against the old one 40 s later. The guard was right. Rule: change
