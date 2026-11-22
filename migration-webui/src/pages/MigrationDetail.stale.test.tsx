@@ -6,6 +6,7 @@ const fetchMigrationDetail = vi.fn()
 
 vi.mock('@/components/RunReports', () => ({ default: () => null }))
 vi.mock('@/components/SharingPanel', () => ({ default: () => null }))
+vi.mock('@/components/RunPhasesCard', () => ({ default: () => null }))
 vi.mock('@/components/QuickVerification', () => ({ default: () => null }))
 vi.mock('@/components/CopySafetyCard', () => ({ default: () => null }))
 vi.mock('@/components/ParityGateCard', () => ({ default: () => null }))

@@ -5816,6 +5816,8 @@ def _source_guard_one(aid, force: bool = False) -> dict | None:
     path = _account_db_path(aid)
     if not path or not os.path.isfile(path):
         return None
+    if _source_writer_running(aid):
+        return None
     st = Settings(account_id=aid)
     # Every protected source -- and any source an operator took a baseline of (a
     # declared sandbox under a server-side test is watched the same way).
@@ -5859,6 +5861,19 @@ _GUARD_AUDIT_SINCE: dict = {}   # account -> RFC3339 the fast watch has read up 
 
 def _account_jobs(aid) -> list[dict]:
     return [r for r in job_admission.list_active() if r.get("account_id") == aid]
+
+
+# Jobs that write to the source on purpose. Only a declared sandbox can be seeded or wiped (domain_guard), so while
+# one runs the guard stops nothing: a reseed of a. was stopped 90 s in by the guard armed for the dharan rehearsal
+# (22 Nov 2026). Retake the baseline before the next migration.
+SOURCE_WRITERS = frozenset({"seed", "wipe source"})
+
+
+def _source_writer_running(aid) -> bool:
+    try:
+        return any(r.get("job_name") in SOURCE_WRITERS for r in _account_jobs(aid))
+    except Exception:      # noqa: BLE001 - cannot tell: keep guarding
+        return False
 
 
 def _stop_account_jobs(aid, why: str) -> int:
@@ -5908,6 +5923,9 @@ def _source_guard_fast(aid) -> list[dict]:
     with open(st.source_sa_key, encoding="utf-8") as fh:
         client_id = json.load(fh).get("client_id")
     now = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime())
+    if _source_writer_running(aid):
+        _GUARD_AUDIT_SINCE[aid] = now      # the writer's own changes are never read back as Bitport's
+        return []
     since = _GUARD_AUDIT_SINCE.get(aid) or time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(time.time() - 600))
     found = source_guard.audit(st, since, client_id)
     _GUARD_AUDIT_SINCE[aid] = now

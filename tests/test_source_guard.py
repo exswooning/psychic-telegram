@@ -184,3 +184,32 @@ def test_a_search_by_this_tool_is_a_read_not_a_change():
            "admin": [], "calendar": []}
     out = G.audit(None, "since", "42", events=lambda app: log[app])
     assert [r["event"] for r in out["byBitport"]] == ["edit"]
+
+
+def test_a_seed_on_the_source_is_never_stopped_by_the_guard(monkeypatch, tmp_path):
+    """22 Nov 2026: the guard armed for the dharan rehearsal stopped a reseed of the sandbox a. 90 s in."""
+    import json
+    import api_server
+    import source_guard
+    ledger = tmp_path / "m.db"
+    ledger.write_text("")
+    key = tmp_path / "k.json"
+    key.write_text(json.dumps({"client_id": "42"}))
+    monkeypatch.setattr(api_server, "_account_db_path", lambda aid: str(ledger))
+    monkeypatch.setattr(api_server, "_account_jobs", lambda aid: [{"pid": 77, "job_name": "seed"}])
+
+    class St:
+        source_domain, source_sa_key = "a.example", str(key)
+    monkeypatch.setattr("config.Settings", lambda account_id=None: St())
+
+    class D:
+        def __init__(self, path): pass
+        def close(self): pass
+    monkeypatch.setattr("db.MigrationDB", D)
+    monkeypatch.setattr(source_guard, "snapshot_taken", lambda d: "2026-10-19")
+    stops = []
+    monkeypatch.setattr(api_server, "_stop_account_jobs", lambda aid, why: stops.append(why) or 1)
+    monkeypatch.setattr(source_guard, "audit", lambda st, since, cid: {
+        "byBitport": [{"event": "create", "item": "Policies tracker 001", "app": "drive"}], "byGoogle": []})
+    assert api_server._source_guard_fast(5) == [] and stops == []
+    assert api_server._source_guard_one(5) is None and stops == []
