@@ -601,7 +601,12 @@ def mail_settings(ctx: Ctx) -> dict:
     scope reads as transient to the retry ladder and spent 7 minutes (18 Nov 2026)."""
     g, made, notes = ctx.seed.build_gmail_settings(ctx.settings, ctx.user), 0, []
     try:
-        if not ctx.retry(lambda: g.users().settings().filters().list(userId="me").execute())().get("filter"):
+        have = ctx.retry(lambda: g.users().settings().filters().list(userId="me").execute())().get("filter", [])
+        # A cleared mailbox loses its labels, and Gmail strips a deleted label from every filter that
+        # added it: such a filter does nothing, so make the pair again (23 Nov 2026, c05 after a. was cleared).
+        for f in [f for f in have if not f.get("action")]:
+            ctx.retry(lambda i=f["id"]: g.users().settings().filters().delete(userId="me", id=i).execute())()
+        if not [f for f in have if f.get("action")]:
             lab = ctx.gmail.users().labels()
             labels = ctx.retry(lambda: lab.list(userId="me").execute())().get("labels", [])
             lid = next((x["id"] for x in labels if x["name"] == "Filtered"), None) or ctx.retry(

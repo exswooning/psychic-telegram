@@ -249,6 +249,17 @@ def test_filter_user_label_actions_are_remapped(gmail_migrator, auth, settings):
     assert lid not in stored_action["addLabelIds"]
 
 
+def test_a_filter_with_no_action_is_skipped_not_failed(gmail_migrator, auth, db, settings):
+    """Gmail strips a deleted label's action and keeps the filter; the API refuses to create it (incident 264)."""
+    settings.migrate_gmail_settings = True
+    auth.source_gmail(SRC_USER).add_filter(criteria={"from": "c01@example.com"}, action={})
+    gmail_migrator.run()
+    assert auth.target_gmail(TGT_USER).filters == []
+    assert gmail_migrator.stats.get("filters_failed", 0) == 0
+    rows = db.conn.execute("select status from audit_log where item_type='filter'").fetchall()
+    assert [r[0] for r in rows] == ["SKIPPED_FILTER_NO_ACTION"]
+
+
 def test_filters_are_never_duplicated_on_resume(gmail_migrator, auth, db, settings):
     import gmail_engine
 

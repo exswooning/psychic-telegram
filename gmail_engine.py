@@ -1624,6 +1624,14 @@ class GmailMigrator:
                     action[passthrough] = src_action[passthrough]
 
             body = {"criteria": f.get("criteria", {}), "action": action}
+            if not any(action.values()):
+                # Gmail strips a filter's label action when that label is deleted and keeps the filter,
+                # which then does nothing -- and the API refuses to create one ("Filter doesn't have any
+                # actions", 400). Nothing to carry (a. -> b., 23 Nov 2026: c05's two, incident 264).
+                self.db.log_audit(self.source_user, fid, "filter", "SKIPPED_FILTER_NO_ACTION",
+                                  "the source filter has no action (its label was deleted); nothing to copy")
+                self.stats["filters_skipped"] += 1
+                continue
 
             if self.settings.dry_run:
                 log.info("[DRY RUN] would create filter %s", fid)
