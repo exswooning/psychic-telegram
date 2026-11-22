@@ -422,6 +422,13 @@ RUN_KINDS = [
      "files); nothing was created.",
      "The end-of-run repair copies the file again (repair.retry_drive_stragglers); run 7 ended with 0 "
      "failed items.", True),
+    ("run.google_unavailable", None,
+     lambda t: "exhausted" in t and any(f"HTTP {c}" in t for c in (500, 502, 503, 504)),
+     "A Google API stayed unavailable through every retry",
+     "Google answered 5xx (UNAVAILABLE, backend error) to every try of one call (P3.7 run 13, a. -> b., 22 Nov "
+     "2026: one Sheet's link check, Sheets API 503 six times); nothing was written.",
+     "Repair re-runs what failed: a link repoint (repair.pending_share_users), a file "
+     "(repair.retry_drive_stragglers).", True),
     ("run.coverage_incomplete", ("drive", "gmail", "calendar", "contacts", "tasks"),
      lambda t: "ID coverage is incomplete" in t,
      "A user's pass ended with its coverage check incomplete",
