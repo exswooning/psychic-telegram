@@ -170,7 +170,8 @@ class TestCrossReferences:
         finding the cross-references anyway."""
         _, m, _ = self._built()
         assert m["items"].get("xref_doc"), "no cross-references without edge cases"
-        assert m.get("xrefs") == 2
+        assert m.get("xrefs") == 3
+        assert m["items"].get("xref_table_doc"), "no Doc with a table and a hyperlink"
 
 
 class TestMemberFailuresAreNotSwallowed:

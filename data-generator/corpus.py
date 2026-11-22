@@ -776,8 +776,19 @@ class CorpusBuilder:
             media=self._media(body, "text/plain"))["id"]
         self._bump("docs")
         self.m["items"]["xref_doc"] = doc
+        # A real hyperlink (link text, not a bare URL) and a table: the round-trip
+        # routes keep or lose these differently from plain text, and the cohort
+        # had neither (P3.7 run 7).
+        html = (f"<p>Quarter review: see <a href=\"{link}\">the Q3 numbers</a>.</p>"
+                "<table border=\"1\"><tr><th>Region</th><th>Q3</th></tr>"
+                "<tr><td>East</td><td>1,204</td></tr><tr><td>West</td><td>987</td></tr></table>"
+                ).encode("utf-8")
+        self.m["items"]["xref_table_doc"] = self._create(
+            {"name": "Q3 review (table, hyperlink)", "parents": [folder], "mimeType": DOC_MIME},
+            media=self._media(html, "text/html"))["id"]
+        self._bump("docs")
         self.m.setdefault("xrefs", 0)
-        self.m["xrefs"] = 2
+        self.m["xrefs"] = 3
 
     def _build_personal(self, root: str) -> None:
         p = self.folder("Personal", root, days_ago=100)
