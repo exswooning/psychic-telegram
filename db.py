@@ -179,6 +179,30 @@ CREATE TABLE IF NOT EXISTS repair_runs (
     error       TEXT
 );
 
+-- One record per migrate run, listing its phases in order (run_phases.py): the passes, then the
+-- follow-ons the launch asked for. A phase is DONE only when it finished cleanly; a start after a
+-- stop or a kill reuses the record and resumes at the first phase not DONE (the per-user ledger
+-- evidence still decides what a pass actually does).
+CREATE TABLE IF NOT EXISTS run_records (
+    run          INTEGER PRIMARY KEY AUTOINCREMENT,
+    started_at   TEXT NOT NULL,
+    pid          INTEGER,
+    resumes      INTEGER NOT NULL DEFAULT 0,
+    resumed_from TEXT
+);
+CREATE TABLE IF NOT EXISTS run_phases (
+    run         INTEGER NOT NULL,
+    seq         INTEGER NOT NULL,
+    name        TEXT NOT NULL,
+    kind        TEXT NOT NULL,         -- 'pass' or 'follow_on'
+    state       TEXT NOT NULL DEFAULT 'PENDING',  -- PENDING RUNNING DONE STOPPED FAILED
+    attempts    INTEGER NOT NULL DEFAULT 0,
+    started_at  TEXT,
+    ended_at    TEXT,
+    note        TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (run, seq)
+);
+
 -- When repair.fix_modified_times last checked each user's copied Drive items. Per user, not
 -- per repair: "moved since the last repair" counted a user that repair skipped -- every user
 -- a stopped run left part-way -- as checked, so their drifted times were never looked at

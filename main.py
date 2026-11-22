@@ -60,6 +60,7 @@ from chat_engine import ChatMigrator
 from contacts_engine import ContactsMigrator
 import memtrace
 import progress
+import run_phases
 import user_claims
 import config
 from config import Settings
@@ -1339,6 +1340,82 @@ def demote_stale_running(db) -> int:
     return cur.rowcount
 
 
+def _phase_name(one) -> str:
+    return "+".join(sorted(one))
+
+
+def _open_run_record(db, settings, plan, recordable: bool):
+    """The run's phase record (run_phases.py): its passes, 'after_drive' behind Drive, and the
+    follow-ons the API asked for in RUN_FOLLOW_ONS. A sample, a chosen few, a delta or a dry run
+    keeps none -- such a run must not reopen, or be mistaken for, the whole tenant's record.
+    Returns the record's id, or None (a record is a report: it never stops a run)."""
+    if not recordable or getattr(settings, "dry_run", False):
+        return None
+    names = []
+    for one in plan:
+        names.append(_phase_name(one))
+        if "drive" in one:
+            names.append("after_drive")
+    try:
+        asked = os.getenv("RUN_FOLLOW_ONS")
+        follow = None if asked is None else [f for f in asked.split(",") if f]
+        return run_phases.begin(db, names, follow, os.getpid())
+    except Exception as exc:      # noqa: BLE001
+        log.warning("could not open the run's phase record: %s", exc)
+        return None
+
+
+def _phase_skippable(db, rec, name, settings, services, delta, only) -> bool:
+    """A pass the record calls DONE is skipped only if the ledger agrees: no user still needs
+    these services (one FAILED, interrupted or never-reached user brings the pass back)."""
+    if rec is None or not run_phases.is_done(db, rec, name):
+        return False
+    try:
+        return not _pass_user_pairs(db, settings, services, delta, only)
+    except Exception:      # noqa: BLE001 - cannot tell: run it
+        return False
+
+
+def _phase_run(db, rec, name, fn):
+    """fn() as one recorded phase: RUNNING, then DONE if it finished cleanly (not stopped or
+    paused, no FAILED user), else STOPPED or FAILED -- also when it raised."""
+    if rec is None:
+        return fn()
+    run_phases.set_state(db, rec, name, run_phases.RUNNING)
+    try:
+        out = fn()
+    except (SystemExit, KeyboardInterrupt):
+        run_phases.set_state(db, rec, name, run_phases.STOPPED)
+        raise
+    except BaseException as exc:
+        run_phases.set_state(db, rec, name, run_phases.FAILED, f"{type(exc).__name__}: {exc}"[:300])
+        raise
+    out = out if isinstance(out, list) else []
+    if SHUTDOWN.is_set() or MEMORY_PAUSE.is_set():
+        run_phases.set_state(db, rec, name, run_phases.STOPPED)
+    elif any(r.get("status") == "FAILED" for r in out):
+        run_phases.set_state(db, rec, name, run_phases.FAILED, "some users failed")
+    else:
+        run_phases.set_state(db, rec, name, run_phases.DONE)
+    return out
+
+
+def _after_drive(db, auth, settings, only, more_passes: bool) -> None:
+    """What follows a Drive pass, once its worker pool has drained."""
+    # Shared drives are tenant-level, so only a whole-tenant run owns them --
+    # and right after Drive, before mail, for the same reason the passes are
+    # ordered at all: a link in mail can name a shared-drive file too.
+    if not only and not getattr(settings, "sample_limit", None):
+        _migrate_shared_drives(db, auth, settings)
+    # This pass's own worker pool has now fully drained -- the one moment
+    # touching these users' state is provably safe, and the one moment
+    # that matters: the NEXT pass (mail/calendar) is about to read this
+    # pass's id_mapping to rewrite Drive links in it. See
+    # _repair_between_passes for why this is narrower than _auto_repair.
+    if more_passes:
+        _repair_between_passes(db, auth, settings)
+
+
 def _run_with_memory_pause(auth, db, settings, services, delta, delta_days,
                            only=None, passes=None, after=None) -> list[dict]:
     """run_batch under the memory watchdog; exits PAUSED if it fires.
@@ -1417,14 +1494,22 @@ def _run_with_memory_pause(auth, db, settings, services, delta, delta_days,
             if ("drive" in everything and "gmail" in everything and getattr(settings, "mail_only_with_links", False)
                     and not settings.dry_run and not getattr(settings, "sample_limit", None)):
                 _start_link_inventory(auth, db, settings, only)
+            rec = _open_run_record(db, settings, plan, whole_tenant and not delta)
             for i, one in enumerate(plan, 1):
+                pn = _phase_name(one)
                 if len(plan) > 1:
                     # Read back by the API to say which pass a live run is on. Carries
                     # the pid because the log is appended across runs, and a marker
                     # from the PREVIOUS run would otherwise read as this one's.
                     print(f"PASS {i}/{len(plan)} pid={os.getpid()}: {','.join(sorted(one))}",
                           flush=True)
-                pass_results = _run_pass(auth, db, settings, one, delta, delta_days, only)
+                skipped = _phase_skippable(db, rec, pn, settings, one, delta, only)
+                if skipped:
+                    print(f"PASS {i}/{len(plan)} already done: {','.join(sorted(one))}", flush=True)
+                    pass_results = []
+                else:
+                    pass_results = _phase_run(
+                        db, rec, pn, lambda: _run_pass(auth, db, settings, one, delta, delta_days, only))
                 failpoints.hit("run.pass_done")
                 results += pass_results
                 if "drive" in one and i < len(plan):
@@ -1449,15 +1534,9 @@ def _run_with_memory_pause(auth, db, settings, services, delta, delta_days,
                 # Shared drives are tenant-level, so only a whole-tenant run owns them --
                 # and right after Drive, before mail, for the same reason the passes are
                 # ordered at all: a link in mail can name a shared-drive file too.
-                if "drive" in one and not only and not getattr(settings, "sample_limit", None):
-                    _migrate_shared_drives(db, auth, settings)
-                # This pass's own worker pool has now fully drained -- the one moment
-                # touching these users' state is provably safe, and the one moment
-                # that matters: the NEXT pass (mail/calendar) is about to read this
-                # pass's id_mapping to rewrite Drive links in it. See
-                # _repair_between_passes for why this is narrower than _auto_repair.
-                if "drive" in one and i < len(plan):
-                    _repair_between_passes(db, auth, settings)
+                if "drive" in one and not (skipped and run_phases.is_done(db, rec, "after_drive")):
+                    _phase_run(db, rec, "after_drive",
+                               lambda: _after_drive(db, auth, settings, only, i < len(plan)))
             if "calendar" in everything and not settings.dry_run and not getattr(
                     settings, "sample_limit", None) and not (
                     MEMORY_PAUSE.is_set() or SHUTDOWN.is_set()):

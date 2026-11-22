@@ -2070,6 +2070,13 @@ def _start_admitted(argv: list[str], account_id: int | None, job_name: str,
     if why:
         return False, why
     out = _child_output(job_name, account_id)
+    if job_name == "migrate" and then:
+        # Told to the run so its record lists the follow-ons as PENDING even if this process dies first.
+        import run_phases
+        kinds = [run_phases.follow_on_name(k) for k in ([then] if isinstance(then, str) else then)]
+        env = {**(env if env is not None else os.environ), "RUN_FOLLOW_ONS": ",".join(k for k in kinds if k)}
+    if job_name in _PHASE_OF_JOB:
+        _note_phase(account_id, _PHASE_OF_JOB[job_name], "RUNNING")
     log_path = getattr(out, "name", None)
     try:
         log_start = out.tell()
@@ -2115,6 +2122,9 @@ def _start_admitted(argv: list[str], account_id: int | None, job_name: str,
         except Exception as exc:      # noqa: BLE001 - recording must never block the release
             print(f"could not record the exit of {job_name!r}: {exc}", flush=True)
         job_admission.release(account_id, job_name)
+        if job_name in _PHASE_OF_JOB:
+            _note_phase(account_id, _PHASE_OF_JOB[job_name], "DONE" if rc == 0 else
+                        "STOPPED" if rc in (-2, -9, -15) else "FAILED", f"exit {rc}")
         # A verification-triggered repair/recheck must get its chance to act
         # before the just-freed slot is handed to the next queued tenant job.
         # Other follow-ons keep the longstanding dispatch-first behavior.
@@ -2529,6 +2539,11 @@ def _close_orphaned_repairs() -> int:
                 closed += conn.execute(
                     "UPDATE repair_runs SET finished_at=strftime('%Y-%m-%dT%H:%M:%SZ','now'), "
                     "error='interrupted: the API restarted while it ran' WHERE finished_at IS NULL").rowcount
+                try:
+                    import run_phases
+                    run_phases.close_orphaned_repair(conn)
+                except _sq.OperationalError:      # a ledger from before run_phases
+                    pass
         except _sq.Error as exc:
             log.warning("could not close orphaned repairs for account %s: %s", aid, exc)
     if closed:
@@ -2559,6 +2574,7 @@ def _start_repair(account_id: int | None, why: str, *,
             st = Settings(account_id=account_id)
             d = MigrationDB(st.db_path)
             run_id = d.repair_started()
+            _note_phase(account_id, "repair", "RUNNING")
             try:
                 _REPAIR_PROGRESS[account_id] = {"startedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "index": 0,
                                                  "total": len(repair.REPAIR_STEPS), "step": "starting"}
@@ -2571,8 +2587,10 @@ def _start_repair(account_id: int | None, why: str, *,
                 for e in out.get("errors") or []:
                     log.warning("repair account %s: %s", account_id, e)
                 d.repair_finished(run_id, repair.summarise(out))
+                _note_phase(account_id, "repair", "DONE")
             except Exception as exc:      # noqa: BLE001
                 d.repair_finished(run_id, "", str(exc)[:500])
+                _note_phase(account_id, "repair", "FAILED", str(exc)[:300])
                 raise
             finally:
                 _REPAIR_PROGRESS.pop(account_id, None)
@@ -3660,6 +3678,48 @@ async def _mirror_loop() -> None:
             raise
         except Exception as exc:      # noqa: BLE001 - the loop must outlive a bad look
             log.warning("mirror scheduler pass failed: %r", exc)
+
+
+def _note_phase(account_id: int | None, name: str, state: str, note: str = "") -> None:
+    """A follow-on's state on the account's latest run record (run_phases.py). A report only:
+    no ledger, no record or any error is skipped."""
+    try:
+        path = _account_db_path(account_id)
+        if not path or not os.path.isfile(path):
+            return
+        from db import MigrationDB
+        import run_phases
+        d = MigrationDB(path)
+        try:
+            run_phases.set_state(d, None, name, state, note)
+        finally:
+            d.close()
+    except Exception as exc:      # noqa: BLE001
+        log.debug("could not note phase %s=%s for account %s: %s", name, state, account_id, exc)
+
+
+# What a job's name means for the run record's follow-on phases.
+_PHASE_OF_JOB = {"dms": "dms", "user-tally": "tally"}
+
+
+@app.get("/api/v2/runs/{account_id}/phases")
+async def run_phases_view(account_id: int, op: Operator = Depends(operator)):
+    """The latest migrate run's record: its phases in order, each PENDING / RUNNING / DONE /
+    STOPPED / FAILED with times, and where a start now would resume (`resumeFrom`)."""
+    require_login(op)
+    _require_account_access(account_id, op)
+
+    def read():
+        import run_phases
+        path = _ledger_path(account_id)
+        if not os.path.isfile(path):
+            return {"accountId": account_id, "record": None}
+        try:
+            with cpdb.ro(path) as conn:
+                return {"accountId": account_id, "record": run_phases.latest(conn)}
+        except sqlite3.OperationalError:      # a ledger from before run_phases
+            return {"accountId": account_id, "record": None}
+    return await _off_loop(read)
 
 
 @app.get("/api/v2/history")

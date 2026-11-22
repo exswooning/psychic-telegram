@@ -310,6 +310,9 @@ class TestSideTables:
             "mirror_cycles",      # records of what the mirror did and what a person
             "mirror_deletions",   # decided: nothing reads them to decide whether an
             "mirror_conflicts",   # item still needs migrating, like repair_runs
+            "run_records",    # not per-user: a migrate run's phase record. A reset
+            "run_phases",     # does not undo what a run did; a phase called DONE
+                              # is only skipped when the per-user ledger agrees
             "rate_limiter_ceiling",  # not per-user at all: one row per TENANT
                               # SIDE ('source'/'target'), what a run proved
                               # about Google's own project-wide Drive quota.
