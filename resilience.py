@@ -59,6 +59,15 @@ try:  # pragma: no cover - exercised implicitly by every real run
 except Exception:  # noqa: BLE001
     _AUTH_ERRORS = ()
 
+try:  # pragma: no cover
+    # httplib2 raises its own DNS failure, not a socket.gaierror: P3.7 run 14 (22 Nov 2026) failed 55 Drive items in
+    # a two-minute DNS drop, each in 0.1 s, past the network-down ride-out below.
+    from httplib2 import ServerNotFoundError as _Httplib2ServerNotFound
+
+    _AUTH_ERRORS += (_Httplib2ServerNotFound,)
+except Exception:  # noqa: BLE001
+    pass
+
 TRANSPORT_ERRORS: tuple[type[BaseException], ...] = (
     ConnectionError,          # covers ConnectionReset/Aborted/Refused, BrokenPipe
     socket.timeout,

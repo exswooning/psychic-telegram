@@ -65,3 +65,11 @@ def test_what_counts_as_the_box_being_offline():
     assert resilience.network_down(socket.gaierror("x"))
     assert resilience.network_down(ConnectionError("Unable to find the server at gmail.googleapis.com"))
     assert not resilience.network_down(ConnectionResetError("Connection reset by peer"))
+
+
+def test_httplib2s_own_dns_error_is_ridden_out(clock):
+    """P3.7 run 14: Drive's httplib2 raised ServerNotFoundError (not a gaierror) and 55 items failed at once."""
+    import httplib2
+    call, calls = _flaky(12, httplib2.ServerNotFoundError("Unable to find the server at www.googleapis.com"))
+    assert resilience.retry_on_google_error(max_retries=6)(call)() == "ok"
+    assert calls["n"] == 13 and sum(clock.slept) > 120
