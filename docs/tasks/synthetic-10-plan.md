@@ -506,8 +506,10 @@ Done when a dry plan for N users passes P4.5 and its estimate fits the window of
 Carried from parity-10-plan.md. Do each when the campaign reaches the scenario that proves it, with a
 measurement before and after.
 
-- [ ] One run record that lists its phases for the UI; a restart resumes from the recorded phase.
-  Proven by F-api and F-reboot.
+- [~] One run record that lists its phases for the UI; a restart resumes from the recorded phase.
+  Proven by F-api and F-reboot. (22 Nov: code done and deployed through sync_vps.sh -- `run_phases.py`, tables
+  `run_records`/`run_phases`, `GET /api/v2/runs/{id}/phases`, the Run phases card on Migration detail; a DONE pass is
+  skipped only when the per-user ledger agrees. 18 offline tests. Live proof still owed: F-api, F-reboot.)
 - [~] **[opus]** (20 Nov: code done, `dms_light_proof.target_index`; run 1b = before, run 2 = after) Bulk DMS check: list the target once with Message-ID headers, match in memory, read
   content only for link mail and mismatches. Proven by P2.10.
 - [~] **[opus]** (20 Nov: probed live on b. -- grants incl. outside and comments survive the move, the move's time holds except Docs re-stamps a commented Doc; code behind `DRIVE_FINISH_IN_STAGING`, OFF until the A/B) One target write per Drive file: comments, then grants, while the file is in the
@@ -521,8 +523,13 @@ measurement before and after.
 - [x] (a963a49) One log file per run; DMS console readings appended to a history, never overwritten.
 - [~] (c81b049: timer and service written, not installed -- install after P3.4) A nightly cohort run with a morning report: the campaign on a systemd timer, one line in
   `monitor/INBOX.md`. Allowed by P0.7(a).
-- [ ] Each known difference fixed or accepted. Open: why the DMS imported its own copy of 4 engine
-  link mails (`gmail.duplicate`).
+- [~] Each known difference fixed or accepted. Open: why the DMS imported its own copy of 4 engine
+  link mails (`gmail.duplicate`). (22 Nov: ACCEPTED on evidence, cause NOT proven. All 20 `dms_duplicate` trashes are
+  17-18 Nov, all on alice..erin's fixed-Message-ID seed thread (`<thread-root-USER@seed.test>` and `-1`, no Drive link),
+  each "an identical second copy". None since 19 Nov in any run with a complete check (P3.5, P3.7 runs 7-14; run 14:
+  0 duplicates in 41 mailboxes). Candidates: a twice-seeded source (the seeder's fixed ids), or a stale DMS user map (fixed
+  7280917, 20 Nov). a. was cleared 22 Nov, so the source can no longer answer; the reconciliation trashes any
+  byte-identical second copy if it recurs.)
 - [ ] `api_server.py` and `webui.py` split by concern. Last. Moves only, no behaviour change, the
   full suite green before and after.
 - [ ] Gmail search-first link rewriting ([claude-gmail-search-first-dms.md](claude-gmail-search-first-dms.md)):
@@ -574,6 +581,16 @@ the read-only route's Drive; a copied comment cannot keep its date; a deck that 
 rebuilt layouts (its slides render identical).
 
 ## 11. State (newest first)
+
+- 23 Nov 2026, ~12:15 am NPT (Opus): **a. stays the sandbox source (operator: "until notified treat a. as a sandbox");
+  reseeding; code-only work deployed through `sync_vps.sh`.** The operator first said "clear a." for dharan: the clear emptied
+  40 users' data, then was stopped before any account was deleted (41 accounts, 4 groups, 3 shared drives kept). The first
+  reseed was stopped 90 s in by the source guard (armed since the dharan rehearsal): a seed or a source wipe -- only ever on a
+  declared sandbox -- is now never stopped and its changes are not read back; retake the baseline before the next
+  migration. c09's three hand-made files (Site, My Map, Vids) were in the emptied Drive: make them again in the browser.
+  Also: deleting users on a source works again (the seed key, one scope); the deploy no longer ships `.claude/` worktrees
+  (9,197 files); the run record of phases (above); `gmail.duplicate` accepted on evidence; the full suite's one failure
+  (two new kinds without a scenario) and the UI suite's 2 errors fixed. Deployed 18:13Z via sync_vps.sh (gate passed).
 
 - 22 Nov 2026, ~10:15 pm NPT (Opus): **P3.7 done: run 14 PARITY 41/41 (16:29Z); runs 13 and 14 in a row, run 14 with F-stop.**
   dharan's route (a. protected, server-side, Forms rebuilt, split mail + DMS, source guard clean) is rehearsed. Next for
