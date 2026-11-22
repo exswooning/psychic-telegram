@@ -512,14 +512,14 @@ measurement before and after.
   content only for link mail and mismatches. Proven by P2.10.
 - [~] **[opus]** (20 Nov: probed live on b. -- grants incl. outside and comments survive the move, the move's time holds except Docs re-stamps a commented Doc; code behind `DRIVE_FINISH_IN_STAGING`, OFF until the A/B) One target write per Drive file: comments, then grants, while the file is in the
   staging drive, then the move. A/B on twins first.
-- [ ] The mail verify reuses the bulk index for its extras check.
-- [ ] End-of-pass retry by class: transient (retry), quota (wait for the reset), explained
+- [x] (22 Nov: measured, not needed) The mail verify reuses the bulk index for its extras check. Run 8's complete check: Gmail 8-14 s a user (41-99 messages; only unmapped target mail is read), Drive 460-3,860 s -- Drive is what binds the check (download_upload Docs differ in structure, so each is exported and rendered); measure run 13 (server-side) first. Revisit at Phase 5 if the Gmail check binds on real mailboxes.
+- [x] (6af447c, pass_retry.py) End-of-pass retry by class: transient (retry), quota (wait for the reset), explained
   (accepted), unexplained (hold that user, go on, open an incident). Two rounds without progress
   stop and report.
 - [~] **[opus]** (20 Nov: code behind `DMS_AT_MAIL_PASS`, OFF until measured: the DMS starts when the run's mail pass ends, users whose mail did not end clean held as before; a per-user start needs the console to accept users added to a running import, not yet probed) The DMS starts per user as that user's mail pass ends clean.
-- [ ] The UI refuses a full verify while the DMS imports.
-- [ ] One log file per run; DMS console readings appended to a history, never overwritten.
-- [ ] A nightly cohort run with a morning report: the campaign on a systemd timer, one line in
+- [x] (bc86185) The UI refuses a full verify while the DMS imports.
+- [x] (a963a49) One log file per run; DMS console readings appended to a history, never overwritten.
+- [~] (c81b049: timer and service written, not installed -- install after P3.4) A nightly cohort run with a morning report: the campaign on a systemd timer, one line in
   `monitor/INBOX.md`. Allowed by P0.7(a).
 - [ ] Each known difference fixed or accepted. Open: why the DMS imported its own copy of 4 engine
   link mails (`gmail.duplicate`).
