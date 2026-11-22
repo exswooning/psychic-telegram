@@ -290,3 +290,14 @@ def test_claim_does_not_admit_a_paused_policy(db):
     R.pause(db)
     assert R._claim(db, 'u@src', 'key') is False
     assert db.conn.execute('select count(*) from verification_repairs').fetchone()[0] == 0
+
+
+def test_a_scoped_repair_is_seen_as_handled(db):
+    """P3.7 run 14: a --scope-to-findings repair keyed only calendar; due_users keyed every service, never
+    matched, and c04 was re-verified every minute for hours."""
+    R.enable(db)
+    V.save_user_results(db, {'users': {'u@src': {'gmail': blank(False), 'calendar': blank(True)}}})
+    key = R._key(db, 'u@src', {'calendar': {}})
+    assert R._claim(db, 'u@src', key)
+    R._finish(db, 'u@src', [key], 'NEEDS_ATTENTION', 'unsupported')
+    assert R.due_users(db) == []

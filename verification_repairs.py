@@ -369,11 +369,18 @@ def due_users(db):
     for user, rows in grouped.items():
         if not any(r["verdict"] in ("DIFFERENCES", "INCOMPLETE") for r in rows):
             continue
-        key = fingerprint(rows)
-        prior = db.conn.execute("SELECT state,owner_pid FROM verification_repairs "
-                                "WHERE source_user=? AND fingerprint=?", (user, key)).fetchone()
-        if prior and (prior["state"] not in ("RUNNING", "INTERRUPTED") or
-                      (prior["state"] == "RUNNING" and _alive(prior["owner_pid"]))):
+        # A --scope-to-findings repair keys only the services with findings (_key(db, user, per)); keyed over all
+        # rows alone, that never matched, and c04 was re-verified every minute for hours (P3.7 run 14).
+        keys = (fingerprint(rows),
+                fingerprint([r for r in rows if r["verdict"] in ("DIFFERENCES", "INCOMPLETE")]))
+        handled = False
+        for key in keys:
+            prior = db.conn.execute("SELECT state,owner_pid FROM verification_repairs "
+                                    "WHERE source_user=? AND fingerprint=?", (user, key)).fetchone()
+            if prior and (prior["state"] not in ("RUNNING", "INTERRUPTED") or
+                          (prior["state"] == "RUNNING" and _alive(prior["owner_pid"]))):
+                handled = True
+        if handled:
             continue
         due.append(user)
     try:
