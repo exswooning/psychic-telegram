@@ -575,6 +575,13 @@ rebuilt layouts (its slides render identical).
 
 ## 11. State (newest first)
 
+- 22 Nov 2026, ~3:20 pm NPT (Opus): **P3.7 run 13: PARITY 41/41 on a complete check. Run 14 (F-stop) started 09:35Z.**
+  The 6 users re-verified IDENTICAL (0 extras); remainders as named (1 encrypted mail, 3 unexportable, 1 deleted grantee).
+  The complete check's long pole was c03's "big sheet" (20,000 x 120, no values): 480 paced 10,000-cell reads, a 300 s budget
+  overrun and a retry, ~17 min each check; blank windows now widen (x4, at most 10x), deployed 09:34Z. Run 14
+  (`/tmp/p37_stop.sh 14`): reset, server-side, one Stop at 2,000 mapped, restart, then the gate -- P3.7's stop-and-restart
+  and its second run in a row.
+
 - 22 Nov 2026, ~2:45 pm NPT (Opus): **Run 13 gate: NOT_PARITY 35/41, only `drive.extras` -- my own probe leftovers.**
   DMS 12,484/12,484, 0 failed. The 6 users' extras were 49 "bitport probe fmt2 (delete)" Docs a format probe of mine left on
   b. on 21 Nov (its delete was skipped by an error); not the migration. Deleted (each checked: name, made 21 Nov), Drive
