@@ -66,13 +66,17 @@ def sheet_requests(source: dict, target: dict) -> list:
     return reqs
 
 
+# Only what doc_requests reads: a full get of a Doc past the 10 MB export limit held 4 GB in one shard and
+# the memory watchdog drained P3.7 run 10 (22 Nov 2026).
+DOC_FIELDS = ("tabs(tabProperties(tabId),documentTab(documentStyle,"
+              "body(content(startIndex,endIndex,paragraph(paragraphStyle(spacingMode))))))")
 SHEET_FIELDS = "properties(timeZone,defaultFormat(padding)),sheets.properties(sheetId,gridProperties)"
 
 
 def realign(kind: str, src_api, tgt_api, sid: str, tid: str, execute=lambda fn: fn()) -> int:
     """Requests applied to the target (0: nothing to do, or a kind with nothing measured to put back)."""
     if kind == "docs":
-        get = lambda api, i: execute(lambda: api.documents().get(documentId=i, includeTabsContent=True).execute())  # noqa: E731
+        get = lambda api, i: execute(lambda: api.documents().get(documentId=i, includeTabsContent=True, fields=DOC_FIELDS).execute())  # noqa: E731
         reqs = doc_requests(get(src_api, sid), get(tgt_api, tid))
         if reqs:
             execute(lambda: tgt_api.documents().batchUpdate(documentId=tid, body={"requests": reqs}).execute())

@@ -168,3 +168,14 @@ def test_a_doc_page_that_renders_differently_is_named():
 
 def test_a_doc_that_cannot_be_rendered_keeps_the_structure_verdict():
     assert _compare_doc(None, None) == ["native document content, formatting or structure differs"]
+
+
+def test_realign_reads_only_the_fields_it_uses():
+    """P3.7 run 10: a full get of the >10 MB Doc held 4 GB in one shard."""
+    from types import SimpleNamespace as NS
+    import native_styles as ns
+    seen = []
+    doc = {"tabs": []}
+    api = NS(documents=lambda: NS(get=lambda **kw: seen.append(kw) or NS(execute=lambda: doc)))
+    assert ns.realign("docs", api, api, "S", "T") == 0
+    assert seen and all(kw.get("fields") == ns.DOC_FIELDS for kw in seen)
