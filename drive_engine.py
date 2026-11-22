@@ -2642,20 +2642,21 @@ class DriveMigrator:
             log.info("[%s] %s migrated as %s", self.source_user,
                      item.get("name"), fidelity_note)
         self._bump("files")
-        if had_ref and self.settings.rewrite_drive_links:
+        if self.settings.rewrite_drive_links and item["mimeType"] in _NATIVE_KIND:
+            # The import is a native copy: its links are checked and repointed in
+            # place after the walk, as for every server-side copy -- whatever the
+            # export showed. Google's RTF export splits a plain-text URL into one run
+            # per word (runs 8 and 9: "https", "docs", ...), so neither has_drive_ref
+            # nor a byte rewrite sees it, and a second import would lose the
+            # realigned styles again.
+            self._pending_native.append((item, tgt_id))
+            self.db.mark_links_pending(self.source_user, item["id"])
+        elif had_ref and self.settings.rewrite_drive_links:
             # Queued, not rewritten here. This file may reference a document
             # that has not migrated yet -- a Sheet's IMPORTRANGE pointing at
             # next week's folder is ordinary -- so the mapping it needs does
             # not exist until the whole tree is done.
-            if item["mimeType"] in _NATIVE_KIND:
-                # The import is a native copy: repoint in place, as for a server-side
-                # copy. Google's RTF export splits a plain-text URL into one run per
-                # word (run 8: "https", "docs", ...), so no byte pattern finds it,
-                # and a second import would lose the realigned styles again.
-                self._pending_native.append((item, tgt_id))
-                self.db.mark_links_pending(self.source_user, item["id"])
-            else:
-                self._pending_link_rewrites.append((item, tgt_id, export_mime))
+            self._pending_link_rewrites.append((item, tgt_id, export_mime))
         if _NATIVE_KIND.get(item["mimeType"]) in ("docs", "sheets"):
             needs_restore = self._after_round_trip(item, tgt_id) or needs_restore
         self._finish_item(item, tgt_id, force_mtime_restore=needs_restore)

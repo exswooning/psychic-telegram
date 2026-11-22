@@ -143,6 +143,9 @@ class TestTheEngineRunsItAtTheRightTime:
         src = self._src("_sync_native")
         assert "_pending_native.append((item, tgt_id))" in src
         assert "mark_links_pending" in src
+        # Run 9: has_drive_ref reads the same split export, so it must not gate a native.
+        native = src.index("_pending_native.append((item, tgt_id))")
+        assert "had_ref" not in src[src.rindex("if ", 0, native):native]
 
     def test_it_runs_after_the_pool_and_the_shortcuts(self):
         """Both can still add mappings; a rewrite is only correct when no
