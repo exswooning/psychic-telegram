@@ -582,6 +582,13 @@ rebuilt layouts (its slides render identical).
 
 ## 11. State (newest first)
 
+- 23 Nov 2026, ~2:25 am NPT (Opus): **Run 15 stopped by the source guard (#263), fixed, restarted 20:36Z.** The guard's
+  fast watch read the audit log from where it last looked -- during the seed -- so when the reset of b. started it replayed
+  24 of the seed's own writes (info@ filling shared drive 3, all before the re-taken baseline) and stopped the reset. Fast
+  watch and full check now never read from before the baseline; test; deployed via sync_vps.sh. OPEN: the reset of b.
+  ignored its Stop for 47 min (SIGINT reached it at 19:44Z, it ended at 20:31Z, unfinished) -- reset_all only looks
+  when every worker is done; a Stop should end it between users.
+
 - 23 Nov 2026, ~1:20 am NPT (Opus): **a. reseeded (both seeds PASS); c09's hand-made files made again; run 15 started.**
   Cohort seed PASS (30 users, 47 min, c10 bulk 8,000), the 11 others at tiny PASS (10 min). c09's Site "Ward Notice
   Board", My Map "Ward Boundary Map" and Vids "Ward Welcome Video" made in the browser as c09 (operator gave c09's
