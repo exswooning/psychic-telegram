@@ -582,6 +582,12 @@ rebuilt layouts (its slides render identical).
 
 ## 11. State (newest first)
 
+- 23 Nov 2026, ~3:50 am NPT (Opus): **Run 15 stopped a third time (#265), by my own write; restarted 21:58Z as 15w.**
+  I starred and described c03's file on a. while the reset of b. ran, then asked for a baseline: it counts in the
+  background, and the guard's fast watch read the write against the old one 40 s later. The guard was right. Rule: change
+  a. only while nothing runs, and wait for `source_guard_snapshot.taken_at`. The reset again ignored its Stop -- now
+  fixed (code, not yet deployed): a Stop cancels every user not yet started (`reset_all`, test).
+
 - 23 Nov 2026, ~3:35 am NPT (Opus): **Run 15 stopped again (live-run rule, #264), fixed, restarted 21:42Z as 15z.**
   Two FAILED filters on c05: "Filter doesn't have any actions". Clearing a. deleted c05's "Filtered" label; Gmail then
   strips that label from every filter and keeps the filter, which does nothing; the reseed saw filters and made none.

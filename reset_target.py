@@ -161,7 +161,8 @@ def reset_all(settings: Settings, auth: AuthManager, users: list[str],
     totals = {"drive": 0, "gmail": 0, "calendar": 0, "chat": 0}
     unreached = []
     print(f"  [0/{len(users)}] users reset", flush=True)
-    with futures.ThreadPoolExecutor(max_workers=workers) as pool:
+    pool = futures.ThreadPoolExecutor(max_workers=workers)
+    try:
         pending = [pool.submit(reset_one, settings, auth, u, services) for u in users]
         for n, fut in enumerate(futures.as_completed(pending), 1):
             r = fut.result()
@@ -172,6 +173,13 @@ def reset_all(settings: Settings, auth: AuthManager, users: list[str],
                 totals[k] += r[k]
             if r.get("unreachable"):
                 unreached.append(f"{r['user']} ({', '.join(r['unreachable'])})")
+    except KeyboardInterrupt:
+        # A Stop ends the reset between users: the `with` block's shutdown waited for every queued user, so a
+        # Stop of b.'s reset ran on for 47 min (23 Nov 2026). Users mid-reset finish; the rest never start.
+        pool.shutdown(wait=False, cancel_futures=True)
+        print(f"  stopped: {sum(f.cancelled() for f in pending)} user(s) not started", flush=True)
+        raise
+    pool.shutdown()
     return totals, unreached
 
 

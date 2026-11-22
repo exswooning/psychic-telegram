@@ -460,3 +460,26 @@ def test_a_whole_tenant_ledger_reset_clears_the_shared_drive_records(tmp_path):
     assert reset_drive_ledger.clear_shared_drive_records(db) == 2
     left = db.conn.execute("SELECT source_id FROM id_mapping WHERE type='shared_drive'").fetchall()
     assert [r[0] for r in left] == ["MOVED"]
+
+
+def test_a_stop_ends_the_reset_between_users(monkeypatch):
+    """A Stop of b.'s reset ran on for 47 min (23 Nov 2026): the pool waited for every queued user."""
+    import threading
+    started, gate = [], threading.Event()
+
+    def one(s, a, u, svc):
+        started.append(u)
+        gate.wait(5)
+        return {"user": u, "drive": 0, "gmail": 0, "calendar": 0, "chat": 0}
+    monkeypatch.setattr(reset_target, "reset_one", one)
+    real = reset_target.futures.as_completed
+
+    def interrupted(fs):
+        raise KeyboardInterrupt
+        yield from real(fs)
+    monkeypatch.setattr(reset_target.futures, "as_completed", interrupted)
+    st = type("S", (), {"target_domain": "t.com", "source_domain": "s.com"})()
+    with pytest.raises(KeyboardInterrupt):
+        reset_target.reset_all(st, None, [f"u{i}@t.com" for i in range(20)], ("drive",), 2)
+    gate.set()
+    assert len(started) <= 2
