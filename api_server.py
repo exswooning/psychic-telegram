@@ -5936,7 +5936,7 @@ def _source_guard_fast(aid) -> list[dict]:
     since = _GUARD_AUDIT_SINCE.get(aid) or time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(time.time() - 600))
     # Never before the baseline: what happened earlier is in it. The read position left by a seed was replayed when
     # the next job started -- 24 of the seed's own writes stopped a reset of b. (incident #263, 22 Nov 2026).
-    since = max(since, taken, key=_audit_instant)
+    since = max(since, source_guard.audit_floor(taken), key=_audit_instant)
     found = source_guard.audit(st, since, client_id)
     _GUARD_AUDIT_SINCE[aid] = now
     hits = [r for r in found.get("byBitport") or [] if r.get("app") != "admin"] + (found.get("byGoogle") or [])

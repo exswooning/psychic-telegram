@@ -241,4 +241,11 @@ def test_the_fast_watch_never_reads_from_before_the_baseline(monkeypatch, tmp_pa
     seen = []
     monkeypatch.setattr(source_guard, "audit", lambda st, since, cid: seen.append(since) or {"byBitport": [], "byGoogle": []})
     api_server._source_guard_fast(5)
-    assert seen == ["2026-11-22T19:41:50Z"]
+    assert seen == ["2026-11-22T19:41:53.000Z"]      # the baseline plus Google's logging skew
+
+
+def test_a_write_logged_just_after_the_baseline_second_is_in_the_baseline():
+    """Incident #266 (23 Nov 2026): a write at 21:45:15.87 was logged 21:45:16.062, the baseline kept 21:45:16."""
+    import source_guard
+    assert source_guard.audit_floor("2026-11-22T21:45:16Z") > "2026-11-22T21:45:16.062Z"
+    assert source_guard.audit_floor("2026-11-22T21:45:16.000Z") == "2026-11-22T21:45:19.000Z"

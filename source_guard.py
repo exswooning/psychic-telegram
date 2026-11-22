@@ -222,6 +222,21 @@ def explain(changes: list[dict], ours: set, events_for=None, settings=None, sinc
 
 
 # -- the check ------------------------------------------------------------------
+# Google stamps an audit event when it logs it, a little after the change, and the baseline's start is kept to the
+# second: a write made just before a baseline (21:45:15.87) read 21:45:16.062 against a baseline of 21:45:16 and
+# stopped run 15 (incident #266, 23 Nov 2026). The count began at that second, so the change is already in it.
+# ponytail: a fixed skew; a change in the first seconds after a baseline goes unread by the log (the recount still sees it).
+AUDIT_SKEW_SEC = 3
+
+
+def audit_floor(taken: str) -> str:
+    """Where the audit log is read from for a baseline taken at `taken`."""
+    from datetime import datetime, timedelta, timezone
+    t = datetime.fromisoformat(str(taken).replace("Z", "+00:00"))
+    t = t if t.tzinfo else t.replace(tzinfo=timezone.utc)
+    return (t + timedelta(seconds=AUDIT_SKEW_SEC)).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+
+
 def check(auth, settings, db, client_id: str, read=read_user, audit_fn=audit, explain_fn=None) -> dict:
     """Compare every user with the snapshot, and read the audit log since the last check
     (or the snapshot). CHANGED if anything differs or Bitport changed anything; CLEAN if
@@ -234,7 +249,8 @@ def check(auth, settings, db, client_id: str, read=read_user, audit_fn=audit, ex
     last = db.conn.execute("SELECT MAX(checked_at) FROM source_guard_checks").fetchone()[0]
     taken = min(r[0] for r in db.conn.execute("SELECT taken_at FROM source_guard_snapshot"))
     # Never before the baseline: a check from before a re-taken baseline would replay what the baseline holds.
-    since = max(last, taken, key=lambda t: str(t).replace(".000Z", "Z")) if last else taken
+    floor = audit_floor(taken)
+    since = max(last, floor, key=lambda t: audit_floor(t)) if last else floor
     changes, unread = [], []
     for u, before in snap.items():
         after = read(auth, settings, u)
