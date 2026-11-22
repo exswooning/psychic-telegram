@@ -582,6 +582,13 @@ rebuilt layouts (its slides render identical).
 
 ## 11. State (newest first)
 
+- 23 Nov 2026, ~1:20 am NPT (Opus): **a. reseeded (both seeds PASS); c09's hand-made files made again; run 15 started.**
+  Cohort seed PASS (30 users, 47 min, c10 bulk 8,000), the 11 others at tiny PASS (10 min). c09's Site "Ward Notice
+  Board", My Map "Ward Boundary Map" and Vids "Ward Welcome Video" made in the browser as c09 (operator gave c09's
+  password; used once, not stored). Run 15 (`/tmp/ctl15.sh`): coverage audit, guard baseline, the two expected guard
+  incidents resolved, then the control run (reset b., server-side, split + DMS; a. stays a sandbox) -- the errors
+  group is judged from it, and it is P3.5's first run with no code change.
+
 - 23 Nov 2026, ~12:15 am NPT (Opus): **a. stays the sandbox source (operator: "until notified treat a. as a sandbox");
   reseeding; code-only work deployed through `sync_vps.sh`.** The operator first said "clear a." for dharan: the clear emptied
   40 users' data, then was stopped before any account was deleted (41 accounts, 4 groups, 3 shared drives kept). The first
