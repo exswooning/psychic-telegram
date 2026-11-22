@@ -70,7 +70,7 @@ _ERRORS = {
     "on_target": ({"drive.parent_folder": "two folders of one name and creation time on b."}, "made on b. first"),
     "failpoint": ({"drive.duplicate": "drive.copy.landed lost",
                    "run.comment_prior_attempt": "drive.comment.created lost"}, "through a failpoint"),
-    "failure": ({"run.disk_full": "F-disk", "run.db_rollback": "F-disk"}, "through a failure scenario"),
+    "failure": ({"run.disk_full": "F-disk", "run.db_rollback": "F-disk", "run.dns": "F-net-12"}, "through a failure scenario"),
     "protected_source": ({"drive.source_changed": "lift a.'s sandbox declaration, edit a file mid-run"},
                          "needs a protected source"),
     # A full verify beside a delta of the same user (c03: the 20,000 x 120 Sheet; c10: 5,000 messages), three tries.
@@ -79,7 +79,8 @@ _ERRORS = {
     "unseedable": ({"run.resource_key": "needs a link-shared file from before Google's 2021 change",
                     "gmail.reset_leftover": "needs a reset, then a rerun (P3.5 runs 2 and 3 read it on the gate)",
                     "run.backend_500": "Google's own 500 on an upload; nothing on our side causes it",
-                    "run.coverage_incomplete": "a pass whose coverage check runs before its findings are repaired"},
+                    "run.coverage_incomplete": "a pass whose coverage check runs before its findings are repaired",
+                    "run.google_unavailable": "Google's own 5xx through every retry; nothing on our side causes it"},
                    "likely unseedable"),
     # not_migrated first: it needs c07's Chat still unmigrated, the rest migrate it.
     "chat": ({"chat.not_migrated": "c07", "chat.attributed": "c07", "chat.space_type": "c07", "chat.members": "c07",
@@ -95,6 +96,7 @@ UNIT_TESTS = {
     "gmail.reset_leftover": "tests/test_split_mail_duplicates.py",
     "run.backend_500": "tests/test_dharan_followups.py",          # the end-of-run straggler re-copy
     "run.coverage_incomplete": "tests/test_campaign.py",          # named and classified (run 7, 21 Nov 2026)
+    "run.google_unavailable": "tests/test_known_issues_run_kinds_dns.py",   # named (incident #255, 22 Nov 2026)
 }
 
 
@@ -161,7 +163,7 @@ _ACT = {
        for k in ("chat.attributed", "chat.space_type", "chat.members", "chat.sender", "chat.text")},
 }
 # Kinds a failure scenario causes: this one reads what that one left on its twin (so that one runs first).
-_VIA_FAILURE = {"run.disk_full": "fail:F-disk", "run.db_rollback": "fail:F-disk"}
+_VIA_FAILURE = {"run.disk_full": "fail:F-disk", "run.db_rollback": "fail:F-disk", "run.dns": "fail:F-net-12"}
 
 
 def _errors() -> list:
