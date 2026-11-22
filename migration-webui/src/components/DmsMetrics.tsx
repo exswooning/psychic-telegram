@@ -14,6 +14,12 @@ const MAIL_FIELDS = ['Users processed', 'Emails discovered', 'Emails imported',
 
 const nf = new Intl.NumberFormat()
 
+function duration(seconds: number): string {
+  const h = Math.floor(seconds / 3600)
+  const m = Math.round((seconds % 3600) / 60)
+  return h ? `${h} h ${m} min` : `${Math.max(1, m)} min`
+}
+
 function age(seconds: number | null): string {
   if (seconds == null) return 'never'
   if (seconds < 60) return `${seconds}s ago`
@@ -155,11 +161,21 @@ const DmsMetrics: React.FC<{ accountId?: number | string }> = ({ accountId }) =>
       {data && has('Emails discovered') && has('Emails imported') && m['Emails discovered'] > 0 && (
         <Box sx={{ mb: 1 }} data-testid="dms-progress">
           <Typography variant="body2" sx={{ fontVariantNumeric: 'tabular-nums' }}>
-            {nf.format(m['Emails imported'])} of {nf.format(m['Emails discovered'])} emails imported
+            {nf.format(m['Emails imported'])} of {(resp?.eta?.total ?? 0) > m['Emails discovered']
+              ? `about ${nf.format(resp!.eta!.total!)} (found on the source)` : nf.format(m['Emails discovered'])} emails imported
             {has('Emails failed') && m['Emails failed'] > 0 ? ` · ${nf.format(m['Emails failed'])} failed` : ''}
           </Typography>
           <LinearProgress variant="determinate" sx={{ height: 8, borderRadius: 1, mt: 0.5 }}
-            value={Math.min(100, (100 * (m['Emails imported'] + (m['Emails skipped'] || 0))) / m['Emails discovered'])} />
+            value={Math.min(100, (100 * (m['Emails imported'] + (m['Emails skipped'] || 0)))
+              / Math.max(m['Emails discovered'], resp?.eta?.total ?? 0))} />
+          {resp?.eta && !resp.eta.done && typeof resp.eta.etaSeconds === 'number' && (
+            <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.5 }}
+              data-testid="dms-eta">
+              About {duration(resp.eta.etaSeconds)} left at {nf.format(resp.eta.perHour ?? 0)} emails an hour
+              (estimate from the last {resp.eta.basedOnMinutes} min of console readings; it moves if Google is
+              still discovering mail)
+            </Typography>
+          )}
         </Box>
       )}
 

@@ -1487,7 +1487,10 @@ def _dms_metrics_payload(account_id: int | None = None) -> dict:
             age = int(time.time()) - int(read_at)
     except (FileNotFoundError, ValueError):
         pass
-    return {"data": data, "ageSeconds": age}
+    return {"data": data, "ageSeconds": age,
+            "eta": dms_migrate.import_eta(
+                os.path.splitext(path)[0] + ".history.jsonl",
+                dms_migrate.source_mail_total(account_context.db_path(account_id)) if account_id is not None else 0)}
 
 
 def get_parallel_job(account_id: int | None, name: str) -> Job:

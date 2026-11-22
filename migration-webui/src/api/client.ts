@@ -215,9 +215,22 @@ export interface DmsMetrics {
   read_at: number
   lastCounters?: { status: string; metrics: Record<string, number>; read_at: number }
 }
+export interface DmsEta {
+  done: boolean
+  /** The larger of the console's own count and the source scan's mail count. */
+  total?: number
+  remaining?: number
+  perHour?: number
+  etaSeconds?: number
+  basedOnMinutes?: number
+  asOf?: number
+}
+
 export interface DmsMetricsResponse {
   data: DmsMetrics | null
   ageSeconds: number | null
+  /** From the import's own pace across its console readings; null when there is too little to go on. */
+  eta?: DmsEta | null
 }
 
 // The DMS counters live only in Google's console; the server scrapes them

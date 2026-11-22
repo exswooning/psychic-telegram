@@ -74,7 +74,7 @@ def test_dms_metrics_refresh_is_readonly_parallel():
 def test_metrics_payload_handles_missing_file(monkeypatch, tmp_path):
     monkeypatch.setattr(webui, "DMS_METRICS_FILE", str(tmp_path / "none.json"))
     p = webui._dms_metrics_payload()
-    assert p == {"data": None, "ageSeconds": None}
+    assert p == {"data": None, "ageSeconds": None, "eta": None}
 
 
 def test_metrics_payload_reads_and_ages(monkeypatch, tmp_path):

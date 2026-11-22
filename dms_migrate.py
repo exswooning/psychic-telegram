@@ -385,6 +385,66 @@ def read_metrics(page) -> dict:
             "read_at": int(time.time())}
 
 
+def import_eta(history_path: str, expected_total: int = 0, min_span_sec: int = 600) -> dict | None:
+    """How long the running DMS import has left, from its own pace: the console readings of THIS import (the
+    trailing run of the history in which "Emails imported" never goes down; a new import starts again near
+    zero) -> emails per hour between its first and last reading -> (total - imported - skipped) / rate.
+    The console's "Emails discovered" rises in step with "Emails imported" (a. -> b., 22 Nov 2026: equal in every
+    reading), so the total is the larger of it and `expected_total` (the source scan's mail count).
+    None when there is nothing honest to say: fewer than two readings, under `min_span_sec` apart, no progress,
+    no total, or the import already past the total it is measured against."""
+    rows = []
+    try:
+        with open(history_path, encoding="utf-8") as fh:
+            for line in fh:
+                try:
+                    r = json.loads(line)
+                except ValueError:
+                    continue
+                m = r.get("metrics") or {}
+                if "Emails imported" in m and r.get("read_at"):
+                    rows.append(r)
+    except OSError:
+        return None
+    if not rows:
+        return None
+    run = [rows[-1]]
+    for r in reversed(rows[:-1]):
+        if r["metrics"]["Emails imported"] > run[-1]["metrics"]["Emails imported"]:
+            break
+        run.append(r)
+    first, last = run[-1], run[0]
+    m = last["metrics"]
+    if "complete" in str(last.get("status", "")).lower():
+        return {"done": True}
+    total = max(m.get("Emails discovered") or 0, expected_total or 0)
+    span = last["read_at"] - first["read_at"]
+    moved = m["Emails imported"] - first["metrics"]["Emails imported"]
+    remaining = total - m["Emails imported"] - (m.get("Emails skipped") or 0)
+    if not total or span < min_span_sec or moved <= 0 or remaining <= 0:
+        return None
+    rate = moved / span
+    return {"done": False, "total": total, "remaining": remaining, "perHour": round(rate * 3600),
+            "etaSeconds": int(remaining / rate), "basedOnMinutes": int(span // 60), "asOf": last["read_at"]}
+
+
+def source_mail_total(db_path: str | None) -> int:
+    """Messages on the source by the latest scan of each user (main.py discover), 0 when unknown."""
+    import sqlite3
+    if not db_path or not os.path.isfile(db_path):
+        return 0
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5)
+        try:
+            return int(conn.execute(
+                "SELECT COALESCE(SUM(messages_total),0) FROM discovery d WHERE scanned_at="
+                "(SELECT MAX(scanned_at) FROM discovery e WHERE e.source_user=d.source_user)").fetchone()[0])
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return 0
+
+
 def cache_metrics(got: dict, path: str) -> dict:
     """Keep the current observation separate from older timestamped counters.
 

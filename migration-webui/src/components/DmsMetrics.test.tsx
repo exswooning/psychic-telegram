@@ -44,3 +44,26 @@ test('the DMS can be run again from its card, with a reason, and says it started
   expect(await screen.findByTestId('dms-start-result')).toHaveTextContent('started pid 42')
   expect(startDms).toHaveBeenCalledWith('cutover final mail', 3)
 })
+
+test('the time left is shown from the import pace, and not at all without one', async () => {
+  const data = { status: 'In progress', metrics: { 'Emails imported': 1900, 'Emails discovered': 10000 }, read_at: 300 }
+  vi.mocked(fetchDmsMetrics).mockResolvedValue({ ageSeconds: 1, data,
+    eta: { done: false, total: 10000, remaining: 8100, perHour: 1800, etaSeconds: 16200, basedOnMinutes: 60, asOf: 300 } })
+  const { unmount } = render(<DmsMetrics accountId={3} />)
+  expect(await screen.findByTestId('dms-eta')).toHaveTextContent('About 4 h 30 min left at 1,800 emails an hour')
+  expect(screen.getByText(/1,900 of 10,000 emails imported/)).toBeInTheDocument()
+  unmount()
+  vi.mocked(fetchDmsMetrics).mockResolvedValue({ ageSeconds: 1, data, eta: null })
+  render(<DmsMetrics accountId={3} />)
+  expect(await screen.findByText(/1,900 of 10,000 emails imported/)).toBeInTheDocument()
+  expect(screen.queryByTestId('dms-eta')).not.toBeInTheDocument()
+})
+
+test('the bar measures against the source count when the console counts as it goes', async () => {
+  vi.mocked(fetchDmsMetrics).mockResolvedValue({ ageSeconds: 1,
+    data: { status: 'In progress', metrics: { 'Emails imported': 2800, 'Emails discovered': 2800 }, read_at: 300 },
+    eta: { done: false, total: 11553, remaining: 8753, perHour: 1800, etaSeconds: 17506, basedOnMinutes: 60 } })
+  render(<DmsMetrics accountId={3} />)
+  expect(await screen.findByText(/2,800 of about 11,553 \(found on the source\) emails imported/)).toBeInTheDocument()
+  expect(screen.getByRole('progressbar')).toHaveAttribute('aria-valuenow', String(Math.round(100 * 2800 / 11553)))
+})
