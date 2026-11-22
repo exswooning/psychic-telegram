@@ -721,12 +721,14 @@ def retry_unreadable_reads(auth, db, settings, apply: bool = False) -> dict:
     so its share list and comments would stay failed for good. Runs after the re-walk,
     whose listings have put the keys in the ledger."""
     rows = db.conn.execute(
-        "SELECT a.source_user, a.item_id, a.item_type FROM audit_log a WHERE a.status='FAILED' "
-        "AND a.item_type IN ('acl','comment') AND a.error_message LIKE ? "
+        "SELECT a.source_user, a.item_id, a.item_type, a.error_message FROM audit_log a WHERE a.status='FAILED' "
+        "AND a.item_type IN ('acl','comment') "
         "AND a.id=(SELECT MAX(id) FROM audit_log b WHERE b.source_user=a.source_user "
         "AND b.item_id=a.item_id AND b.item_type=a.item_type) "
-        "AND (a.item_type='comment' OR a.item_id LIKE '%:(list-failed)')",
-        (f"%{NOT_FOUND}%",)).fetchall()
+        "AND (a.item_type='comment' OR a.item_id LIKE '%:(list-failed)')").fetchall()
+    # A network drop too (P3.7 run 14: three c10 comments failed in a two-minute DNS drop and stayed failed).
+    import resilience
+    rows = [r[:3] for r in rows if NOT_FOUND in (r[3] or "") or resilience.network_down(RuntimeError(r[3] or ""))]
     out = {"candidates": len(rows), "fixed": 0, "errors": []}
     if not apply or not rows:
         return out
