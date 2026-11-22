@@ -582,6 +582,13 @@ rebuilt layouts (its slides render identical).
 
 ## 11. State (newest first)
 
+- 23 Nov 2026, ~3:35 am NPT (Opus): **Run 15 stopped again (live-run rule, #264), fixed, restarted 21:42Z as 15z.**
+  Two FAILED filters on c05: "Filter doesn't have any actions". Clearing a. deleted c05's "Filtered" label; Gmail then
+  strips that label from every filter and keeps the filter, which does nothing; the reseed saw filters and made none.
+  Engine: an actionless source filter is `SKIPPED_FILTER_NO_ACTION` (a real shape, test); seeder: deletes actionless
+  filters and makes the pair again; c05's two rebuilt on a. Coverage audit (20:02Z): 56 covered, 1 absent -- no Drive
+  file had a description or a star; the seeder's shortcut target now has both, c03's set on a.; baseline re-taken.
+
 - 23 Nov 2026, ~2:25 am NPT (Opus): **Run 15 stopped by the source guard (#263), fixed, restarted 20:36Z.** The guard's
   fast watch read the audit log from where it last looked -- during the seed -- so when the reset of b. started it replayed
   24 of the seed's own writes (info@ filling shared drive 3, all before the re-taken baseline) and stopped the reset. Fast

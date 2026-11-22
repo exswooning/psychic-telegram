@@ -445,7 +445,10 @@ def drive_shortcuts(ctx: Ctx) -> dict:
         return {"made": 0, "notes": ["already made"]}
     from googleapiclient.http import MediaIoBaseUpload
     import io
-    f = ctx.retry(lambda: ctx.drive.files().create(body={"name": name}, fields="id", media_body=MediaIoBaseUpload(
+    # A description and a star, so the coverage audit's "File names, descriptions, starred flag" has data (23 Nov 2026).
+    f = ctx.retry(lambda: ctx.drive.files().create(body={
+        "name": name, "description": "Target of two shortcuts (fableplan2)", "starred": True}, fields="id",
+        media_body=MediaIoBaseUpload(
         io.BytesIO(b"target of a shortcut"), mimetype="text/plain")).execute())()["id"]
     d = ctx.retry(lambda: ctx.drive.files().create(body={
         "name": "fableplan2 shortcut folder", "mimeType": "application/vnd.google-apps.folder"}, fields="id").execute())()["id"]
