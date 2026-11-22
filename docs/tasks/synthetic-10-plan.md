@@ -575,6 +575,15 @@ rebuilt layouts (its slides render identical).
 
 ## 11. State (newest first)
 
+- 22 Nov 2026, ~10:00 pm NPT (Opus): **Run 14: migrate PASS 11:37Z, DMS done 13:07Z; gate NOT_PARITY 40/41; three fixes.**
+  (1) c10: 3 comments failed in the 11:13Z DNS drop stayed FAILED -- their files were copied, so the re-walk skipped them and
+  `repair.retry_unreadable_reads` re-read only 404s. It now re-reads network failures too; repair fixed all 3.
+  (2) c04: the scoped repair keyed only the services with findings and `due_users` keyed every service, so c04 was
+  re-verified every minute 14:05-16:04Z (~120 checks, the box never idle). `due_users` checks both keys now.
+  (3) c04's "Release Schedule" target calendar had a `domain:b.` reader the source never had and the ledger never wrote
+  (etag 11:31:02Z, during its calendar pass; 1 of 79 calendars; not in run 13). Removed on b.; cause OPEN -- b.'s key has no
+  audit-log scope to say who wrote it. Watch for it on the next run. All three deployed 16:09-16:10Z; re-check and gate running.
+
 - 22 Nov 2026, ~5:10 pm NPT (Opus): **Run 14: F-stop recorded STOPPED (rc 130), restart clean; then #258, fixed, restarted 11:22Z.**
   One Stop at 2,000 mapped (10:33Z) read STOPPED, not crashed; the restart went on. At 11:13Z the router's DNS dropped ~2 min and
   55 Drive items failed in 0.1 s each: httplib2's ServerNotFoundError is not a gaierror, so the network-down ride-out never saw
