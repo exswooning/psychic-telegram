@@ -413,7 +413,7 @@ Phase 1 and the code of Phase 2 need no tenant. Start them while Phase 0 is open
   and counts for each.
 - [ ] P3.6 From the measured rates, estimate the 300-user run: seeding hours, Drive hours, DMS days,
   verify hours. Write the numbers in State. They are the inputs of P4.3 and P5.1.
-- [ ] P3.7 (added 21 Nov, operator: dharan.gov.np moves into a. after this plan) dharan's route, end to end, on the cohort:
+- [x] P3.7 (22 Nov: runs 13 and 14 PARITY 41/41 in a row, server-side, run 14 with one Stop mid-Drive recorded STOPPED and resumed) (added 21 Nov, operator: dharan.gov.np moves into a. after this plan) dharan's route, end to end, on the cohort:
   a. protected (not a sandbox; `/tmp/p35_dharan.sh N` restores protection and keeps a.'s sandbox record in
   `/tmp/a-sandbox-revocation.json`), Drive by `download_upload` (a government grant is read-only: no server-side copy), Forms
   rebuilt, the source tripwire at 0 changes, split mail + DMS, verify, gate PARITY. Twice in a row, plus one stop-and-restart
@@ -574,6 +574,11 @@ the read-only route's Drive; a copied comment cannot keep its date; a deck that 
 rebuilt layouts (its slides render identical).
 
 ## 11. State (newest first)
+
+- 22 Nov 2026, ~10:15 pm NPT (Opus): **P3.7 done: run 14 PARITY 41/41 (16:29Z); runs 13 and 14 in a row, run 14 with F-stop.**
+  dharan's route (a. protected, server-side, Forms rebuilt, split mail + DMS, source guard clean) is rehearsed. Next for
+  dharan: its admin's delegation (Drive write for server-side) and DMS approval; clear a.'s seed data; end the a. -> b. campaign.
+  Incident #259 (c04 verdict flip) was my hand removal of the extra grant; resolved.
 
 - 22 Nov 2026, ~10:00 pm NPT (Opus): **Run 14: migrate PASS 11:37Z, DMS done 13:07Z; gate NOT_PARITY 40/41; three fixes.**
   (1) c10: 3 comments failed in the 11:13Z DNS drop stayed FAILED -- their files were copied, so the re-walk skipped them and
