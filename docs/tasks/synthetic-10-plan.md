@@ -573,6 +573,15 @@ rebuilt layouts (its slides render identical).
 
 ## 11. State (newest first)
 
+- 22 Nov 2026, ~08:45 NPT (Opus): **P3.7 run 8 stopped by the live-run rule at its check; fixed; run 9 started 08:25.**
+  Before it: three stops fixed -- the source guard read a Drive search (`files.list` with a query) as a change (190ecc1); the
+  wrapper's old deploy line rolled `reset_target` back (removed); a target reset deleted shared drives the ledger still mapped,
+  31 x 404 (4ffaad0). Run 8 itself: migrate clean, 41/41 DONE. Complete check stopped after 8 users: calendar, contacts, tasks
+  IDENTICAL; Drive one difference per user, "Q3 summary (links out)" still linking to a. Cause: Google's RTF export splits a
+  plain-text URL into one run per word, so the byte rewrite found nothing. Fix (c9cbcca): every imported native is repointed in
+  place through its own API, as a server-side copy is. Also: one content slot for the whole box made the check serial (c01's
+  Drive 64 min, CPU idle); now one per 2 GB available, 1-4 -- deploy at the next idle gap.
+
 - 22 Nov 2026, ~03:00 NPT (Opus): **P3.7 run 7: gate NOT_PARITY 37/41, every remainder understood; the .docx route itself changes how Docs look.**
   Complete check on the new code: mail, calendar, contacts, tasks, Sheets and Slides IDENTICAL for all 41. Left: c01's 7 half-made
   "Oversized Doc" rebuilds (a Docs 503 each run; fixed: a failed rebuild removes its own file; trashed), my own probe on carol
