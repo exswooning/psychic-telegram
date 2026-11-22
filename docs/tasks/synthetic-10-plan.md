@@ -575,6 +575,12 @@ rebuilt layouts (its slides render identical).
 
 ## 11. State (newest first)
 
+- 22 Nov 2026, ~12:35 NPT (Opus): **P3.7 run 13 (dharan's route, now server-side): migrate PASS, 0 failed, 62 min.**
+  41/41 users, 5,002 files server-side, 2 Apps Script by download, 1 Form rebuilt; the one Sheets 503 (incident #255) cleared by
+  the automatic repair. Staging drives all deleted (b. holds only the 3 migrated shared drives). Source guard CLEAN, nothing by
+  Bitport or by Google in a.'s audit log. Download_upload runs took ~2 h 20 min for the same cohort. DMS importing; then the
+  complete check and the gate.
+
 - 22 Nov 2026, ~11:25 NPT (Opus): **Runs 9-11 stopped by the live-run rule, each fixed; run 12 started 11:22.**
   Run 9: no image-free Doc was queued for its link repoint (has_drive_ref reads the same split RTF); every imported native is
   now checked in place. Run 10: the >10 MB Doc went over as plain text (every rich export of it is capped -- zip, HTML, PDF,
