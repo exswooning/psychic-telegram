@@ -548,7 +548,9 @@ Overall 22 Nov: 6.5 / 10.
 
 ### Path to 10 (in order; each step's result goes into State)
 
-1. P3.7, dharan's route: run 7 to PARITY on a complete check, run 8 (`/tmp/p35_dharan.sh 8`, proves the
+1. (22 Nov, operator: server-side is the default for a government source too, so dharan's route is now a protected a.
+   by server_side -- `/tmp/p35_ss_resume.sh N` after a reset, run 13 first; download_upload kept as the read-only option.)
+   P3.7, dharan's route: run 7 to PARITY on a complete check, run 8 (`/tmp/p35_dharan.sh 8`, proves the
    shared-drive reset), then F-stop on it (stop mid-Drive, restart, equal to control).
 2. P3.5: two server-side runs back to back with no code change between them (`/tmp/p35_run_nochat.sh N`).
 3. [x] (22 Nov, ae38999: 9 failures fixed, `tests/` and `data-generator/` each rc 0; run them separately, as CLAUDE.md says -- one process mixing both conftests fails test_big_attachment) The full suite green; fix what fails before any live scenario.
