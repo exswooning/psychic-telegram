@@ -643,12 +643,15 @@ def compare_sheets_streamed(source, target, sid, tid, lookup=lambda fid: None,
         if width <= 0 or height <= 0:
             raise RuntimeError('Sheet grid dimensions are unavailable; coverage incomplete')
         for col in range(0,width,100):
-            end=min(width,col+100); step=max(1,window_cells//max(1,end-col))
-            for row in range(0,height,step):
+            end=min(width,col+100); base=max(1,window_cells//max(1,end-col)); step=base; row=0
+            # A blank stretch widens the next window (x4, at most 10x): P3.7 run 13's 20,000 x 120 Sheet held no
+            # value and took 480 paced reads, ~17 min a check. Any cell drops back to the base window.
+            while row<height:
                 rng="'"+props['title'].replace("'","''")+"'!"+_a1(col,row)+':'+_a1(end-1,min(height,row+step)-1)
                 fields='sheets(properties.sheetId,data(startRow,startColumn,rowData(values('+CELL_FIELDS+'))))'
                 x=content(get(source,sid,ranges=[rng],includeGridData=True,fields=fields),props['sheetId'],a)
                 y=content(get(target,tid,ranges=[rng],includeGridData=True,fields=fields),sb['properties']['sheetId'],b)
+                row+=step; step=base if (x or y) else min(step*4, base*10)
                 if _rewrite(x, lookup)!=y:
                     diffs.append('native Sheet cell content/style differs in '+rng)
                     # Even after a mismatch, continue reading every range; output alone is bounded.
