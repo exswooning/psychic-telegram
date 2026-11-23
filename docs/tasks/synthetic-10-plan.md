@@ -586,6 +586,12 @@ rebuilt layouts (its slides render identical).
 
 ## 11. State (newest first)
 
+- 23 Nov 2026, ~11:00 am NPT (Opus): **Every scenario is runnable but five.** Benchmark fail cases merged (15 read
+  the failure run that causes them, kept on its row; 6 unseedable on a., covered by test_benchmark_truth_table; F-tamper
+  grades before repair; F-webui's seed body fixed). Of 186 (Chat aside): 149 run live, 32 covered by a unit test,
+  5 failpoints unreachable on this pair (move mode, shared drives: no twin owns one, the DMS follow-on: whole-tenant
+  run only) -- arm them in the Phase 5 run. Not deployed yet: the profile test seed is running.
+
 - 23 Nov 2026, ~10:20 am NPT (Opus): **Run 15: PARITY 41/41 -- P3.5's first run.** Remainder: one encrypted
   email, one My Map, one grant to a deleted account. Failpoints merged (9b416fb: 20 batchable on twins, 1 solo, 5
   unreachable on this pair with reasons). 300-user seed costed: full profile mail 648 GB / ~200 h through the box; 15%
