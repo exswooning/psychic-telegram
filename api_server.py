@@ -74,7 +74,7 @@ try:
     from fastapi import (Cookie, Depends, FastAPI, Header, HTTPException, Query,
                          Request, Response, WebSocket, WebSocketDisconnect)
     from fastapi.middleware.cors import CORSMiddleware
-    from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
+    from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse
     from pydantic import BaseModel, Field
 except ImportError:  # pragma: no cover - import guard, not logic
     sys.exit("control plane needs: pip install -r requirements-control-plane.txt")
@@ -82,6 +82,7 @@ except ImportError:  # pragma: no cover - import guard, not logic
 import accounts_auth
 import account_context
 import job_admission
+import simple_status
 import job_queue
 import scheduled_runs
 import job_supervisor
@@ -1737,6 +1738,24 @@ async def get_active_jobs(op: Operator = Depends(operator)):
         rows = [r if r.get("account_id") in mine else
                 {k: v for k, v in r.items() if k not in ("pid", "progress")} for r in rows]
     return rows
+
+
+@app.get("/api/v2/simple")
+async def simple_status_json(op: Operator = Depends(operator)):
+    """Everything the /simple page shows, from local data only, cached 15 s per account."""
+    require_reader(op)
+    if op.is_superadmin or op.login_id is None:      # login_id None: the operator's own token path
+        ids = None
+    else:
+        ids = {op.login_id, *accounts_auth.owned_migrations(op.login_id)}
+    return await _off_loop(simple_status.summary, ids)
+
+
+@app.get("/simple")
+async def simple_status_page(op: Operator = Depends(operator)):
+    """Same gate as the JSON it fetches: a signed-in session (the cookie rides a plain navigation)."""
+    require_reader(op)
+    return HTMLResponse(simple_status.PAGE)
 
 
 @app.get("/api/v2/users")

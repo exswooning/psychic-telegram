@@ -7,6 +7,7 @@ everything.nishantbohara.com.np {
 	# path as defense in depth, not as the primary route here).
 	reverse_proxy /api/v2/* 127.0.0.1:8090
 	reverse_proxy /ws 127.0.0.1:8090
+	reverse_proxy /simple 127.0.0.1:8090
 
 	# webui.py: the SPA (redirects / -> /app), its own /api/* endpoints
 	# (seed, job status, config -- unrelated to api_server.py's /api/v2/*),
