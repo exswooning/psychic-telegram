@@ -2968,6 +2968,27 @@ def seed_argv(body: dict, account_id: int | None = None) -> tuple[list[str], dic
         if not os.path.isfile(path):
             return [], {}, f"no cohort file data-generator/cohorts/{cohort}.json"
         argv += ["--cohort", path]
+    # A profile (data-generator/profiles/<name>.json, P4.2): N new users shaped like it, made first with
+    # create_users. Bare names and numbers only, like the cohort.
+    profile = (body.get("profile") or "").strip()
+    if profile:
+        if not re.fullmatch(r"[a-z0-9_-]{1,40}", profile):
+            return [], {}, "profile must be a file name from data-generator/profiles/ (letters, digits, - and _)"
+        path = os.path.join(HERE, "data-generator", "profiles", profile + ".json")
+        if not os.path.isfile(path):
+            return [], {}, f"no profile file data-generator/profiles/{profile}.json"
+        try:
+            n, seed_no, share = int(body.get("profile_users")), int(body.get("seed_number") or 0), float(body.get("mail_share") or 1)
+        except (TypeError, ValueError):
+            return [], {}, "profile_users and seed_number must be whole numbers, mail_share a number"
+        if not (1 <= n <= 300 and 0 < share <= 1):
+            return [], {}, "profile_users must be 1..300 and mail_share in (0, 1]"
+        argv += ["--profile", path, "--users", str(n), "--seed", str(seed_no), "--mail-share", f"{share:g}"]
+        if body.get("upload_mb_per_sec"):
+            argv += ["--upload-mb-per-sec", f"{float(body['upload_mb_per_sec']):g}"]
+        if body.get("max_hours"):
+            argv += ["--max-hours", f"{float(body['max_hours']):g}"]
+        return argv, _seed_env(st, account_id), ""
     users = (body.get("users") or "").strip()      # with a cohort: narrows it to these members
     if users:
         # Localparts only: an address would silently seed nothing, and the
