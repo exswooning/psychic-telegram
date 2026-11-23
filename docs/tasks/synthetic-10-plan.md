@@ -586,6 +586,12 @@ rebuilt layouts (its slides render identical).
 
 ## 11. State (newest first)
 
+- 23 Nov 2026, ~10:20 am NPT (Opus): **Run 15: PARITY 41/41 -- P3.5's first run.** Remainder: one encrypted
+  email, one My Map, one grant to a deleted account. Failpoints merged (9b416fb: 20 batchable on twins, 1 solo, 5
+  unreachable on this pair with reasons). 300-user seed costed: full profile mail 648 GB / ~200 h through the box; 15%
+  (`--mail-share`, operator) 156 GB. Test seed started 04:26Z from the UI (profile org45, 5 users p001-p005, 15%
+  mail): its probe measured 1.84 MB/s up, not 0.9. Next: a DMS import b. -> a. into two of them, the other way to fill.
+
 - 23 Nov 2026, ~10:00 am NPT (Opus): **Fastest path, operator's go.** Run 15 counts as P3.5's first run. Two Sonnet
   agents write the 47 scenarios the runner could not run (26 failpoints, batched onto twins; 21 benchmark fail cases
   read from the failure runs that cause them); live runs stay one at a time; the 300-user seed fills a. beside the
