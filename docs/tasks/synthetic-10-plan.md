@@ -586,6 +586,14 @@ rebuilt layouts (its slides render identical).
 
 ## 11. State (newest first)
 
+- 23 Nov 2026, ~4:45 pm NPT (Opus): **Real-data test added to the plan (operator).** dharan.gov.np (renamed
+  old.mdharan.com first) -> a. as account 8, every user as `d-<localpart>@a.`, Drive + calendar + contacts + tasks (mail
+  stays off: ~360 GB), started after the rename; verified item by item. The real users are protected on a. (agent
+  building it): account 5's runs, checks, tally and source guard leave them out; seed, reset, wipe, undo, move-back refuse
+  them by name; only account 8's own migration writes into them. fableplan2 runs on a.'s other users beside it.
+  Meanwhile dharan.gov.np -> new.mdharan.com (account 7, Drive) copied all 45 users (~31k items, 112 GB, 0 failed
+  copies); deep check and the rename procedure (df4ee59) wait for the run's follow-ons.
+
 - 23 Nov 2026, ~11:00 am NPT (Opus): **Every scenario is runnable but five.** Benchmark fail cases merged (15 read
   the failure run that causes them, kept on its row; 6 unseedable on a., covered by test_benchmark_truth_table; F-tamper
   grades before repair; F-webui's seed body fixed). Of 186 (Chat aside): 149 run live, 32 covered by a unit test,
