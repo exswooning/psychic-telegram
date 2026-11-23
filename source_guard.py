@@ -83,7 +83,16 @@ def read_user(auth, settings, user: str) -> dict:
 
 
 def _users(db) -> list[str]:
-    return [r["source_email"] for r in db.all_identities() if r["entity_type"] == "user"]
+    return [r["source_email"] for r in db.all_identities() if r["entity_type"] == "user"]     # protected: left out
+
+
+def _hidden_here(settings, user) -> bool:
+    import domain_guard
+    try:
+        r = domain_guard.subject_record(user)
+    except domain_guard.DomainGuardUnavailable:
+        return False          # unreadable: compared as before (the guard never goes blind)
+    return bool(r) and r["owner_account_id"] != domain_guard.acting_account(settings)
 
 
 def snapshot(auth, settings, db, read=read_user) -> dict:
@@ -150,6 +159,33 @@ def _events(svc, app: str, since: str):
             return
 
 
+def _others_on(settings):
+    """(actor, params) -> True when an audit event is another account's business on this source:
+    it names a protected user of another account (d-*@a., account 8's), or -- when this source
+    holds such users at all -- its actor is on neither of this pair's domains (the owner's run,
+    copying as its own source's users into its staging drives here, from this same box)."""
+    import domain_guard
+    try:
+        recs = domain_guard.subjects()
+    except domain_guard.DomainGuardUnavailable:
+        return lambda who, params: False      # unreadable: the guard skips nothing
+    aid = domain_guard.acting_account(settings)
+    src = (getattr(settings, "source_domain", "") or "").lower()
+    pair = {src, (getattr(settings, "target_domain", "") or "").lower()}
+    shared = any(r["domain"] == src and r["owner_account_id"] != aid for r in recs)
+
+    def emails(v):
+        for s in (v if isinstance(v, list) else [v]):
+            if isinstance(s, str) and "@" in s:
+                yield s
+
+    def check(who, params) -> bool:
+        if any(domain_guard.hidden(a, aid) for v in [who, *params.values()] for a in emails(v)):
+            return True
+        return bool(shared and who and "@" in who and who.rsplit("@", 1)[1].lower() not in pair)
+    return check
+
+
 def audit(settings, since: str, client_id: str, events=None) -> dict:
     """Changes in Google's own log since `since`: those made from this tool's addresses
     (its own token authorisations name them), and deletions by anyone else."""
@@ -159,10 +195,13 @@ def audit(settings, since: str, client_id: str, events=None) -> dict:
     ours = {x.get("ipAddress") for x, e, p in events("token")
             if str(p.get("client_id")) == str(client_id) and x.get("ipAddress")}
     by_bitport, by_google, deletions = [], [], []
+    others = _others_on(settings)
     for app in APPS:
         for x, e, p in events(app):
             name, ip = e.get("name"), x.get("ipAddress")
             who = (x.get("actor") or {}).get("email")
+            if others(who, p):
+                continue      # another account's protected users, or its run (same box, same addresses)
             row = {"at": x["id"]["time"], "app": app, "event": name, "actor": who,
                    "item": p.get("doc_title") or p.get("SETTING_NAME") or p.get("event_title") or "",
                    "id": p.get("doc_id")}
@@ -253,6 +292,8 @@ def check(auth, settings, db, client_id: str, read=read_user, audit_fn=audit, ex
     since = max(last, floor, key=lambda t: audit_floor(t)) if last else floor
     changes, unread = [], []
     for u, before in snap.items():
+        if _hidden_here(settings, u):
+            continue      # another account's protected user: never read, never compared
         after = read(auth, settings, u)
         if after["errors"]:
             unread.append({"user": u, "errors": after["errors"]})

@@ -75,7 +75,10 @@ def assess(conn, accepted: list[dict] | None = None, dms_failed: int | None = No
     conn.row_factory = sqlite3.Row
     accepted = accepted or []
     auto = {i[0] for i in known_issues.ISSUES if i[6]}
+    import domain_guard
     users = [r[0] for r in (_rows(conn, "SELECT source_email FROM identity_map WHERE entity_type='user'") or [])]
+    aid = domain_guard.ledger_account((_rows(conn, "PRAGMA database_list") or [(0, "", "")])[0][2])
+    users = [u for u in users if not domain_guard.hidden(u, aid)]      # another account's protected users
     checks = {(r["source_user"], r["service"]): r for r in
               (_rows(conn, "SELECT source_user, service, verdict, verified_at, payload FROM user_verification") or [])}
     # As of: a check older than the user's last write by the run or the DMS reconciliation describes a state

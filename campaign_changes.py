@@ -24,6 +24,8 @@ class Refused(RuntimeError):
 def _guard(address, configured, what):
     """Only the domain this account's pair is configured for, and only a declared sandbox (never government)."""
     import domain_guard
+    if domain_guard.protected_subject(address):
+        raise Refused(domain_guard.protected_subject(address))
     domain = address.rsplit("@", 1)[-1].lower()
     if domain != (configured or "").lower():
         raise Refused(f"{address} is not on {configured or 'a configured domain'}: the campaign only {what} its own pair")

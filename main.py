@@ -1621,7 +1621,7 @@ def cmd_init_db(args, settings: Settings, db: MigrationDB, auth: AuthManager):
         existing = ({r["source_email"].lower(): r["target_email"] for r in db.all_identities()
                      if r["entity_type"] == "user"} if db is not None else {})
         for s in src_users:
-            candidate = s.split("@")[0] + "@" + settings.target_domain
+            candidate = (getattr(args, "target_prefix", None) or "") + s.split("@")[0] + "@" + settings.target_domain
             # An operator's own mapping stays (info@s -> nest@t, 2026-11-02): auto-map only
             # fills gaps and replaces a pointer at a benchmark's throwaway test account.
             prior = existing.get(s.lower())
@@ -3280,6 +3280,9 @@ def build_parser() -> argparse.ArgumentParser:
                         "exist, and provision-users only creates accounts "
                         "already mapped, so neither can start the other. "
                         "Every account created consumes a licence.")
+    s.add_argument("--target-prefix", default="",
+                   help="with --auto-map, map source X@src to <prefix>X@target "
+                        "(e.g. d-: ward2@dharan.gov.np -> d-ward2@a.sarafgloabalexim.com)")
     s.set_defaults(func=cmd_init_db)
 
     s = sub.add_parser("preflight", help="verify DWD for every mapped user")

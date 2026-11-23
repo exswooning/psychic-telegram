@@ -349,6 +349,12 @@ class AuthManager:
                 user = subjects[(tenant, key_user)]
             elif key_user not in {value for (side, _), value in subjects.items() if side == tenant} and key_user != getattr(self.settings, tenant + "_admin", "").lower():
                 raise RuntimeError("Domain-following run refused an unpinned delegated user")
+        import domain_guard
+        # Another account's protected user (d-*@a., account 8's real users): no client at all,
+        # to read or to write. Its owner's migration passes.
+        why = domain_guard.protected_subject(user, domain_guard.acting_account(self.settings), migration=True)
+        if why:
+            raise PermissionError(why)
         key = (tenant, user)
         with self._lock:
             creds = self._creds_cache.get(key)
@@ -600,4 +606,6 @@ def list_domain_users(auth: AuthManager, tenant: str, domain: str) -> list[str]:
         users.extend(u["primaryEmail"].lower() for u in resp.get("users", []))
         page_token = resp.get("nextPageToken")
         if not page_token:
-            return users
+            import domain_guard
+            aid = domain_guard.acting_account(auth.settings)
+            return [u for u in users if not domain_guard.hidden(u, aid)]

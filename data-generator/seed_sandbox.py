@@ -2157,6 +2157,27 @@ class _PerThreadService:
         return getattr(svc, name)
 
 
+def _subject(user: str) -> str:
+    """Every client the seeder builds names its user here: another account's protected user
+    (d-*@a., account 8's real users) is never seeded, reset, filled or trimmed, by anyone."""
+    import domain_guard
+    why = domain_guard.protected_subject(user)
+    if why:
+        raise PermissionError("REFUSING: " + why)
+    return user
+
+
+def _unprotected(emails) -> set:
+    """A directory listing without protected users (--all-users, fit-to-licences, the default discovery)."""
+    import domain_guard
+    return {e for e in emails if not domain_guard.protected_subject(e)}
+
+
+def _protected_reason(email: str) -> str:
+    import domain_guard
+    return domain_guard.protected_subject(email)
+
+
 def build_services(settings: Settings, user: str):
     """Delegated clients with WRITE scopes against the sandbox source tenant."""
     import google_auth_httplib2
@@ -2167,7 +2188,7 @@ def build_services(settings: Settings, user: str):
     key = _resolve_key_path(settings)
     creds = service_account.Credentials.from_service_account_file(
         key, scopes=seed_scopes(settings)
-    ).with_subject(user)
+    ).with_subject(_subject(user))
 
     def svc(api, version):
         http = google_auth_httplib2.AuthorizedHttp(
@@ -2191,7 +2212,7 @@ def build_chat(settings: Settings, user: str):
 
     creds = service_account.Credentials.from_service_account_file(
         _resolve_key_path(settings), scopes=seed_scopes(settings)
-    ).with_subject(user)
+    ).with_subject(_subject(user))
     http = google_auth_httplib2.AuthorizedHttp(
         creds, http=httplib2.Http(timeout=300)
     )
@@ -2223,7 +2244,7 @@ def build_people_tasks(settings: Settings, user: str):
     creds = service_account.Credentials.from_service_account_file(
         _resolve_key_path(settings),
         scopes=[CONTACTS_WRITE_SCOPE, TASKS_WRITE_SCOPE],
-    ).with_subject(user)
+    ).with_subject(_subject(user))
 
     def svc(api, version):
         http = google_auth_httplib2.AuthorizedHttp(
@@ -2248,7 +2269,7 @@ def build_reports(settings: Settings, user: str):
 
     creds = service_account.Credentials.from_service_account_file(
         _resolve_key_path(settings), scopes=SEED_SCOPES + [REPORTS_SCOPE]
-    ).with_subject(user)
+    ).with_subject(_subject(user))
     http = google_auth_httplib2.AuthorizedHttp(
         creds, http=httplib2.Http(timeout=120)
     )
@@ -2269,7 +2290,7 @@ def build_directory_readonly(settings: Settings, user: str):
 
     creds = service_account.Credentials.from_service_account_file(
         _resolve_key_path(settings), scopes=[DIRECTORY_READONLY_SCOPE]
-    ).with_subject(user)
+    ).with_subject(_subject(user))
     http = google_auth_httplib2.AuthorizedHttp(
         creds, http=httplib2.Http(timeout=120)
     )
@@ -2291,7 +2312,7 @@ def build_directory_groups(settings: Settings, user: str):
 
     creds = service_account.Credentials.from_service_account_file(
         _resolve_key_path(settings), scopes=[GROUP_WRITE_SCOPE]
-    ).with_subject(user)
+    ).with_subject(_subject(user))
     http = google_auth_httplib2.AuthorizedHttp(
         creds, http=httplib2.Http(timeout=120)
     )
@@ -2314,7 +2335,7 @@ def build_gmail_purge(settings: Settings, user: str):
     try:
         creds = service_account.Credentials.from_service_account_file(
             _resolve_key_path(settings), scopes=[GMAIL_PURGE_SCOPE]
-        ).with_subject(user)
+        ).with_subject(_subject(user))
         http = google_auth_httplib2.AuthorizedHttp(
             creds, http=httplib2.Http(timeout=120))
         return build("gmail", "v1", http=http, cache_discovery=False)
@@ -2339,7 +2360,7 @@ def build_gmail_settings(settings: Settings, user: str):
         creds = service_account.Credentials.from_service_account_file(
             _resolve_key_path(settings),
             scopes=[GMAIL_SETTINGS_SCOPE, GMAIL_SHARING_SCOPE]
-        ).with_subject(user)
+        ).with_subject(_subject(user))
         http = google_auth_httplib2.AuthorizedHttp(
             creds, http=httplib2.Http(timeout=120))
         return build("gmail", "v1", http=http, cache_discovery=False)
@@ -2362,7 +2383,7 @@ def _build_directory_readwrite(settings: Settings, user: str):
     creds = service_account.Credentials.from_service_account_file(
         _resolve_key_path(settings),
         scopes=SEED_SCOPES + [provision.DIRECTORY_WRITE_SCOPE],
-    ).with_subject(user)
+    ).with_subject(_subject(user))
     http = google_auth_httplib2.AuthorizedHttp(
         creds, http=httplib2.Http(timeout=120)
     )
@@ -2431,7 +2452,7 @@ def _list_users(directory) -> set[str]:
         token = resp.get("nextPageToken")
         if not token:
             break
-    return emails
+    return _unprotected(emails)
 
 
 def entries_from_existing_users(existing_emails: set[str], domain: str) -> list[dict]:
@@ -3407,6 +3428,10 @@ def main(argv: list[str] | None = None) -> int:
         keep = {u.strip().lower() for u in args.users.split(",") if u.strip()}
         entries = [e for e in entries if e["local"] in keep]
         print(f"  narrowed to {len(entries)} of the cohort: {', '.join(e['local'] for e in entries)}")
+    # Named, not skipped: a protected user (another account's real data) is never a seed's user or peer.
+    named = sorted(set(all_users) - _unprotected(all_users))
+    if named:
+        sys.exit(f"REFUSING: {', '.join(named)}: " + _protected_reason(named[0]))
 
     # --- Optionally create the accounts first ----------------------------
     # --create-until-full already created its accounts (and built `entries`

@@ -72,6 +72,11 @@ class MoveBack:
         for d in (self.settings.source_domain, self.settings.target_domain):
             if domain_guard.is_government(d or ""):
                 return f"{d} is a government domain: nothing is moved into or out of it"
+        for u in users:
+            why = domain_guard.protected_subject(u) or domain_guard.protected_subject(
+                self.db.resolve_identity(u) or "")
+            if why:
+                return why
 
         m = re.search(r"accounts/(\d+)/", self.settings.db_path or "")
         ms = mirror_scheduler.get_settings(int(m.group(1)) if m else None)

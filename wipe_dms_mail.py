@@ -50,6 +50,10 @@ def wipe(settings, db, sources, apply=False, client=_client, say=print) -> int:
         "SELECT target_id FROM id_mapping WHERE type IN ('message','draft') AND target_id IS NOT NULL")}
     for source in sources:
         target = ledger[source.lower()]
+        why = domain_guard.protected_subject(target) or domain_guard.protected_subject(source)
+        if why:
+            say("REFUSED: " + why)
+            return 2
         try:
             svc = client(settings, target)
             ids = unmapped_ids(svc, mapped)

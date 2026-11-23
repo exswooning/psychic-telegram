@@ -346,6 +346,9 @@ def _delete_ledger_shared_drives(settings: Settings, auth: AuthManager) -> int:
     admin. The per-user reset never reached them, so the next run adopted the previous run's files instead of
     copying them (P3.7 run 7, 21 Nov 2026: info@'s SEEDED-SD-3). Only ids the ledger maps; one already gone is 404."""
     import sqlite3
+    why = domain_guard.subjects_on(getattr(settings, "target_domain", "") or "")
+    if why:
+        raise ValueError(why)
     try:
         conn = sqlite3.connect(f"file:{settings.db_path}?mode=ro", uri=True)
         ids = [r[0] for r in conn.execute(

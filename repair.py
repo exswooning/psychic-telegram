@@ -1322,6 +1322,10 @@ def clean_staging_drives(auth, db, settings, apply: bool = False) -> dict:
                         db.log_audit(source_user, drv["id"], "staging_cleanup", "MEMBER_REMOVED",
                                      f"{name}: {p['emailAddress']} no longer sees it")
                     out["members_removed"] += 1
+            import domain_guard
+            if domain_guard.protected_subject(target_user):      # nothing deletes a protected user's files
+                out["kept"].append(f"{name}: {target_user} is a protected user; nothing deleted")
+                continue
             member = auth.target_drive(target_user)
             items = member.files().list(corpora="drive", driveId=drv["id"], includeItemsFromAllDrives=True,
                                         supportsAllDrives=True, pageSize=1000,

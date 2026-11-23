@@ -762,6 +762,7 @@ class MigrationDB:
                 if not src or not tgt:
                     continue
                 rows.append((src, tgt, (r.get("entity_type") or "user").strip()))
+        rows = _own_pairs(self, rows)
 
         with self.write() as conn:
             conn.executemany(
@@ -829,7 +830,7 @@ class MigrationDB:
             q += " WHERE status=?"
             args = (status,)
         q += " ORDER BY source_email"
-        return self.conn.execute(q, args).fetchall()
+        return _visible(self, self.conn.execute(q, args).fetchall())
 
     def mark_services_done(self, source_email: str, services) -> None:
         """Union the given services into this user's completed set."""
@@ -865,10 +866,10 @@ class MigrationDB:
 
     def identity_pairs(self):
         """Every mapped (source, target) pair, in a stable order."""
-        return self.conn.execute(
+        return _visible(self, self.conn.execute(
             """SELECT source_email, target_email FROM identity_map
                 WHERE target_email IS NOT NULL AND target_email != ''
-                ORDER BY source_email""").fetchall()
+                ORDER BY source_email""").fetchall())
 
     def set_identity_status(self, source_email: str, status: str,
                             notes: str = "") -> None:
@@ -1793,6 +1794,26 @@ class MigrationDB:
             )
 
 
+def _visible(db: MigrationDB, rows: list) -> list:
+    """identity_map rows without another account's protected users (domain_guard.protected_subject)."""
+    import domain_guard
+    return domain_guard.visible(rows, domain_guard.ledger_account(db.path))
+
+
+def _own_pairs(db: MigrationDB, pairs: list) -> list:
+    """Pairs (source, target, ...) this ledger may hold: another account's protected user never
+    enters it, so no raw read of identity_map can find one either."""
+    import domain_guard
+    keep = domain_guard.visible([{"source_email": p[0], "target_email": p[1]} for p in pairs],
+                                domain_guard.ledger_account(db.path))
+    ok = {(k["source_email"], k["target_email"]) for k in keep}
+    dropped = [p[0] for p in pairs if (p[0], p[1]) not in ok]
+    if dropped:
+        log.warning("identity map: %d protected user(s) of another account left out, e.g. %s",
+                    len(dropped), dropped[0])
+    return [p for p in pairs if (p[0], p[1]) in ok]
+
+
 def bulk_seed_identities(db: MigrationDB, pairs: Iterable[tuple[str, str]]) -> None:
     """Convenience helper for tests and small manual runs."""
     with db.write() as conn:
@@ -1801,7 +1822,7 @@ def bulk_seed_identities(db: MigrationDB, pairs: Iterable[tuple[str, str]]) -> N
                VALUES (?,?)
                ON CONFLICT(source_email) DO UPDATE SET
                    target_email=excluded.target_email""",
-            [(a.lower(), b.lower()) for a, b in pairs],
+            _own_pairs(db, [(a.lower(), b.lower()) for a, b in pairs]),
         )
     db._identity_cache = None            # membership changed
 

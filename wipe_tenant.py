@@ -311,6 +311,9 @@ def wipe_groups(directory, domain: str) -> int:
     """Every group on the domain, as the admin. Tenant-level, like shared drives."""
     import domain_guard
     domain_guard.require_not_source(domain)
+    why = domain_guard.subjects_on(domain)
+    if why:
+        raise ValueError(why)
     n, token = 0, None
     while True:
         r = directory.groups().list(domain=domain, maxResults=200, pageToken=token).execute()
@@ -411,6 +414,10 @@ def wipe(users: list[str], clients: Callable[[str, str], object], admin: str,
     domain_guard.require_wipe_subjects([admin, *users])
     if groups_domain:
         domain_guard.require_not_source(groups_domain)
+    # Shared drives and groups are the whole tenant's: refused where another account's protected users live.
+    why = domain_guard.subjects_on(groups_domain or admin.rsplit("@", 1)[-1]) if (shared_drives or groups_domain) else ""
+    if why:
+        raise ValueError(why)
     totals = {s: 0 for s in services}
     failed: dict[str, list[str]] = {s: [] for s in services}
 
