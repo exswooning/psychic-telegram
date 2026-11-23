@@ -40,7 +40,8 @@ SHELL = [
     (r"sqlite3 data/accounts/\d+/migration\.db 'select tenant,ceiling from rate_limiter_ceiling'", None),
 ]
 KINDS = {"arm", "arm_chain", "disarm", "api", "webui", "shell", "wait_idle", "wait_pass", "wait_log", "wait_exit",
-         "wait_resume", "wait_incident", "wait_incident_closed", "repeat", "twin", "directory", "source", "change", "dwd", "fired"}
+         "wait_resume", "wait_incident", "wait_incident_closed", "repeat", "twin", "directory", "source", "change", "dwd", "fired",
+         "bench"}
 
 
 class StepFailed(RuntimeError):
@@ -68,12 +69,25 @@ class Ctx:
         self.done = set()          # pids already seen to exit
         self.last = {}             # the last "start" / "seed" request, for wait_resume
         self.unfired = []          # the armed specs a `fired` step found still armed (never reached)
+        self.since, self.bench = "", {}      # when the scenario began; {report kind: {benchmark id: [statuses read]}}
+
+
+def snapshot(driver, ctx: Ctx, settle: float = 0) -> None:
+    """Add what this scenario's runs have graded themselves so far to ctx.bench. A fault's reading must be taken
+    while it holds: the tally regrades the newest report and a repair then cures what the report named."""
+    if settle:
+        driver.sleep(settle)
+    for kind in ("migration", "seed"):
+        for bid, seen in (driver.benchmarks(kind, ctx.since) or {}).items():
+            have = ctx.bench.setdefault(kind, {})
+            have[bid] = sorted(set(have.get(bid, ())) | set(seen))
 
 
 def fill(obj, ctx: Ctx):
     """The step with <twin>, <second twin>, <last twin> and <account> filled in."""
     text = json.dumps(obj)
-    for key, val in (("<twin>", ctx.user), ("<second twin>", ctx.twins[1] if len(ctx.twins) > 1 else ""),
+    for key, val in (("<twin local>", ctx.user.partition("@")[0]), ("<source domain>", ctx.last_twin.partition("@")[2]),
+                     ("<twin>", ctx.user), ("<second twin>", ctx.twins[1] if len(ctx.twins) > 1 else ""),
                      ("<last twin>", ctx.last_twin), ("<account>", str(ctx.account or ""))):
         text = text.replace(key, val)
     return json.loads(text)
@@ -182,6 +196,7 @@ class Runner:
     def do_directory(self, st): self.d.directory(st["action"], st["side"], st.get("user") or self.ctx.user)
     def do_source(self, st): self.d.source(st["action"], st.get("user") or self.ctx.user)
     def do_dwd(self, st): self.d.dwd(st["tenant"], st["drop_scope"])
+    def do_bench(self, st): snapshot(self.d, self.ctx, settle=2 * self.d.poll)      # the watcher regrades within a minute
 
     # -- waits ----
     def do_wait_idle(self, st):

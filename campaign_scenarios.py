@@ -247,17 +247,29 @@ def _failpoints() -> list:
 
 
 # ---- benchmarks: each check can pass and can fail ------------------------------------------------------
-# The fault that makes it read FAIL or UNVERIFIED: a failure scenario ("F-...") or a short phrase.
+# The fault that makes it read FAIL or UNVERIFIED: a failure scenario ("F-...", whose run's report is read) or, when
+# no run on a. can cause it, the reason -- that benchmark is `unseedable` and BENCH_UNIT proves it. A key "seed:<id>"
+# is the seed run's check of that id (run_completed is in both kinds).
 BENCH_FAULT = {
-    "run_completed": "F-kill", "migrated_something": "migrate a user whose source is empty",
-    "item_failure_rate": "F-source-delete", "users_failed": "F-suspend", "blocked_items": "F-licence",
+    "run_completed": "F-kill",
+    # ledger.succeeded counts the whole ledger, so a twin that copies nothing leaves it far above 1
+    "migrated_something": "ledger.succeeded is the whole ledger's: only an empty ledger reads 0, and a. holds the cohort",
+    "item_failure_rate": "F-suspend", "users_failed": "F-suspend",
+    "blocked_items": "b. has 300 licences and the cohort 30, so none can be short (F-licence is unseedable too)",
     "retry_rate": "F-rate", "quota_pushbacks": "F-rate", "p95_latency": "F-rate",
     "items_per_min_per_worker": "F-rate", "count_parity": "F-tamper", "checksum_failures": "F-tamper",
     "acl_fidelity": "F-tamper", "extra_grants": "F-tamper", "timestamps_preserved": "F-tamper",
-    "users_finished": "F-kill", "never_finished": "F-kill", "service_failures": "F-scope",
-    "fill_users_failed": "a seed run into a user with no storage left", "warnings_per_user": "a seed run with a refused scope",
-    "fill_reached": "a seed run stopped half way",
+    "service_failures": "needs a seed that fails a service: a scope pulled from the seed key (15 min to propagate) and a re-seed of a twin",
+    "fill_users_failed": "needs a fill that exhausts a.'s storage pool (storageQuotaExceeded), which stops every later seed there",
+    "warnings_per_user": "needs a seed that draws over one warning per user (a refused scope), as service_failures",
+    "fill_reached": "needs a fill that exhausts a.'s storage pool, as fill_users_failed",
+    "seed:run_completed": "F-webui", "seed:users_finished": "F-webui", "seed:never_finished": "F-webui",
 }
+BENCH_UNIT = "tests/test_benchmark_truth_table.py"      # every check FAILs (or WARNs, if it cannot fail) on crafted facts
+
+
+def bench_fault(kind: str, bid: str) -> str:
+    return BENCH_FAULT.get(f"{kind}:{bid}") or BENCH_FAULT.get(bid, "")
 
 
 def _benchmarks() -> list:
@@ -265,13 +277,21 @@ def _benchmarks() -> list:
     out = []
     for kind, group in (("migration", benchmarks.DEFAULTS), ("seed", benchmarks.SEED_DEFAULTS)):
         for b in group:
+            fault = bench_fault(kind, b.id)
+            ran = fault.startswith("F-")      # else no run on a. can cause it
+            # What shows the fault: FAIL; WARN for a check that cannot fail (bad is None); UNKNOWN when it is
+            # required (a report with a required UNKNOWN is UNVERIFIED, never PASS).
+            accept = ["FAIL"] + (["WARN"] if b.bad is None else []) + (["UNKNOWN", "UNVERIFIED"] if b.required else [])
             for outcome in ("pass", "fail"):
+                fail = outcome == "fail"
                 out.append(Scenario(
                     id=f"bench:{kind}:{b.id}:{outcome}", group="benchmarks",
-                    title=f"{kind} benchmark {b.label} reads {outcome.upper()}", how="check_only" if outcome == "pass" else "failure",
-                    inject={} if outcome == "pass" else {"fault": BENCH_FAULT.get(b.id, "")},
-                    expect={"benchmark": b.id,
-                            "outcome": "PASS" if outcome == "pass" else "FAIL or UNVERIFIED"}))
+                    title=f"{kind} benchmark {b.label} reads {outcome.upper()}",
+                    how="check_only" if not fail else "failure" if ran else "unseedable",
+                    inject={} if not fail else {"fault": fault, **({"failure": f"fail:{fault}"} if ran else {"cause": fault})},
+                    unit_test=BENCH_UNIT if fail and not ran else "",
+                    expect={"benchmark": b.id, "report_kind": kind, "outcome": "FAIL or UNVERIFIED" if fail else "PASS",
+                            **({"accept": accept} if fail else {})}))
     return out
 
 

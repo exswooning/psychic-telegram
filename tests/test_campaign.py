@@ -30,7 +30,29 @@ def test_every_benchmark_has_a_passing_and_a_failing_scenario_and_a_named_fault(
     for kind, group in (("migration", benchmarks.DEFAULTS), ("seed", benchmarks.SEED_DEFAULTS)):
         for b in group:
             assert f"bench:{kind}:{b.id}:pass" in S.by_id() and f"bench:{kind}:{b.id}:fail" in S.by_id()
-            assert S.BENCH_FAULT.get(b.id), f"benchmark {b.id} has no fault that makes it fail"
+            assert S.bench_fault(kind, b.id), f"benchmark {b.id} has no fault that makes it fail"
+
+
+def test_a_failing_benchmark_is_caused_by_a_failure_scenario_or_covered_by_its_unit_test():
+    import os
+    by = S.by_id()
+    n_ran = n_covered = 0
+    for kind, group in (("migration", benchmarks.DEFAULTS), ("seed", benchmarks.SEED_DEFAULTS)):
+        for b in group:
+            sc = by[f"bench:{kind}:{b.id}:fail"]
+            if sc.how == "unseedable":
+                n_covered += 1
+                assert sc.unit_test and os.path.isfile(os.path.join(C.HERE, sc.unit_test)), sc.id
+                assert not S.bench_fault(kind, b.id).startswith("F-"), sc.id
+            else:
+                n_ran += 1
+                assert sc.how == "failure" and sc.inject["failure"] == f"fail:{S.bench_fault(kind, b.id)}", sc.id
+                assert sc.inject["failure"] in by and not sc.act and sc.expect["report_kind"] == kind, sc.id
+    assert (n_ran, n_covered) == (15, 6)
+    # a check that cannot fail (bad is None) is shown by WARN; one that is required, by UNKNOWN (UNVERIFIED) too
+    assert "WARN" in by["bench:migration:quota_pushbacks:fail"].expect["accept"]
+    assert "UNKNOWN" in by["bench:migration:count_parity:fail"].expect["accept"]
+    assert "UNKNOWN" not in by["bench:migration:p95_latency:fail"].expect["accept"]
 
 
 def test_a_fault_naming_a_failure_scenario_names_one_that_exists():

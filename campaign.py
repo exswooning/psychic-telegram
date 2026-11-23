@@ -100,6 +100,10 @@ class Driver:
     def source(self, action: str, user: str) -> str: raise Unautomated("no source writer")
     def dwd(self, tenant: str, drop_scope: str) -> None: raise Unautomated("no delegation writer")
     def facts(self, user: str | None) -> dict: raise NotImplementedError   # what judges read; see judge()
+    def benchmarks(self, kind: str, since: str | None = None):
+        """{benchmark id: [statuses read]} from the run reports of `kind` ("migration" or "seed"): the newest one, or
+        every one whose run began at or after `since`. None = no report to read (the facts' own reading stands)."""
+        return None
 
 
 TWINS = tuple(f"t{n:02d}" for n in range(2, 21))      # t01 is the control
@@ -344,6 +348,18 @@ class LiveDriver(Driver):
             time.sleep(self.poll)
         return False
 
+    def benchmarks(self, kind: str, since: str | None = None):
+        import run_report
+        reps = [r for r in run_report.list_reports(self.account_id) if r["kind"] == kind]      # newest first
+        if since:
+            began = run_report._parse_iso(since)
+            reps = [r for r in reps if (t := run_report._parse_iso(r["startedAt"] or r["generatedAt"])) and t >= began]
+        out: dict = {}
+        for r in reps if since else reps[:1]:
+            for b in ((run_report.load_report(self.account_id, r["id"]) or {}).get("benchmarks") or {}).get("results", []):
+                out.setdefault(b["id"], set()).add(str(b.get("status", "")).upper())
+        return {k: sorted(v) for k, v in out.items()} or None
+
     def facts(self, user: str | None, since: str | None = None) -> dict:
         import known_issues
         out: dict = {}
@@ -384,12 +400,7 @@ class LiveDriver(Driver):
                     out["equal_to_control"] = svc(mine) == svc(ctl)
                     out["duplicates"] = sum(max(0, (v.get("target") or 0) - (v.get("expected") or v.get("source") or 0))
                                             for v in (mine.get("services") or {}).values())
-        reports = sorted(f for f in os.listdir(os.path.join(HERE, "logs", "reports", str(self.account_id)))
-                         if f.endswith(".json") and f.startswith("migration-"))
-        if reports:
-            with open(os.path.join(HERE, "logs", "reports", str(self.account_id), reports[-1]), encoding="utf-8") as fh:
-                rep = json.load(fh)
-            out["benchmarks"] = {b["id"]: b.get("status", "").upper() for b in (rep.get("benchmarks") or {}).get("results", [])}
+        out["benchmarks"] = self.benchmarks("migration")
         out["incidents"] = self.incidents()
         try:
             out["exits"] = self.exits()
@@ -403,7 +414,7 @@ def judge(expect: dict, facts: dict) -> tuple:
     driver could not read (missing key) makes that check UNVERIFIED, never a pass."""
     unread = []
     for key, want in expect.items():
-        if key in ("ends_as", "closes_on", "outcome", "or_evidence", "or_source", "needs_source", "service", "verify_after") or want is None:
+        if key in ("ends_as", "closes_on", "outcome", "report_kind", "accept", "or_evidence", "or_source", "needs_source", "service", "verify_after") or want is None:
             continue
         if key == "finding_classified":
             have = facts.get("findings")
@@ -464,12 +475,18 @@ def judge(expect: dict, facts: dict) -> tuple:
                 return "FAIL", f"{facts['duplicates']} item(s) landed twice"
         elif key == "benchmark":
             have = (facts.get("benchmarks") or {}).get(want)
-            if have is None:
+            if not have:
                 unread.append(key)
             else:
-                ok_set = {"PASS"} if expect.get("outcome") == "PASS" else {"FAIL", "UNVERIFIED"}
-                if str(have).upper() not in ok_set:
-                    return "FAIL", f"benchmark {want} read {have}, wanted {sorted(ok_set)}"
+                # `have` is one status, or every status the fault's runs read (the fault shows if any is an accepted one)
+                seen = {str(x).upper() for x in ([have] if isinstance(have, str) else have)}
+                if expect.get("outcome") == "PASS":
+                    ok_set, ok = {"PASS"}, seen <= {"PASS"}
+                else:
+                    ok_set = set(expect.get("accept") or ("FAIL", "UNVERIFIED"))
+                    ok = bool(seen & ok_set)
+                if not ok:
+                    return "FAIL", f"benchmark {want} read {sorted(seen)}, wanted {sorted(ok_set)}"
         elif key == "incident":
             seen = (facts.get("incidents") or {}).get(want)
             for phase in ("opens", "closes"):
@@ -512,6 +529,8 @@ READS_THE_RUN = ("check_only", "seeded", "must_not_happen")
 
 def _read(sc, driver, row, user):
     facts = driver.facts(user, since="")
+    if sc.expect.get("benchmark") and (got := driver.benchmarks(sc.expect.get("report_kind", "migration"))) is not None:
+        facts["benchmarks"] = got       # the newest report of its kind: a seed's checks are not in a migration's
     probe = sc.expect.get("or_source") or sc.expect.get("needs_source")
     if probe and user:
         facts["source_has"] = driver.source_has(probe, user)
@@ -531,11 +550,12 @@ def _run_steps(sc, driver, row, name, allow):
     ctx = X.Ctx(name, sc.id, allow, [], getattr(driver, "account_id", None), driver.fixture_user(TWINS[-1]))
     X.validate(steps, ctx)
     ctx.twins = [driver.take_twin() for _ in range(int(sc.inject.get("twin", 1)))]
-    ctx.user = ctx.twins[0]
+    ctx.user, ctx.since = ctx.twins[0], row["started_at"]
     X.run(steps, driver, ctx)
+    X.snapshot(driver, ctx)         # what the runs graded themselves, for the bench:*:fail scenarios that name this one
     verdicts = [judge(sc.expect, driver.facts(t)) for t in ctx.twins]
     status, why = min(verdicts, key=lambda v: ("FAIL", "UNVERIFIED", "PASS").index(v[0]))
-    return {**row, "status": status, "reason": why, "user": ctx.twins[0], "twins": ctx.twins,
+    return {**row, "status": status, "reason": why, "user": ctx.twins[0], "twins": ctx.twins, "benchmarks": ctx.bench,
             "finished_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
 
 
@@ -594,6 +614,14 @@ def run_scenario(sc: S.Scenario, driver: Driver, name: str, allow: set, wait: in
         prior = read_results(name).get(sc.inject["failure"], {})
         if not prior.get("user"):
             return {**row, "status": "UNVERIFIED", "reason": f"{sc.inject['failure']} has not run: it causes this one"}
+        if sc.expect.get("benchmark"):
+            # a benchmark is judged by the reports of THAT scenario's runs, kept on its row (the tally regrades the
+            # newest report and a repair undoes the fault, so a later read of the reports would see the cure)
+            got = (prior.get("benchmarks") or {}).get(sc.expect.get("report_kind", "migration"))
+            if not got:
+                return {**row, "status": "UNVERIFIED", "reason": f"{sc.inject['failure']} kept no {sc.expect.get('report_kind')} report: run it again"}
+            status, why = judge(sc.expect, {"benchmarks": got})
+            return {**row, "status": status, "reason": why, "user": prior["user"], "finished_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
         return _read(sc, driver, row, prior["user"])
     if sc.how in ("failure", "failpoint") and sc.inject.get("steps") and not sc.act:
         try:
@@ -670,7 +698,7 @@ def run(name: str, driver: Driver, group: str | None = None, only: set | None = 
     out(f"{len(todo)} scenario(s) to run of {len(select(scenarios, group, only))} selected")
     if dry_run:
         for s in todo:
-            out(f"  {s.id}  [{s.how}]" + (f"  needs {','.join(s.needs)}" if s.needs else "") + ("" if s.act or s.inject.get("steps") or s.inject.get("unreachable") or s.how in ("check_only", "unseedable") else "  (no act yet)"))
+            out(f"  {s.id}  [{s.how}]" + (f"  needs {','.join(s.needs)}" if s.needs else "") + ("" if s.act or s.inject.get("steps") or s.inject.get("unreachable") or s.inject.get("failure") or s.how in ("check_only", "unseedable") else "  (no act yet)"))
         return done
     chunks = [[s] for s in todo]
     if batch > 1:

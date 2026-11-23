@@ -27,7 +27,8 @@ TWIN = "<twin>"
 # t01 is started with exactly this body.
 START = {"users": [TWIN], "services": ["all"], "mail_mode": "engine", "transfer_mode": "server_side", "dms_after": False}
 STEPS = {"arm", "arm_chain", "disarm", "api", "webui", "shell", "wait_idle", "wait_pass", "wait_log", "wait_exit",
-         "wait_resume", "wait_incident", "wait_incident_closed", "repeat", "twin", "directory", "source", "change", "dwd", "fired"}
+         "wait_resume", "wait_incident", "wait_incident_closed", "repeat", "twin", "directory", "source", "change", "dwd", "fired",
+         "bench"}
 BASE = {"equal_to_control": True, "no_item_twice": True}
 
 
@@ -110,8 +111,9 @@ ROWS = {
         "the run and its follow-ons go on or are picked up; no phase starts twice (one migrate, one repair in the run history); "
         "this is also where watch_box_busy can be read"),
     "F-webui": ("The web UI restarts during a seed, then a migration", 1, [
-        {"do": "webui", "method": "POST", "path": "/api/seed", "body": {"users": [TWIN]},
-         "note": "the Seed Wizard's request for the twin's own user; body refined at P3.4"},
+        {"do": "webui", "method": "POST", "path": "/api/seed", "body": {
+            "cohort": "fableplan2", "users": "<twin local>", "confirm_domain": "<source domain>"},
+         "note": "the Seed Wizard's request for the twin's own user (the cohort names its shape; users are localparts)"},
         {"do": "wait_log", "job": "seed", "match": "."}, shell("systemctl restart bitport-webui"), {"do": "wait_resume", "by": "seed"},
         IDLE, start(), {"do": "wait_pass", "pass": "drive"}, shell("systemctl restart bitport-webui"), IDLE, *FINISH], BASE,
         "the migration survives the restart; the seed, started again, adds nothing twice (the twin's source count is unchanged)"),
@@ -183,7 +185,9 @@ ROWS = {
         {"do": "change", "kind": "tasks.list_missing", "user": TWIN}, {"do": "change", "kind": "drive.grant_missing", "user": TWIN},
         {"do": "change", "kind": "drive.grant_extra", "user": TWIN, "needs_primitive": "campaign_changes.drive.grant_extra"},
         {"do": "change", "kind": "gmail.labels_missing", "user": TWIN}, {"do": "change", "kind": "drive.mtime", "user": TWIN},
-        api("/api/v2/one-to-one/run", {"users": [TWIN], "limit": 0, "repair": False}), IDLE, *FINISH], BASE,
+        api("/api/v2/one-to-one/run", {"users": [TWIN], "limit": 0, "repair": False}), IDLE,
+        # tallied before the repair, so the report is regraded with b. changed: `bench` keeps what the benchmarks read
+        api("/api/v2/tally/run", {"users": [TWIN]}), IDLE, {"do": "bench"}, *FINISH], BASE,
         "each change is named by its known_issues kind; repair restores what it can; the count_parity, extra_grants, "
         "acl_fidelity and timestamps benchmarks read FAIL or UNVERIFIED before the repair (the bench:*:fail scenarios read them)"),
     "F-double": ("Start pressed twice", 1, [
