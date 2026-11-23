@@ -409,8 +409,8 @@ Phase 1 and the code of Phase 2 need no tenant. Start them while Phase 0 is open
   `campaign.py` groups in this order: `errors`, `failures`, `benchmarks`, `watchers`,
   `chat`. A failed scenario is a bug: fix, test, deploy, `--redo` that scenario. After each group
   run `ui_check.py --account-id ID` once, so the UI's numbers are compared with the ledger.
-- [ ] P3.5 Three wipe-and-migrate runs of the cohort in a row: row 7. Record phase times, verdict
-  and counts for each.
+- [~] P3.5 Three wipe-and-migrate runs of the cohort in a row: row 7. Record phase times, verdict
+  and counts for each. (23 Nov, operator: run 15 counts as the first -- only check fixes between it and the next two.)
 - [ ] P3.6 From the measured rates, estimate the 300-user run: seeding hours, Drive hours, DMS days,
   verify hours. Write the numbers in State. They are the inputs of P4.3 and P5.1.
 - [x] P3.7 (22 Nov: runs 13 and 14 PARITY 41/41 in a row, server-side, run 14 with one Stop mid-Drive recorded STOPPED and resumed) (added 21 Nov, operator: dharan.gov.np moves into a. after this plan) dharan's route, end to end, on the cohort:
@@ -585,6 +585,11 @@ the read-only route's Drive; a copied comment cannot keep its date; a deck that 
 rebuilt layouts (its slides render identical).
 
 ## 11. State (newest first)
+
+- 23 Nov 2026, ~10:00 am NPT (Opus): **Fastest path, operator's go.** Run 15 counts as P3.5's first run. Two Sonnet
+  agents write the 47 scenarios the runner could not run (26 failpoints, batched onto twins; 21 benchmark fail cases
+  read from the failure runs that cause them); live runs stay one at a time; the 300-user seed fills a. beside the
+  campaign; each live batch runs only its twin and its service.
 
 - 23 Nov 2026, ~9:30 am NPT (Opus): **Run 15 (15v) migrated clean (migrate PASS, DMS done); the gate read UNVERIFIED
   (#268) on leftovers from earlier runs, not on run 15.** (1) 570 Gmail extras on all 41 users: Docs comment
