@@ -1160,7 +1160,7 @@ class TestAnUnusableUploadedKeyProvisionsFresh:
         monkeypatch.setattr(fs.accounts_auth, "get_tenant_config",
                             lambda account_id, side: {"sa_key_path": str(up)})
         monkeypatch.setattr(readiness, "_own_project",
-                            lambda p, d: {"name": "own project", "ok": False, "detail": "shared"})
+                            lambda p, d, a=None: {"name": "own project", "ok": False, "detail": "shared"})
         monkeypatch.setattr(fs, "_admin_can_reach_project", lambda *a, **k: True)
         monkeypatch.setattr(fs, "_delegation_already_live", lambda *a, **k: True)
         monkeypatch.setattr(fs.provision_gcp, "gcloud_ready", lambda: (True, "me"))
