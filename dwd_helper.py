@@ -120,7 +120,8 @@ def _check_console_blocker(browser, attempted: set[str], destination: str) -> bo
                     text = ""
                 notice = _billing_notice(text)
                 _publish_billing_notice(notice)
-                grace = "/interstitial/gracesubscription/" in current
+                grace = "/interstitial/gracesubscription/" in current or (
+                    os.getenv("BILLING_DISMISS_OK") == "1" and "/interstitial/graceoffer" in current)
                 reminder = bool(re.search(r"couldn[’']t process your last payment", text, re.I))
                 # A suspension countdown ("N days before service suspension") offers Dismiss. Clicked only when the
                 # operator said so for this run (BILLING_DISMISS_OK=1; dharan.gov.np, 23 Nov 2026: "click dismiss").
