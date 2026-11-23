@@ -582,6 +582,16 @@ rebuilt layouts (its slides render identical).
 
 ## 11. State (newest first)
 
+- 23 Nov 2026, ~9:30 am NPT (Opus): **Run 15 (15v) migrated clean (migrate PASS, DMS done); the gate read UNVERIFIED
+  (#268) on leftovers from earlier runs, not on run 15.** (1) 570 Gmail extras on all 41 users: Docs comment
+  notifications and out-of-office replies the DMS imported in runs 13-14; the target reset deleted only @seed.test mail,
+  and once a. was cleared their source copies were gone. Removed from b. (644 with the trashed welcome mail; a dry run
+  first; a batch read that dropped rate-limited items had first counted 2,698). The target reset now removes every
+  message naming the source (`remove_source_mail`). (2) c10: two `.Quarantined duplicate` files from 17 Nov at its My
+  Drive root, with repair records naming originals gone: the reset now removes repair's own copies at the root and the
+  ledger reset their records. (3) info@: drive.native read 74 checked of 26 -- its shared drives' natives were counted;
+  now only its own in-scope ones (`native_checked_count`). All tested, deployed; full check re-run.
+
 - 23 Nov 2026, ~4:25 am NPT (Opus): **Run 15 stopped a fourth time (#266), a guard defect; fixed, deployed, restarted
   22:35Z as 15v.** The full check read my 21:45:15.87 write, which Google logged at 21:45:16.062, against a baseline kept
   to the second (21:45:16). The audit log is now read from 3 s after the baseline (`source_guard.audit_floor`, both
