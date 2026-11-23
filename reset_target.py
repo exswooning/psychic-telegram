@@ -147,6 +147,29 @@ def trash_google_welcome_mail(gmail) -> int:
             return n
 
 
+def remove_source_mail(gmail, source_domain: str, purge=None) -> int:
+    """Every message naming the source domain, deleted for good when `purge` (a mail.google.com client) is given,
+    else trashed; how many. The seeder's reset takes only @seed.test mail, so what Google's import brought over --
+    Docs notifications, out-of-office replies -- stayed through every reset, and once the source had been cleared
+    the next check read 570 of them as extras on b. (incident #268, 23 Nov 2026). On a sandbox target, mail naming
+    the source arrived by a migration."""
+    q, n = f"from:{source_domain} OR to:{source_domain} OR cc:{source_domain}", 0
+    while True:      # list again from the start: what was removed no longer matches
+        if purge is not None:
+            r = purge.users().messages().list(userId="me", q=q, includeSpamTrash=True, maxResults=500).execute()
+        else:
+            r = gmail.users().messages().list(userId="me", q=q + " -in:trash", maxResults=500).execute()
+        ids = [m["id"] for m in r.get("messages", [])]
+        if not ids:
+            return n
+        if purge is not None:
+            purge.users().messages().batchDelete(userId="me", body={"ids": ids}).execute()
+        else:
+            for mid in ids:
+                gmail.users().messages().trash(userId="me", id=mid).execute()
+        n += len(ids)
+
+
 def reset_all(settings: Settings, auth: AuthManager, users: list[str],
               services: tuple[str, ...], workers: int) -> tuple[dict, list[str]]:
     """Reset every user side by side; (totals, users it could not reach).
@@ -244,6 +267,10 @@ def reset_one(settings: Settings, auth: AuthManager, user: str,
             out["gmail"] += welcome
             if welcome:
                 print(f"    {user}: trashed {welcome} of Google's own welcome mail")
+            moved = remove_source_mail(auth.target_gmail(user), settings.source_domain, _purge_client(settings, user))
+            out["gmail"] += moved
+            if moved:
+                print(f"    {user}: removed {moved} message(s) naming {settings.source_domain} (Google's import included)")
         except Exception as exc:  # noqa: BLE001 - the seeded mail is already gone; this is tidying
             print(f"    ! {user} welcome mail: {str(exc)[:90]}")
     if "chat" in services:

@@ -483,3 +483,26 @@ def test_a_stop_ends_the_reset_between_users(monkeypatch):
         reset_target.reset_all(st, None, [f"u{i}@t.com" for i in range(20)], ("drive",), 2)
     gate.set()
     assert len(started) <= 2
+
+
+def test_a_reset_removes_mail_naming_the_source_that_google_imported():
+    """Incident #268: DMS-delivered mail (no @seed.test id) survived every reset; 570 extras once a. was cleared."""
+    class Call:
+        def __init__(self, fn): self.fn = fn
+        def execute(self): return self.fn()
+
+    class Msgs:
+        def __init__(self): self.box, self.queries = {"m1", "m2", "m3"}, []
+        def list(self, userId, q, maxResults, includeSpamTrash=False):
+            self.queries.append(q)
+            return Call(lambda: {"messages": [{"id": i} for i in sorted(self.box)][:2]})
+        def batchDelete(self, userId, body):
+            return Call(lambda: self.box.difference_update(body["ids"]))
+
+    class G:
+        def __init__(self): self.m = Msgs()
+        def users(self): return self
+        def messages(self): return self.m
+    purge = G()
+    assert reset_target.remove_source_mail(None, "a.example", purge) == 3
+    assert purge.m.box == set() and purge.m.queries[0] == "from:a.example OR to:a.example OR cc:a.example"
