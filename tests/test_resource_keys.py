@@ -28,6 +28,10 @@ class _Files:
     def delete(self, **kw):
         raise AssertionError("reached the source")
 
+    def copy(self, **kw):
+        self.calls.append(("copy", kw))
+        return _Req({"id": "COPY"})
+
     def get(self, **kw):
         self.calls.append(("get", kw))
         return _Req({"id": kw["fileId"]})
@@ -148,3 +152,13 @@ def test_a_failed_acceptance_names_its_findings():
     assert known_issues.user_reason(c, "a@src") == \
         "3 Doc/Slide structure differs from the source; 1 A source file has no copy"
     assert known_issues.user_reason(c, "b@src") == ""
+
+
+def test_a_server_side_copy_carries_the_key():
+    """dharan.gov.np, ward6, 23 Nov 2026: the key was on file, the copy went without it and Google said 404."""
+    resource_keys.KEYS.clear()
+    svc = _Svc()
+    src = auth.allow_copy_into(auth.ReadOnlyDrive(svc), "STAGING")
+    src.files().list(q="'P' in parents", fields="files(id)").execute()
+    req = src.files().copy(fileId="F1", body={"parents": ["STAGING"]}, fields="id")
+    assert req.headers[resource_keys.HEADER] == "F1/0-key1"

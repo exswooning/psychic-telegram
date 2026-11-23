@@ -930,6 +930,10 @@ class DriveMigrator:
                         and not self.shared_drive and not self.delta):
                     self._walk_shared_with_me(tgt_root)
                 self._drain_file_pool()
+                # After the drain: a file still in flight has no ledger row yet and would be swept twice.
+                if not self.shared_drive and not self.delta and not self.budget.limited:
+                    self._sweep_owned_unreached(tgt_root)
+                    self._drain_file_pool()
             finally:
                 self._close_file_pool()
             self._fixup_shortcuts()
@@ -1294,6 +1298,35 @@ class DriveMigrator:
             self.stats[key] = self.stats.get(key, 0) + n
         import progress
         progress.tick(self.source_user, "drive", n)      # the heartbeat oversight's stall check reads
+
+    def _sweep_owned_unreached(self, tgt_root: str) -> None:
+        """Files the user owns that no walk reached: an orphan with no parent (Forms leaves its responses Sheet so),
+        or one inside a folder someone outside the org owns. dharan.gov.np, 23 Nov 2026: both were never attempted
+        and read UNMAPPED_SOURCE at the end. Each goes into the copy of its folder this user holds, else the root."""
+        files, token = [], None
+        q = ("'me' in owners and trashed = false and mimeType != '%s' and mimeType != '%s'"
+             % (FOLDER_MIME, SHORTCUT_MIME))
+        while not shutdown_requested():
+            r = self._retry(lambda t=token: self.src.files().list(
+                q=q, pageSize=1000, pageToken=t, fields=f"nextPageToken,files({ITEM_FIELDS})").execute(),
+                write=False, tenant="source")
+            # Never attempted only: a file the walk copied, failed or decided to skip has a ledger row already.
+            files += [f for f in r.get("files", []) if f.get("mimeType") not in (FOLDER_MIME, SHORTCUT_MIME)
+                      and not self.db.get_target_id(self.source_user, f["id"], "file")
+                      and not self.db.conn.execute("SELECT 1 FROM audit_log WHERE source_user=? AND item_id=? LIMIT 1",
+                                                   (self.source_user, f["id"])).fetchone()]
+            token = r.get("nextPageToken")
+            if not token:
+                break
+        by_parent: dict[str, list] = {}
+        for f in files:
+            parent = (f.get("parents") or [None])[0]
+            tgt = (parent and self.db.get_target_id(self.source_user, parent, "folder")) or tgt_root
+            by_parent.setdefault(tgt, []).append(f)
+        for tgt, items in by_parent.items():
+            log.info("[%s] %d owned file(s) no walk reached, copied into %s", self.source_user, len(items), tgt)
+            self.stats["unreached_swept"] = self.stats.get("unreached_swept", 0) + len(items)
+            self._sync_files(items, tgt)
 
     def _walk(self, src_parent: str, tgt_parent: str, depth: int) -> None:
         if depth > self.settings.max_recursion_depth:

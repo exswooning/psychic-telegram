@@ -170,13 +170,18 @@ class _ReadOnlyCollection:
             import resource_keys
             return resource_keys.keyed(fn, self._name, method, self._keys_db)
         if self._name == "files" and method == "copy" and self._copy_into:
+            # The copy carries the file's resource key too: an older link-shared file is "not found"
+            # without it (dharan.gov.np, ward6, 23 Nov 2026: key on file, copy refused 404).
+            import resource_keys
+            keyed_copy = resource_keys.keyed(fn, "files", "copy", self._keys_db)
+
             def copy(*a, **kw):
                 parents = (kw.get("body") or {}).get("parents")
                 if parents != [self._copy_into]:
                     raise SourceWriteRefused(
                         f"source Drive files.copy into {parents} refused: a migration "
                         f"copies only into its own staging drive ({self._copy_into})")
-                return fn(*a, **kw)
+                return keyed_copy(*a, **kw)
             return copy
         if self._name == "files" and method == "update" and self._moves and self._copy_into:
             def move(*a, **kw):
