@@ -209,6 +209,13 @@ def reset_service_ledger(db: MigrationDB, source_email: str,
                 if table in tables:
                     side_deleted += conn.execute(
                         f"DELETE FROM {table} WHERE source_user=?", (source_email,)).rowcount
+        # What repair quarantined or kept (`drive-duplicate`, `drive-backup`, ...) on the target just reset: kept, it
+        # sent the next check after files that no longer exist (c10, incident #268, 23 Nov 2026).
+        if "finding_repair_actions" in tables:
+            for svc in services:
+                side_deleted += conn.execute(
+                    "DELETE FROM finding_repair_actions WHERE source_user=? AND service LIKE ?",
+                    (source_email, svc + "%")).rowcount
         if "drive" in services and "comment_delivery_attempts" in tables:
             side_deleted += conn.execute(
                 "DELETE FROM comment_delivery_attempts WHERE source_user=?", (source_email,)).rowcount

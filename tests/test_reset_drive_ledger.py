@@ -48,6 +48,18 @@ def _seed(db):
 
 
 class TestResetDriveLedger:
+    def test_repair_records_for_the_reset_service_are_cleared(self, db):
+        """c10's quarantine records outlived the reset and the next check chased files gone with it (#268)."""
+        _seed(db)
+        with db.write() as conn:
+            conn.execute("CREATE TABLE IF NOT EXISTS finding_repair_actions (source_user TEXT, service TEXT, "
+                         "item_id TEXT, state TEXT, detail TEXT, checked_at TEXT)")
+            conn.executemany("INSERT INTO finding_repair_actions (source_user, service, item_id, state) VALUES (?,?,?,?)",
+                             [(SRC, "drive-duplicate", "q1", "QUARANTINED"), (SRC, "gmail-label", "g1", "DONE")])
+        reset_drive_ledger.reset_drive_ledger(db, SRC)
+        left = db.conn.execute("SELECT service FROM finding_repair_actions").fetchall()
+        assert [r[0] for r in left] == ["gmail-label"]
+
     def test_drive_mapping_rows_are_cleared(self, db):
         _seed(db)
         reset_drive_ledger.reset_drive_ledger(db, SRC)

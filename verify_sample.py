@@ -793,7 +793,7 @@ class Verifier:
         out["sp"] = sp = "" if carried_in else w._drive_path(src, sid, sc)
         out["tp"] = tp = w._drive_path(tgt, tid, tc)
         out["diffs"] = compare_drive_file(sm, tm, sp, tp)
-        out["ev"] = ev = {"kind": kind, "name": sm.get("name"), "path": sp, "opened": False}
+        out["ev"] = ev = {"kind": kind, "name": sm.get("name"), "path": sp, "opened": False, "source": sid}
         w._publish_stats(currentDocument=sid, currentMime=sm.get("mimeType"), currentSince=time.time(),
                          phase="compare")
         if kind == "file":

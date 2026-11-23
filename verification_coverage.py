@@ -94,6 +94,13 @@ def permissions_status(result: dict) -> str:
     )
 
 
+def native_checked_count(evidence, native_ids) -> int:
+    """This user's in-scope natives whose content was compared, each once."""
+    ids = set(native_ids or ())
+    return len({e.get("source") for e in evidence
+                if e.get("service") == "drive" and e.get("nativeFeaturesChecked") and e.get("source") in ids})
+
+
 def drive(v, result):
     src = v.auth.source_drive(v.src_user)
     external_items = []
@@ -162,7 +169,10 @@ def drive(v, result):
         # sharing are checked, but Google has no API that reads its content, so it is named, never counted as compared.
         result["nativeNoReadApi"] = sorted(f.get("name", f["id"]) for f in files
                                            if f["id"] in in_scope and f["id"] not in reasoned and f.get("mimeType") in NO_READ_API)
-        result["nativeSourceCount"] = sum(f.get("mimeType","").startswith("application/vnd.google-apps.") and not f.get("mimeType","").endswith((".folder",".shortcut")) and f.get("mimeType") not in NO_READ_API for f in files if f["id"] in in_scope and f["id"] not in reasoned)
+        native_ids = [f["id"] for f in files if f["id"] in in_scope and f["id"] not in reasoned
+                      and f.get("mimeType", "").startswith("application/vnd.google-apps.")
+                      and not f.get("mimeType", "").endswith((".folder", ".shortcut")) and f.get("mimeType") not in NO_READ_API]
+        result["nativeSourceCount"], result["nativeSourceIds"] = len(native_ids), native_ids
         result["sourceInventory"] = {
             "inScope": len(in_scope),
             "excludedSharedOrTenantItems": excluded,
@@ -328,7 +338,9 @@ def drive(v, result):
             "External originals keep their owners and collaborators; retained private copies are content fallbacks.",
         )
     )
-    native_checked=sum(bool(e.get("nativeFeaturesChecked")) for e in v.evidence if e.get("service")=="drive")
+    # Only this user's in-scope natives: a shared drive's are compared too, and counted, info@ read 74 checked of 26
+    # and INCOMPLETE on every run (23 Nov 2026).
+    native_checked = native_checked_count(v.evidence, result.get("nativeSourceIds"))
     result["checks"].append(check("drive.native", "Readable native content, formatting and structures",
         "EMPTY" if result.get("nativeSourceCount")==0 else "INCOMPLETE" if native_checked!=result.get("nativeSourceCount") else "DIFFERENCES" if any(e.get("nativeFeaturesMatched") is False for e in v.evidence if e.get("service")=="drive") else "MATCHED",
         result.get("nativeSourceCount",0),native_checked,

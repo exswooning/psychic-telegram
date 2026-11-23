@@ -283,6 +283,9 @@ def reset_one(settings: Settings, auth: AuthManager, user: str,
     return out
 
 
+REPAIR_COPY_PREFIXES = (".Quarantined duplicate ", ".Repair backup - ")
+
+
 def _delete_ledger_drive_items(settings: Settings, auth: AuthManager, target_user: str) -> int:
     """Every Drive item the ledger says the migration wrote for this user, by id -- not only the seeded tree. A
     fixture made at the root of a source My Drive was copied to the root of the target's, outside MIGRATION-TEST, so
@@ -307,8 +310,11 @@ def _delete_ledger_drive_items(settings: Settings, auth: AuthManager, target_use
     wanted, at_root, token = set(ids), [], None
     while True:
         resp = drive.files().list(q="'root' in parents and 'me' in owners and trashed = false", pageSize=1000,
-                                  pageToken=token, fields="nextPageToken,files(id)").execute()
-        at_root += [f["id"] for f in resp.get("files", []) if f["id"] in wanted]
+                                  pageToken=token, fields="nextPageToken,files(id,name)").execute()
+        # And repair's own copies left where it found the file (`finding_repairs`): no ledger row maps them, so c10's
+        # two quarantined duplicates outlived every reset and failed run 15's check (incident #268, 23 Nov 2026).
+        at_root += [f["id"] for f in resp.get("files", []) if f["id"] in wanted
+                    or f.get("name", "").startswith(REPAIR_COPY_PREFIXES)]
         token = resp.get("nextPageToken")
         if not token:
             break

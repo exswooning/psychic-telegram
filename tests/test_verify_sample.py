@@ -1002,3 +1002,11 @@ def test_a_text_body_that_differs_only_in_line_endings_is_the_same_message_but_b
         return (b"Message-ID: <x@y>\r\nMIME-Version: 1.0\r\nContent-Type: application/octet-stream\r\n"
                 b"Content-Transfer-Encoding: base64\r\n\r\n" + base64.b64encode(x) + b"\r\n")
     assert V.normalise_message(binary(b"a\r\nb"))[1] != V.normalise_message(binary(b"a\nb"))[1]
+
+
+def test_a_shared_drives_natives_never_count_toward_the_users_own():
+    """info@ read 74 natives checked of 26 and INCOMPLETE on every run: its shared drives' were counted (23 Nov 2026)."""
+    import verification_coverage as C
+    ev = [{"service": "drive", "nativeFeaturesChecked": True, "source": s} for s in ("a", "b", "sd1", "sd2", "a")]
+    assert C.native_checked_count(ev, ["a", "b"]) == 2
+    assert C.native_checked_count(ev, ["a", "b", "c"]) == 2      # c never compared: still short

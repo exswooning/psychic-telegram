@@ -409,7 +409,8 @@ def test_the_reset_deletes_what_the_ledger_says_the_migration_wrote_outside_the_
 
     class Files:
         def list(self, **_):         # what is at the root of the target My Drive: two mapped, one the user's own
-            return SimpleNamespace(execute=lambda: {"files": [{"id": "t1"}, {"id": "t2"}, {"id": "theirs"}]})
+            return SimpleNamespace(execute=lambda: {"files": [{"id": "t1"}, {"id": "t2"}, {"id": "theirs"},
+                                                              {"id": "q1", "name": ".Quarantined duplicate 1bexmI0n - x.txt"}]})
 
         def delete(self, fileId, **_):
             deleted.append(fileId)
@@ -419,7 +420,7 @@ def test_the_reset_deletes_what_the_ledger_says_the_migration_wrote_outside_the_
         def target_drive(self, user):
             return SimpleNamespace(files=lambda: Files())
     n = reset_target._delete_ledger_drive_items(SimpleNamespace(db_path=str(db)), Auth(), "u@b.example.com")
-    assert n == 2 and sorted(deleted) == ["t1", "t2"]
+    assert n == 3 and sorted(deleted) == ["q1", "t1", "t2"]      # q1: repair's own copy (incident #268)
 
 
 def test_the_shared_drives_the_ledger_maps_are_deleted_with_their_contents(tmp_path):
