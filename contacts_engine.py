@@ -416,7 +416,7 @@ class ContactsMigrator:
         try:
             self.limiter.acquire()
             created = self._retry(lambda b=body: failpoints.hit("contacts.created", self.tgt.people().createContact(
-                body=b).execute()))
+                body=b).execute(), user=self.source_user))
         except (PermanentAPIError, RuntimeError) as exc:
             self.db.log_audit(self.source_user, rid, "contact", "FAILED",
                               str(exc))

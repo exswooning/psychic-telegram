@@ -588,14 +588,14 @@ class CalendarMigrator:
             typed.update(eventType=item["eventType"], **{prop: item[prop]})
             try:
                 return self._retry(lambda: failpoints.hit("calendar.imported", self.tgt.events().insert(
-                    calendarId="primary", body=typed, sendUpdates="none").execute()))
+                    calendarId="primary", body=typed, sendUpdates="none").execute(), user=self.source_user))
             except (PermanentAPIError, RuntimeError) as exc:
                 log.warning("[%s] could not create %s event %s as its own type (%s); "
                             "importing it as an ordinary event", self.source_user,
                             item["eventType"], item.get("id"), exc)
         return self._retry(lambda b=body: failpoints.hit("calendar.imported", self.tgt.events().import_(
             calendarId=tgt_cal_id, body=b, conferenceDataVersion=0,
-        ).execute()))
+        ).execute(), user=self.source_user))
 
     def _give_future_meeting_a_meet(self, item: dict, target_id: str,
                                     tgt_cal_id: str) -> None:

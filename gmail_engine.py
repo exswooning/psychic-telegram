@@ -499,7 +499,7 @@ class GmailMigrator:
 
         insert = lambda: failpoints.hit("gmail.inserted", self.tgt.users().messages().insert(   # noqa: E731
             userId="me", body=body, media_body=media,
-            internalDateSource="dateHeader").execute())
+            internalDateSource="dateHeader").execute(), user=self.source_user)
         try:
             if not msgid:
                 if self.settings.mail_only_with_links or not source_id:

@@ -281,7 +281,7 @@ class TasksMigrator:
             kw["parent"] = parent
         try:
             self.limiter.acquire()
-            created = self._retry(lambda k=kw: failpoints.hit("tasks.created", self.tgt.tasks().insert(**k).execute()))
+            created = self._retry(lambda k=kw: failpoints.hit("tasks.created", self.tgt.tasks().insert(**k).execute(), user=self.source_user))
         except (PermanentAPIError, RuntimeError) as exc:
             self.db.log_audit(self.source_user, src_id, "task", "FAILED",
                               str(exc))

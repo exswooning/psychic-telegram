@@ -1,12 +1,16 @@
 """campaign.py -- run the scenarios of campaign_scenarios.py, one result line each (fableplan2 P2.1).
 
-    python campaign.py --account-id ID --name NAME [--group G] [--only id,id] [--redo] [--dry-run]
+    python campaign.py --account-id ID --name NAME [--group G] [--only id,id] [--redo] [--dry-run] [--batch N]
 
 Runs on the box, as root, so it needs no password: it makes its own session for the superadmin the way the
 tests do. Every request is the one the UI's button sends, with `reason: "campaign <name> <id>"`. It never
 wipes a tenant. A result is PASS, FAIL, UNVERIFIED (a check nobody could make, or a scenario with no `act`
 yet -- never a pass), SKIPPED (the operator did not allow it) or COVERED (cannot be caused live; its unit
 test stands). Results append to logs/campaigns/<name>/results.jsonl and RESULTS.md is rewritten.
+
+`--batch N` puts up to N failpoint scenarios on N twins and runs them in one pass (`_run_batch`): each fault is armed for
+its own twin only (`point@n#twin`), the run is restarted after every kill and once more with no fault, and each scenario
+is judged on its own twin. A batch that cannot be read cleanly is run again one scenario at a time, and the row says so.
 """
 from __future__ import annotations
 
@@ -18,6 +22,7 @@ import time
 
 import campaign_changes
 import campaign_executor as X
+import campaign_failures as CF
 import campaign_scenarios as S
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -84,6 +89,7 @@ class Driver:
     def sleep(self, seconds: float) -> None: time.sleep(seconds)
     def disarm(self) -> None: return None
     def arm(self, spec: str) -> None: raise Unautomated("this driver cannot arm a failpoint")
+    def armed(self) -> list: raise Unautomated("this driver cannot read the armed failpoints")
     def webui(self, method: str, path: str, body: dict | None) -> dict: raise Unautomated("this driver has no web UI")
     def shell(self, cmd: str, allow: set) -> tuple: raise Unautomated("this driver cannot run a shell command")
     def job_pid(self, job=None, exclude=(), timeout: int = 120, active_only: bool = False): raise Unautomated("no job table")
@@ -233,6 +239,15 @@ class LiveDriver(Driver):
         os.makedirs(os.path.dirname(failpoints.FAULT_FILE), exist_ok=True)
         with open(failpoints.FAULT_FILE, "w", encoding="utf-8") as fh:
             fh.write(spec + "\n")
+
+    def armed(self) -> list:
+        """The specs still in the fault file: a spec that fired struck itself out (failpoints._fired)."""
+        import failpoints
+        try:
+            with open(failpoints.FAULT_FILE, encoding="utf-8") as fh:
+                return [ln.strip() for ln in fh if ln.strip()]
+        except FileNotFoundError:
+            return []
 
     def inject(self, inject: dict) -> None:
         fault = (inject.get("env") or {}).get("BITPORT_FAULT")
@@ -524,8 +539,51 @@ def _run_steps(sc, driver, row, name, allow):
             "finished_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
 
 
+def _run_batch(batch: list, driver, name: str, allow: set) -> list:
+    """Failpoint scenarios on one twin each, one pass. Rows come back in the batch's order. Ambiguous (a step failed, a run died
+    for a reason the armed kills do not explain, the run history is unreadable): every scenario runs alone. One twin's facts
+    unreadable: that scenario runs alone. Either way the row says why."""
+    now = lambda: time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())      # noqa: E731
+    ids = [sc.id for sc in batch]
+
+    def alone(scs, why):
+        out = []
+        for sc in scs:
+            r = run_scenario(sc, driver, name, allow)
+            out.append({**r, "batch": ids, "reason": f"batch ambiguous ({why}); run alone: {r.get('reason', '')}"})
+        return out
+
+    try:
+        twins = [driver.take_twin() for _ in batch]
+        steps, specs = CF.fp_batch_steps(batch, twins)
+        ctx = X.Ctx(name, "batch", allow, twins, getattr(driver, "account_id", None), driver.fixture_user(TWINS[-1]))
+        X.validate(steps, ctx)
+        X.run(steps, driver, ctx)
+        facts = [driver.facts(t) for t in twins]
+    except (campaign_changes.Refused, Unautomated) as exc:
+        return [{"id": sc.id, "group": sc.group, "how": sc.how, "batch": ids, "status": "UNVERIFIED",
+                 "reason": f"batch not run: {exc}"} for sc in batch]
+    except Exception as exc:      # noqa: BLE001 - a batch that failed says nothing about one scenario: run each alone
+        return alone(batch, f"{type(exc).__name__}: {str(exc)[:120]}")
+    fired_kills = sum(CF._fp_parts(sc)[2] == "kill" and spec not in ctx.unfired for sc, spec in zip(batch, specs))
+    crashed = (facts[0].get("exits") or {}).get("crashed")
+    if crashed != fired_kills:
+        return alone(batch, f"{crashed} run(s) died, {fired_kills} kill(s) fired")
+    out = []
+    for sc, spec, twin, fact in zip(batch, specs, twins, facts):
+        status, why = ("FAIL", f"the failpoint was never reached: {spec}") if spec in ctx.unfired else judge(sc.expect, fact)
+        if status == "UNVERIFIED":
+            out.extend(alone([sc], why))
+        else:
+            out.append({"id": sc.id, "group": sc.group, "how": sc.how, "batch": ids, "status": status, "reason": why,
+                        "user": twin, "twins": [twin], "finished_at": now()})
+    return out
+
+
 def run_scenario(sc: S.Scenario, driver: Driver, name: str, allow: set, wait: int = 4 * 3600) -> dict:
     row = {"id": sc.id, "group": sc.group, "how": sc.how, "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+    if sc.inject.get("unreachable"):
+        return {**row, "status": "UNVERIFIED", "reason": f"cannot be caused on a twin: {sc.inject['unreachable']}"}
     if sc.needs and not set(sc.needs) <= allow:
         return {**row, "status": "SKIPPED", "reason": f"the operator did not allow {', '.join(sc.needs)}"}
     if sc.how == "unseedable":
@@ -537,7 +595,7 @@ def run_scenario(sc: S.Scenario, driver: Driver, name: str, allow: set, wait: in
         if not prior.get("user"):
             return {**row, "status": "UNVERIFIED", "reason": f"{sc.inject['failure']} has not run: it causes this one"}
         return _read(sc, driver, row, prior["user"])
-    if sc.how == "failure" and sc.inject.get("steps") and not sc.act:
+    if sc.how in ("failure", "failpoint") and sc.inject.get("steps") and not sc.act:
         try:
             return _run_steps(sc, driver, row, name, allow)
         except campaign_changes.Refused as exc:
@@ -605,22 +663,27 @@ def select(scenarios: list, group: str | None, only: set | None) -> list:
 
 
 def run(name: str, driver: Driver, group: str | None = None, only: set | None = None, redo: bool = False,
-        allow: set | None = None, dry_run: bool = False, out=print) -> dict:
+        allow: set | None = None, dry_run: bool = False, out=print, batch: int = 0) -> dict:
     scenarios = S.all_scenarios()
     done = read_results(name)
     todo = [s for s in select(scenarios, group, only) if redo or done.get(s.id, {}).get("status") not in PASSING | {"SKIPPED"}]
     out(f"{len(todo)} scenario(s) to run of {len(select(scenarios, group, only))} selected")
     if dry_run:
         for s in todo:
-            out(f"  {s.id}  [{s.how}]" + (f"  needs {','.join(s.needs)}" if s.needs else "") + ("" if s.act or s.inject.get("steps") or s.how in ("check_only", "unseedable") else "  (no act yet)"))
+            out(f"  {s.id}  [{s.how}]" + (f"  needs {','.join(s.needs)}" if s.needs else "") + ("" if s.act or s.inject.get("steps") or s.inject.get("unreachable") or s.how in ("check_only", "unseedable") else "  (no act yet)"))
         return done
-    for s in todo:
-        row = run_scenario(s, driver, name, allow or set())
+    chunks = [[s] for s in todo]
+    if batch > 1:
+        groups, solo = CF.fp_batches([s for s in todo if s.id.startswith("fp:")], batch)
+        chunks = [[s] for s in todo if not s.id.startswith("fp:") or s in solo] + groups
+    for chunk in chunks:
+        rows = _run_batch(chunk, driver, name, allow or set()) if len(chunk) > 1 else [run_scenario(chunk[0], driver, name, allow or set())]
         if hasattr(driver, "disarm"):
             driver.disarm()
-        append_result(name, row)
-        done[s.id] = row
-        out(f"  {row['status']:<10} {s.id}  {row.get('reason', '')[:90]}")
+        for s, row in zip(chunk, rows):
+            append_result(name, row)
+            done[s.id] = row
+            out(f"  {row['status']:<10} {s.id}  {row.get('reason', '')[:90]}")
     with open(os.path.join(results_dir(name), "RESULTS.md"), "w", encoding="utf-8") as fh:
         fh.write(render_md(name, scenarios, done))
     return done
@@ -635,6 +698,7 @@ def main(argv=None) -> int:
     ap.add_argument("--redo", action="store_true", help="run again what already passed")
     ap.add_argument("--allow", default="", help="operator permissions given: net,reboot")
     ap.add_argument("--dry-run", action="store_true", help="print what would run; touch nothing")
+    ap.add_argument("--batch", type=int, default=0, help="put up to N failpoint scenarios on N twins, one pass (2 or more)")
     args = ap.parse_args(argv)
     only = {x.strip() for x in args.only.split(",") if x.strip()} if args.only else None
     if args.dry_run:
@@ -642,7 +706,7 @@ def main(argv=None) -> int:
         return 0
     driver = LiveDriver(args.account_id, args.name)
     try:
-        run(args.name, driver, args.group, only, args.redo, set(args.allow.split(",")) - {""})
+        run(args.name, driver, args.group, only, args.redo, set(args.allow.split(",")) - {""}, batch=args.batch)
     finally:
         driver.disarm()
     return 0

@@ -27,7 +27,7 @@ TWIN = "<twin>"
 # t01 is started with exactly this body.
 START = {"users": [TWIN], "services": ["all"], "mail_mode": "engine", "transfer_mode": "server_side", "dms_after": False}
 STEPS = {"arm", "arm_chain", "disarm", "api", "webui", "shell", "wait_idle", "wait_pass", "wait_log", "wait_exit",
-         "wait_resume", "wait_incident", "wait_incident_closed", "repeat", "twin", "directory", "source", "change", "dwd"}
+         "wait_resume", "wait_incident", "wait_incident_closed", "repeat", "twin", "directory", "source", "change", "dwd", "fired"}
 BASE = {"equal_to_control": True, "no_item_twice": True}
 
 
@@ -51,8 +51,13 @@ IDLE = {"do": "wait_idle", "timeout": 4 * 3600}
 RESTART_API = shell("systemctl restart bitport-api")
 # Every row ends the same way: the twin is checked and repaired the way the One-to-one button does, then tallied
 # (the counts `equal_to_control` compares), and the box is idle.
-FINISH = [api("/api/v2/one-to-one/run", {"users": [TWIN], "limit": 0, "repair": True}), IDLE,
-          api("/api/v2/tally/run", {"users": [TWIN]}), IDLE, {"do": "disarm"}]
+def finish(users=None) -> list:
+    users = users or [TWIN]
+    return [api("/api/v2/one-to-one/run", {"users": users, "limit": 0, "repair": True}), IDLE,
+            api("/api/v2/tally/run", {"users": users}), IDLE, {"do": "disarm"}]
+
+
+FINISH = finish()
 
 # Kill points in the order a run reaches them (`failpoints.NAMES` minus the move-only `drive.moved_out`, which this
 # edition refuses and failpoints' own tests cover). Each is armed in turn, fires, the run restarts, the next is armed.
@@ -202,8 +207,80 @@ ROWS = {
 }
 
 
-def _scenarios() -> dict:
+# ---- the failpoint scenarios (fp:<point>:kill|lost), one twin each, run alone or batched onto twins -------------------
+# A point's own service is all its minimal run migrates; the restart without the fault is the whole START body, so the
+# twin ends with every service and `equal_to_control` compares like with like. A twin run never owns a shared drive (c08
+# does) and never starts the DMS, and this edition refuses a move: those three say so instead of running.
+FP_SERVICE = {"drive": "drive", "gmail": "gmail", "calendar": "calendar", "contacts": "contacts", "tasks": "tasks",
+              "shareddrive": "drive", "run": "drive", "followon": "drive"}
+FP_UNREACHABLE = {
+    "shareddrive.created": "only a whole-tenant run (users: []) creates shared drives -- none of the twins owns one (c08 does), "
+                           "and a chosen-user run never reaches them; arm it for the whole-tenant run (Phase 5)",
+    "followon.dms.start": "the DMS follow-on starts only after a clean whole-tenant split run; a twin run never starts it "
+                          "(F-dms-held is that run)",
+    "drive.moved_out": "needs TRANSFER_MODE=move, which the Business Starter pair refuses (move_preflight); "
+                       "failpoints' own unit tests cover the point",
+}
+FP_PROCESS_LEVEL = ("run", "followon")        # no user at the call: armed for the whole process, not scoped to a twin
+
+
+def _fp_parts(sc) -> tuple:
+    fault = sc.inject["env"]["BITPORT_FAULT"]
+    name = fault.split("@")[0]
+    return fault, name, "lost" if fault.endswith(":lost") else "kill", FP_SERVICE[name.split(".")[0]]
+
+
+def fp_batchable(sc) -> bool:
+    """A scenario that can share a run: the API's own death (a follow-on's point) cannot, nor can an unreachable one."""
+    return sc.id.startswith("fp:") and bool(sc.inject.get("steps")) and not _fp_parts(sc)[1].startswith("followon.")
+
+
+def fp_steps(sc) -> list:
+    fault, name, mode, svc = _fp_parts(sc)
+    if mode == "kill" and not name.startswith("followon."):
+        wait = [{"do": "wait_exit", "code": 137}]
+    else:      # a lost reply ends the run clean; a follow-on's kill is the API's own death, so it is started again
+        wait = [{"do": "wait_exit"}, IDLE, *([RESTART_API] if mode == "kill" else [])]
+    return [arm(fault), start(services=[svc]), *wait, {"do": "fired", "specs": [fault]}, {"do": "disarm"},
+            start(), IDLE, *FINISH]
+
+
+def fp_batch_steps(batch: list, twins: list) -> tuple:
+    """One run of every twin of the batch, each with its own fault armed (`#twin` scopes a spec to its user's calls; a run.*
+    point has none), restarted after every kill, then once more without any fault. Returns (steps, spec per scenario)."""
+    specs = []
+    for sc, twin in zip(batch, twins):
+        fault, name, _, _ = _fp_parts(sc)
+        specs.append(fault if name.split(".")[0] in FP_PROCESS_LEVEL else f"{fault}#{twin}")
+    kills = sum(_fp_parts(sc)[2] == "kill" for sc in batch)
+    run = [start(users=list(twins), services=sorted({_fp_parts(sc)[3] for sc in batch})), {"do": "wait_exit"}, IDLE]
+    return ([arm("\n".join(specs)), *run * (kills + 1), {"do": "fired", "specs": specs, "soft": True}, {"do": "disarm"},
+             start(users=list(twins)), IDLE, *finish(list(twins))], specs)
+
+
+def fp_batches(scenarios: list, size: int) -> tuple:
+    """(batches of up to `size` scenarios that can share a run, the rest to run one at a time)."""
+    ok = [s for s in scenarios if fp_batchable(s)]
+    return [ok[i:i + size] for i in range(0, len(ok), size)], [s for s in scenarios if s not in ok]
+
+
+def _failpoints() -> dict:
     out = {}
+    for sc in S._failpoints():
+        name = _fp_parts(sc)[1]
+        why = FP_UNREACHABLE.get(name)
+        inject = {**sc.inject, "unreachable": why} if why else {**sc.inject, "twin": 1}
+        new = S.Scenario(id=sc.id, group=sc.group, title=sc.title, how=sc.how, inject=inject,
+                         expect={**sc.expect, "ends_as": "the point is reached and fires; the restart finishes; the twin ends equal "
+                                                         "to the control and nothing landed twice"})
+        if not why:
+            new.inject["steps"] = fp_steps(new)
+        out[sc.id] = new
+    return out
+
+
+def _scenarios() -> dict:
+    out = _failpoints()
     for fid, (title, twins, steps, expect, passes) in ROWS.items():
         out[f"fail:{fid}"] = S.Scenario(
             id=f"fail:{fid}", group="failures", title=title, how="failure",

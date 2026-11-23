@@ -1474,7 +1474,7 @@ class MigrationDB:
                  parent_target_id, source_name, utc_now()),
             )
         import failpoints
-        failpoints.hit(_MAPPED_FAILPOINT.get(item_type, ""))
+        failpoints.hit(_MAPPED_FAILPOINT.get(item_type, ""), user=source_user)
         # Write through, after the transaction commits. Ordering matters: a
         # cache updated before the commit would answer "already migrated" for
         # work that a crash then rolled back.

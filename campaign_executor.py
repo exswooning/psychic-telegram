@@ -40,7 +40,7 @@ SHELL = [
     (r"sqlite3 data/accounts/\d+/migration\.db 'select tenant,ceiling from rate_limiter_ceiling'", None),
 ]
 KINDS = {"arm", "arm_chain", "disarm", "api", "webui", "shell", "wait_idle", "wait_pass", "wait_log", "wait_exit",
-         "wait_resume", "wait_incident", "wait_incident_closed", "repeat", "twin", "directory", "source", "change", "dwd"}
+         "wait_resume", "wait_incident", "wait_incident_closed", "repeat", "twin", "directory", "source", "change", "dwd", "fired"}
 
 
 class StepFailed(RuntimeError):
@@ -67,6 +67,7 @@ class Ctx:
         self.pid = None            # the job the steps are following
         self.done = set()          # pids already seen to exit
         self.last = {}             # the last "start" / "seed" request, for wait_resume
+        self.unfired = []          # the armed specs a `fired` step found still armed (never reached)
 
 
 def fill(obj, ctx: Ctx):
@@ -136,6 +137,13 @@ class Runner:
         for point in st["points"]:
             self.d.arm(point)
             self.run(st["each"])
+
+    def do_fired(self, st):
+        """A spec that fired struck itself from the fault file (failpoints._fired): one still there was never reached."""
+        left = [s for s in st["specs"] if s in self.d.armed()]
+        self.ctx.unfired = left
+        if left and not st.get("soft"):
+            raise StepFailed(f"the failpoint was never reached: {', '.join(left)}")
 
     def do_repeat(self, st):
         for _ in range(st["times"]):

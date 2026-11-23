@@ -248,7 +248,7 @@ def reconcile(migrator, sid, tid):
                 if limiter is not None:limiter.acquire()
             for i, (_body, call) in enumerate(options):
                 try:
-                    created = failpoints.hit("drive.comment.created", call().execute())
+                    created = failpoints.hit("drive.comment.created", call().execute(), user=migrator.source_user)
                     break
                 except Exception as exc:      # noqa: BLE001 - only a definite refusal moves to the next way
                     if i == len(options) - 1 or not _refused(exc):

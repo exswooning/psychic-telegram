@@ -2099,7 +2099,7 @@ class DriveMigrator:
                         lambda: failpoints.hit("drive.copy.landed", src.files().copy(
                             fileId=item["id"], body=b, supportsAllDrives=True,
                             fields="id,md5Checksum",
-                        ).execute()), label="drive.files.copy", tenant="source"), body)
+                        ).execute(), user=self.source_user), label="drive.files.copy", tenant="source"), body)
                     break
                 except (PermanentAPIError, RuntimeError) as exc:
                     # Google's own daily cap reads exactly like a rate limit (403
@@ -2283,7 +2283,7 @@ class DriveMigrator:
             self._retry(lambda: failpoints.hit("drive.moved_out", self._mover().files().update(
                 fileId=fid, addParents=self._staging_drive_id,
                 removeParents=",".join(item.get("parents") or []),
-                supportsAllDrives=True, fields="id").execute()),
+                supportsAllDrives=True, fields="id").execute(), user=self.source_user),
                 label="drive.files.move_out", tenant="source")
         except (PermanentAPIError, RuntimeError) as exc:
             # A lost response can hide a move that happened: ask where it is first.
@@ -2475,7 +2475,7 @@ class DriveMigrator:
                 "drive.copy.landed", self.tgt.files().create(
                     body=b, media_body=media, fields="id,md5Checksum",
                     supportsAllDrives=True,
-                ).execute()), label="drive.files.create"), body)
+                ).execute(), user=self.source_user), label="drive.files.create"), body)
         except (PermanentAPIError, RuntimeError) as exc:
             self.quota.refund(size)
             self.db.log_audit(self.source_user, item["id"], "file", "FAILED", str(exc))
@@ -2607,7 +2607,7 @@ class DriveMigrator:
             result = with_carried_fallback(lambda b: self._retry(lambda: failpoints.hit(
                 "drive.copy.landed", self.tgt.files().create(
                     body=b, media_body=media, fields="id,modifiedTime", supportsAllDrives=True,
-                ).execute())), body)
+                ).execute(), user=self.source_user)), body)
         except (PermanentAPIError, RuntimeError) as exc:
             self.db.log_audit(self.source_user, item["id"], "file", "FAILED", str(exc))
             self._bump("failed")
@@ -2795,7 +2795,7 @@ class DriveMigrator:
                 with _native_slots():
                     n = self._retry(lambda k=kind, t=tgt_id: failpoints.hit("drive.native_links", link_rewrite.rewrite_native(
                         k, self.auth.api("target", k, self.target_user), t,
-                        self.db.target_for_source_id, pace=lambda op, k=k: pace(k, op))),
+                        self.db.target_for_source_id, pace=lambda op, k=k: pace(k, op)), user=self.source_user),
                         label=f"{kind}.links")
             except Exception as exc:      # noqa: BLE001 - the file migrated; record, never raise
                 self.db.log_audit(self.source_user, item["id"], "link_rewrite",
@@ -3390,7 +3390,7 @@ class DriveMigrator:
             batch.add(req, request_id=str(idx), callback=_cb)
 
         try:
-            self._retry(lambda: failpoints.hit("drive.acl.granted", batch.execute()),
+            self._retry(lambda: failpoints.hit("drive.acl.granted", batch.execute(), user=self.source_user),
                         label="drive.permissions.create.batch", cost=len(chunk))
         except (PermanentAPIError, RuntimeError) as exc:
             # A whole-batch failure: every grant in the chunk failed. Record
@@ -3479,7 +3479,7 @@ class DriveMigrator:
                 self._retry(lambda b=body: failpoints.hit("drive.acl.granted", self.tgt.permissions().create(
                     fileId=target_id, body=b, sendNotificationEmail=False,
                     supportsAllDrives=True, fields="id",
-                ).execute()), label="drive.permissions.create", max_retries=limit)
+                ).execute(), user=self.source_user), label="drive.permissions.create", max_retries=limit)
                 # Same upsert-clears-the-failure reasoning as the batch path.
                 self.db.log_audit(self.source_user, audit_key, "acl", "SUCCESS", f"role={body.get('role')}")
                 return 1
