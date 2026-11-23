@@ -553,6 +553,10 @@ old keys from root's `authorized_keys`; decide on rewriting the git history that
 
 Overall 22 Nov: 6.5 / 10.
 
+23 Nov (operator: score Security as if its OPERATOR items were done; the reminder comes when everything else is
+finished -- they are not done): Drive 9, Mail 7, Verification 7.5, Orchestration 6.5, Operations 6, Security 10,
+Tests 7.5. Overall 23 Nov: 7.6 / 10.
+
 ### Path to 10 (in order; each step's result goes into State)
 
 1. (22 Nov, operator: server-side is the default for a government source too, so dharan's route is now a protected a.
