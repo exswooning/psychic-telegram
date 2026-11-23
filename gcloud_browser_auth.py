@@ -425,7 +425,7 @@ def _drive_browser(proc, url: str, email: str, password: str, timeout: int) -> s
             # succeeded; return control to the provisioning caller.
             # Keep this signed-in browser alive for a separately reviewed Cloud
             # first-use dialog; no generic legal-button acceptance.
-            detail = _review_cloud_console_terms(page, email, max(deadline - time.time(), 1))
+            detail = _review_cloud_console_terms(page, email, max(deadline - time.time(), 1), password)
             if detail:
                 browser.close()
                 return detail
@@ -433,15 +433,23 @@ def _drive_browser(proc, url: str, email: str, password: str, timeout: int) -> s
     return ""
 
 
-def _review_cloud_console_terms(page, email: str, timeout: float) -> str:
+def _review_cloud_console_terms(page, email: str, timeout: float, password: str = "") -> str:
     """Prepare the visible Cloud dialog and continue only after its own approval."""
     try:
         page.goto("https://console.cloud.google.com/projectcreate", wait_until="domcontentloaded", timeout=30000)
         notice = None
+        reauthed = False
         # The console shell can precede its account/terms dialog by seconds.
         # A loaded navigation response is not proof that no agreement is due.
         for attempt in range(25):
             page.wait_for_timeout(1000)
+            # An organisation that asks again ("Verify it's you ... Enter your password") before the console opens:
+            # the admin's own password, once (dharan.gov.np, 23 Nov 2026 -- setup failed here).
+            if password and not reauthed and _fill_visible(page, _PW_SEL, password):
+                reauthed = True
+                log("  the organisation asked for the password again before the Cloud console; entered it")
+                page.wait_for_timeout(4000)
+                continue
             notice = setup_notices.current_notice(page, email)
             if notice:
                 break

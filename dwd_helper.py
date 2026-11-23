@@ -122,11 +122,17 @@ def _check_console_blocker(browser, attempted: set[str], destination: str) -> bo
                 _publish_billing_notice(notice)
                 grace = "/interstitial/gracesubscription/" in current
                 reminder = bool(re.search(r"couldn[’']t process your last payment", text, re.I))
+                # A suspension countdown ("N days before service suspension") offers Dismiss. Clicked only when the
+                # operator said so for this run (BILLING_DISMISS_OK=1; dharan.gov.np, 23 Nov 2026: "click dismiss").
+                dismiss_ok = os.getenv("BILLING_DISMISS_OK") == "1"
+                reminder = reminder or (dismiss_ok and bool(notice.get("days") is not None or
+                                                           re.search(r"suspen", text, re.I)))
                 if grace and reminder and current not in attempted:
                     attempted.add(current)
                     # These labels explicitly postpone the notice; Next may
                     # instead confirm payment or an agreement on another page.
-                    labels = re.compile(r"^(?:DO THIS LATER|REMIND ME LATER|NOT NOW)$", re.I)
+                    labels = re.compile(r"^(?:DO THIS LATER|REMIND ME LATER|NOT NOW" + ("|DISMISS" if dismiss_ok else "")
+                                        + r")$", re.I)
                     for role in ("button", "link"):
                         candidates = page.get_by_role(role, name=labels)
                         if candidates.count() != 1 or not candidates.is_visible() or not candidates.is_enabled():
@@ -152,6 +158,11 @@ def _check_console_blocker(browser, attempted: set[str], destination: str) -> bo
                         except Exception:  # noqa: BLE001 - require the operator on uncertainty
                             logging.getLogger(__name__).debug("billing reminder did not clear", exc_info=True)
                         break
+                try:
+                    seen = [b.inner_text(timeout=1000).strip() for b in page.get_by_role("button").all()[:12]]
+                    log(f"  billing page {current} buttons: {seen}")
+                except Exception:  # noqa: BLE001 - diagnostics only
+                    pass
                 log("  [ACTION REQUIRED] " + str(AdminConsoleBlocked()))
                 browser.close()
                 raise AdminConsoleBlocked()
