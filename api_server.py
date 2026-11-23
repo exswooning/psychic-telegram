@@ -6014,28 +6014,32 @@ async def source_guard_view(account_id: int | None = None, op: Operator = Depend
     return await _off_loop(_read)
 
 
+def _source_guard_baseline(aid) -> None:
+    """Count the source afresh: the baseline every later check compares with."""
+    import source_guard
+    from auth import AuthManager
+    from config import Settings
+    from db import MigrationDB
+    st = Settings(account_id=aid)
+    d = MigrationDB(_account_db_path(aid))
+    try:
+        source_guard.snapshot(AuthManager(st), st, d)
+    finally:
+        d.close()
+
+
 @app.post("/api/v2/source-guard")
 async def source_guard_run(body: SourceGuardAction, op: Operator = Depends(operator)):
     """Check now, or (re)take the baseline -- both read the source only, in the background."""
     aid = _resolve_account(body, op)
 
     def _go() -> tuple[bool, str]:
-        import source_guard
-        from auth import AuthManager
-        from config import Settings
-        from db import MigrationDB
-
         def work():
             try:
                 if body.action == "check":
                     _source_guard_one(aid, force=True)
                 else:
-                    st = Settings(account_id=aid)
-                    d = MigrationDB(_account_db_path(aid))
-                    try:
-                        source_guard.snapshot(AuthManager(st), st, d)
-                    finally:
-                        d.close()
+                    _source_guard_baseline(aid)
             except Exception as exc:      # noqa: BLE001
                 log.warning("source guard %s failed for account %s: %r", body.action, aid, exc)
         threading.Thread(target=work, daemon=True, name=f"source-guard-{aid}").start()
@@ -6118,6 +6122,58 @@ async def _oversight_loop() -> None:
             raise
         except Exception as exc:      # noqa: BLE001 - the loop must outlive any one sweep
             log.warning("oversight sweep failed: %s", exc)
+        try:
+            await _domain_rename_sweep()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:      # noqa: BLE001
+            log.warning("domain rename sweep failed: %r", exc)
+
+
+def _domain_rename_apply_child(aid, **_) -> dict:
+    """domain_rename.py apply in its own process: the account's admission row it holds then names
+    that process, so a Stop (or the source guard's) interrupts the rewrite -- which rolls back --
+    and never this server."""
+    import domain_rename
+    try:
+        p = subprocess.run([PY, "domain_rename.py", "apply", "--account-id", str(aid), "--stop-jobs",
+                            "--by", "automatic"], cwd=HERE, capture_output=True, text=True,
+                           stdin=subprocess.DEVNULL, timeout=domain_rename.STOP_WAIT_SEC + 7200)
+        return json.loads(p.stdout)
+    except (subprocess.TimeoutExpired, ValueError) as exc:
+        return {"ok": False, "detail": f"apply did not finish cleanly: {exc}"[:400]}
+
+
+async def _domain_rename_sweep() -> None:
+    """An account with a planned primary-domain rename (domain_rename.py): once Google shows
+    both sides renamed, stop its jobs, rewrite its ledger and config, retake the source
+    baseline, and start the run that picks the work up -- the Drive migrate again while a
+    user is unfinished, otherwise the one-to-one checks."""
+    import domain_rename
+    for aid in await _off_loop(domain_rename.accounts_pending):
+        t = _REPAIR_THREADS.get(aid)
+        if t is not None and t.is_alive():
+            continue            # a repair thread writes the ledger and is on no Stop list; next sweep
+        r = await _off_loop(domain_rename.auto_step, aid, baseline=_source_guard_baseline,
+                            apply_fn=_domain_rename_apply_child)
+        log.info("domain rename: account %s %s", aid, r.get("state"))
+        if not r.get("resume"):
+            continue
+        op = Operator(name="domain rename", role="admin", account_id=aid, login_id=aid, is_superadmin=True)
+        why = "resume after the primary-domain rename"
+        try:
+            if r["resume"] == "migrate":
+                res = await migrate_start(StartMigration(reason=why, account_id=aid, services=["drive"],
+                                                         checks_after_run=True), op)
+            else:
+                res = await one_to_one_run(RunVerification(reason=why, account_id=aid), op)
+            got = json.loads(res.body)
+            ok, detail = bool(got.get("ok")), str(got.get("detail"))
+        except HTTPException as exc:
+            ok, detail = False, f"{exc.status_code}: {exc.detail}"
+        except Exception as exc:      # noqa: BLE001
+            ok, detail = False, repr(exc)
+        await _off_loop(domain_rename.resumed, aid, r["resume"], ok, detail)
 
 
 async def _housekeeping_loop() -> None:

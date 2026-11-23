@@ -37,6 +37,8 @@ import logging
 import json
 import os
 import tempfile
+import threading
+import time
 from datetime import datetime, timezone
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -129,6 +131,11 @@ def source_refuse_reason(domain: str, source_domain: str = "") -> str:
     d = _norm(domain)
     if not d:
         return "The domain is unknown; destructive actions are refused."
+    if renamed_target(d, source_domain):
+        # This account's own migration writing into its target after a rename gave the
+        # target the source's old (government) name. Only a caller naming the renamed
+        # source passes; reset/wipe/undo/seed refuse it by is_government on their own.
+        return ""
     if is_government(d):
         return f"{d} is a government domain. Destructive actions are permanently refused."
     if d in revocations():
@@ -161,7 +168,11 @@ def require_wipe_subjects(subjects, source_domain: str = "") -> None:
         value = (subject or "").strip()
         if value.count("@") != 1 or not all(value.split("@")):
             raise ValueError("A complete user email is required for destructive actions.")
-        require_not_source(value.rsplit("@", 1)[1], source_domain)
+        domain = value.rsplit("@", 1)[1]
+        if is_government(domain):      # never a wipe, even where a migration may write
+            raise ValueError(f"{_norm(domain)} is a government domain. "
+                             "Destructive actions are permanently refused.")
+        require_not_source(domain, source_domain)
 
 
 def revocations() -> dict[str, dict]:
@@ -192,11 +203,69 @@ def protected_domains() -> set[str]:
     return (configured_domains() - revoked) | env_domains() | (source_domains() - revoked)
 
 
+_RENAMES: dict = {"at": -1e9, "rows": []}
+_READING = threading.local()
+
+
+def forget_renames() -> None:
+    _RENAMES["at"] = -1e9
+
+
+def renames() -> list[dict]:
+    """Every recorded primary-domain rename (domain_rename.py), cached a minute: Settings()
+    asks is_government, and reading the control plane builds a Settings (~55 ms)."""
+    if getattr(_READING, "on", False):
+        return []                   # that Settings asking again: labels decide for it
+    if time.monotonic() - _RENAMES["at"] < 60:
+        return _RENAMES["rows"]
+    _READING.on = True
+    try:
+        import control_plane_db as cpdb
+        with cpdb.ro() as conn:
+            rows = [dict(r) for r in conn.execute(
+                "SELECT account_id, side, from_domain, to_domain, applied_at FROM domain_renames")]
+    except Exception:      # noqa: BLE001 - an install before migration 018; labels still decide
+        rows = []
+    finally:
+        _READING.on = False
+    _RENAMES.update(at=time.monotonic(), rows=rows)
+    return rows
+
+
+def _gov_labels(domain: str) -> bool:
+    return "gov" in _norm(domain).split(".")[1:]
+
+
 def is_government(domain: str) -> bool:
     """A government domain (*.gov, *.gov.np, ...): never a sandbox, whatever anyone
-    declares -- it is only ever read, never seeded, reset or wiped."""
-    labels = _norm(domain).split(".")
-    return "gov" in labels[1:]
+    declares -- it is only ever read, never seeded, reset or wiped. A government source
+    renamed (dharan.gov.np -> old.mdharan.com) keeps it: both names of a source-side
+    rename whose old name was government are government, from the moment it is planned."""
+    d = _norm(domain)
+    if _gov_labels(d):
+        return True
+    pairs = [(_norm(r["from_domain"]), _norm(r["to_domain"])) for r in renames() if r["side"] == "source"]
+    gov: set[str] = set()
+    grew = True
+    while grew:                     # a chain of renames carries it along
+        grew = False
+        for f, t in pairs:
+            if (f in gov or _gov_labels(f)) and not {f, t} <= gov:
+                gov |= {f, t}
+                grew = True
+    return d in gov
+
+
+def renamed_target(domain: str, source_domain: str) -> bool:
+    """`domain` is an applied target-side rename's new name AND `source_domain` that same
+    account's applied source-side new name: that account's own migration, nobody else's."""
+    d, s = _norm(domain), _norm(source_domain)
+    if not d or not s:
+        return False
+    rows = [r for r in renames() if r["applied_at"]]
+    accounts = {r["account_id"] for r in rows if r["side"] == "source" and _norm(r["to_domain"]) == s}
+    return any(r["side"] == "target" and _norm(r["to_domain"]) == d and r["account_id"] in accounts
+               for r in rows)
 
 
 def is_protected(domain: str) -> bool:

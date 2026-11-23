@@ -112,6 +112,8 @@ def remove(side: str, domain: str, admin_email: str, admin_password: str,
 
     if wipe_data:
         import domain_guard
+        if domain_guard.is_government(domain):      # a renamed target may be written by its migration, never wiped
+            raise ValueError(f"{domain} is a government domain; its data can never be wiped.")
         domain_guard.require_not_source(domain, st.source_domain)
         if side == "source":
             raise ValueError("Source domains can never be wiped.")
