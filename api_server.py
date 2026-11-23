@@ -1752,6 +1752,7 @@ async def simple_status_json(op: Operator = Depends(operator)):
 
 
 @app.get("/simple")
+@app.get("/api/v2/simple/page")   # reaches the API through the existing /api/v2 proxy rule; /simple needs Caddy's new line
 async def simple_status_page(op: Operator = Depends(operator)):
     """Same gate as the JSON it fetches: a signed-in session (the cookie rides a plain navigation)."""
     require_reader(op)
