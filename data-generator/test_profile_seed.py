@@ -307,3 +307,13 @@ def test_the_upload_probe_measures_and_cleans_up(settings, tenant):
     drive, _ = tenant
     rate = profile_seed.probe_upload(seed, settings, "p001@tenanta.com", 0.0, chunk=100_000)
     assert rate > 0 and not [f for f in drive.store.values() if f["name"].startswith("bitport-upload-probe")]
+
+
+def test_mail_share_cuts_every_mailbox_before_the_cost_is_worked_out(monkeypatch, capsys):
+    """Operator, 23 Nov 2026: test 15% of the profile's mail -- the whole of it was 200 h through the box's upload."""
+    import re
+    args = ("--upload-mb-per-sec", "0.9", "--drive-per-sec", "20", "--mail-per-sec", "20", "--max-hours", "100000")
+    _, full = _plan_only(monkeypatch, capsys, *args)
+    _, cut = _plan_only(monkeypatch, capsys, *args, "--mail-share", "0.15")
+    msgs = lambda out: int(re.search(r"([\d,]+) messages", out).group(1).replace(",", ""))
+    assert 0.13 * msgs(full) <= msgs(cut) <= 0.15 * msgs(full)

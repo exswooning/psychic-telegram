@@ -2931,6 +2931,9 @@ def _profile_step(args, settings, total_users: int):
     if n < 1:
         sys.exit(f"--users {total_users} leaves no room for profile users beside the cohort's {n_cohort}")
     plans = pp.plan(profile, n, args.seed)
+    if args.mail_share < 1:
+        # The profile's mail is ~1 MB a message through the box's upload: 648 GB, 200 h for 214 users (23 Nov 2026).
+        plans = pp.scale_messages(plans, args.mail_share)
     mix = pp.file_mix(profile)
     largest = profile["summary"]["largest_bytes"]["max"]
     cap = min(largest, int(args.pool_max_file_mb * 2**20))
@@ -3120,6 +3123,8 @@ def main(argv: list[str] | None = None) -> int:
                          "hours first, and refuses past --max-hours")
     ap.add_argument("--plan-only", action="store_true", help="with --profile: print the plan and its cost, write nothing "
                                                               "(needs --upload-mb-per-sec: it does not probe)")
+    ap.add_argument("--mail-share", type=float, default=1.0,
+                    help="with --profile: seed this share of the profile's messages in every mailbox (0.15 = 15%%)")
     ap.add_argument("--max-hours", type=float, default=12.0, help="with --profile: refuse a plan that takes longer (default 12)")
     ap.add_argument("--upload-mb-per-sec", type=float, default=None,
                     help="with --profile: this box's upload rate in MB/s. Default: measured by a --probe-seconds upload")
