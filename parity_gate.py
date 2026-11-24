@@ -46,7 +46,9 @@ SERVICE_OF = {**dict.fromkeys(("file", "folder", "acl", "comment", "shortcut", "
 EVERY_SERVICE = {"user"}
 # Kinds no API can carry, each named in the final report (known_issues says why for every one).
 ACCEPTED_KINDS = {"chat.attributed", "chat.space_type", "chat.members", "chat.sender", "chat.not_migrated",
-                  "drive.form_relinked", "drive.ab_test_residue", "gmail.link_scan_encrypted"}
+                  "drive.form_relinked", "drive.ab_test_residue", "gmail.link_scan_encrypted",
+                  # operator, 24 Nov 2026: an outsider's file reaches the user as their own copy, the original stays
+                  "drive.external_copy"}
 # Audit statuses that are a decision with a reason, not a failure.
 REMAINDER = {
     "SKIPPED_UNEXPORTABLE": "no API can copy it (Sites, My Maps, Jamboards); listed for a person",

@@ -81,6 +81,8 @@ _ERRORS = {
                     "run.coverage_incomplete": "a pass whose coverage check runs before its findings are repaired",
                     "run.google_unavailable": "Google's own 5xx through every retry; nothing on our side causes it",
                     "gmail.dms_reconcile_mismatch": "Google's DMS import decides it; split mail reconciles what it finds",
+                    "drive.external_copy": "needs a file an outside account owns, shared in -- only that person can make "
+                                           "one (c02's outside_folder waits on the same upload); seen live on dharan",
                     "drive.content_export": "Docs and Slides are judged as rendered and Sheets by structure, so the export "
                                             "compare is left only to Drawings, whose download_upload round trip comes out "
                                             "identical: a twin's arm reads drive.native_structure (fp2-live, 24 Nov 2026)",
@@ -105,6 +107,7 @@ UNIT_TESTS = {
     "run.coverage_incomplete": "tests/test_campaign.py",          # named and classified (run 7, 21 Nov 2026)
     "run.google_unavailable": "tests/test_known_issues_run_kinds_dns.py",   # named (incident #255, 22 Nov 2026)
     "gmail.dms_reconcile_mismatch": "tests/test_split_mail_safety.py",   # named (fp2 run 15, t03; 24 Nov 2026)
+    "drive.external_copy": "tests/test_known_issues_run_kinds_dns.py",   # accepted by the operator, 24 Nov 2026
     "drive.content_export": "tests/test_verify_sample.py",       # test_native_documents_are_exported_and_compared
     "run.held_for_drive": "tests/test_new_accounts_and_held_mail.py",     # held while Drive failed, runs once Drive succeeds
     "drive.form_relinked": "tests/test_form_relink.py",

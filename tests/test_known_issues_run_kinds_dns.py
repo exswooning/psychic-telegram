@@ -18,3 +18,13 @@ def test_a_rendered_page_or_slide_difference_is_the_native_round_trip():
     import known_issues
     assert known_issues.classify("drive", "page 1 renders differently") == "drive.native_structure"
     assert known_issues.classify("drive", "slide 3 renders differently") == "drive.native_structure"
+
+
+def test_an_outsiders_file_delivered_as_a_copy_is_one_accepted_kind():
+    """dharan.gov.np, 23 Nov 2026: 1,132 findings on 42 users; the operator accepted them on 24 Nov."""
+    import known_issues, parity_gate
+    for text in ('{"type": "external_access", "id": "X"}', "external original shortcut missing or placement differs",
+                 "external fallback has unreviewed sharing",
+                 "sharing of X: original access inspection failed: Visible source parent has no mapped target folder"):
+        assert known_issues.classify("drive", text) == "drive.external_copy", text
+    assert "drive.external_copy" in parity_gate.ACCEPTED_KINDS

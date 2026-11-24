@@ -76,6 +76,14 @@ ISSUES = [
      "Untitled task got the title \"(untitled)\"",
      "An old engine rule; Google accepts an empty title (measured 2026-10-23).",
      "Patch the title back to empty (finding_repairs.repair_tasks); the engine keeps it empty now.", True),
+    ("drive.external_copy", "drive", lambda t: ("external_access" in t or "external original shortcut missing" in t
+                                              or "external fallback has unreviewed sharing" in t
+                                              or "original access inspection failed" in t),
+     "A file owned outside the source organisation, delivered as the user's own copy",
+     "Its owner is outside the migration: the original keeps its owner and sharing, which the old address cannot pass "
+     "on; the user gets a copy with the same content (dharan.gov.np, 1,132 findings on 42 users, 23 Nov 2026).",
+     "Accepted by the operator (24 Nov 2026): nothing to repair; the outside owner can share the original with the new "
+     "address if the live version is wanted.", False),
     ("drive.sheets_scope", "drive", lambda t: "ACCESS_TOKEN_SCOPE_INSUFFICIENT" in t or "insufficient authen" in t,
      "A Sheet could not be read for comparison",
      "The checker used a Sheets method Google allows only with write access; the source grant is read-only.",
