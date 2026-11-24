@@ -973,6 +973,15 @@ def _pass_user_pairs(db, settings, services, delta, only):
     return pairs
 
 
+def shard_of(user: str, n: int) -> int:
+    """Which of n processes holds this user: by a stable hash of the address, never by position. Each process builds
+    its own list and drops users the ledger shows done at its own moment, while the others write that ledger; a slice
+    by position (pairs[k::n]) then shifted, and one user ran in two processes at once -- t02's mail inserted twice,
+    18 duplicates (fp2-live F-kill, 24 Nov 2026)."""
+    import zlib
+    return zlib.crc32(user.strip().lower().encode()) % max(1, n)
+
+
 def run_batch(auth: AuthManager, db: MigrationDB, settings: Settings,
               services: set[str], delta: bool, delta_days: int,
               only: list[str] | None = None) -> list[dict]:
@@ -983,7 +992,7 @@ def run_batch(auth: AuthManager, db: MigrationDB, settings: Settings,
     shard = os.getenv("MIGRATE_SHARD")
     if shard:
         k, n = (int(x) for x in shard.split("/"))
-        pairs = pairs[k::n]
+        pairs = [p for p in pairs if shard_of(p[0], n) == k]
 
     if not pairs:
         log.warning("no users to process — check identity_map")
