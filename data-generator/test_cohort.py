@@ -137,3 +137,95 @@ def test_a_conversation_is_inserted_into_one_thread(monkeypatch):
     out = F.mail_threads(_ctx(monkeypatch, Threads()))
     assert out["made"] == 3
     assert [b.get("threadId") for b in Threads.bodies] == [None, "T1", "T1"]
+
+
+# ---- the Drive fixtures of P2.6 (fakes only) ----------------------------------------------------------------
+class _Call:
+    def __init__(self, fn):
+        self.fn = fn
+
+    def execute(self):
+        return self.fn()
+
+
+class _FakeDrive:
+    """Records creates; list answers `shared` for a sharedWithMe query and one hit for a marker name in `made`."""
+    def __init__(self, made=(), shared=(), refuse_permission=False):
+        self.created, self.perms, self.comments_made, self.replies_made = [], [], [], []
+        self.made, self.shared, self.refuse = list(made), list(shared), refuse_permission
+
+    def files(self):
+        return self
+
+    def comments(self):
+        return self
+
+    def replies(self):
+        return self
+
+    def permissions(self):
+        return self
+
+    def list(self, q="", **kw):
+        return _Call(lambda: {"files": self.shared if "sharedWithMe" in q
+                              else [{"id": "x"}] if any(f"name='{n}'" in q for n in self.made) else []})
+
+    def create(self, body=None, **kw):
+        body = body or {}
+
+        def go():
+            if "emailAddress" in body:
+                if self.refuse:
+                    raise RuntimeError("invalidSharingRequest")
+                self.perms.append(body)
+            elif "action" in body:
+                self.replies_made.append(body)
+            elif "mimeType" not in body and "content" in body:
+                self.comments_made.append(body)
+            else:
+                self.created.append(body)
+            return {"id": f"id{len(self.created) + len(self.comments_made)}"}
+        return _Call(go)
+
+
+def _dctx(drive, user="c03@a.example", external="learn@gmail.com"):
+    return F.Ctx(seed=None, settings=None, user=user, peers=[], external=external, drive=drive, gmail=None, cal=None,
+                 retry=lambda fn: fn, items=None)
+
+
+def test_comment_actions_makes_replies_that_are_only_an_action(monkeypatch):
+    import sys
+    import types
+    monkeypatch.setitem(sys.modules, "googleapiclient.http", types.SimpleNamespace(MediaIoBaseUpload=lambda *a, **k: None))
+    d = _FakeDrive()
+    out = F.comment_actions(_dctx(d))
+    assert out["notes"] == [] and len(d.comments_made) == 2
+    assert [r["action"] for r in d.replies_made] == ["resolve", "resolve", "reopen"]
+    assert all("content" not in r for r in d.replies_made)
+    assert F.comment_actions(_dctx(_FakeDrive(made=["fableplan2 comments action doc"]))) == {"made": 0, "notes": ["already made"]}
+
+
+def test_a_colleague_shortcut_points_at_a_file_a_colleague_owns_and_waits_when_none_is_shared():
+    mine = {"id": "m", "owners": [{"emailAddress": "c03@a.example"}]}
+    other_org = {"id": "o", "owners": [{"emailAddress": "p@elsewhere.com"}]}
+    theirs = {"id": "t", "owners": [{"emailAddress": "c01@a.example"}]}
+    d = _FakeDrive(shared=[mine, other_org, theirs])
+    assert F.colleague_shortcut(_dctx(d))["made"] == 1
+    assert d.created[0]["shortcutDetails"] == {"targetId": "t"} and d.created[0]["mimeType"].endswith("shortcut")
+    none = _FakeDrive(shared=[mine, other_org])
+    out = F.colleague_shortcut(_dctx(none))
+    assert out["made"] == 0 and "shared with this user" in out["notes"][0] and not none.created
+
+
+def test_the_outside_folder_is_shared_to_the_outside_address_and_says_what_a_person_must_do():
+    d = _FakeDrive()
+    out = F.outside_folder(_dctx(d))
+    assert d.created[0]["mimeType"].endswith("folder") and d.perms[0]["emailAddress"] == "learn@gmail.com"
+    assert d.perms[0]["role"] == "writer" and "learn@gmail.com" in out["notes"][0] and out["made"] == 2
+    refused = F.outside_folder(_dctx(_FakeDrive(refuse_permission=True)))
+    assert refused["made"] == 1 and len(refused["notes"]) == 2 and "invalidSharingRequest" in refused["notes"][0]
+
+
+def test_the_cohort_gives_the_new_fixtures_to_the_users_the_scenarios_name():
+    by = {u["localpart"]: u["fixtures"] for u in F.load_cohort(COHORT)["users"]}
+    assert "outside_folder" in by["c02"] and {"comment_actions", "colleague_shortcut"} <= set(by["c03"])

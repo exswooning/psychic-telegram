@@ -436,6 +436,76 @@ def drive_comments(ctx: Ctx) -> dict:
     return {"made": made, "notes": notes}
 
 
+@fixture("comment_actions")
+def comment_actions(ctx: Ctx) -> dict:
+    """A Doc whose comments end in replies that are only an action (resolve, reopen), with no words: the copy writes
+    "[Author, date] " after them and Drive drops the trailing space, which once read as a changed reply
+    (`run.comment_differs`, fixed 4 Nov 2026). Its own Doc, so a fixtures-only pass can add it to a seeded user."""
+    from googleapiclient.http import MediaIoBaseUpload
+    import io
+    name = "fableplan2 comments action doc"
+    if _made(ctx, "drive", name):
+        return {"made": 0, "notes": ["already made"]}
+    doc = ctx.retry(lambda: ctx.drive.files().create(
+        body={"name": name, "mimeType": "application/vnd.google-apps.document"}, fields="id",
+        media_body=MediaIoBaseUpload(io.BytesIO(b"Ward notice\nOffice hours changed.\n"), mimetype="text/plain")).execute())()["id"]
+    made, notes = 1, []
+    try:
+        for text, action in (("Is this still true?", "resolve"), ("Needs another look", "resolve")):
+            cid = ctx.retry(lambda t=text: ctx.drive.comments().create(fileId=doc, fields="id", body={"content": t}).execute())()["id"]
+            ctx.retry(lambda c=cid, a=action: ctx.drive.replies().create(fileId=doc, commentId=c, fields="id",
+                                                                         body={"action": a}).execute())()
+            made += 2
+        ctx.retry(lambda: ctx.drive.replies().create(fileId=doc, commentId=cid, fields="id", body={"action": "reopen"}).execute())()
+        made += 1
+    except Exception as exc:      # noqa: BLE001 - what Google refuses is a note
+        notes.append(f"{type(exc).__name__}: {str(exc)[:140]}")
+    return {"made": made, "notes": notes}
+
+
+@fixture("colleague_shortcut")
+def colleague_shortcut(ctx: Ctx) -> dict:
+    """A shortcut in this user's Drive to a file a COLLEAGUE owns and shared in: it resolves to the colleague's copy,
+    and when that copy does not exist yet the shortcut is skipped and the check finds the item absent
+    (`drive.item_absent`). Needs something shared in already (the corpus shares a share of each user's files with its peers)."""
+    name = "fableplan2 shortcut to a colleague file"
+    if _made(ctx, "drive", name):
+        return {"made": 0, "notes": ["already made"]}
+    domain = ctx.user.split("@")[1].lower()
+    shared = ctx.retry(lambda: ctx.drive.files().list(
+        q="sharedWithMe=true and trashed=false and mimeType!='application/vnd.google-apps.shortcut'",
+        fields="files(id,owners(emailAddress))", pageSize=50).execute())().get("files", [])
+    target = next((f["id"] for f in shared if any((o.get("emailAddress") or "").lower().endswith("@" + domain)
+                                                  and (o.get("emailAddress") or "").lower() != ctx.user.lower()
+                                                  for o in f.get("owners", []))), None)
+    if not target:
+        return {"made": 0, "notes": ["nothing a colleague owns is shared with this user yet: seed the others, then this again"]}
+    ctx.retry(lambda: ctx.drive.files().create(body={
+        "name": name, "mimeType": "application/vnd.google-apps.shortcut", "shortcutDetails": {"targetId": target}},
+        fields="id").execute())()
+    return {"made": 1, "notes": []}
+
+
+@fixture("outside_folder")
+def outside_folder(ctx: Ctx) -> dict:
+    """A folder this user owns, shared as writer with the outside address, for someone outside the org to put a file
+    in (`drive.unmapped_source`: the walk lists only what the user owns). No API acts as that account, so a person
+    uploads one file from it into the folder; until then the source probe reads 'the fixture was never made'."""
+    name = "fableplan2 outside folder"
+    if _made(ctx, "drive", name):
+        return {"made": 0, "notes": ["already made"]}
+    folder = ctx.retry(lambda: ctx.drive.files().create(
+        body={"name": name, "mimeType": "application/vnd.google-apps.folder"}, fields="id").execute())()["id"]
+    todo = f"a person uploads one file from {ctx.external} into '{name}' of {ctx.user}"
+    try:
+        ctx.retry(lambda: ctx.drive.permissions().create(
+            fileId=folder, body={"type": "user", "role": "writer", "emailAddress": ctx.external},
+            sendNotificationEmail=False, fields="id").execute())()
+    except Exception as exc:      # noqa: BLE001
+        return {"made": 1, "notes": [f"could not share with {ctx.external}: {str(exc)[:120]}", todo]}
+    return {"made": 2, "notes": [todo]}
+
+
 @fixture("drive_shortcuts")
 def drive_shortcuts(ctx: Ctx) -> dict:
     """A shortcut to a file and one to a folder, both in this user's own Drive (a shortcut resolves to whichever copy

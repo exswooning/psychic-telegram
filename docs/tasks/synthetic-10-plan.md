@@ -586,6 +586,16 @@ rebuilt layouts (its slides render identical).
 
 ## 11. State (newest first)
 
+- 24 Nov 2026 (Sonnet): **The eight UNVERIFIED seeded errors of run 15 each have a way to read PASS or COVERED.** Probes (`campaign_evidence.py`,
+  PASS when the case is on the source and the user reads IDENTICAL): `drive.item_absent` (a shortcut to a colleague's file; new fixture
+  `colleague_shortcut`, c03), `drive.comments_unreadable` (a Form's comment list answers 403/404; fixture moved to c09's Form),
+  `run.comment_differs` (a reply that is only an action; new fixture `comment_actions`, c03), `drive.unmapped_source` (an outsider-owned
+  file in c02's new `outside_folder`; **a person uploads one file from the outside address into it**, no API acts as that account).
+  Unseedable, each with its unit test: `run.held_for_drive` (needs a failed Drive; test_new_accounts_and_held_mail, now also the next-run
+  resume), `drive.form_relinked` and `drive.forms_response_sheet` (no API links a Form to a Sheet; test_form_relink), `run.comment_missing`
+  (test_resource_keys). **A reseed is needed** (`--fixtures-only`, c02/c03) before the four probes can PASS. Found: the
+  `drive.forms_response_sheet` rule is the same text as `drive.native_structure`, which is listed first, so it is never reached by `classify`.
+
 - 23 Nov 2026, ~4:45 pm NPT (Opus): **Real-data test added to the plan (operator).** dharan.gov.np (renamed
   old.mdharan.com first) -> a. as account 8, every user as `d-<localpart>@a.`, Drive + calendar + contacts + tasks (mail
   stays off: ~360 GB), started after the rename; verified item by item. The real users are protected on a. (agent

@@ -18,7 +18,8 @@
    "mail": 40,
    "events": 10,
    "fixtures": [
-    "sharing_extras"
+    "sharing_extras",
+    "outside_folder"
    ]
   },
   {
@@ -31,7 +32,9 @@
     "drive_comments",
     "drive_shortcuts",
     "big_sheet",
-    "doc_with_image"
+    "doc_with_image",
+    "comment_actions",
+    "colleague_shortcut"
    ]
   },
   {

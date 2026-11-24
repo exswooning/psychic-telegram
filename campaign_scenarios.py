@@ -49,11 +49,11 @@ _ERRORS = {
     "seeded": ({
         "gmail.labels_added": "c04", "gmail.duplicate": "c04", "gmail.no_message_id": "c04",
         "gmail.body_link_copy": "c04", "gmail.link_owner_not_migrated": "c04",
-        "gmail.link_scan_encrypted": "c04", "run.mail_owed_to_dms": "c04", "run.held_for_drive": "c04",
+        "gmail.link_scan_encrypted": "c04", "run.mail_owed_to_dms": "c04",
         "drive.shortcut_target": "c03", "drive.item_absent": "c03", "drive.group_grant": "c02",
-        "drive.embedded_images": "c03", "drive.form_relinked": "c03", "drive.forms_response_sheet": "c03",
+        "drive.embedded_images": "c03",
         "run.form_rebuild": "c09", "drive.comments": "c03", "run.comment_differs": "c03",
-        "run.comment_missing": "c03", "drive.comments_unreadable": "c03", "drive.sheet_too_large": "c03",
+        "drive.comments_unreadable": "c09", "drive.sheet_too_large": "c03",
         "tasks.untitled": "c07", "run.malware_flag": "c09", "drive.unmapped_source": "c02"}, "happens in the run"),
     "must_not_happen": ({
         "gmail.link_scan_fixed": "c04", "drive.sheets_scope": "c03", "drive.office_compared_as_native": "c01",
@@ -80,7 +80,11 @@ _ERRORS = {
                     "gmail.reset_leftover": "needs a reset, then a rerun (P3.5 runs 2 and 3 read it on the gate)",
                     "run.backend_500": "Google's own 500 on an upload; nothing on our side causes it",
                     "run.coverage_incomplete": "a pass whose coverage check runs before its findings are repaired",
-                    "run.google_unavailable": "Google's own 5xx through every retry; nothing on our side causes it"},
+                    "run.google_unavailable": "Google's own 5xx through every retry; nothing on our side causes it",
+                    "run.held_for_drive": "a user's Drive has to FAIL in an ordered run; a healthy cohort never does (F-scope is the failures group's)",
+                    "drive.form_relinked": "Google links a Form to a responses Sheet only in the Forms UI (linkedSheetId is read-only): no API makes one",
+                    "drive.forms_response_sheet": "same cause: no seeded Form has a responses Sheet, and no API links one",
+                    "run.comment_missing": "two copies of one Doc sharing a comment id comes from Drive's UI copy; files.copy copies no comments"},
                    "likely unseedable"),
     # not_migrated first: it needs c07's Chat still unmigrated, the rest migrate it.
     "chat": ({"chat.not_migrated": "c07", "chat.attributed": "c07", "chat.space_type": "c07", "chat.members": "c07",
@@ -97,6 +101,10 @@ UNIT_TESTS = {
     "run.backend_500": "tests/test_dharan_followups.py",          # the end-of-run straggler re-copy
     "run.coverage_incomplete": "tests/test_campaign.py",          # named and classified (run 7, 21 Nov 2026)
     "run.google_unavailable": "tests/test_known_issues_run_kinds_dns.py",   # named (incident #255, 22 Nov 2026)
+    "run.held_for_drive": "tests/test_new_accounts_and_held_mail.py",     # held while Drive failed, runs once Drive succeeds
+    "drive.form_relinked": "tests/test_form_relink.py",
+    "drive.forms_response_sheet": "tests/test_form_relink.py",
+    "run.comment_missing": "tests/test_resource_keys.py",                 # two files, one comment id, both comments copied
 }
 
 
@@ -110,7 +118,8 @@ EVIDENCE = {
 
 
 # Kinds proved from the source instead (campaign_evidence.PROBES): the case is there, and the user reads IDENTICAL.
-SOURCE_PROBES = ("drive.sheet_too_large", "drive.embedded_images", "run.form_rebuild", "drive.group_grant", "gmail.no_message_id", "gmail.body_link_copy", "gmail.link_owner_not_migrated", "tasks.untitled", "drive.comments", "drive.shortcut_target", "run.malware_flag", "drive.comment_quote_escaped")
+SOURCE_PROBES = ("drive.sheet_too_large", "drive.embedded_images", "run.form_rebuild", "drive.group_grant", "gmail.no_message_id", "gmail.body_link_copy", "gmail.link_owner_not_migrated", "tasks.untitled", "drive.comments", "drive.shortcut_target", "run.malware_flag", "drive.comment_quote_escaped",
+                  "drive.item_absent", "drive.comments_unreadable", "run.comment_differs", "drive.unmapped_source")
 
 
 def _ends(kid: str) -> str:

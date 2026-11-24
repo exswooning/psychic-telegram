@@ -4,11 +4,11 @@ Each probe returns True (the case is there), False (it is not: the fixture was n
 from __future__ import annotations
 
 
-def _owned(auth, user, q):
+def _owned(auth, user, q, fields="id,name,mimeType"):
     d = auth.source_drive(user)
     out, tok = [], None
     while True:
-        r = d.files().list(q=f"'me' in owners and trashed=false and {q}", fields="nextPageToken,files(id,name,mimeType)",
+        r = d.files().list(q=f"'me' in owners and trashed=false and {q}", fields=f"nextPageToken,files({fields})",
                            pageSize=200, pageToken=tok).execute()
         out += r.get("files", [])
         tok = r.get("nextPageToken")
@@ -66,6 +66,57 @@ def _group_grant(auth, user, _s):
     return False
 
 
+_FORM = "application/vnd.google-apps.form"
+
+
+def _shortcut_to_colleague(auth, user, _s):
+    """A shortcut whose target a colleague owns: its copy may not exist yet when the shortcut is reached."""
+    d = auth.source_drive(user)
+    for f in _owned(auth, user, "mimeType='application/vnd.google-apps.shortcut'", "id,shortcutDetails(targetId)"):
+        target = (f.get("shortcutDetails") or {}).get("targetId")
+        try:
+            owners = d.files().get(fileId=target, fields="owners(emailAddress)", supportsAllDrives=True).execute().get("owners", [])
+        except Exception:      # noqa: BLE001 - a target this user cannot read proves nothing
+            continue
+        if any((o.get("emailAddress") or "").lower() != user.lower() for o in owners):
+            return True
+    return False
+
+
+def _form_comments_refused(auth, user, _s):
+    """A Form answers its comment list with 403/404 (it has none): what known_issues calls unreadable comments."""
+    d = auth.source_drive(user)
+    for f in _owned(auth, user, f"name='fableplan2 ward survey' and mimeType='{_FORM}'"):
+        try:
+            d.comments().list(fileId=f["id"], fields="comments(id)", pageSize=1).execute()
+        except Exception as exc:      # noqa: BLE001
+            if getattr(getattr(exc, "resp", None), "status", None) in (403, 404):
+                return True
+            raise
+    return False
+
+
+def _action_only_reply(auth, user, _s):
+    d = auth.source_drive(user)
+    for f in _owned(auth, user, "name='fableplan2 comments action doc'"):
+        for c in d.comments().list(fileId=f["id"], fields="comments(replies(action,content))", pageSize=100).execute().get("comments", []):
+            if any(r.get("action") and not (r.get("content") or "").strip() for r in c.get("replies", [])):
+                return True
+    return False
+
+
+def _outsider_file(auth, user, _s):
+    """A file in the user's own folder that someone outside the org owns (a person put it there)."""
+    d = auth.source_drive(user)
+    org = "@" + user.split("@")[1].lower()
+    for folder in _owned(auth, user, "name='fableplan2 outside folder' and mimeType='application/vnd.google-apps.folder'"):
+        kids = d.files().list(q=f"'{folder['id']}' in parents and trashed=false", fields="files(owners(emailAddress))",
+                              pageSize=100).execute().get("files", [])
+        if any(not (o.get("emailAddress") or "").lower().endswith(org) for k in kids for o in k.get("owners", [])):
+            return True
+    return False
+
+
 PROBES = {
     "drive.sheet_too_large": _by_name("fableplan2 big sheet", "application/vnd.google-apps.spreadsheet"),
     "drive.embedded_images": _by_name("fableplan2 doc with image", "application/vnd.google-apps.document"),
@@ -79,6 +130,10 @@ PROBES = {
     "drive.shortcut_target": lambda a, u, s: bool(_owned(a, u, "mimeType='application/vnd.google-apps.shortcut'")),
     "run.malware_flag": lambda a, u, s: bool(_owned(a, u, "name='eicar-test.txt'")),
     "drive.comment_quote_escaped": _quote_in_comment,
+    "drive.item_absent": _shortcut_to_colleague,
+    "drive.comments_unreadable": _form_comments_refused,
+    "run.comment_differs": _action_only_reply,
+    "drive.unmapped_source": _outsider_file,
 }
 
 
