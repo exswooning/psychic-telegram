@@ -665,7 +665,7 @@ def run_scenario(sc: S.Scenario, driver: Driver, name: str, allow: set, wait: in
             driver.inject(sc.inject)       # a fault is armed (or found unmakeable) before a twin and a run are spent
         user = None if sc.how == "check_only" else driver.fixture_user(sc.fixtures[0]) if sc.fixtures else driver.take_twin()
         driver.prepare(sc.fixtures)
-        since = row["started_at"] if sc.fixtures else None        # a fixture user has a history older than this scenario
+        since = row["started_at"]      # a fixture user and a twin both have a history older than this scenario (fp2-live, 24 Nov 2026)
         for _ in range(int(sc.act.get("tries", 1))):
             reply = driver.api(sc.act.get("method", "POST"), sc.act["path"], {**_bind(sc.act.get("body", {}), user), "reason": f"campaign {name} {sc.id}"}) if sc.act else {}
             if sc.act.get("beside_verify"):

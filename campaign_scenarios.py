@@ -81,6 +81,7 @@ _ERRORS = {
                     "run.backend_500": "Google's own 500 on an upload; nothing on our side causes it",
                     "run.coverage_incomplete": "a pass whose coverage check runs before its findings are repaired",
                     "run.google_unavailable": "Google's own 5xx through every retry; nothing on our side causes it",
+                    "gmail.dms_reconcile_mismatch": "Google's DMS import decides it; split mail reconciles what it finds",
                     "run.held_for_drive": "a user's Drive has to FAIL in an ordered run; a healthy cohort never does (F-scope is the failures group's)",
                     "drive.form_relinked": "Google links a Form to a responses Sheet only in the Forms UI (linkedSheetId is read-only): no API makes one",
                     "drive.forms_response_sheet": "same cause: no seeded Form has a responses Sheet, and no API links one",
@@ -101,6 +102,7 @@ UNIT_TESTS = {
     "run.backend_500": "tests/test_dharan_followups.py",          # the end-of-run straggler re-copy
     "run.coverage_incomplete": "tests/test_campaign.py",          # named and classified (run 7, 21 Nov 2026)
     "run.google_unavailable": "tests/test_known_issues_run_kinds_dns.py",   # named (incident #255, 22 Nov 2026)
+    "gmail.dms_reconcile_mismatch": "tests/test_split_mail_safety.py",   # named (fp2 run 15, t03; 24 Nov 2026)
     "run.held_for_drive": "tests/test_new_accounts_and_held_mail.py",     # held while Drive failed, runs once Drive succeeds
     "drive.form_relinked": "tests/test_form_relink.py",
     "drive.forms_response_sheet": "tests/test_form_relink.py",
@@ -175,6 +177,10 @@ _ACT = {
 _VIA_FAILURE = {"run.disk_full": "fail:F-disk", "run.db_rollback": "fail:F-disk", "run.dns": "fail:F-net-12"}
 
 
+# Arms whose finding no longer happens: twin t03's Drive moved by download_upload read IDENTICAL (fp2-live, 24 Nov 2026).
+FIXED_ARMS = ("drive.native_structure", "drive.content_export")
+
+
 def _errors() -> list:
     out = []
     for how, (ids, why) in _ERRORS.items():
@@ -193,6 +199,9 @@ def _errors() -> list:
                 # a fixed defect must not return; every other kind is classified, then ends as its entry says
                 expect = ({"finding_absent": kid, "ends_as": end} if kid == "run.db_rollback"
                           else {"finding_classified": kid, "ends_as": end, end: kid, **more})
+            if kid in FIXED_ARMS:
+                # The arm still runs (download_upload on a twin, then a check); the finding must no longer come.
+                expect = {"finding_absent": kid, "ends_as": end, **more}
             out.append(Scenario(
                 id=f"err:{kid}", group=group, title=f"{kid} ({why})", how=how, act=act,
                 fixtures=(what,) if what in {f"c{n:02d}" for n in range(1, 11)} else (),

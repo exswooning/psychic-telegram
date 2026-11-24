@@ -343,7 +343,7 @@ def test_every_error_ends_as_its_known_issues_entry_says_and_the_gate_agrees():
     import parity_gate
     for s in _errors():
         kid = s.id[4:]
-        if s.how == "must_not_happen":
+        if s.how == "must_not_happen" or "finding_absent" in s.expect:      # a fixed defect: the finding must not come
             continue
         entry = known_issues.BY_ID.get(kid) or known_issues.RUN_BY_ID[kid]
         want = "fixed" if entry[6] else "accepted" if kid in parity_gate.ACCEPTED_KINDS else "listed"
@@ -372,11 +372,12 @@ def test_a_cause_is_armed_before_the_twin_and_the_run_are_spent():
     assert kinds.index("inject") < kinds.index("twin") < kinds.index("api")
 
 
-def test_a_fix_is_read_after_a_verify_with_repair():
-    d = _Verifying({"findings": {"drive.content_export"}, "fixed": {"drive.content_export"}})
+def test_a_fixed_arm_runs_its_check_and_passes_only_when_the_finding_stays_away():
+    """fp2-live, 24 Nov 2026: download_upload on twin t03 read IDENTICAL -- the arm's finding no longer happens."""
+    d = _Verifying({"findings": set()})
     assert C.run_scenario(S.by_id()["err:drive.content_export"], d, "n", set())["status"] == "PASS"
     assert ("verify", "t02", "drive") in d.calls
-    d = _Verifying({"findings": {"drive.content_export"}, "fixed": set()})
+    d = _Verifying({"findings": {"drive.content_export"}, "fixed": {"drive.content_export"}})
     assert C.run_scenario(S.by_id()["err:drive.content_export"], d, "n", set())["status"] == "FAIL"
 
 

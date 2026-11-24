@@ -23,6 +23,11 @@ ISSUES = [
      "or a category tab): the sender address is the OLD domain's, not the account's own.",
      "Remove the extra labels on the target copy (repair.repair_verified_gmail_labels); "
      "new mail is corrected as it is written (migration_checks.verify_written_mail).", True),
+    ("gmail.dms_reconcile_mismatch", "gmail", lambda t: "DMS destination content or labels did not match" in t,
+     "A message the DMS delivered differs from the source in content or labels",
+     "Split mail's reconciliation compares each DMS-delivered copy with the source; Google's import can file labels "
+     "differently or alter a message (fp2 run 15: 6 on t03).",
+     "Reconciled by split_mail (labels realigned, a content mismatch re-inserted from the source); listed when it cannot.", True),
     ("gmail.labels_missing", "gmail", lambda t: "labels missing on the target" in t or "unread state differs" in t,
      "A label or read state did not come across",
      "Label mapping or a later change on the target.",
