@@ -44,3 +44,20 @@ def test_a_spec_without_a_scope_still_fires_for_any_user(fault_file):
     fault_file.write_text("contacts.created@1:lost\n")
     with pytest.raises(ConnectionResetError):
         failpoints.hit("contacts.created", 1, user="t09@a.test")
+
+
+def test_a_run_tells_failpoints_its_target(monkeypatch, tmp_path):
+    """fp2-live, 24 Nov 2026: API-launched runs left TARGET_DOMAIN unset; every failpoint read the target as ''."""
+    import os
+    import main
+    monkeypatch.delenv("TARGET_DOMAIN", raising=False)
+    monkeypatch.setenv("MIGRATION_DB", str(tmp_path / "l.db"))
+    class S:
+        target_domain, db_path, dry_run, user_workers = "b.example", str(tmp_path / "l.db"), False, 1
+    monkeypatch.setattr(main, "Settings", lambda account_id=None: S())
+    monkeypatch.setattr(main, "setup_logging", lambda s: (_ for _ in ()).throw(SystemExit(0)))
+    try:
+        main.main(["status"])
+    except SystemExit:
+        pass
+    assert os.environ["TARGET_DOMAIN"] == "b.example"

@@ -3485,6 +3485,11 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
 
     settings = Settings(account_id=args.account_id)
+    # The run's own target, for code that reads it from the environment: failpoints.hit judges "is the target a
+    # declared sandbox" from TARGET_DOMAIN, which an API-launched run (domains from the account) never set -- every
+    # campaign failpoint was ignored as "target '' is not a declared sandbox" (fp2-live, 24 Nov 2026). Shards inherit it.
+    if settings.target_domain and not os.environ.get("TARGET_DOMAIN"):
+        os.environ["TARGET_DOMAIN"] = settings.target_domain
     if args.db:
         settings.db_path = args.db
     if args.dry_run:
