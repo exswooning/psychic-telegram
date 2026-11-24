@@ -117,3 +117,14 @@ def test_switched_off_it_posts_as_the_owner(db, settings):
     m, target = _migrator(db, settings, src)
     mc.reconcile(m, "S1", "T1")
     assert target[0]["author"]["displayName"] == "Dave B" and target[0]["content"].startswith("[Carol, ")
+
+
+def test_a_thread_left_failed_is_marked_fixed_when_a_later_pass_reconciles_it(db, settings):
+    """fp2-live, 24 Nov 2026: t08's comment was reconciled and CONFIRMED while its row still read FAILED."""
+    src = [_comment("a", "Please check.", {"displayName": "Carol"})]
+    m, target = _migrator(db, settings, src)
+    db.log_audit("dave@a.test", "S1", "comment", "FAILED", "failpoint drive.comment.created@1: reply lost")
+    mc.reconcile(m, "S1", "T1")
+    row = db.conn.execute("SELECT status FROM audit_log WHERE item_id='S1' AND item_type='comment'").fetchone()
+    assert row[0] == "SUCCESS"
+    assert db.conn.execute("SELECT new_status FROM item_retries WHERE item_id='S1'").fetchone()[0] == "SUCCESS"

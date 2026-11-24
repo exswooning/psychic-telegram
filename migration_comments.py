@@ -298,6 +298,14 @@ def reconcile(migrator, sid, tid):
                     fileId=tid, commentId=c, body=b, fields="id,content,action")),
                 found.get("replies", []),
             )
+    # A thread an earlier pass left FAILED (a lost reply, a dropped connection) is whole now: say so, so the fix is
+    # on record (item_retries) -- t08's comment was reconciled and CONFIRMED while its row still read FAILED
+    # (fp2-live run.reply_lost, 24 Nov 2026).
+    if migrator.db.conn.execute(
+            "SELECT 1 FROM audit_log WHERE source_user=? AND item_id=? AND item_type='comment' AND status='FAILED'",
+            (migrator.source_user, sid)).fetchone():
+        migrator.db.log_audit(migrator.source_user, sid, "comment", "SUCCESS",
+                              "comment thread reconciled on a later pass")
     return written
 
 
