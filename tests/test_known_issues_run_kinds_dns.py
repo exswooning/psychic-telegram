@@ -28,3 +28,15 @@ def test_an_outsiders_file_delivered_as_a_copy_is_one_accepted_kind():
                  "sharing of X: original access inspection failed: Visible source parent has no mapped target folder"):
         assert known_issues.classify("drive", text) == "drive.external_copy", text
     assert "drive.external_copy" in parity_gate.ACCEPTED_KINDS
+
+
+def test_the_gate_can_judge_one_service():
+    """A Drive-only migration (dharan.gov.np) is judged on Drive; its other services were never part of it."""
+    import sqlite3, parity_gate
+    c = sqlite3.connect(":memory:")
+    c.execute("CREATE TABLE identity_map (source_email TEXT, entity_type TEXT)")
+    c.execute("INSERT INTO identity_map VALUES ('u@a.example','user')")
+    c.execute("CREATE TABLE user_verification (source_user TEXT, service TEXT, verdict TEXT, verified_at TEXT, payload TEXT)")
+    c.execute("INSERT INTO user_verification VALUES ('u@a.example','drive','IDENTICAL','2026-11-24T00:00:00Z','{}')")
+    assert parity_gate.assess(c, services=("drive",))["verdict"] == "PARITY"
+    assert parity_gate.assess(c)["verdict"] != "PARITY"

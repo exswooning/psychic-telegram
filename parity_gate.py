@@ -72,7 +72,9 @@ def _accepted_by_operator(finding: dict, accepted: list[dict]) -> dict | None:
     return None
 
 
-def assess(conn, accepted: list[dict] | None = None, dms_failed: int | None = None) -> dict:
+def assess(conn, accepted: list[dict] | None = None, dms_failed: int | None = None,
+           services: tuple | None = None) -> dict:
+    """`services`: only these (a Drive-only migration is judged on Drive -- dharan.gov.np, 24 Nov 2026)."""
     import known_issues
     conn.row_factory = sqlite3.Row
     accepted = accepted or []
@@ -106,7 +108,7 @@ def assess(conn, accepted: list[dict] | None = None, dms_failed: int | None = No
     unverified, differs, accepted_out, per_user = [], [], [], {}
     for user in sorted(users):
         state = "PARITY"
-        for svc in SERVICES:
+        for svc in (services or SERVICES):
             row = checks.get((user, svc))
             verdict = row["verdict"] if row else "NOT_VERIFIED"
             changed = max(last_write.get((user, svc), ""), last_write.get((user, None), ""))
@@ -233,13 +235,15 @@ def main(argv=None) -> int:
     ap.add_argument("--account-id", type=int)
     ap.add_argument("--db")
     ap.add_argument("--json", action="store_true")
+    ap.add_argument("--services", help="comma-separated: judge only these services (a Drive-only migration: drive)")
     args = ap.parse_args(argv)
     db = args.db or (HERE / "data" / "accounts" / str(args.account_id) / "migration.db" if args.account_id
                      else os.getenv("MIGRATION_DB", "migration.db"))
     accepted = _accepted_list()
     conn = sqlite3.connect(Path(db).resolve().as_uri() + "?mode=ro", uri=True, timeout=30)
     try:
-        result = assess(conn, accepted, _dms_failed(args.account_id) if args.account_id else None)
+        result = assess(conn, accepted, _dms_failed(args.account_id) if args.account_id else None,
+                        tuple(x.strip() for x in args.services.split(",")) if args.services else None)
     finally:
         conn.close()
     print(json.dumps(result, indent=1, ensure_ascii=False) if args.json else report(result))
