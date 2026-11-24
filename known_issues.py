@@ -91,7 +91,9 @@ ISSUES = [
      "None: the operator chose a linked Form over an identical Sheet (2026-10-24). Done by "
      "form_relink.py as the target admin, in repair's \"form links\" step.", False),
     ("drive.native_structure", "drive", lambda t: ("native document content, formatting or structure differs" in t
-                                                 or "native Sheet entered values, formatting, or structures differ" in t),
+                                                 or "native Sheet entered values, formatting, or structures differ" in t
+                                                 # the same round trip judged by Google's rendering (native_fidelity)
+                                                 or " renders differently" in t),
      "Doc/Slide structure differs from the source",
      "A read-only source forces download+upload: the Office round trip changes a Doc's paragraph spacing and "
      "header margin, a Sheet's time zone, grid and default padding, and rebuilds a deck's layouts and masters.",
