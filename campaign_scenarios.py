@@ -58,8 +58,7 @@ _ERRORS = {
     "must_not_happen": ({
         "gmail.link_scan_fixed": "c04", "drive.sheets_scope": "c03", "drive.office_compared_as_native": "c01",
         "drive.comment_quote_escaped": "c03"}, "fixed defect: the finding must not return"),
-    "arm": ({"drive.native_structure": "a twin's Drive moved by download_upload",
-             "drive.content_export": "a twin's Drive moved by download_upload"}, "download_upload arm only"),
+    "arm": ({"drive.native_structure": "a twin's Drive moved by download_upload"}, "download_upload arm only"),
     "changed_after": ({
         "gmail.labels_missing": "change a label on b.", "gmail.unmapped_source": "new mail on a.",
         "drive.mtime": "touch a file on b.", "drive.content_changed": "edit a file on a.",
@@ -82,6 +81,9 @@ _ERRORS = {
                     "run.coverage_incomplete": "a pass whose coverage check runs before its findings are repaired",
                     "run.google_unavailable": "Google's own 5xx through every retry; nothing on our side causes it",
                     "gmail.dms_reconcile_mismatch": "Google's DMS import decides it; split mail reconciles what it finds",
+                    "drive.content_export": "Docs and Slides are judged as rendered and Sheets by structure, so the export "
+                                            "compare is left only to Drawings, whose download_upload round trip comes out "
+                                            "identical: a twin's arm reads drive.native_structure (fp2-live, 24 Nov 2026)",
                     "run.held_for_drive": "a user's Drive has to FAIL in an ordered run; a healthy cohort never does (F-scope is the failures group's)",
                     "drive.form_relinked": "Google links a Form to a responses Sheet only in the Forms UI (linkedSheetId is read-only): no API makes one",
                     "drive.forms_response_sheet": "same cause: no seeded Form has a responses Sheet, and no API links one",
@@ -103,6 +105,7 @@ UNIT_TESTS = {
     "run.coverage_incomplete": "tests/test_campaign.py",          # named and classified (run 7, 21 Nov 2026)
     "run.google_unavailable": "tests/test_known_issues_run_kinds_dns.py",   # named (incident #255, 22 Nov 2026)
     "gmail.dms_reconcile_mismatch": "tests/test_split_mail_safety.py",   # named (fp2 run 15, t03; 24 Nov 2026)
+    "drive.content_export": "tests/test_verify_sample.py",       # test_native_documents_are_exported_and_compared
     "run.held_for_drive": "tests/test_new_accounts_and_held_mail.py",     # held while Drive failed, runs once Drive succeeds
     "drive.form_relinked": "tests/test_form_relink.py",
     "drive.forms_response_sheet": "tests/test_form_relink.py",
@@ -158,7 +161,7 @@ def _lost(point: str) -> dict:
 # kind -> (act, inject, more expect). A cause the driver cannot make (an `inject` that is only a "cause") reads
 # UNVERIFIED, "not automated yet", before any twin or run is spent: parent_folder, source_changed, ab_test_residue.
 _ACT = {
-    "drive.native_structure": (_DU, {}, _VERIFY_DRIVE), "drive.content_export": (_DU, {}, _VERIFY_DRIVE),
+    "drive.native_structure": (_DU, {}, _VERIFY_DRIVE),
     "drive.duplicate": (_migrate(**_DRIVE), _lost("drive.copy.landed"), _VERIFY_DRIVE),
     "run.comment_prior_attempt": (_migrate(**_DRIVE), _lost("drive.comment.created"), {}),
     "drive.parent_folder": (_migrate(**_DRIVE), {"cause": "two folders of one name and creation time on b., made before the run"},
