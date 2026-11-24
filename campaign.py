@@ -231,7 +231,9 @@ class LiveDriver(Driver):
             # An account_id the caller names wins: overwritten, a setup meant for account 7 ran as 5 and set 5's keys
             # aside (23 Nov 2026).
             data=json.dumps({"account_id": self.account_id, **(body or {})}).encode() if body is not None else None)
-        with urllib.request.urlopen(req, timeout=60) as resp:
+        # 300 s: a start runs readiness and scope probes before it answers; at 60 s the driver read a run it had
+        # just started as failed and the next scenario launched another beside it (fp2-live, 24 Nov 2026).
+        with urllib.request.urlopen(req, timeout=300) as resp:
             return json.loads(resp.read() or b"{}")
 
     def api(self, method: str, path: str, body: dict | None) -> dict:
