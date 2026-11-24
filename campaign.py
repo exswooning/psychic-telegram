@@ -691,6 +691,15 @@ def run_scenario(sc: S.Scenario, driver: Driver, name: str, allow: set, wait: in
                 if not driver.wait_idle(wait):
                     return {**row, "status": "FAIL", "reason": f"the check is still running after {wait} s"}
             status, why = judge(sc.expect, driver.facts(user, since=since))
+            spec = (sc.inject.get("env") or {}).get("BITPORT_FAULT")
+            if spec:
+                # An armed fault never reached proves nothing: every failpoint was silently ignored until 24 Nov 2026.
+                try:
+                    still = spec in (driver.armed() or [])
+                except Unautomated:
+                    still = False
+                if still:
+                    status, why = "UNVERIFIED", f"the failpoint {spec} was never reached"
             if status == "PASS" or "never classified" not in why:
                 break
         if sc.how == "google" and sc.unit_test and "never classified" in why:

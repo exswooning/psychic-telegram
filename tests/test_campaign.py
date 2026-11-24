@@ -343,7 +343,7 @@ def test_every_error_ends_as_its_known_issues_entry_says_and_the_gate_agrees():
     import parity_gate
     for s in _errors():
         kid = s.id[4:]
-        if s.how == "must_not_happen":
+        if s.how == "must_not_happen" or "finding_absent" in s.expect:      # a fixed defect: the finding must not come
             continue
         entry = known_issues.BY_ID.get(kid) or known_issues.RUN_BY_ID[kid]
         want = "fixed" if entry[6] else "accepted" if kid in parity_gate.ACCEPTED_KINDS else "listed"
@@ -534,3 +534,16 @@ def test_a_twin_is_reset_before_a_scenario_spends_it(tmp_path, monkeypatch):
     assert d.take_twin() == "t02@a.test"
     assert calls == [("/api/reset_target", "b.test", ["t02@a.test"]),
                      ("/api/reset_drive_ledger", "a.test", ["t02@a.test"])]
+
+
+def test_a_fault_settled_by_bitport_passes_only_when_it_fired():
+    """fp2-live, 24 Nov 2026: the lost copy reply was adopted on t07 and the lost comment reply reconciled on t08."""
+    s = S.by_id()["err:drive.duplicate"]
+    assert s.expect["finding_absent"] == "drive.duplicate"
+    d = _Verifying({"findings": set()})
+    d.armed = lambda: []                                   # the spec was struck: it fired
+    assert C.run_scenario(s, d, "n", set())["status"] == "PASS"
+    d = _Verifying({"findings": set()})
+    d.armed = lambda: [s.inject["env"]["BITPORT_FAULT"]]   # still armed: never reached
+    r = C.run_scenario(s, d, "n", set())
+    assert r["status"] == "UNVERIFIED" and "never reached" in r["reason"]

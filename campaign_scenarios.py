@@ -185,6 +185,11 @@ _ACT = {
 _VIA_FAILURE = {"run.disk_full": "fail:F-disk", "run.db_rollback": "fail:F-disk", "run.dns": "fail:F-net-12"}
 
 
+# Fired live on fresh twins (fp2-live, 24 Nov 2026) and settled without a finding: a lost copy reply is adopted
+# (drive_engine._take_placed, t07), a lost comment reply is reconciled and CONFIRMED (migration_comments, t08).
+HANDLED_UNDER_FAULT = ("drive.duplicate", "run.comment_prior_attempt")
+
+
 def _errors() -> list:
     out = []
     for how, (ids, why) in _ERRORS.items():
@@ -203,6 +208,9 @@ def _errors() -> list:
                 # a fixed defect must not return; every other kind is classified, then ends as its entry says
                 expect = ({"finding_absent": kid, "ends_as": end} if kid == "run.db_rollback"
                           else {"finding_classified": kid, "ends_as": end, end: kid, **more})
+            if kid in HANDLED_UNDER_FAULT:
+                # The fault fires (checked in campaign.run_scenario) and Bitport settles it itself: no finding comes.
+                expect = {"finding_absent": kid, "ends_as": end, **more}
             out.append(Scenario(
                 id=f"err:{kid}", group=group, title=f"{kid} ({why})", how=how, act=act,
                 fixtures=(what,) if what in {f"c{n:02d}" for n in range(1, 11)} else (),
