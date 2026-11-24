@@ -518,6 +518,14 @@ RUN_KINDS = [
      "suchanaadhikari@, account 3).",
      "None automatic. Raise VERIFY_SHEET_CELL_BUDGET for a Sheet the operator has qualified; until then "
      "the Sheet reads UNVERIFIED, never identical.", False),
+    ("run.reply_lost", None,
+     lambda t: ("reply lost" in t or "Connection reset by peer" in t or "Connection aborted" in t
+                or "Remote end closed connection" in t or "RemoteDisconnected" in t),
+     "A write's reply never came back, so it may have landed",
+     "The connection dropped after Google received a write (failpoint ':lost' in the campaign; live, a reset "
+     "socket). Repeating it blindly could make a second copy.",
+     "Never repeated blindly: a copy is adopted if it landed (drive_engine._take_placed), a comment's earlier "
+     "attempt is reconciled first (run.comment_prior_attempt), everything else is retried by repair.", True),
     ("run.comment_prior_attempt", ("comment",),
      lambda t: "Prior uncertain comment/reply delivery needs reconciliation" in t,
      "A comment was not copied because an earlier attempt is on record",

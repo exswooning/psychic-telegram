@@ -40,3 +40,11 @@ def test_the_gate_can_judge_one_service():
     c.execute("INSERT INTO user_verification VALUES ('u@a.example','drive','IDENTICAL','2026-11-24T00:00:00Z','{}')")
     assert parity_gate.assess(c, services=("drive",))["verdict"] == "PARITY"
     assert parity_gate.assess(c)["verdict"] != "PARITY"
+
+
+def test_a_lost_reply_is_named():
+    """fp2-live, 24 Nov 2026: the comment failpoint's FAILED row read unclassified (incident #299)."""
+    import known_issues
+    for t in ("failpoint drive.comment.created@1: reply lost", "[Errno 104] Connection reset by peer",
+              "('Connection aborted.', RemoteDisconnected('Remote end closed connection without response'))"):
+        assert known_issues.classify_failure("comment", t) == "run.reply_lost", t

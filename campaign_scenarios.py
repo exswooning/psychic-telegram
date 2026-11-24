@@ -68,7 +68,8 @@ _ERRORS = {
         "drive.ab_test_residue": "after an A/B arm run"}, "changed on purpose after the run"),
     "on_target": ({"drive.parent_folder": "two folders of one name and creation time on b."}, "made on b. first"),
     "failpoint": ({"drive.duplicate": "drive.copy.landed lost",
-                   "run.comment_prior_attempt": "drive.comment.created lost"}, "through a failpoint"),
+                   "run.comment_prior_attempt": "drive.comment.created lost",
+                   "run.reply_lost": "drive.comment.created lost"}, "through a failpoint"),
     "failure": ({"run.disk_full": "F-disk", "run.db_rollback": "F-disk", "run.dns": "F-net-12"}, "through a failure scenario"),
     "protected_source": ({"drive.source_changed": "lift a.'s sandbox declaration, edit a file mid-run"},
                          "needs a protected source"),
@@ -167,6 +168,7 @@ _ACT = {
     "drive.native_structure": (_DU, {}, _VERIFY_DRIVE),
     "drive.duplicate": (_migrate(**_DRIVE), _lost("drive.copy.landed"), _VERIFY_DRIVE),
     "run.comment_prior_attempt": (_migrate(**_DRIVE), _lost("drive.comment.created"), {}),
+    "run.reply_lost": (_migrate(**_DRIVE), _lost("drive.comment.created"), {}),
     "drive.parent_folder": (_migrate(**_DRIVE), {"cause": "two folders of one name and creation time on b., made before the run"},
                             _VERIFY_DRIVE),
     "drive.source_changed": (_migrate(**_DRIVE), {"cause": "restore a.'s protection (domain-guard/restore), edit a source "
