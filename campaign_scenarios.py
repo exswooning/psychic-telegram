@@ -177,10 +177,6 @@ _ACT = {
 _VIA_FAILURE = {"run.disk_full": "fail:F-disk", "run.db_rollback": "fail:F-disk", "run.dns": "fail:F-net-12"}
 
 
-# Arms whose finding no longer happens: twin t03's Drive moved by download_upload read IDENTICAL (fp2-live, 24 Nov 2026).
-FIXED_ARMS = ("drive.native_structure", "drive.content_export")
-
-
 def _errors() -> list:
     out = []
     for how, (ids, why) in _ERRORS.items():
@@ -199,9 +195,6 @@ def _errors() -> list:
                 # a fixed defect must not return; every other kind is classified, then ends as its entry says
                 expect = ({"finding_absent": kid, "ends_as": end} if kid == "run.db_rollback"
                           else {"finding_classified": kid, "ends_as": end, end: kid, **more})
-            if kid in FIXED_ARMS:
-                # The arm still runs (download_upload on a twin, then a check); the finding must no longer come.
-                expect = {"finding_absent": kid, "ends_as": end, **more}
             out.append(Scenario(
                 id=f"err:{kid}", group=group, title=f"{kid} ({why})", how=how, act=act,
                 fixtures=(what,) if what in {f"c{n:02d}" for n in range(1, 11)} else (),

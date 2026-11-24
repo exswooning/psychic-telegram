@@ -219,7 +219,21 @@ class LiveDriver(Driver):
         with open(path, "w", encoding="utf-8") as fh:
             json.dump(used + [free[0]], fh)
         self.started = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        return f"{free[0]}@{self.domain}"
+        user = f"{free[0]}@{self.domain}"
+        self._fresh(user)
+        return user
+
+    def _fresh(self, user: str) -> None:
+        """A twin a whole-tenant run already migrated copies nothing new: a failpoint at copy.landed is never reached
+        and an arm moves no file (fp2-live, 24 Nov 2026). Its copy on the target and its ledger rows are cleared first."""
+        import accounts_auth
+        target = (accounts_auth.get_tenant_config(self.account_id, "target") or {}).get("domain", "")
+        services = "drive,gmail,calendar,contacts,tasks"
+        for path, confirm in (("/api/reset_target", target), ("/api/reset_drive_ledger", self.domain)):
+            self.webui("POST", path, {"confirm_domain": confirm, "services": services, "users": [user],
+                                      "reason": f"campaign {self.name}: a fresh twin"})
+            if not self.wait_idle(3600):
+                raise Unautomated(f"the twin reset ({path}) of {user} did not finish")
 
     def prepare(self, fixtures: tuple) -> None:
         return None          # the cohort is seeded once (P3.1); a fixture names the cohort user holding it

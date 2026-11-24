@@ -343,7 +343,7 @@ def test_every_error_ends_as_its_known_issues_entry_says_and_the_gate_agrees():
     import parity_gate
     for s in _errors():
         kid = s.id[4:]
-        if s.how == "must_not_happen" or "finding_absent" in s.expect:      # a fixed defect: the finding must not come
+        if s.how == "must_not_happen":
             continue
         entry = known_issues.BY_ID.get(kid) or known_issues.RUN_BY_ID[kid]
         want = "fixed" if entry[6] else "accepted" if kid in parity_gate.ACCEPTED_KINDS else "listed"
@@ -372,12 +372,11 @@ def test_a_cause_is_armed_before_the_twin_and_the_run_are_spent():
     assert kinds.index("inject") < kinds.index("twin") < kinds.index("api")
 
 
-def test_a_fixed_arm_runs_its_check_and_passes_only_when_the_finding_stays_away():
-    """fp2-live, 24 Nov 2026: download_upload on twin t03 read IDENTICAL -- the arm's finding no longer happens."""
-    d = _Verifying({"findings": set()})
+def test_a_fix_is_read_after_a_verify_with_repair():
+    d = _Verifying({"findings": {"drive.content_export"}, "fixed": {"drive.content_export"}})
     assert C.run_scenario(S.by_id()["err:drive.content_export"], d, "n", set())["status"] == "PASS"
     assert ("verify", "t02", "drive") in d.calls
-    d = _Verifying({"findings": {"drive.content_export"}, "fixed": {"drive.content_export"}})
+    d = _Verifying({"findings": {"drive.content_export"}, "fixed": set()})
     assert C.run_scenario(S.by_id()["err:drive.content_export"], d, "n", set())["status"] == "FAIL"
 
 
@@ -520,3 +519,17 @@ def test_run_7s_two_unnamed_failures_have_names():
                                          'when requesting https://www.googleapis.com/upload/drive/v3/files') == "run.backend_500"
     assert known_issues.classify_failure(
         "drive", "Full source/destination ID coverage is incomplete; findings scheduled for repair") == "run.coverage_incomplete"
+
+
+def test_a_twin_is_reset_before_a_scenario_spends_it(tmp_path, monkeypatch):
+    """fp2-live, 24 Nov 2026: twins run 15 had migrated copied nothing new, so failpoints and arms never ran."""
+    import accounts_auth
+    monkeypatch.setattr(C, "HERE", str(tmp_path))
+    monkeypatch.setattr(accounts_auth, "get_tenant_config", lambda aid, side: {"domain": "b.test"})
+    d = object.__new__(C.LiveDriver)
+    d.name, d.account_id, d.domain, calls = "n", 5, "a.test", []
+    d.webui = lambda m, p, body: calls.append((p, body["confirm_domain"], body["users"])) or {}
+    d.wait_idle = lambda t: True
+    assert d.take_twin() == "t02@a.test"
+    assert calls == [("/api/reset_target", "b.test", ["t02@a.test"]),
+                     ("/api/reset_drive_ledger", "a.test", ["t02@a.test"])]
