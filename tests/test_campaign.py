@@ -166,6 +166,55 @@ def test_a_failure_scenario_must_end_equal_to_the_control_with_nothing_twice():
     assert C.run_scenario(sc(expect=e), FakeDriver({"equal_to_control": False, "duplicates": 0}), "n", set())["status"] == "FAIL"
 
 
+@pytest.mark.parametrize(
+    ("verdict", "duplicates", "sampled", "checked_at", "mail_count", "contacts_count", "status"),
+    [
+        ("IDENTICAL", 0, None, "2026-11-24T13:01:00Z", 335, 25, "PASS"),
+        ("DIFFERENCES", 2, None, "2026-11-24T13:01:00Z", 353, 25, "FAIL"),
+        ("IDENTICAL", 0, {"checked": 25, "of": 321}, "2026-11-24T13:01:00Z", 335, 25, "UNVERIFIED"),
+        ("IDENTICAL", 0, None, "2026-11-24T12:59:00Z", 335, 25, "UNVERIFIED"),
+        ("IDENTICAL", 0, None, "2026-11-24T13:01:00Z", 320, 25, "FAIL"),
+        ("IDENTICAL", 0, None, "2026-11-24T13:01:00Z", 335, 50, "FAIL"),
+    ],
+)
+def test_recovery_requires_current_full_verification_and_uses_each_twins_expected_count(
+        verdict, duplicates, sampled, checked_at, mail_count, contacts_count, status):
+    import json
+    import sqlite3
+
+    from parity_gate import SERVICES as checked_services
+    from tally import SERVICES as tallied_services
+
+    control, twin = "t01@sandbox.test", "t02@sandbox.test"
+    start = "2026-11-24T13:00:00Z"
+    with sqlite3.connect(":memory:") as conn:
+        conn.executescript("""
+            CREATE TABLE user_verification(source_user, service, verdict, verified_at, payload);
+            CREATE TABLE user_tally(source_user, recorded_at, payload);
+        """)
+        for user in (control, twin):
+            for service in checked_services:
+                test_mail = user == twin and service == "gmail"
+                payload = {"completion": "COMPLETE", "sampled": sampled if test_mail else None,
+                           "counts": {"duplicates": duplicates if test_mail else 0}}
+                conn.execute("INSERT INTO user_verification VALUES (?, ?, ?, ?, ?)",
+                             (user, service, verdict if test_mail else "IDENTICAL",
+                              "2026-11-23T03:09:33Z" if user == control else checked_at,
+                              json.dumps(payload)))
+            services = {service: {"usersCompared": 1, "expected": 25, "target": 25} for service in tallied_services}
+            services["mail"].update(expected=321, target=353 if user == control else mail_count)
+            if user == twin:
+                services["contacts"]["target"] = contacts_count
+            conn.execute("INSERT INTO user_tally VALUES (?, ?, ?)",
+                         (user, "2026-11-24T13:02:00Z", json.dumps({"services": services})))
+
+        facts = C.recovery_facts(conn, twin, control, start)
+        outcome, reason = C.judge({"equal_to_control": True, "no_item_twice": True}, facts)
+        assert outcome == status
+        if duplicates:
+            assert facts["duplicates"] == duplicates and "landed twice" in reason
+
+
 def test_a_benchmark_must_read_what_the_scenario_says():
     e = {"benchmark": "users_failed", "outcome": "FAIL or UNVERIFIED"}
     assert C.run_scenario(sc(expect=e), FakeDriver({"benchmarks": {"users_failed": "UNVERIFIED"}}), "n", set())["status"] == "PASS"

@@ -110,6 +110,55 @@ TWINS = tuple(f"t{n:02d}" for n in range(2, 21))      # t01 is the control
 CONTROL = "t01"
 
 
+def recovery_facts(conn, user: str, control: str, since: str) -> dict:
+    """Compare full item checks and each mailbox's own expected counts."""
+    from parity_gate import SERVICES as checked_services
+    from tally import SERVICES as tallied_services
+
+    checks = {user: {}, control: {}}
+    for address, service, verdict, checked_at, raw in conn.execute(
+            "SELECT source_user, service, verdict, verified_at, payload FROM user_verification "
+            "WHERE source_user IN (?, ?)", (user, control)):
+        payload = json.loads(raw or "{}")
+        if payload.get("completion") != "COMPLETE" or payload.get("sampled"):
+            continue
+        if not checked_at or (address == user and checked_at < since):
+            continue
+        duplicates = (payload.get("counts") or {}).get("duplicates")
+        if type(duplicates) is int and duplicates >= 0:
+            checks[address][service] = (verdict, duplicates)
+
+    twin_checks, control_checks = checks[user], checks[control]
+    facts = {}
+    if not set(checked_services).issubset(twin_checks):
+        return facts
+    facts["duplicates"] = sum(twin_checks[service][1] for service in checked_services)
+    if any(control_checks.get(service) != ("IDENTICAL", 0) for service in checked_services):
+        return facts
+
+    count_gaps = {}
+    for address, recorded_at, raw in conn.execute(
+            "SELECT source_user, recorded_at, payload FROM user_tally WHERE source_user IN (?, ?)", (user, control)):
+        services = json.loads(raw or "{}").get("services") or {}
+        if not recorded_at or (address == user and recorded_at < since):
+            continue
+        if any(services.get(service, {}).get("usersCompared") != 1 for service in tallied_services):
+            continue
+        gaps = {service: services[service]["expected"] - services[service]["target"]
+                for service in tallied_services}
+        # Raw mail tallies include destination-only messages (even on the clean control).
+        # The full Gmail check above decides which are duplicates or actionable extras.
+        gaps["mail"] = max(0, gaps["mail"])
+        count_gaps[address] = gaps
+
+    if control in count_gaps and not any(count_gaps[control].values()) and user in count_gaps:
+        facts["equal_to_control"] = (
+            not any(count_gaps[user].values())
+            and all(twin_checks[service] == control_checks[service] for service in checked_services)
+        )
+    return facts
+
+
 class LiveDriver(Driver):
     """The box: requests go to the API as the superadmin, with a session made here (root needs no password);
     facts come from the account's own ledger, its reports and the incident table."""
@@ -409,15 +458,8 @@ class LiveDriver(Driver):
                     "SELECT item_type, status, COUNT(*) FROM audit_log WHERE source_user=? GROUP BY 1,2", (user,))}
                 out["verdicts"] = {r[0]: r[1] for r in c.execute(
                     "SELECT service, verdict FROM user_verification WHERE source_user=?", (user,))}
-                tallies = {r[0]: json.loads(r[1]) for r in c.execute(
-                    "SELECT source_user, payload FROM user_tally WHERE source_user IN (?,?)",
-                    (user, f"{CONTROL}@{self.domain}"))}
-                mine, ctl = tallies.get(user), tallies.get(f"{CONTROL}@{self.domain}")
-                if mine and ctl:
-                    svc = lambda p: {k: v.get("target") for k, v in (p.get("services") or {}).items()}  # noqa: E731
-                    out["equal_to_control"] = svc(mine) == svc(ctl)
-                    out["duplicates"] = sum(max(0, (v.get("target") or 0) - (v.get("expected") or v.get("source") or 0))
-                                            for v in (mine.get("services") or {}).values())
+                if user != self.fixture_user(CONTROL):
+                    out.update(recovery_facts(c, user, self.fixture_user(CONTROL), since))
         out["benchmarks"] = self.benchmarks("migration")
         out["incidents"] = self.incidents()
         try:
@@ -485,6 +527,8 @@ def judge(expect: dict, facts: dict) -> tuple:
             if "equal_to_control" not in facts:
                 unread.append(key)
             elif not facts["equal_to_control"]:
+                if expect.get("no_item_twice") and facts.get("duplicates"):
+                    return "FAIL", f"{facts['duplicates']} item(s) landed twice"
                 return "FAIL", "counts or verdict differ from the control twin"
         elif key == "no_item_twice":
             if "duplicates" not in facts:
