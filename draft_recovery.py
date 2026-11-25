@@ -5,12 +5,19 @@ import base64
 import email
 import hashlib
 import io
+import time
 
 
 HEADER = "X-Bitport-Source-Draft"
+MAX_DUPLICATE_READS = 500
+DUPLICATE_SCAN_SECONDS = 300
 
 
-def recover(auth, db, settings, user, result):
+class DuplicateScanDeferred(RuntimeError):
+    """The target scan cannot complete safely within the automatic limit."""
+
+
+def recover(auth, db, settings, user, result, progress=print):
     from domain_guard import require_not_source
     from gmail_engine import GmailMigrator, LARGE_MESSAGE_THRESHOLD, SYSTEM_LABELS, _ascii_headers
     from googleapiclient.http import MediaIoBaseUpload
@@ -18,7 +25,7 @@ def recover(auth, db, settings, user, result):
 
     ids = sorted({x["id"] for x in result.get("notCopied", [])
                   if x.get("type") == "draft" and x.get("status") == "UNMAPPED_SOURCE" and x.get("id")})
-    out = {"candidates": len(ids), "attempted": 0, "mapped": 0, "errors": []}
+    out = {"candidates": len(ids), "attempted": 0, "mapped": 0, "duplicateReads": 0, "errors": []}
     if not ids:
         return out
     target = db.resolve_identity(user)
@@ -52,20 +59,42 @@ def recover(auth, db, settings, user, result):
         _stop_check()
         return gm._retry(lambda: svc.users().drafts().get(userId="me", id=did, format="raw").execute())
 
-    def targets():
-        token, seen, count = None, set(), 0
+    deadline = time.monotonic() + DUPLICATE_SCAN_SECONDS
+    progress(f"repair: {user} checking {len(ids)} unmapped Gmail draft(s) for duplicate copies")
+
+    def scan_time_left():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise DuplicateScanDeferred("Gmail draft inspection reached its time limit; remaining drafts require review")
+        return remaining
+
+    def scan_request(fn):
+        from resilience import retry_on_google_error
+
+        _stop_check()
+        value = retry_on_google_error(max_retries=settings.max_retries,
+                                      base_delay=settings.base_backoff,
+                                      max_delay=settings.max_backoff,
+                                      max_elapsed=scan_time_left(),
+                                      label="repair.gmail.draft_duplicate_scan")(fn)()
+        scan_time_left()
+        return value
+
+    def target_ids():
+        token, seen, drafts = None, set(), []
+        remaining = MAX_DUPLICATE_READS - out["duplicateReads"]
         while True:
-            _stop_check()
-            page = gm._retry(lambda: gm.tgt.users().drafts().list(
+            page = scan_request(lambda: gm.tgt.users().drafts().list(
                 userId="me", maxResults=100, pageToken=token, includeSpamTrash=True).execute())
-            for item in page.get("drafts", []):
-                count += 1
-                if count > 500:
-                    raise RuntimeError("Target has over 500 drafts; bounded duplicate inspection requires operator review")
-                yield item["id"], read(gm.tgt, item["id"])
+            drafts.extend(item["id"] for item in page.get("drafts", []))
+            if len(drafts) > remaining:
+                raise DuplicateScanDeferred(
+                    f"Gmail draft inspection cannot recheck the destination within its "
+                    f"{MAX_DUPLICATE_READS}-read limit; remaining drafts require review"
+                )
             token = page.get("nextPageToken")
             if not token:
-                return
+                return drafts
             if token in seen:
                 raise RuntimeError("Target draft inventory repeated a page token")
             seen.add(token)
@@ -96,7 +125,13 @@ def recover(auth, db, settings, user, result):
                 "SELECT m.target_id FROM id_mapping m JOIN identity_map i ON i.source_email=m.source_user "
                 "WHERE m.type='draft' AND i.target_email=?", (target,))}
             marked, unmarked_equal = [], []
-            for tid, full in targets():
+            for tid in target_ids():
+                full = scan_request(lambda: gm.tgt.users().drafts().get(
+                    userId="me", id=tid, format="raw").execute())
+                out["duplicateReads"] += 1
+                if out["duplicateReads"] % 25 == 0:
+                    progress(f"repair: {user} inspected {out['duplicateReads']} Gmail draft copies "
+                             f"across {out['attempted']}/{len(ids)} source drafts")
                 raw = decode(full["message"]["raw"])
                 headers = ["".join(str(h).split()) for h in email.message_from_bytes(raw).get_all(HEADER) or []]
                 if marker in headers:
@@ -165,6 +200,10 @@ def recover(auth, db, settings, user, result):
             record(did, marker, sha, "VERIFIED", tid)
             db.log_audit(user, did, "draft", "SUCCESS", "Marked draft copy verified; original target drafts preserved")
             out["mapped"] += 1
+        except DuplicateScanDeferred as exc:
+            out["errors"].append(str(exc))
+            progress(f"repair: {user} {exc}")
+            break
         except Exception as exc:
             out["errors"].append(f"{did}: {type(exc).__name__}: {str(exc)[:200]}")
     return out

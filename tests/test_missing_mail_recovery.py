@@ -57,6 +57,57 @@ def test_mapping_loss_adopts_existing_copy_without_duplicate(auth, db, settings,
     assert len(auth.target_gmail(TGT_USER).messages) == 1
 
 
+def test_draft_recovery_stops_before_repeated_destination_scan(auth, db, settings, identity, monkeypatch):
+    import draft_recovery
+
+    settings.source_read_only = True
+    monkeypatch.setattr(draft_recovery, "MAX_DUPLICATE_READS", 2)
+    src, tgt = auth.source_gmail(SRC_USER), auth.target_gmail(TGT_USER)
+    ids = [src.add_draft(f"Subject: {i}\r\n\r\nsource draft".encode()) for i in range(2)]
+    existing = tgt.add_draft(b"Subject: Existing\r\n\r\nkeep this draft")
+    before_source, before_existing = copy.deepcopy(src.drafts), copy.deepcopy(tgt.drafts[existing])
+    result = {"notCopied": [{"type": "draft", "status": "UNMAPPED_SOURCE", "id": i} for i in ids]}
+    log = []
+
+    got = draft_recovery.recover(auth, db, settings, SRC_USER, result, log.append)
+
+    assert got["duplicateReads"] == 1 and got["mapped"] == 1
+    assert got["errors"] and "2-read limit" in got["errors"][0]
+    assert any("require review" in line for line in log)
+    assert db.get_target_id(SRC_USER, ids[0], "draft")
+    assert not db.get_target_id(SRC_USER, ids[1], "draft")
+    assert src.drafts == before_source and tgt.drafts[existing] == before_existing
+    assert len(tgt.drafts) == 2
+
+
+def test_draft_recovery_never_creates_after_duplicate_scan_takes_too_long(
+        auth, db, settings, identity, monkeypatch):
+    from types import SimpleNamespace
+    import draft_recovery
+    from tests.fakes import _GmailDrafts
+
+    settings.source_read_only = True
+    src, tgt = auth.source_gmail(SRC_USER), auth.target_gmail(TGT_USER)
+    sid = src.add_draft(b"Subject: Source\r\n\r\nsource draft")
+    tgt.add_draft(b"Subject: Existing\r\n\r\nkeep this draft")
+    before = copy.deepcopy(tgt.drafts)
+    now = [0]
+    monkeypatch.setattr(draft_recovery, "time", SimpleNamespace(monotonic=lambda: now[0]))
+    original = _GmailDrafts._get
+
+    def slow_get(self, **kwargs):
+        if self.s is tgt:
+            now[0] += draft_recovery.DUPLICATE_SCAN_SECONDS
+        return original(self, **kwargs)
+
+    monkeypatch.setattr(_GmailDrafts, "_get", slow_get)
+    result = {"notCopied": [{"type": "draft", "status": "UNMAPPED_SOURCE", "id": sid}]}
+    got = draft_recovery.recover(auth, db, settings, SRC_USER, result, lambda _: None)
+    assert got["mapped"] == 0 and "time limit" in got["errors"][0]
+    assert not db.get_target_id(SRC_USER, sid, "draft")
+    assert tgt.drafts == before and not tgt.calls_to("drafts.create")
+
+
 @pytest.mark.parametrize("unsafe", ["domain", "writable-source", "dry-run"])
 def test_recovery_refuses_unsafe_configuration(auth, db, settings, identity, monkeypatch, unsafe):
     import domain_guard

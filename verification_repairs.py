@@ -470,7 +470,7 @@ def _finish(db, user, keys, state, summary):
                          (queue_state, utc_now() if queue_state == "RESOLVED" else None, user, *services))
 
 
-def scoped_repair(auth, db, settings, user, per):
+def scoped_repair(auth, db, settings, user, per, progress=print):
     """No tenant-wide run_all: every called write path is explicitly user scoped."""
     import repair
     import retry_failed
@@ -531,7 +531,7 @@ def scoped_repair(auth, db, settings, user, per):
     if any(i.get("type") == "draft" and i.get("status") == "UNMAPPED_SOURCE"
            for i in (per.get("gmail") or {}).get("notCopied", [])):
         import draft_recovery
-        out["missing_drafts"] = draft_recovery.recover(auth, db, st, user, per["gmail"])
+        out["missing_drafts"] = draft_recovery.recover(auth, db, st, user, per["gmail"], progress)
     drive = per.get("drive") or {}
     if any(any(d.startswith("links inside still point at the source (") for d in item.get("diffs", []))
            for item in drive.get("differences", [])):
@@ -607,7 +607,7 @@ def finished_user(auth, db, settings, user, per, limit, retry, progress=print):
     run_id = db.repair_started()
     progress(f"repair: {user} started; scope=one-user")
     try:
-        out = scoped_repair(auth, db, settings, user, work)
+        out = scoped_repair(auth, db, settings, user, work, progress)
         attempts = ((out.get("contacts") or {}).get("candidates", 0)
                     + sum((out.get("failed_items") or {}).get(k, 0) for k in ("messages", "events", "drafts"))
                     + (out.get("gmail_labels") or {}).get("candidates", 0)
