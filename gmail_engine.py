@@ -33,7 +33,8 @@ import uuid
 from google.auth.exceptions import RefreshError
 from googleapiclient.http import MediaFileUpload, MediaIoBaseUpload  # noqa: F401
 
-from config import DEFERRED_TO_DMS, DELIVERED_BY_DMS, OWED_GRANT, Settings
+from config import (DEFERRED_TO_DMS, DELIVERED_BY_DMS, GMAIL_RECOVERY_AMBIGUOUS,
+                    GMAIL_RECOVERY_DIFFERENT, OWED_GRANT, Settings)
 from sample_budget import Budget
 from link_rewrite import rewrite_raw
 from resilience import (PermanentAPIError, RateLimiter, TransportExhausted,
@@ -376,7 +377,7 @@ class GmailMigrator:
                 )}
                 found = [tid for tid in found if tid not in claimed]
             if len(found) > 1 or resp.get("nextPageToken"):
-                raise RuntimeError("Ambiguous unclaimed destination Message-ID; recovery blocked")
+                raise RuntimeError(GMAIL_RECOVERY_AMBIGUOUS)
         if self.settings.mail_only_with_links and (len(found) > 1 or resp.get("nextPageToken")):
             # Leftovers a reset moved to Trash are retained, not copies: only more than one LIVE copy is ambiguous
             # (alice, P3.5, 19 Nov 2026: two trashed copies of one Message-ID blocked six messages).
@@ -498,7 +499,7 @@ class GmailMigrator:
                                               "PENDING", "Target copy " + existing + " retained unchanged in Trash; "
                                               "fresh source content with current link mappings will be inserted separately")
                             return None
-                    raise RuntimeError("Existing destination Message-ID has different content; manual review required")
+                    raise RuntimeError(GMAIL_RECOVERY_DIFFERENT)
                 return {"id": existing, "threadId": target.get("threadId"), "adopted": True}
             log.info("[%s] a previous attempt had already delivered %s; "
                      "adopting it instead of inserting a duplicate",

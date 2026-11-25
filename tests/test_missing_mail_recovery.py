@@ -136,14 +136,20 @@ def test_source_inventory_failure_cannot_pass(auth, db, settings, identity, monk
 
 def test_existing_message_id_with_different_content_is_not_adopted_or_duplicated(auth, db, settings, identity, monkeypatch):
     import domain_guard
+    import retry_failed
     monkeypatch.setattr(domain_guard, "source_domains", lambda: {settings.source_domain})
     settings.source_read_only = True
     sid = auth.source_gmail(SRC_USER).add_message(b"Message-ID: <collision@test>\r\n\r\nsource")
-    auth.target_gmail(TGT_USER).add_message(b"Message-ID: <collision@test>\r\n\r\nDIFFERENT")
+    target = auth.target_gmail(TGT_USER)
+    target.add_message(b"Message-ID: <collision@test>\r\n\r\nDIFFERENT")
+    before = copy.deepcopy(target.messages)
     got = repair.repair_verified_missing_mail(auth, db, settings, report(auth, db, settings), apply=True)
     assert got["errors"] and got["mapped"] == 0
+    retried = retry_failed.retry(auth, db, settings, apply=True, users={SRC_USER}, item_types=("message",))
+    assert retried["retried"] == 0
+    assert db.get_audit(SRC_USER, sid, "message")["status"] == "FAILED"
     assert not db.get_target_id(SRC_USER, sid, "message")
-    assert len(auth.target_gmail(TGT_USER).messages) == 1
+    assert target.messages == before
 
 
 def test_stopped_mail_run_returns_interrupted_without_draft_or_settings_writes(auth, db, settings, identity, monkeypatch):

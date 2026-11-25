@@ -59,6 +59,11 @@ DEFERRED_TO_DMS = "SKIPPED_NO_DRIVE_LINK"
 # the rest, links unrewritten, rather than the engine. Owed to the DMS, not a failure that blocks it.
 DMS_OWED_FAILURES = ("Ambiguous destination Message-ID", "Unresolved Drive link mapping")
 
+# These reasons are saved on FAILED message rows. A generic retry must leave
+# them to the recovery path that requires a unique, matching destination copy.
+GMAIL_RECOVERY_AMBIGUOUS = "Ambiguous unclaimed destination Message-ID; recovery blocked"
+GMAIL_RECOVERY_DIFFERENT = "Existing destination Message-ID has different content; manual review required"
+
 
 def owed_to_dms(item_type: str, error: str) -> bool:
     return item_type in ("message", "draft") and any(m in (error or "") for m in DMS_OWED_FAILURES)
