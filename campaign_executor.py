@@ -158,6 +158,14 @@ class Runner:
         self.ctx.unfired = left
         if left and not st.get("soft"):
             raise StepFailed(f"the failpoint was never reached: {', '.join(left)}")
+        if job := st.get("lost_reply_log"):
+            transcript = self.d.log_text(job)
+            missing = [spec for spec in st["specs"] if not re.search(
+                rf"\bFAILPOINT {re.escape(spec.partition(':')[0])}: reply lost\s*$",
+                transcript, re.MULTILINE,
+            )]
+            if missing:
+                raise StepFailed(f"no lost-reply log evidence for: {', '.join(missing)}")
 
     def do_repeat(self, st):
         for _ in range(st["times"]):

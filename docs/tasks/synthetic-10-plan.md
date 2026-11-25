@@ -586,6 +586,13 @@ rebuilt layouts (its slides render identical).
 
 ## 11. State (newest first)
 
+- 25 Nov 2026 (Codex): **F-lost now checks each fault before scoring recovery.** The account 5 archive for
+  24 Nov at 11:09:54 UTC logged only two of the eight intended lost replies (Drive copy and Tasks create).
+  The runner started the migration before arming faults and could advance after reading the same generic
+  log marker again. It now arms all eight before launch, waits for a clean exit, and requires a separate
+  log marker for each fault before comparing the twin with the control. Local regressions cover both
+  an unfired fault and a spent fault with no matching log marker. The sandbox rerun and score remain pending.
+
 - 24 Nov 2026 (Sonnet): **The eight UNVERIFIED seeded errors of run 15 each have a way to read PASS or COVERED.** Probes (`campaign_evidence.py`,
   PASS when the case is on the source and the user reads IDENTICAL): `drive.item_absent` (a shortcut to a colleague's file; new fixture
   `colleague_shortcut`, c03), `drive.comments_unreadable` (a Form's comment list answers 403/404; fixture moved to c09's Form),

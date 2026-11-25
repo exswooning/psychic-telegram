@@ -516,7 +516,7 @@ def test_failure_steps_use_the_known_vocabulary_real_endpoints_and_real_failpoin
                 assert st["kind"] in campaign_changes.CHANGES, (fid, st["kind"])
             if st["do"] in ("directory", "source"):
                 assert st.get("needs_primitive"), (fid, st)       # named, so the executor's author knows what is missing
-            for point in st.get("points", []) + ([st["fault"]] if "fault" in st else []):
+            for point in st.get("points", []) + st.get("fault", "").splitlines():
                 assert point.split("@")[0] in failpoints.NAMES, (fid, point)
                 assert point.endswith(":lost") == (fid == "F-lost"), (fid, point)
 

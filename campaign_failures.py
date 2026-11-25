@@ -88,10 +88,10 @@ ROWS = {
         {"do": "disarm"}, start(), IDLE, *FINISH], BASE,
         "each point is reached, the run dies there with exit 137 (a crashed incident), the next run finishes; nothing twice"),
     "F-lost": ("A reply is lost after the write landed", 1, [
-        start(), {"do": "arm_chain", "points": LOST_CHAIN, "each": [{"do": "wait_log", "match": "FAILPOINT .*: reply lost"}]},
-        IDLE, *FINISH], BASE,
-        "the write landed, its reply was lost, the retry found the copy and adopted it: one item, not two (one run, one twin: "
-        "the spec file is re-read at every hit, so each point is armed as the one before fires)"),
+        arm("\n".join(LOST_CHAIN)), start(), {"do": "wait_exit", "code": 0},
+        {"do": "fired", "specs": LOST_CHAIN, "lost_reply_log": "migrate"}, IDLE, *FINISH], BASE,
+        "every armed write produced its own lost-reply record in one clean run; "
+        "the twin then matches the control with no item copied twice"),
     "F-kill-random": ("SIGKILL at 5 random moments", 1, [
         {"do": "repeat", "times": 5, "steps": [start(), {"do": "wait_log", "match": "PASS|heartbeat", "after_random_sec": [20, 240]},
                                                 STOP(True), {"do": "wait_exit"}]},

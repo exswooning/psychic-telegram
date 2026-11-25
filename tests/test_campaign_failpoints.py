@@ -38,6 +38,54 @@ class FpDriver(RecDriver):
         return out
 
 
+class LostReplyDriver(FpDriver):
+    """A clean migration exit can leave faults unfired or lack their log evidence."""
+
+    def __init__(self, missing_marker=None, **kw):
+        super().__init__(**kw)
+        self.missing_marker = missing_marker
+        self.markers = {"drive.copy.landed@2", "tasks.created@2"}
+
+    def exit_of(self, pid):
+        armed = set(self.file)
+        rc = super().exit_of(pid)
+        self.markers.update(
+            point for spec in armed.difference(self.file)
+            if (point := spec.partition(":")[0]) != self.missing_marker
+        )
+        return rc
+
+    def log_text(self, job):
+        assert job == "migrate"
+        return "\n".join(f"FAILPOINT {point}: reply lost" for point in sorted(self.markers))
+
+
+def test_lost_reply_chain_arms_every_point_before_start_and_checks_the_twin():
+    d = LostReplyDriver()
+    row = C.run_scenario(S.by_id()["fail:F-lost"], d, "n", set())
+
+    assert row["status"] == "PASS", row
+    arm = next(i for i, call in enumerate(d.calls) if call[0] == "arm")
+    start = next(i for i, call in enumerate(d.calls)
+                 if call[0] == "api" and call[2].endswith("/migrate/start"))
+    assert arm < start
+    assert d.calls[arm][1].splitlines() == CF.LOST_CHAIN
+    assert sum(call[0] == "arm" for call in d.calls) == 1
+
+
+@pytest.mark.parametrize(("driver", "reason"), [
+    ({"unreached": {"gmail.inserted"}}, "never reached"),
+    ({"missing_marker": "gmail.inserted@2"}, "no lost-reply log evidence"),
+])
+def test_lost_reply_chain_cannot_reuse_an_unrelated_fault_marker(driver, reason):
+    d = LostReplyDriver(**driver)
+    row = C.run_scenario(S.by_id()["fail:F-lost"], d, "n", set())
+
+    assert row["status"] == "FAIL", row
+    assert "gmail.inserted@2" in row["reason"] and reason in row["reason"]
+    assert not any(call[0] == "api" and call[2].endswith("/one-to-one/run") for call in d.calls)
+
+
 FP = [s for s in S.all_scenarios() if s.id.startswith("fp:")]
 RUNNABLE = [s for s in FP if not s.inject.get("unreachable")]
 UNREACHABLE = {"drive.moved_out", "shareddrive.created", "followon.dms.start"}

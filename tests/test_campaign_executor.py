@@ -191,6 +191,10 @@ def test_a_shell_step_fails_on_a_bad_exit_and_on_a_good_one_it_was_told_to_expec
 @pytest.mark.parametrize("fid", sorted(set(CF.ROWS)))
 def test_every_failure_row_runs_end_to_end(fid):
     d = RecDriver(exit_code={"F-kill": 137, "F-memory": 3}.get(fid, 1))
+    if fid == "F-lost":
+        from tests.test_campaign_failpoints import LostReplyDriver
+
+        d = LostReplyDriver()
     row = C.run_scenario(S.by_id()[f"fail:{fid}"], d, "n", {"net", "reboot"})
     if fid == "F-deploy":      # the operator's side: the deploy script is not on the allow-list
         assert row["status"] == "UNVERIFIED" and "sync_vps.sh" in row["reason"] and "twin" not in kinds(d)
