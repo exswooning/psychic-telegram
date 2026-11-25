@@ -365,8 +365,16 @@ class GmailMigrator:
         found = [m["id"] for m in (resp.get("messages") or [])
                  if m["id"] != ignore]
         if getattr(self, "recover_unmapped", False):
-            claimed = {r[0] for r in self.db.conn.execute("SELECT target_id FROM id_mapping WHERE source_user=? AND type='message'", (self.source_user,))}
-            found = [tid for tid in found if tid not in claimed]
+            if found:
+                # Gmail returns at most 100 candidates. Probe just those IDs
+                # instead of loading the whole mailbox's mappings for each message.
+                marks = ",".join("?" for _ in found)
+                claimed = {row[0] for row in self.db.conn.execute(
+                    f"SELECT target_id FROM id_mapping INDEXED BY ix_map_target "
+                    f"WHERE target_id IN ({marks}) AND source_user=? AND type='message'",
+                    (*found, self.source_user),
+                )}
+                found = [tid for tid in found if tid not in claimed]
             if len(found) > 1 or resp.get("nextPageToken"):
                 raise RuntimeError("Ambiguous unclaimed destination Message-ID; recovery blocked")
         if self.settings.mail_only_with_links and (len(found) > 1 or resp.get("nextPageToken")):

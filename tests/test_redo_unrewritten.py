@@ -174,6 +174,40 @@ class TestTheRepairDoesNotResumeOntoTheCopyItReplaced:
         assert g.tgt.asked[0]["maxResults"] == 1
 
 
+@pytest.fixture
+def unmapped_finder(tmp_path):
+    from db import MigrationDB
+
+    db = MigrationDB(str(tmp_path / "mail.db"))
+    gm = _finder(["CLAIMED", "UNCLAIMED"])
+    gm.db = db
+    gm.source_user = "source@example.com"
+    gm.recover_unmapped = True
+    db.record_mapping(gm.source_user, "previous", "CLAIMED", "message")
+    db.record_mapping("someone-else@example.com", "other", "UNCLAIMED", "message")
+    db.record_mapping(gm.source_user, "other-kind", "UNCLAIMED", "draft")
+    try:
+        yield gm
+    finally:
+        db.close()
+
+
+def test_missing_mail_recovery_excludes_only_this_mailbox_message_claims(unmapped_finder):
+    assert unmapped_finder._find_by_message_id("m@x") == "UNCLAIMED"
+    unmapped_finder.db.record_mapping(unmapped_finder.source_user, "fresh", "UNCLAIMED", "message")
+    assert unmapped_finder._find_by_message_id("m@x") is None
+
+
+def test_missing_mail_recovery_holds_multiple_candidates_and_incomplete_search(unmapped_finder):
+    unmapped_finder.tgt.ids.append("ANOTHER")
+    with pytest.raises(RuntimeError, match="Ambiguous unclaimed"):
+        unmapped_finder._find_by_message_id("m@x")
+
+    unmapped_finder.tgt.list = lambda **kwargs: _Exec({"messages": [], "nextPageToken": "more"})
+    with pytest.raises(RuntimeError, match="Ambiguous unclaimed"):
+        unmapped_finder._find_by_message_id("m@x")
+
+
 class TestARepairIgnoresTheDeltaWindow:
     """The mail needing repair is the OLD mail -- copied before rewriting was
     on. A delta window would scan the days where nothing is broken and report
