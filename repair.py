@@ -228,7 +228,8 @@ def repair_verified_missing_mail(auth, db, settings, report: dict, apply: bool =
     Never run a mailbox-wide redo or change source permissions/settings. Drafts
     remain explicit findings: replaying a draft create lacks safe deduplication.
     """
-    from concurrent.futures import ThreadPoolExecutor
+    from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+    from itertools import islice
     from domain_guard import require_not_source
     from gmail_engine import GmailMigrator
     from verify_sample import _stop_check
@@ -277,14 +278,26 @@ def repair_verified_missing_mail(auth, db, settings, report: dict, apply: bool =
                                      "Available mappings were rewritten; the unavailable original URL was preserved. "
                                      "Target message content can match without establishing access to that source reference.")
                 return bool(db.get_target_id(user, mid, "message"))
-            # Bound submissions as well as concurrency; raw attachments stay
-            # inside workers, never queued for the entire mailbox.
+            # Keep a bounded queue replenished as work finishes, even if
+            # a single slow message is still waiting on Google.
             with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="mail-recovery") as pool:
-                for start in range(0, len(ids), workers * 2):
-                    _stop_check()
-                    for mapped in pool.map(one, ids[start:start + workers * 2]):
-                        out["attempted"] += 1
-                        out["mapped"] += int(mapped)
+                messages = iter(ids)
+                pending = set()
+                try:
+                    while True:
+                        _stop_check()
+                        for mid in islice(messages, workers * 2 - len(pending)):
+                            pending.add(pool.submit(one, mid))
+                        if not pending:
+                            break
+                        finished, pending = wait(pending, timeout=0.25, return_when=FIRST_COMPLETED)
+                        for future in finished:
+                            mapped = future.result()
+                            out["attempted"] += 1
+                            out["mapped"] += int(mapped)
+                finally:
+                    for future in pending:
+                        future.cancel()
             failed = gm.stats.get("failed", 0)
             if failed:
                 out["errors"].append(f"{user}: {failed} emails could not be copied; inspect item audit records")

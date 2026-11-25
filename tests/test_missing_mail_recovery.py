@@ -57,6 +57,64 @@ def test_mapping_loss_adopts_existing_copy_without_duplicate(auth, db, settings,
     assert len(auth.target_gmail(TGT_USER).messages) == 1
 
 
+def test_a_slow_message_does_not_block_repair_of_the_next_group(
+        auth, db, settings, identity, monkeypatch):
+    from threading import Event
+
+    settings.source_read_only = True
+    settings.mail_workers = 2
+    # With two workers the old wave ended at d. The fast worker can reach e
+    # while a still waits only if the queue is replenished as work completes.
+    reached_next_group = Event()
+    ids = ["a", "b", "c", "d", "e"]
+    scope = {"users": {SRC_USER: {"gmail": {"notCopied": [
+        {"id": mid, "type": "message", "status": "UNMAPPED_SOURCE"} for mid in ids]}}}}
+
+    def copy_one(migrator, ref):
+        mid = ref["id"]
+        if mid == "a":
+            assert reached_next_group.wait(3), "the slow item blocked the next group"
+        if mid == "e":
+            reached_next_group.set()
+        migrator.db.record_mapping(SRC_USER, mid, "target-" + mid, "message")
+
+    monkeypatch.setattr(G.GmailMigrator, "_migrate_one_message", copy_one)
+    monkeypatch.setattr(G.GmailMigrator, "sync_labels", lambda self: None)
+    got = repair.repair_verified_missing_mail(auth, db, settings, scope, apply=True)
+
+    assert got == {"candidates": 5, "attempted": 5, "mapped": 5, "errors": []}
+    assert [db.get_target_id(SRC_USER, mid, "message") for mid in ids] == ["target-" + mid for mid in ids]
+
+
+def test_recovery_stop_keeps_finished_work_and_does_not_start_another_message(
+        auth, db, settings, identity, monkeypatch):
+    from threading import Event
+
+    settings.source_read_only = True
+    settings.mail_workers = 1
+    stopped = Event()
+    ids = ["a", "b", "c"]
+    scope = {"users": {SRC_USER: {"gmail": {"notCopied": [
+        {"id": mid, "type": "message", "status": "UNMAPPED_SOURCE"} for mid in ids]}}}}
+
+    def check_stop():
+        if stopped.is_set():
+            raise V.VerificationCancelled("test stop")
+
+    def copy_one(migrator, ref):
+        mid = ref["id"]
+        migrator.db.record_mapping(SRC_USER, mid, "target-" + mid, "message")
+        stopped.set()
+
+    monkeypatch.setattr(V, "_stop_check", check_stop)
+    monkeypatch.setattr(G.GmailMigrator, "_migrate_one_message", copy_one)
+    monkeypatch.setattr(G.GmailMigrator, "sync_labels", lambda self: None)
+    with pytest.raises(V.VerificationCancelled, match="test stop"):
+        repair.repair_verified_missing_mail(auth, db, settings, scope, apply=True)
+
+    assert [db.get_target_id(SRC_USER, mid, "message") for mid in ids] == ["target-a", None, None]
+
+
 def test_draft_recovery_stops_before_repeated_destination_scan(auth, db, settings, identity, monkeypatch):
     import draft_recovery
 

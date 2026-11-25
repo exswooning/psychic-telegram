@@ -46,6 +46,7 @@ from collections.abc import Iterator
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from email.parser import BytesHeaderParser
+from itertools import islice
 from verification_reads import error_detail
 
 # The CLI and repair callbacks must share the same module and cancellation type.
@@ -1505,12 +1506,12 @@ class Verifier:
         return b"", self._x(lambda: svc.users().messages().get(
             userId="me", id=mid, format="metadata", metadataHeaders=list(RECEIPT_HEADERS)).execute())
 
-    def _gmail_single(self, svc, mid, fmt, budget, cost):
+    def _gmail_single(self, svc, mid, fmt, budget, cost, metadata_headers=RECEIPT_HEADERS):
         def read():
             budget.acquire(cost, _stop_check)
             try:
                 message = svc.users().messages().get(userId="me", id=mid, format=fmt,
-                    **({"metadataHeaders": list(RECEIPT_HEADERS)} if fmt != "raw" else {})).execute()
+                    **({"metadataHeaders": list(metadata_headers)} if fmt != "raw" else {})).execute()
                 if fmt != "raw":
                     return b"", message
                 raw = message.get("raw", "")
@@ -1522,8 +1523,9 @@ class Verifier:
         return self._x(read)
 
     def _raw_many(self, svc, message_ids: list[str], side: str, progress_offset: int = 0,
-                  progress_total: int | None = None, fmt: str = "raw") -> tuple[dict[int, tuple[bytes, dict]], dict[int, Exception]]:
-        """Read a bounded batch of raw messages, falling back for test/service adapters.
+                  progress_total: int | None = None, fmt: str = "raw",
+                  metadata_headers=RECEIPT_HEADERS) -> tuple[dict[int, tuple[bytes, dict]], dict[int, Exception]]:
+        """Read raw messages or metadata in bounded batches.
 
         Gmail has no collection-level raw export. The old loop made two synchronous HTTP
         round trips per message; a 39k-message mailbox therefore needed ~80k sequential
@@ -1544,7 +1546,7 @@ class Verifier:
                 self._report_progress(operation, progress_offset + index, progress_total,
                                       f"email {message_id}")
                 try:
-                    values[index] = self._gmail_single(svc, message_id, fmt, budget, cost)
+                    values[index] = self._gmail_single(svc, message_id, fmt, budget, cost, metadata_headers)
                 except Exception as exc:  # noqa: BLE001 - retain per-message failure
                     errors[index] = exc
             return values, errors
@@ -1600,7 +1602,7 @@ class Verifier:
                     errors.pop(index, None)
                     request = (svc.users().messages().get(userId="me", id=message_ids[index], format="raw") if fmt == "raw"
                                else svc.users().messages().get(userId="me", id=message_ids[index], format="metadata",
-                                                               metadataHeaders=list(RECEIPT_HEADERS)))
+                                                               metadataHeaders=list(metadata_headers)))
                     batch.add(request, request_id=str(index))
                 try:
                     batch.execute()
@@ -1633,7 +1635,7 @@ class Verifier:
                     if status_of(errors[index]) == 400:
                         try:
                             # Single-message fallback still passes through quota pacing.
-                            values[index] = self._gmail_single(svc, message_ids[index], fmt, budget, cost)
+                            values[index] = self._gmail_single(svc, message_ids[index], fmt, budget, cost, metadata_headers)
                             errors.pop(index, None)
                         except Exception as exc:
                             errors[index] = exc
@@ -1849,40 +1851,54 @@ class Verifier:
             "AND status='TRASHED') OR (item_type='dms_draft_duplicate' AND status='TRASHED') OR (item_type='link_repair' AND status='SUCCESS'))", (self.src_user,))
             for m in [_re.search(r"trashed ([\w-]+)", msg or "")] if m}
         kept_trash = 0
-        try:
-            scanned = 0
-            for m in self._list_all(tgt):
-                scanned += 1
-                self._report_progress("Gmail target inventory", scanned,
-                                      item=f"email {m.get('id', '?')}")
-                if m["id"] in mapped_ids:
+
+        def unmatched_ids():
+            nonlocal kept_trash
+            try:
+                for scanned, message in enumerate(self._list_all(tgt), 1):
+                    target_id = message["id"]
+                    self._report_progress("Gmail target inventory", scanned, item=f"email {target_id}")
+                    if target_id in mapped_ids:
+                        continue
+                    if target_id in bitport_trashed:
+                        kept_trash += 1
+                        continue
+                    yield target_id
+            except Exception as exc:  # retain any IDs already yielded before a failed page
+                res["errors"].append(f"could not list the target's mailbox: {error_detail(exc)}")
+
+        unmatched = unmatched_ids()
+        batch_size = _gmail_batch_size()
+        while ids := list(islice(unmatched, batch_size)):
+            headers, errors = self._raw_many(
+                tgt, ids, "target", fmt="metadata", metadata_headers=("Message-ID", "From"))
+            for index, target_id in enumerate(ids):
+                _stop_check()
+                if index in errors:
+                    res["errors"].append(
+                        f"could not read target Gmail message {target_id}: {error_detail(errors[index])}")
                     continue
-                if m["id"] in bitport_trashed:
-                    kept_trash += 1
-                    continue
-                hdr = self._x(lambda i=m["id"]: tgt.users().messages().get(
-                    userId="me", id=i, format="metadata", metadataHeaders=["Message-ID", "From"]).execute())
+                _, hdr = headers[index]
                 head = {h["name"].lower(): h["value"].strip() for h in hdr.get("payload", {}).get("headers", [])}
                 mid = head.get("message-id", "")
-                # A sender domain or Trash label is not an accepted-difference record, with ONE exact
-                # exception: Google's own welcome mail, which Google puts in every new target account
-                # ("Tips for using your new inbox", "Get the official Gmail app") and which is not the
-                # source's data. The tally leaves the same sender out on both sides (tally.NOT_GOOGLE_WELCOME);
-                # left in here, every freshly made target user read DIFFERENCES (a. -> b., 17 Nov 2026).
-                if (mid and mid not in mapped_msgids and _google_welcome(head.get("from", ""))
-                        and not self._x(lambda q=mid: src.users().messages().list(
+                # Ignore Google's destination welcome mail only if its ID is absent on the source.
+                # A source welcome message carried over by DMS stays visible.
+                if mid and mid not in mapped_msgids and _google_welcome(head.get("from", "")):
+                    try:
+                        on_source = self._x(lambda q=mid: src.users().messages().list(
                             userId="me", q=f"rfc822msgid:{q}", includeSpamTrash=True,
-                            maxResults=1).execute()).get("messages")):
-                    # ...and only when its Message-ID is nowhere on the source: a source welcome mail the
-                    # DMS carried over is source data, and stays reported.
-                    welcome += 1
-                    continue
+                            maxResults=1).execute(), operation="Gmail source welcome mail lookup").get("messages")
+                    except Exception as exc:
+                        res["errors"].append(
+                            f"could not check the source of target Gmail message {target_id}: {error_detail(exc)}")
+                        continue
+                    if not on_source:
+                        welcome += 1
+                        continue
                 # Preserve and report every other unmatched destination for review.
                 (res["duplicates"] if mid in mapped_msgids else res["extras"]).append({
-                    "target": m["id"], "messageId": mid, "labels": hdr.get("labelIds") or [],
+                    "target": target_id, "messageId": mid, "labels": hdr.get("labelIds") or [],
                     "classification": "UNMATCHED_DESTINATION"})
-        except Exception as exc:      # noqa: BLE001
-            res["errors"].append(f"could not list the target's mailbox: {error_detail(exc)}")
         if kept_trash:
             res["notes"].append(f"{kept_trash} second copy(ies) Bitport moved to the target's trash, kept beside the "
                                 "mapped copy (recoverable 30 days): not counted")

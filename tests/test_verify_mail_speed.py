@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 import verify_sample as V
+from tests.conftest import SRC_USER, TGT_USER
 
 
 @pytest.fixture(autouse=True)
@@ -46,6 +47,61 @@ def test_raw_errors_stay_attached_to_their_item(monkeypatch):
     exc = RuntimeError('not found')
     values, errors = V.Verifier(None,None,None,'s','t')._raw_many(Mail({'2':exc}), ['0','1','2','3'], 'target')
     assert set(values) == {0,1,3} and errors == {2:exc}
+
+
+def test_target_inventory_batches_unmapped_headers_and_keeps_partial_evidence(
+        auth, db, settings, identity, monkeypatch):
+    monkeypatch.setenv("VERIFY_GMAIL_BATCH_SIZE", "3")
+    src, tgt = auth.source_gmail(SRC_USER), auth.target_gmail(TGT_USER)
+    matched = b"Message-ID: <matched@test>\r\nFrom: user@test\r\n\r\nbody"
+    sid, tid = src.add_message(matched), tgt.add_message(matched)
+    db.record_mapping(SRC_USER, sid, tid, "message")
+    duplicate = tgt.add_message(matched, ["INBOX"])
+    welcome = tgt.add_message(
+        b"Message-ID: <welcome@test>\r\nFrom: mail-noreply@google.com\r\n\r\nhello")
+    source_welcome = b"Message-ID: <source-welcome@test>\r\nFrom: mail-noreply@google.com\r\n\r\nhello"
+    src.add_message(source_welcome)
+    extra_welcome = tgt.add_message(source_welcome)
+    unreadable = tgt.add_message(b"Message-ID: <blocked@test>\r\n\r\nblocked")
+    extra = tgt.add_message(b"Message-ID: <extra@test>\r\n\r\nextra", ["TRASH"])
+    batches = []
+
+    def batch(callback):
+        requests = []
+        batches.append(requests)
+
+        def add(request, request_id):
+            requests.append((request_id, request))
+
+        def execute():
+            for index, request in reversed(requests):
+                if request.kwargs["id"] == unreadable:
+                    callback(index, None, RuntimeError("metadata unavailable"))
+                else:
+                    response = request.execute()
+                    headers = set(request.kwargs.get("metadataHeaders", ()))
+                    if headers:
+                        response["payload"]["headers"] = [
+                            h for h in response["payload"]["headers"] if h["name"] in headers]
+                    callback(index, response, None)
+
+        return SimpleNamespace(add=add, execute=execute)
+
+    monkeypatch.setattr(tgt, "new_batch_http_request", batch, raising=False)
+    report = V.run(auth, db, settings, [SRC_USER], ("gmail",), progress=lambda _: None)
+    result = report["users"][SRC_USER]["gmail"]
+
+    metadata_batches = [[req.kwargs for _, req in requests if req.kwargs["format"] == "metadata"]
+                        for requests in batches]
+    inventory_batches = [chunk for chunk in metadata_batches if chunk]
+    assert [len(chunk) for chunk in inventory_batches] == [3, 2]
+    assert all(req["metadataHeaders"] == ["Message-ID", "From"] for chunk in inventory_batches for req in chunk)
+    assert {req["id"] for chunk in inventory_batches for req in chunk} == {
+        duplicate, welcome, extra_welcome, unreadable, extra}
+    assert {item["target"] for item in result["duplicates"]} == {duplicate}
+    assert {item["target"] for item in result["extras"]} == {extra_welcome, extra}
+    assert any(unreadable in err and "metadata unavailable" in err for err in result["errors"])
+    assert report["coverage"]["completion"] == "INCOMPLETE"
 
 
 @pytest.mark.parametrize('value,expected', [('1000',50), ('0',1), ('-4',1), ('bad',10)])
