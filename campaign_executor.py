@@ -175,15 +175,15 @@ class Runner:
     def _request(self, call, st):
         path = st["path"].replace("{pid}", str(self._pid())) if "{pid}" in st["path"] else st["path"]
         body = {**st.get("body", {}), "reason": f"campaign {self.ctx.name} {self.ctx.sid}"}
-        want = st.get("expect_status")
-        try:
-            call(st.get("method", "POST"), path, body)
-        except Exception as exc:      # noqa: BLE001 - a refusal the scenario expects is the pass
-            if want and getattr(exc, "code", None) == want:
+        want = st.get("expect_refusal")
+        reply = call(st.get("method", "POST"), path, body)
+        if isinstance(reply, dict) and reply.get("ok") is False:
+            detail = " ".join(str(reply.get("detail") or "action refused").split())
+            if want == detail:
                 return
-            raise
+            raise StepFailed(f"{path}: {detail[:150]}")
         if want:
-            raise StepFailed(f"{path} answered, but the scenario expects a {want}")
+            raise StepFailed(f"{path} accepted a request the scenario expected it to refuse")
         if path.endswith("/migrate/start"):
             self.ctx.last["start"], self.ctx.pid = st, None
 
@@ -228,6 +228,11 @@ class Runner:
         self.ctx.pid = None
         if "code" in st and got[0] != st["code"]:
             raise StepFailed(f"job {pid} exited {got[0]}, the scenario expects {st['code']}")
+        if st.get("stopped"):
+            if got[0] == 0:
+                raise StepFailed(f"job {pid} finished normally before Stop took effect")
+            if not self.d.stop_was_audited(pid):
+                raise StepFailed(f"job {pid} exited {got[0]} without its own audited Stop")
 
     def do_wait_resume(self, st):
         """A job is running again by itself (the API's pickup, the autopilot), else the operator's Start / seed again."""

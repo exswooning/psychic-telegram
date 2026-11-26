@@ -586,6 +586,13 @@ rebuilt layouts (its slides render identical).
 
 ## 11. State (newest first)
 
+- 26 Nov 2026 (Codex): The account 5 archive shows F-kill-random stopped five migration processes, each with exit
+  `-9`. It recorded HTTP 409 before the final migration started and kept no reason from the preflight response.
+  The runner now retains the reason for a migration-start preflight refusal, stops on an unsuccessful action
+  response, and checks that each interrupted migration in F-stop and F-kill-random has its own Stop audit.
+  F-double now expects the API's specific already-running refusal. Live recovery and duplicate counts still need
+  a fresh sandbox run.
+
 - 25 Nov 2026 (Codex): **F-lost now checks each fault before scoring recovery.** The account 5 archive for
   24 Nov at 11:09:54 UTC logged only two of the eight intended lost replies (Drive copy and Tasks create).
   The runner started the migration before arming faults and could advance after reading the same generic

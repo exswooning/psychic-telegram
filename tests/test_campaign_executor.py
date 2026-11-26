@@ -5,6 +5,7 @@ destructive one without its --allow word, a source that is not a declared sandbo
 the campaign is not set up for.
 """
 import subprocess
+from io import BytesIO
 from types import SimpleNamespace
 
 import pytest
@@ -15,11 +16,6 @@ import campaign_executor as X
 import campaign_failures as CF
 import campaign_scenarios as S
 import domain_guard
-
-
-class HttpError(Exception):
-    def __init__(self, code):
-        self.code = code
 
 
 class AllIncidents(dict):
@@ -49,7 +45,7 @@ class RecDriver(C.Driver):
         self.calls.append(("api", method, path, body))
         if path.endswith("/migrate/start"):
             if self.running and self.refuse:
-                raise HttpError(409)
+                return {"ok": False, "detail": "Not started: a migrate is already running for this account"}
             self.running = True
         return {}
 
@@ -61,6 +57,7 @@ class RecDriver(C.Driver):
     def job_pid(self, job=None, exclude=(), timeout=120, active_only=False): return 4242
     def log_text(self, job): return "PASS 1/9 pid=4242: drive,gmail\nFAILPOINT x@2: reply lost\nheartbeat\nNo space left on device"
     def exit_of(self, pid): self.running = False; return self.exit_code
+    def stop_was_audited(self, pid): return True
     def incidents(self): return AllIncidents()
     def change(self, kind, user): self.calls.append(("change", kind, user)); return "did"
     def directory(self, action, side, user): self.calls.append(("directory", action, side, user)); return "did"
@@ -103,9 +100,51 @@ def test_an_api_step_carries_the_reason_the_twin_and_the_running_jobs_pid():
 
 
 def test_a_request_the_scenario_expects_refused_passes_and_one_accepted_fails():
-    run_steps([CF.start(), {**CF.start(), "expect_status": 409}])           # the second is the 409
-    with pytest.raises(X.StepFailed, match="expects a 409"):
-        run_steps([{**CF.start(), "expect_status": 409}])                    # nothing running: it was accepted
+    duplicate = {**CF.start(), "expect_refusal": "Not started: a migrate is already running for this account"}
+    run_steps([CF.start(), duplicate])
+    with pytest.raises(X.StepFailed, match="expected it to refuse"):
+        run_steps([duplicate])  # Nothing is running, so this start is accepted.
+
+
+def test_an_application_refusal_stops_the_scenario_before_following_a_pid():
+    d = RecDriver()
+    d.api = lambda *args: {"ok": False, "detail": "migration slot is busy"}
+    d.job_pid = lambda **kw: pytest.fail("a refused start must not select a PID")
+    with pytest.raises(X.StepFailed, match="migration slot is busy"):
+        run_steps([CF.start(), {"do": "wait_exit"}], d)
+
+
+def test_double_start_requires_the_admission_refusal_the_api_actually_returns():
+    class AdmissionDriver(RecDriver):
+        def api(self, method, path, body):
+            if path.endswith("/migrate/start") and self.running:
+                return {"ok": False, "detail": self.detail}
+            return super().api(method, path, body)
+
+    scenario = S.by_id()["fail:F-double"]
+    d = AdmissionDriver()
+    d.detail = "Not started: a migrate is already running for this account"
+    assert C.run_scenario(scenario, d, "n", set())["status"] == "PASS"
+    d = AdmissionDriver()
+    d.detail = "the target is not ready"
+    row = C.run_scenario(scenario, d, "n", set())
+    assert row["status"] == "FAIL" and "target is not ready" in row["reason"]
+
+
+def test_migration_start_conflict_keeps_the_preflight_reason_and_status(monkeypatch):
+    from urllib import error, request
+
+    live = C.LiveDriver.__new__(C.LiveDriver)
+    live.account_id, live.token = 5, "test"
+
+    def refused(req, **kwargs):
+        raise error.HTTPError(req.full_url, 409, "Conflict", {}, BytesIO(
+            b'{"detail":"Not started: the target readiness check failed."}'))
+
+    monkeypatch.setattr(request, "urlopen", refused)
+    with pytest.raises(error.HTTPError, match="target readiness check failed") as exc:
+        live._call("http://localhost:8090", "POST", "/api/v2/migrate/start", {})
+    assert exc.value.code == 409
 
 
 def test_a_webui_step_goes_to_the_web_ui():
@@ -209,6 +248,38 @@ def test_a_failure_scenario_is_judged_on_every_twin_and_the_worst_verdict_stands
             return {**self._facts, "duplicates": 1 if user.startswith("t03") else 0}
     row = C.run_scenario(S.by_id()["fail:F-stop"], TwoTwins(), "n", set())
     assert row["status"] == "FAIL" and "landed twice" in row["reason"]
+
+
+@pytest.mark.parametrize("fid", ["F-stop", "F-kill-random"])
+def test_each_interrupted_run_needs_its_own_audited_stop(fid):
+    d = RecDriver(exit_code=130)
+    pids = iter(range(4242, 4247))
+    d.job_pid = lambda **kw: next(pids)
+    d.stop_was_audited = lambda pid: pid == 4242
+    row = C.run_scenario(S.by_id()[f"fail:{fid}"], d, "n", set())
+    assert row["status"] == "FAIL" and "job 4243" in row["reason"] and "audited Stop" in row["reason"]
+
+
+def test_a_natural_exit_does_not_count_as_an_audited_stop():
+    with pytest.raises(X.StepFailed, match="finished normally"):
+        run_steps([{"do": "wait_exit", "stopped": True}], RecDriver(exit_code=0))
+
+
+def test_live_stop_evidence_uses_the_current_finished_migrations_pid_and_start(monkeypatch):
+    import run_watch
+
+    live = C.LiveDriver.__new__(C.LiveDriver)
+    live.account_id, live.started = 5, "2026-11-24T11:00:00Z"
+    before = {"pid": 1, "jobName": "migrate", "running": False, "startedAt": "2026-11-24T10:59:59Z"}
+    current = {**before, "pid": 2, "startedAt": "2026-11-24T11:01:00Z"}
+    calls = []
+    monkeypatch.setattr(run_watch, "list_runs", lambda account, limit: [
+        {**current, "pid": 3, "jobName": "verify"}, current, before])
+    monkeypatch.setattr(run_watch, "stopped_by", lambda pid, since: calls.append((pid, since)) or "test")
+    assert not live.stop_was_audited(1)
+    assert not live.stop_was_audited(3)
+    assert live.stop_was_audited(2)
+    assert calls == [(2, current["startedAt"])]
 
 
 def test_a_step_that_raises_is_a_failed_scenario_and_an_unmakeable_one_is_unverified():

@@ -80,6 +80,7 @@ def _dropin(env: str) -> list:
 
 UNDROPIN = [shell(f"rm -f {DROPIN} && systemctl daemon-reload && systemctl restart bitport-api")]
 STOP = lambda force: api("/api/v2/jobs/{pid}/stop", {"force": force})      # noqa: E731
+WAIT_STOPPED = {"do": "wait_exit", "stopped": True}
 
 # id -> (title, twins, steps, expect, how it passes (the plan's column))
 ROWS = {
@@ -94,14 +95,14 @@ ROWS = {
         "the twin then matches the control with no item copied twice"),
     "F-kill-random": ("SIGKILL at 5 random moments", 1, [
         {"do": "repeat", "times": 5, "steps": [start(), {"do": "wait_log", "match": "PASS|heartbeat", "after_random_sec": [20, 240]},
-                                                STOP(True), {"do": "wait_exit"}]},
+                                                STOP(True), WAIT_STOPPED]},
         start(), IDLE, *FINISH], {**BASE, "stopped_not_crashed": True},
         "each kill is recorded STOPPED by the operator (the Stop is audited with the pid), never crashed; the next run finishes"),
     "F-stop": ("Stop, then Start (one press, and two)", 2, [
-        {"do": "twin", "n": 1}, start(), {"do": "wait_pass", "pass": "drive"}, STOP(False), {"do": "wait_exit"},
+        {"do": "twin", "n": 1}, start(), {"do": "wait_pass", "pass": "drive"}, STOP(False), WAIT_STOPPED,
         start(), IDLE, *FINISH,
         {"do": "twin", "n": 2}, start(), {"do": "wait_pass", "pass": "drive"}, STOP(False), STOP(False),
-        {"do": "wait_exit"}, start(), IDLE, *FINISH], {**BASE, "stopped_not_crashed": True},
+        WAIT_STOPPED, start(), IDLE, *FINISH], {**BASE, "stopped_not_crashed": True},
         "both stops recorded STOPPED, not crashed (a press and a second press are the Jobs page's own); both resume to the control's counts"),
     "F-api": ("The API restarts in the Drive pass, the mail pass and a follow-on", 1, [
         start(), {"do": "wait_pass", "pass": "drive"}, RESTART_API, {"do": "wait_resume", "by": "start"},
@@ -191,8 +192,9 @@ ROWS = {
         "each change is named by its known_issues kind; repair restores what it can; the count_parity, extra_grants, "
         "acl_fidelity and timestamps benchmarks read FAIL or UNVERIFIED before the repair (the bench:*:fail scenarios read them)"),
     "F-double": ("Start pressed twice", 1, [
-        start(), {**start(), "expect_status": 409}, IDLE, *FINISH], BASE,
-        "the second request is refused (409, 'already running'); one migrate in the run history, nothing started twice"),
+        start(), {**start(), "expect_refusal": "Not started: a migrate is already running for this account"},
+        IDLE, *FINISH], BASE,
+        "the second request is refused as already running; one migrate in the run history, nothing started twice"),
     "F-deploy": ("A deploy during a run", 1, [
         start(), shell("./sync_vps.sh root@100.79.158.38 /opt/bitport ~/.ssh/bitport_lenovo", expect_exit_nonzero=True,
                        note="run from the operator's side with a harmless change staged; a campaign on the box asks the operator to "

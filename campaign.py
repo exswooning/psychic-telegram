@@ -95,6 +95,7 @@ class Driver:
     def job_pid(self, job=None, exclude=(), timeout: int = 120, active_only: bool = False): raise Unautomated("no job table")
     def log_text(self, job: str) -> str: raise Unautomated("no job log")
     def exit_of(self, pid: int): raise Unautomated("no run history")
+    def stop_was_audited(self, pid: int) -> bool: raise Unautomated("no Stop audit")
     def incidents(self) -> dict: raise Unautomated("no incident table")
     def directory(self, action: str, side: str, user: str) -> str: raise Unautomated("no Directory API")
     def source(self, action: str, user: str) -> str: raise Unautomated("no source writer")
@@ -288,6 +289,7 @@ class LiveDriver(Driver):
         return None          # the cohort is seeded once (P3.1); a fixture names the cohort user holding it
 
     def _call(self, base: str, method: str, path: str, body: dict | None) -> dict:
+        from urllib.error import HTTPError
         import urllib.request
         req = urllib.request.Request(base + path, method=method, headers={
             "Content-Type": "application/json", "Cookie": f"bp_session={self.token}"},
@@ -296,8 +298,21 @@ class LiveDriver(Driver):
             data=json.dumps({"account_id": self.account_id, **(body or {})}).encode() if body is not None else None)
         # 300 s: a start runs readiness and scope probes before it answers; at 60 s the driver read a run it had
         # just started as failed and the next scenario launched another beside it (fp2-live, 24 Nov 2026).
-        with urllib.request.urlopen(req, timeout=300) as resp:
-            return json.loads(resp.read() or b"{}")
+        try:
+            with urllib.request.urlopen(req, timeout=300) as resp:
+                return json.loads(resp.read() or b"{}")
+        except HTTPError as exc:
+            if exc.code != 409 or path != "/api/v2/migrate/start":
+                raise
+            with exc:
+                try:
+                    rejected = json.loads(exc.read(2048))
+                except ValueError:
+                    rejected = None
+            detail = rejected.get("detail") if isinstance(rejected, dict) else None
+            if isinstance(detail, str) and detail.startswith("Not started:"):
+                raise HTTPError(exc.url, exc.code, " ".join(detail.split())[:160], exc.headers, None) from exc
+            raise
 
     def api(self, method: str, path: str, body: dict | None) -> dict:
         return self._call(self.api_base, method, path, body)
@@ -375,6 +390,13 @@ class LiveDriver(Driver):
     def exit_of(self, pid: int):
         import run_watch
         return next((r["rc"] for r in run_watch.list_runs(self.account_id, limit=50) if r["pid"] == pid and not r["running"]), None)
+
+    def stop_was_audited(self, pid: int) -> bool:
+        import run_watch
+        run = next((r for r in run_watch.list_runs(self.account_id, limit=50)
+                    if r["pid"] == pid and r["jobName"] == "migrate" and not r["running"]
+                    and (r["startedAt"] or "") >= self.started), None)
+        return run is not None and bool(run_watch.stopped_by(pid, run["startedAt"]))
 
     def incidents(self) -> dict:
         """{incident kind: {"opens", "closes"}} for the incidents opened since this scenario's twin was taken."""
