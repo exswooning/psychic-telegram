@@ -295,6 +295,47 @@ class LiveDriver(Driver):
                 detail = (reply.get("error") or reply.get("msg")) if isinstance(reply, dict) else None
                 raise Unautomated(f"{job} was not accepted for {user}: {str(detail or 'no success reply')[:150]}")
             self._wait_reset_result(job, user, request_id, queued=reply.get("queued") is True)
+            if job == "reset target":
+                self._require_fresh_target_gmail(user, target)
+
+    def _require_fresh_target_gmail(self, user: str, target_domain: str) -> None:
+        """A clean exit alone does not establish an empty mailbox. Keep the ledger unless it is verified."""
+        import sqlite3
+        from contextlib import closing
+
+        import campaign_evidence
+        from auth import AuthManager
+        from config import Settings
+
+        try:
+            settings = Settings(account_id=self.account_id)
+            local, _, domain = user.partition("@")
+            if (not local or not domain or domain.lower() != self.domain.lower()
+                    or domain.lower() != settings.source_domain.lower()
+                    or not target_domain or target_domain.lower() != settings.target_domain.lower()
+                    or target_domain.lower() == domain.lower()):
+                raise Unautomated("could not confirm the campaign's source and target domains for Gmail freshness")
+            ledger = Path(settings.db_path).resolve().as_uri()
+            with closing(sqlite3.connect(f"{ledger}?mode=ro", uri=True)) as conn:
+                identities = conn.execute(
+                    "SELECT source_email, target_email FROM identity_map "
+                    "WHERE source_email = ? COLLATE NOCASE AND entity_type = 'user' LIMIT 2", (user,),
+                ).fetchall()
+            if len(identities) != 1:
+                raise Unautomated("could not confirm a unique scoped target user for Gmail freshness")
+            source_user, target_user = identities[0]
+            target_local, _, target_host = target_user.partition("@")
+            if not target_local or target_host.lower() != target_domain.lower():
+                raise Unautomated("the mapped user is outside the configured Gmail target")
+            problem = campaign_evidence.target_gmail_freshness_problem(AuthManager(settings), source_user, target_user)
+        except Unautomated:
+            raise
+        except Exception as exc:  # noqa: BLE001 - API/credential failures must never clear the ledger
+            status = getattr(getattr(exc, "resp", None), "status", None)
+            kind = f"HTTP {status}" if type(status) is int else type(exc).__name__
+            raise Unautomated(f"could not complete the scoped target Gmail freshness check ({kind})") from None
+        if problem:
+            raise Unautomated(problem)
 
     def _wait_reset_result(self, job: str, user: str, request_id: str,
                            timeout: int = 3600, *, queued: bool = False) -> None:

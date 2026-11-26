@@ -586,6 +586,13 @@ rebuilt layouts (its slides render identical).
 
 ## 11. State (newest first)
 
+- 26 Nov 2026 (Codex): The VM's individual Gmail lost-reply test recorded the live injection and
+  reuse of the delivered copy. The final check matched 337 Gmail items and the other five services,
+  but found 40 duplicate target copies. All 40 IDs were in original sandbox records before the
+  test. A successful target reset can leave older mail. Before clearing the ledger, each twin now
+  needs a complete Gmail inventory including Spam, Trash and drafts. Unexplained leftovers or a
+  failed read stop the campaign and preserve the ledger.
+
 - 26 Nov 2026 (Codex): An individual Gmail lost-reply case can no longer pass based on an empty
   armed-fault file. The runner requires the acknowledged Gmail migration PID, the selected account
   and twin, a successful exit for that exact run, and the fault marker in that process's own archive.

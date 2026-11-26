@@ -572,7 +572,33 @@ def test_run_7s_two_unnamed_failures_have_names():
 
 
 @pytest.fixture
-def fresh_driver(tmp_path, monkeypatch):
+def fresh_mail(tmp_path, monkeypatch):
+    import sqlite3
+    from contextlib import closing
+    from types import SimpleNamespace
+
+    import auth
+    import config
+    from tests.fakes import FakeAuth
+
+    settings = SimpleNamespace(account_id=5, source_domain="a.test", target_domain="b.test",
+                               db_path=str(tmp_path / "account.db"))
+    with closing(sqlite3.connect(settings.db_path)) as conn, conn:
+        conn.execute("CREATE TABLE identity_map (source_email TEXT, target_email TEXT, entity_type TEXT)")
+        conn.execute("INSERT INTO identity_map VALUES (?, ?, 'user')", ("t02@a.test", "mapped-twin@b.test"))
+
+    def account_settings(account_id):
+        assert account_id == settings.account_id
+        return settings
+
+    mail = FakeAuth(settings)
+    monkeypatch.setattr(config, "Settings", account_settings)
+    monkeypatch.setattr(auth, "AuthManager", lambda st: mail)
+    return mail
+
+
+@pytest.fixture
+def fresh_driver(tmp_path, monkeypatch, fresh_mail):
     import accounts_auth
 
     monkeypatch.setattr(C, "HERE", str(tmp_path))
@@ -646,6 +672,114 @@ def test_failed_reset_exit_prevents_spending_the_twin(fresh_driver, monkeypatch,
     with pytest.raises(C.Unautomated, match=f"{failure_job} exited 3"):
         d.take_twin()
     assert len(calls) == (1 if failure_job == "reset target" else 2)
+
+
+@pytest.fixture
+def successful_resets(fresh_driver, monkeypatch):
+    import webui
+
+    calls = []
+    fresh_driver.webui = lambda m, p, b: calls.append((p, b["reset_request_id"])) or {"ok": True}
+    monkeypatch.setattr(webui, "load_job_result", lambda account, job: {
+        "name": job, "rc": 0, "finished": 1, "reset_request_id": calls[-1][1],
+    })
+    return calls
+
+
+@pytest.mark.parametrize("label", ["TRASH", "SPAM", "INBOX"])
+def test_residual_target_mail_blocks_ledger_reset_after_successful_target_exit(fresh_driver, fresh_mail, successful_resets, label):
+    target = fresh_mail.target_gmail("mapped-twin@b.test")
+    target.add_message(b"Message-ID: <residual@external.test>\r\nFrom: outside@external.test\r\n\r\nprivate\r\n", [label])
+
+    with pytest.raises(C.Unautomated, match="target Gmail.*unexplained"):
+        fresh_driver.take_twin()
+    assert [path for path, _ in successful_resets] == ["/api/reset_target"]
+    assert target.calls_to("messages.list")[0]["includeSpamTrash"] is True
+    assert [method for method, _ in target.calls] == ["drafts.list", "messages.list", "messages.get"]
+
+
+WELCOME = (b"Message-ID: <welcome@mail.gmail.com>\r\n"
+           b"From: Gmail Team <mail-noreply@google.com>\r\n\r\nPrivate welcome message\r\n")
+
+
+@pytest.mark.parametrize("source_has_welcome", [False, True])
+def test_fresh_twin_accepts_only_trashed_welcome_absent_from_the_scoped_source(
+        fresh_driver, fresh_mail, successful_resets, source_has_welcome):
+    target = fresh_mail.target_gmail("mapped-twin@b.test")
+    source = fresh_mail.source_gmail("t02@a.test")
+    target_id = target.add_message(WELCOME, ["TRASH"])
+    if source_has_welcome:
+        source.add_message(WELCOME, ["TRASH"])
+        with pytest.raises(C.Unautomated, match="absence from source Gmail was not established"):
+            fresh_driver.take_twin()
+        assert len(successful_resets) == 1
+    else:
+        assert fresh_driver.take_twin() == "t02@a.test"
+        assert len(successful_resets) == 2
+    assert target.calls_to("messages.get")[0]["id"] == target_id
+    assert source.calls_to("messages.list") == [{
+        "userId": "me", "q": "rfc822msgid:<welcome@mail.gmail.com>", "includeSpamTrash": True,
+        "maxResults": 1, "fields": "nextPageToken,messages(id)",
+    }]
+
+
+@pytest.mark.parametrize("residue", ["live welcome", "draft", "source read denied", "target read denied"])
+def test_fresh_twin_refuses_unproven_mail_and_reports_read_failure_without_contents(
+        fresh_driver, fresh_mail, successful_resets, residue):
+    target = fresh_mail.target_gmail("mapped-twin@b.test")
+    if residue == "live welcome":
+        target.add_message(WELCOME, ["INBOX"])
+        reason = "unexplained message"
+    elif residue == "draft":
+        did = target.add_draft(WELCOME)
+        target.drafts[did]["message"]["labelIds"].append("TRASH")
+        reason = "contains a draft"
+    else:
+        problem = target
+        if residue == "source read denied":
+            target.add_message(WELCOME, ["TRASH"])
+            problem = fresh_mail.source_gmail("t02@a.test")
+        problem.fail_next("messages.list", status=403, reason="sensitive details")
+        reason = r"could not complete.*\(HTTP 403\)"
+    with pytest.raises(C.Unautomated, match=reason) as exc:
+        fresh_driver.take_twin()
+    assert "sensitive details" not in str(exc.value) and len(successful_resets) == 1
+    assert target.calls_to("drafts.list")[0]["includeSpamTrash"] is True
+
+
+def test_freshness_reaches_residue_on_a_later_gmail_page(fresh_driver, fresh_mail, successful_resets, monkeypatch):
+    from tests.fakes import _GmailMessages
+
+    target = fresh_mail.target_gmail("mapped-twin@b.test")
+    target.add_message(WELCOME, ["TRASH"])
+    target.add_message(b"Message-ID: <next-page@example.test>\r\n\r\nextra\r\n", ["TRASH"])
+    real_list = _GmailMessages._list
+    monkeypatch.setattr(_GmailMessages, "_list", lambda self, **kw: real_list(self, **dict(kw, maxResults=1)))
+    with pytest.raises(C.Unautomated, match="unexplained message"):
+        fresh_driver.take_twin()
+    assert [call["pageToken"] for call in target.calls_to("messages.list")] == [None, "1"]
+    assert len(successful_resets) == 1
+
+
+@pytest.mark.parametrize("reply", [{}, {"error": "private details"}, {"nextPageToken": "1"}])
+def test_freshness_does_not_accept_malformed_or_endless_pages(fresh_driver, fresh_mail, successful_resets, monkeypatch, reply):
+    from tests.fakes import _GmailMessages
+
+    def page(self, pageToken=None, **kw):
+        if "nextPageToken" in reply:
+            return {"nextPageToken": str(int(pageToken or 0) + 1)}
+        return reply
+
+    monkeypatch.setattr(_GmailMessages, "_list", page)
+    target = fresh_mail.target_gmail("mapped-twin@b.test")
+    if not reply:
+        assert fresh_driver.take_twin() == "t02@a.test"
+        assert len(successful_resets) == 2
+    else:
+        with pytest.raises(C.Unautomated, match="could not complete.*ValueError"):
+            fresh_driver.take_twin()
+        assert len(successful_resets) == 1
+    assert target.call_count("messages.list") == (16 if "nextPageToken" in reply else 1)
 
 
 def test_idle_or_incomplete_run_is_not_terminal_reset_evidence(fresh_driver, monkeypatch):

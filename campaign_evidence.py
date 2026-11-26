@@ -1,7 +1,87 @@
-"""Source-side proof that a seeded case exists (fableplan2 P2.6): what the fixture user holds on a., read
-through the same clients the engine uses. A scenario passes on this only with the user reading IDENTICAL on b.
-Each probe returns True (the case is there), False (it is not: the fixture was never made) -- never a guess."""
+"""Read-only evidence for FablePlan2 fixture and target freshness checks."""
 from __future__ import annotations
+
+import re
+from email.utils import getaddresses
+
+
+# Workspace provisions two welcome notices. Bound metadata and source lookups
+# even if a reset left many messages with its sender from earlier campaigns.
+_MAX_WELCOME_NOTICES = 8
+_MAX_FRESHNESS_PAGES = 16
+
+
+def _gmail_page(page, collection):
+    if not isinstance(page, dict) or page.keys() - {collection, "nextPageToken"}:
+        raise ValueError("unexpected Gmail list response")
+    items, token = page.get(collection, []), page.get("nextPageToken")
+    if not isinstance(items, list) or (token is not None and not isinstance(token, str)):
+        raise ValueError("unexpected Gmail page")
+    ids = []
+    for item in items:
+        if not isinstance(item, dict) or not isinstance(item.get("id"), str) or not item["id"]:
+            raise ValueError("Gmail page item is missing its ID")
+        ids.append(item["id"])
+    return ids, token
+
+
+def _gmail_ids(items, collection, page_size):
+    token, seen_tokens, seen_ids = None, set(), set()
+    for _ in range(_MAX_FRESHNESS_PAGES):
+        page = items.list(userId="me", includeSpamTrash=True, maxResults=page_size, pageToken=token,
+                          fields=f"nextPageToken,{collection}(id)").execute()
+        ids, token = _gmail_page(page, collection)
+        for item_id in ids:
+            if item_id in seen_ids:
+                raise ValueError("Gmail inventory repeated an item")
+            seen_ids.add(item_id)
+            yield item_id
+        if not token:
+            return
+        if token in seen_tokens:
+            raise ValueError("Gmail inventory repeated a page token")
+        seen_tokens.add(token)
+    raise ValueError("Gmail freshness inventory exceeded its page budget")
+
+
+def _trashed_welcome_id(messages, target_id):
+    from verify_sample import _google_welcome
+
+    item = messages.get(userId="me", id=target_id, format="metadata", metadataHeaders=["From", "Message-ID"],
+                        fields="id,labelIds,payload(headers)").execute()
+    labels = item.get("labelIds", [])
+    if item.get("id") != target_id or not isinstance(labels, list) or "TRASH" not in labels or "DRAFT" in labels:
+        return None
+    headers = item.get("payload", {}).get("headers", [])
+    sender = [h["value"] for h in headers if h["name"].lower() == "from"]
+    message_ids = [h["value"].strip() for h in headers if h["name"].lower() == "message-id"]
+    if len(sender) != 1 or len(getaddresses(sender)) != 1 or not _google_welcome(sender[0]):
+        return None
+    # Only an intact, bounded Message-ID can go into the exact-ID search.
+    if len(message_ids) == 1 and re.fullmatch(r"<[A-Za-z0-9._+%=-]{1,190}@[A-Za-z0-9.-]{1,63}>", message_ids[0]):
+        return message_ids[0]
+    return None
+
+
+def target_gmail_freshness_problem(auth, source_user: str, target_user: str) -> str | None:
+    """Check the target inventory and drafts. Only target-only, trashed welcome mail can remain."""
+    target = auth.target_gmail(target_user).users()
+    if next(_gmail_ids(target.drafts(), "drafts", 1), None) is not None:
+        return "target Gmail still contains a draft"
+    messages = target.messages()
+    for count, target_id in enumerate(_gmail_ids(messages, "messages", 500), 1):
+        if count > _MAX_WELCOME_NOTICES:
+            return "target Gmail exceeds the bounded welcome-mail check"
+        message_id = _trashed_welcome_id(messages, target_id)
+        if message_id is None:
+            return "target Gmail still contains an unexplained message"
+        source_page = auth.source_gmail(source_user).users().messages().list(
+            userId="me", q=f"rfc822msgid:{message_id}", includeSpamTrash=True, maxResults=1,
+            fields="nextPageToken,messages(id)").execute()
+        source_ids, next_page = _gmail_page(source_page, "messages")
+        if source_ids or next_page:
+            return "target Gmail contains a message whose absence from source Gmail was not established"
+    return None
 
 
 def _owned(auth, user, q, fields="id,name,mimeType"):
