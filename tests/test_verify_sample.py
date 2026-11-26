@@ -387,8 +387,7 @@ class TestEveryKindOfDamageIsFound:
         assert r["users"][SRC_USER]["drive"]["notCopied"][0]["error"] == "storageQuotaExceeded" and r["verdict"] == "DIFFERENCES"
 
     def test_a_source_that_cannot_be_read_makes_it_incomplete_not_a_pass(self, migrated, monkeypatch):
-        src = migrated.auth.source_drive(SRC_USER)
-        real = src.files
+        src = migrated.auth.source_drive(SRC_USER, writable=True)
 
         def broken():
             raise RuntimeError("source unreachable")
