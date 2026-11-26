@@ -243,7 +243,9 @@ def fp_batchable(sc) -> bool:
 
 def fp_steps(sc) -> list:
     fault, name, mode, svc = _fp_parts(sc)
-    if mode == "kill" and not name.startswith("followon."):
+    if fault == "gmail.inserted@1:lost":
+        wait = [{"do": "wait_exit", "gmail_lost_reply": True}, IDLE]
+    elif mode == "kill" and not name.startswith("followon."):
         wait = [{"do": "wait_exit", "code": 137}]
     else:      # a lost reply ends the run clean; a follow-on's kill is the API's own death, so it is started again
         wait = [{"do": "wait_exit"}, IDLE, *([RESTART_API] if mode == "kill" else [])]

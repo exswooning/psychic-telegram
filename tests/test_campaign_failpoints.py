@@ -1,4 +1,7 @@
 """The 26 failpoint scenarios run through the campaign: alone (steps) and batched onto twins (`--batch`), no tenant."""
+import json
+from pathlib import Path
+
 import pytest
 
 import campaign as C
@@ -14,10 +17,17 @@ class FpDriver(RecDriver):
     def __init__(self, unreached=(), extra_deaths=0, blind_user=None, **kw):
         super().__init__(**kw)
         self.file, self.unreached, self.deaths, self.extra, self.blind = [], set(unreached), 0, extra_deaths, blind_user
+        self.fired = set()
 
     def arm(self, spec): self.calls.append(("arm", spec)); self.file = [s for s in spec.split("\n") if s]
     def disarm(self): self.calls.append(("disarm",)); self.file = []
     def armed(self): return list(self.file)
+
+    def api(self, method, path, body):
+        reply = super().api(method, path, body)
+        if path.endswith("/migrate/start") and reply.get("ok") is not False:
+            return {"ok": True, "detail": "started pid 4242: main.py"}
+        return reply
 
     def exit_of(self, pid):
         self.running = False
@@ -26,10 +36,17 @@ class FpDriver(RecDriver):
             if point in self.unreached:
                 continue
             self.file.remove(line)
+            self.fired.add(line)
             if ":lost" not in line and not point.startswith("followon."):
                 self.deaths += 1
                 return 137
         return 0
+
+    def gmail_lost_reply_evidence(self, pid, user, timeout):
+        assert self.exit_of(pid) == 0
+        if "gmail.inserted@1:lost" not in self.fired:
+            raise C.X.StepFailed(f"no gmail.inserted@1 lost-reply marker in Gmail shot PID {pid}")
+        return {"pid": pid, "fault": "gmail.inserted@1:lost"}
 
     def facts(self, user, since=None):
         out = {**self._facts, "exits": {"stopped": 0, "crashed": self.deaths + self.extra}}
@@ -115,12 +132,133 @@ def test_a_failpoint_scenario_runs_alone_on_one_twin_with_its_service_only(sc):
     svc = CF.FP_SERVICE[point(sc).split(".")[0]]
     assert starts[0]["services"] == [svc] and starts[-1]["services"] == ["all"]      # the restart has no fault and every service
     assert d.calls.index(arm) < d.calls.index(("disarm",))
+    if sc.id == "fp:gmail.inserted:lost":
+        assert row["faultEvidence"] == {"pid": 4242, "fault": "gmail.inserted@1:lost"}
 
 
 def test_a_point_that_is_never_reached_fails_the_scenario_instead_of_passing_vacuously():
     sc = S.by_id()["fp:tasks.created:lost"]
     row = C.run_scenario(sc, FpDriver(unreached={"tasks.created"}), "n", set())
     assert row["status"] == "FAIL" and "never reached" in row["reason"]
+
+
+def test_single_gmail_lost_reply_cannot_pass_when_someone_clears_the_arm():
+    class ClearedArm(FpDriver):
+        def exit_of(self, pid):
+            self.file.clear()
+            self.running = False
+            return 0
+
+        def log_text(self, job):
+            return "FAILPOINT gmail.inserted@1: reply lost"  # a previous run's log
+
+    sc = S.by_id()["fp:gmail.inserted:lost"]
+    d = ClearedArm()
+    row = C.run_scenario(sc, d, "n", set())
+    assert row["status"] == "FAIL" and "no gmail.inserted@1 lost-reply marker" in row["reason"], row
+    assert not any(call[0] == "api" and call[2].endswith("/one-to-one/run") for call in d.calls)
+
+
+def test_single_gmail_lost_reply_does_not_follow_an_unacknowledged_pid():
+    class QueuedStart(FpDriver):
+        def api(self, method, path, body):
+            reply = super().api(method, path, body)
+            if path.endswith("/migrate/start"):
+                return {"ok": True, "detail": "queued for capacity"}
+            return reply
+
+        def job_pid(self, **kw):
+            pytest.fail("queued Gmail shot must not select a PID from another run")
+
+    d = QueuedStart()
+    row = C.run_scenario(S.by_id()["fp:gmail.inserted:lost"], d, "n", set())
+    assert row["status"] == "FAIL" and "Start did not acknowledge a PID" in row["reason"], row
+    assert not any(call[0] == "api" and call[2].endswith("/one-to-one/run") for call in d.calls)
+
+
+@pytest.fixture
+def gmail_shot_transcript(tmp_path, monkeypatch):
+    import control_plane_db as cpdb
+    import webui
+
+    driver = C.LiveDriver.__new__(C.LiveDriver)
+    driver.account_id, driver.started = 5, "2026-11-26T15:00:00Z"
+    pid, started = 4242, "2026-11-26T15:00:00.111Z"
+    argv = ["/bin/python", "main.py", "--account-id", "5", "migrate", "--services", "gmail", "--user", "t02@a.test"]
+    monkeypatch.setenv("CONTROL_PLANE_DB", str(tmp_path / "control.db"))
+    cpdb.apply_migrations()
+    with cpdb.rw() as conn:
+        conn.execute("INSERT INTO active_jobs(account_id, job_name, pid, argv, started_at) VALUES(?,?,?,?,?)",
+                     (5, "migrate", pid, json.dumps(argv), started))
+
+    marker = "2026-11-26 15:00:00,900 WARNING [worker        ] failpoints: FAILPOINT gmail.inserted@1: reply lost\n"
+    logs = (tmp_path / "logs" / "jobs" / "5").resolve()
+    archive = logs / "runs" / "migrate.2026-11-26T150000.log"
+    archive.parent.mkdir(parents=True)
+    archive.write_text(marker)
+    latest = logs / "migrate.log"
+    latest.write_text(marker)
+    monkeypatch.setattr(webui, "job_log_path", lambda account, job: str(latest))
+
+    proc_root = tmp_path / "proc"
+    monkeypatch.setattr(C, "PROCFS", proc_root)
+    proc = proc_root / str(pid)
+    fd = proc / "fd" / "1"
+    fd.parent.mkdir(parents=True)
+    fd.symlink_to(archive)
+    (proc / "cmdline").write_bytes(b"\0".join(arg.encode() for arg in argv) + b"\0")
+    (proc / "stat").write_text("4242 (python 3) S " + "0 " * 18 + "987\n")
+
+    opened, original_open = [], Path.open
+
+    def track_transcript(path, *args, **kwargs):
+        handle = original_open(path, *args, **kwargs)
+        if path == fd:
+            opened.append(handle)
+        return handle
+
+    monkeypatch.setattr(Path, "open", track_transcript)
+    return driver, pid, started, archive, opened
+
+
+def _record_gmail_shot_terminal(pid, started, *, rc=0, finished="2026-11-26T15:00:01.000Z"):
+    import control_plane_db as cpdb
+    import run_watch
+
+    run_watch.record_started(5, "migrate", pid, started_at=started)
+    with cpdb.rw() as conn:
+        conn.execute("INSERT INTO run_events(account_id, job_name, event, pid, rc, at) VALUES(?,?,?,?,?,?)",
+                     (5, "migrate", "finished", pid, rc, finished))
+
+
+@pytest.mark.parametrize(("case", "error", "reason"), [
+    ("success", None, None),
+    ("latest-only marker", C.X.StepFailed, "no gmail.inserted@1 lost-reply marker"),
+    ("wrong start", C.Unautomated, "no matching terminal"),
+    ("older exit", C.Unautomated, "no terminal Gmail shot observed"),
+    ("failed exit", C.X.StepFailed, "exited 1, expected 0"),
+    ("wrong user", C.Unautomated, "own scoped transcript"),
+])
+def test_live_gmail_lost_reply_requires_its_admitted_process_archive_and_exit(gmail_shot_transcript, case, error, reason):
+    driver, pid, started, archive, opened = gmail_shot_transcript
+    user = "t03@a.test" if case == "wrong user" else "t02@a.test"
+    if case == "latest-only marker":
+        archive.write_text("the scoped process did not fire the fault\n")
+    _record_gmail_shot_terminal(
+        pid, "2026-11-26T14:59:59.900Z" if case == "wrong start" else started,
+        rc=1 if case == "failed exit" else 0,
+        finished="2026-11-26T15:00:00.100Z" if case == "older exit" else "2026-11-26T15:00:01.000Z",
+    )
+    if error:
+        with pytest.raises(error, match=reason):
+            driver.gmail_lost_reply_evidence(pid, user, 0)
+    else:
+        assert driver.gmail_lost_reply_evidence(pid, user, 0) == {
+            "pid": pid, "startedAt": started, "exitCode": 0,
+            "archive": archive.name, "fault": "gmail.inserted@1:lost",
+        }
+    assert len(opened) == (0 if case == "wrong user" else 1)
+    assert all(handle.closed for handle in opened)
 
 
 def test_the_batches_hold_what_can_share_a_run_and_leave_the_rest_alone():

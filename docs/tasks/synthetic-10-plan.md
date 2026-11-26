@@ -586,6 +586,12 @@ rebuilt layouts (its slides render identical).
 
 ## 11. State (newest first)
 
+- 26 Nov 2026 (Codex): An individual Gmail lost-reply case can no longer pass based on an empty
+  armed-fault file. The runner requires the acknowledged Gmail migration PID, the selected account
+  and twin, a successful exit for that exact run, and the fault marker in that process's own archive.
+  The regression reproduced a false pass when the arm disappeared and only a prior log held the
+  marker. Batch and other fault scenarios still use their existing checks.
+
 - 26 Nov 2026 (Codex): The campaign now waits for the successful terminal result of each named
   twin reset and ledger reset. Each request carries its own identifier through admission and the
   queue, so a refused reset, a stale success, or a failed exit cannot qualify a twin for migration.

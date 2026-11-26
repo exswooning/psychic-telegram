@@ -66,7 +66,9 @@ class Ctx:
         self.name, self.sid, self.allow, self.twins, self.account, self.last_twin = name, sid, allow, twins, account, last_twin
         self.user = twins[0] if twins else ""
         self.pid = None            # the job the steps are following
+        self.launch_pid = None     # the PID explicitly acknowledged by Start, when present
         self.done = set()          # pids already seen to exit
+        self.fault_evidence = None
         self.last = {}             # the last "start" / "seed" request, for wait_resume
         self.unfired = []          # the armed specs a `fired` step found still armed (never reached)
         self.since, self.bench = "", {}      # when the scenario began; {report kind: {benchmark id: [statuses read]}}
@@ -186,6 +188,9 @@ class Runner:
             raise StepFailed(f"{path} accepted a request the scenario expected it to refuse")
         if path.endswith("/migrate/start"):
             self.ctx.last["start"], self.ctx.pid = st, None
+            detail = str(reply.get("detail", "")) if isinstance(reply, dict) and reply.get("ok") is True else ""
+            started = re.match(r"^started pid ([1-9]\d*):", detail)
+            self.ctx.launch_pid = int(started[1]) if started else None
 
     def do_api(self, st): self._request(self.d.api, st)
 
@@ -222,6 +227,14 @@ class Runner:
         self._until(f"the {p} pass", lambda: re.search(rf"PASS \d+/\d+ pid=\d+: [^\n]*\b{p}\b", self.d.log_text("migrate")), st.get("timeout", 4 * 3600))
 
     def do_wait_exit(self, st):
+        if st.get("gmail_lost_reply"):
+            pid = self.ctx.launch_pid
+            if pid is None:
+                raise StepFailed("the Gmail shot Start did not acknowledge a PID")
+            self.ctx.fault_evidence = self.d.gmail_lost_reply_evidence(pid, self.ctx.user, st.get("timeout", 4 * 3600))
+            self.ctx.done.add(pid)
+            self.ctx.pid = None
+            return
         pid = self._pid()
         got = self._until(f"job {pid} to exit", lambda: (lambda rc: None if rc is None else (rc,))(self.d.exit_of(pid)), st.get("timeout", 4 * 3600))
         self.ctx.done.add(pid)

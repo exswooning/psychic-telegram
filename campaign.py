@@ -17,9 +17,11 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import stat
 import sys
 import time
 import uuid
+from pathlib import Path
 
 import campaign_changes
 import campaign_executor as X
@@ -28,6 +30,7 @@ import campaign_scenarios as S
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PASSING = {"PASS", "COVERED"}
+PROCFS = Path("/proc")
 
 
 def results_dir(name: str) -> str:
@@ -96,6 +99,8 @@ class Driver:
     def job_pid(self, job=None, exclude=(), timeout: int = 120, active_only: bool = False): raise Unautomated("no job table")
     def log_text(self, job: str) -> str: raise Unautomated("no job log")
     def exit_of(self, pid: int): raise Unautomated("no run history")
+    def gmail_lost_reply_evidence(self, pid: int, user: str, timeout: float) -> dict:
+        raise Unautomated("no PID-bound Gmail lost-reply evidence")
     def stop_was_audited(self, pid: int) -> bool: raise Unautomated("no Stop audit")
     def incidents(self) -> dict: raise Unautomated("no incident table")
     def directory(self, action: str, side: str, user: str) -> str: raise Unautomated("no Directory API")
@@ -420,6 +425,64 @@ class LiveDriver(Driver):
         import run_watch
         return next((r["rc"] for r in run_watch.list_runs(self.account_id, limit=50) if r["pid"] == pid and not r["running"]), None)
 
+    def gmail_lost_reply_evidence(self, pid: int, user: str, timeout: float) -> dict:
+        """Prove one Gmail shot from its admitted argv, own transcript and terminal run."""
+        import control_plane_db as cpdb
+        import run_watch
+        import webui
+
+        with cpdb.ro() as conn:
+            admitted = conn.execute(
+                "SELECT argv, started_at FROM active_jobs WHERE account_id=? AND job_name='migrate' AND pid=?",
+                (self.account_id, pid),
+            ).fetchone()
+        expected = ["main.py", "--account-id", str(self.account_id), "migrate", "--services", "gmail", "--user", user]
+        since_epoch = run_watch._epoch(self.started)
+        started_epoch = run_watch._epoch(admitted["started_at"]) if admitted else None
+        if started_epoch is None or since_epoch is None or started_epoch < since_epoch:
+            raise Unautomated(f"no fresh migration admission for Gmail shot PID {pid}")
+
+        started = admitted["started_at"]
+        proc = PROCFS / str(pid)
+        fd = proc / "fd" / "1"
+        logs = Path(webui.job_log_path(self.account_id, "migrate")).parent.resolve() / "runs"
+        try:
+            birth = (proc / "stat").read_text().rsplit(")", 1)[1].split()[19]
+            argv = (proc / "cmdline").read_bytes().decode().rstrip("\0").split("\0")
+            archive = fd.readlink()
+            if (json.loads(admitted["argv"])[1:] != expected or argv[1:] != expected
+                    or archive.parent != logs or not archive.match("migrate.*.log")):
+                raise Unautomated(f"could not bind Gmail shot PID {pid} to its own scoped transcript")
+            archive_info = archive.stat()
+            if not stat.S_ISREG(archive_info.st_mode):
+                raise Unautomated(f"Gmail shot PID {pid} did not open a regular transcript")
+            with fd.open(encoding="utf-8", errors="replace") as transcript:
+                birth_after = (proc / "stat").read_text().rsplit(")", 1)[1].split()[19]
+                if birth != birth_after or not os.path.samestat(archive_info, os.fstat(transcript.fileno())):
+                    raise Unautomated(f"could not bind Gmail shot PID {pid} to its own scoped transcript")
+                deadline = time.monotonic() + timeout
+                while True:
+                    runs = run_watch.list_runs(self.account_id, limit=50)
+                    exits = [r for r in runs if r["jobName"] == "migrate" and r["pid"] == pid
+                             and not r["running"] and (run_watch._epoch(r["finishedAt"]) or 0) >= started_epoch]
+                    if exits:
+                        run = exits[0]
+                        if len(exits) != 1 or run["startedAt"] != started or type(run["rc"]) is not int:
+                            raise Unautomated(f"no matching terminal Gmail shot for PID {pid} at {started}")
+                        if run["rc"] != 0:
+                            raise X.StepFailed(f"Gmail shot PID {pid} exited {run['rc']}, expected 0")
+                        marker = "] failpoints: FAILPOINT gmail.inserted@1: reply lost"
+                        if not any(line.rstrip().endswith(marker) for line in transcript):
+                            raise X.StepFailed(f"no gmail.inserted@1 lost-reply marker in Gmail shot PID {pid}")
+                        return {"pid": pid, "startedAt": started, "exitCode": 0,
+                                "archive": archive.name, "fault": "gmail.inserted@1:lost"}
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise Unautomated(f"no terminal Gmail shot observed for PID {pid} at {started}")
+                    self.sleep(min(self.poll, remaining))
+        except (OSError, ValueError, TypeError, IndexError) as exc:
+            raise Unautomated(f"could not read the scoped Gmail shot transcript for PID {pid}") from exc
+
     def stop_was_audited(self, pid: int) -> bool:
         import run_watch
         run = next((r for r in run_watch.list_runs(self.account_id, limit=50)
@@ -668,6 +731,8 @@ def _run_steps(sc, driver, row, name, allow):
     X.snapshot(driver, ctx)         # what the runs graded themselves, for the bench:*:fail scenarios that name this one
     verdicts = [judge(sc.expect, driver.facts(t)) for t in ctx.twins]
     status, why = min(verdicts, key=lambda v: ("FAIL", "UNVERIFIED", "PASS").index(v[0]))
+    if ctx.fault_evidence:
+        row["faultEvidence"] = ctx.fault_evidence
     return {**row, "status": status, "reason": why, "user": ctx.twins[0], "twins": ctx.twins, "benchmarks": ctx.bench,
             "finished_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
 
