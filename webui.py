@@ -861,6 +861,7 @@ class Job:
         # the Jobs page can replay it: a retry is the same request again, so
         # every check the original went through runs again too.
         self.retry: dict | None = None
+        self.reset_request_id: str | None = None
         # Set per run by start(); the on-disk transcript this job's output
         # is written to, and the thing that makes its output survive a
         # restart of this process. See start()'s own comment.
@@ -884,7 +885,7 @@ class Job:
     def start(self, name: str, argv: list[str],
               env: dict | None = None, cwd: str | None = None,
               on_finish: Callable[[int | None], None] | None = None,
-              retry: dict | None = None) -> tuple[bool, str]:
+              retry: dict | None = None, reset_request_id: str | None = None) -> tuple[bool, str]:
         import account_isolation
         why = account_isolation.refusal(self.account_id, env)
         if why:
@@ -894,6 +895,7 @@ class Job:
                 return False, f"{self.name} is still running"
             self.name, self.lines, self.rc = name, [], None
             self.retry = retry
+            self.reset_request_id = reset_request_id
             self.started, self.finished = time.time(), 0.0
             # Only deploy_remote.py's caller passes this today -- it is how
             # deploy history learns the outcome of a job that runs detached
@@ -1163,6 +1165,8 @@ class Job:
                     "lines": self.lines[-2000:],
                     "retry": self.retry,
                 }
+                if self.reset_request_id is not None:
+                    payload["reset_request_id"] = self.reset_request_id
             path = job_result_path(self.account_id, self.name)
             os.makedirs(os.path.dirname(path), exist_ok=True)
             tmp = path + ".tmp"
@@ -1572,25 +1576,29 @@ def _queue_starter(account_id: int | None, label: str,
     return get_job(account_id).start(
         label, list(payload["argv"]), env=env, cwd=payload.get("cwd") or None,
         on_finish=lambda rc: _job_finished(account_id, label),
-        retry=payload.get("retry"))
+        retry=payload.get("retry"), reset_request_id=payload.get("reset_request_id"))
 
 
 def launch_or_queue(account_id: int | None, label: str, argv: list[str],
                     env: dict | None = None, cwd: str | None = None,
                     requested_by: str = "",
-                    retry: dict | None = None) -> tuple[str, str]:
+                    retry: dict | None = None,
+                    reset_request_id: str | None = None) -> tuple[str, str]:
     """Run it now if the box has room, otherwise stand it in line.
 
     Returns (state, message) where state is "started", "queued" or "error".
     Queued is a success: the caller's work was accepted, it just has not
     begun. Reporting it as an error is what the old 503 did.
     """
+    if reset_request_id is not None and (
+            not isinstance(reset_request_id, str) or not re.fullmatch(r"[0-9a-f]{32}", reset_request_id)):
+        return "error", "invalid reset request ID"
     admitted, why = job_admission.try_admit(account_id, label)
     if admitted:
         ok, msg = get_job(account_id).start(
             label, argv, env=env, cwd=cwd,
             on_finish=lambda rc: _job_finished(account_id, label),
-            retry=retry)
+            retry=retry, reset_request_id=reset_request_id)
         if not ok:
             # Job.start() refused (e.g. this account's job is already
             # running) before ever spawning -- _drain(), and so on_finish,
@@ -1602,7 +1610,7 @@ def launch_or_queue(account_id: int | None, label: str, argv: list[str],
         row = job_queue.enqueue(
             account_id, label,
             {"argv": list(argv), "env": _env_overlay(env), "cwd": cwd or "",
-             "retry": retry},
+             "retry": retry, "reset_request_id": reset_request_id},
             requested_by=requested_by, reason=why,
             runner=job_queue.RUNNER_WEBUI)
     except job_queue.QueueFull as exc:
@@ -6325,7 +6333,7 @@ class Handler(BaseHTTPRequestHandler):
         # reset_target.py lives at the repo root, unlike the seeder.
         state, msg = launch_or_queue(
             account_id, "reset target", argv, env=env,
-            requested_by=_account_email(account_id))
+            requested_by=_account_email(account_id), reset_request_id=body.get("reset_request_id"))
         self._json({"ok": state != "error", "queued": state == "queued",
                     "msg": msg, "error": msg if state == "error" else ""})
         return
@@ -6419,7 +6427,7 @@ class Handler(BaseHTTPRequestHandler):
 
         state, msg = launch_or_queue(
             account_id, "reset drive ledger", argv, env=env,
-            requested_by=_account_email(account_id))
+            requested_by=_account_email(account_id), reset_request_id=body.get("reset_request_id"))
         self._json({"ok": state != "error", "queued": state == "queued",
                     "msg": msg, "error": msg if state == "error" else ""})
         return

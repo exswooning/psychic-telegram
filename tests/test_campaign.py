@@ -571,18 +571,97 @@ def test_run_7s_two_unnamed_failures_have_names():
         "drive", "Full source/destination ID coverage is incomplete; findings scheduled for repair") == "run.coverage_incomplete"
 
 
-def test_a_twin_is_reset_before_a_scenario_spends_it(tmp_path, monkeypatch):
-    """fp2-live, 24 Nov 2026: twins run 15 had migrated copied nothing new, so failpoints and arms never ran."""
+@pytest.fixture
+def fresh_driver(tmp_path, monkeypatch):
     import accounts_auth
+
     monkeypatch.setattr(C, "HERE", str(tmp_path))
     monkeypatch.setattr(accounts_auth, "get_tenant_config", lambda aid, side: {"domain": "b.test"})
     d = object.__new__(C.LiveDriver)
-    d.name, d.account_id, d.domain, calls = "n", 5, "a.test", []
-    d.webui = lambda m, p, body: calls.append((p, body["confirm_domain"], body["users"])) or {}
+    d.name, d.account_id, d.domain, d.poll = "n", 5, "a.test", 1
+    d.sleep = lambda t: None
     d.wait_idle = lambda t: True
+    return d
+
+
+@pytest.mark.parametrize("queued", [False, True])
+def test_a_twin_is_reset_before_a_scenario_spends_it(fresh_driver, monkeypatch, queued):
+    """Ignore old exits and wait for each accepted reset's own completion."""
+    import webui
+
+    d, calls = fresh_driver, []
+    reads = []
+    queue_polls = []
+
+    def run_reset(method, path, body):
+        if method == "GET":
+            assert path == "/api/queue?account=5" and body is None
+            queue_polls.append(path)
+            return {}
+        calls.append((path, body["confirm_domain"], body["users"], body["reset_request_id"]))
+        return {"ok": True, "queued": queued}
+
+    def result(account_id, job):
+        assert account_id == d.account_id
+        reads.append(job)
+        request_id = "old-run" if reads.count(job) == 1 else calls[-1][3]
+        return {"name": job, "rc": 0, "finished": 1, "reset_request_id": request_id}
+
+    d.webui = run_reset
+    monkeypatch.setattr(webui, "load_job_result", result)
     assert d.take_twin() == "t02@a.test"
-    assert calls == [("/api/reset_target", "b.test", ["t02@a.test"]),
-                     ("/api/reset_drive_ledger", "a.test", ["t02@a.test"])]
+    assert [call[:3] for call in calls] == [
+        ("/api/reset_target", "b.test", ["t02@a.test"]),
+        ("/api/reset_drive_ledger", "a.test", ["t02@a.test"]),
+    ]
+    assert calls[0][3] != calls[1][3]
+    assert reads == ["reset target", "reset target", "reset drive ledger", "reset drive ledger"]
+    assert len(queue_polls) == (2 if queued else 0)
+
+
+@pytest.mark.parametrize("refusal", [{"ok": False, "error": "protected target"}, {}])
+def test_refused_target_reset_prevents_the_ledger_reset(fresh_driver, monkeypatch, refusal):
+    import webui
+
+    d, calls = fresh_driver, []
+    d.webui = lambda m, p, b: calls.append(p) or refusal
+    monkeypatch.setattr(webui, "load_job_result", lambda *args: pytest.fail("looked for a refused job"))
+    with pytest.raises(C.Unautomated, match="reset target was not accepted"):
+        d.take_twin()
+    assert calls == ["/api/reset_target"]
+
+
+@pytest.mark.parametrize("failure_job", ["reset target", "reset drive ledger"])
+def test_failed_reset_exit_prevents_spending_the_twin(fresh_driver, monkeypatch, failure_job):
+    import webui
+
+    d, calls = fresh_driver, []
+    d.webui = lambda m, p, b: calls.append((p, b["reset_request_id"])) or {"ok": True}
+
+    def result(account_id, job):
+        return {"name": job, "rc": 3 if job == failure_job else 0, "finished": 1,
+                "reset_request_id": calls[-1][1]}
+
+    monkeypatch.setattr(webui, "load_job_result", result)
+    with pytest.raises(C.Unautomated, match=f"{failure_job} exited 3"):
+        d.take_twin()
+    assert len(calls) == (1 if failure_job == "reset target" else 2)
+
+
+def test_idle_or_incomplete_run_is_not_terminal_reset_evidence(fresh_driver, monkeypatch):
+    from types import SimpleNamespace
+
+    import webui
+
+    d = fresh_driver
+    ticks = iter([0, 0, 0, 2])
+    monkeypatch.setattr(C, "time", SimpleNamespace(monotonic=lambda: next(ticks)))
+    monkeypatch.setattr(webui, "load_job_result", lambda *a: {
+        "name": "reset target", "rc": None, "finished": 1, "reset_request_id": "this-run",
+    })
+    d.wait_idle = lambda t: pytest.fail("idle is not a confirmed exit")
+    with pytest.raises(C.Unautomated, match="no successful terminal result"):
+        d._wait_reset_result("reset target", "t02@a.test", "this-run", timeout=1)
 
 
 def test_a_fault_settled_by_bitport_passes_only_when_it_fired():

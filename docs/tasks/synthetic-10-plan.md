@@ -586,6 +586,11 @@ rebuilt layouts (its slides render identical).
 
 ## 11. State (newest first)
 
+- 26 Nov 2026 (Codex): The campaign now waits for the successful terminal result of each named
+  twin reset and ledger reset. Each request carries its own identifier through admission and the
+  queue, so a refused reset, a stale success, or a failed exit cannot qualify a twin for migration.
+  Local tests cover immediate and queued resets as well as the failure paths.
+
 - 26 Nov 2026 (Codex): The account 5 archive shows F-kill-random stopped five migration processes, each with exit
   `-9`. It recorded HTTP 409 before the final migration started and kept no reason from the preflight response.
   The runner now retains the reason for a migration-start preflight refusal, stops on an unsuccessful action

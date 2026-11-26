@@ -19,6 +19,7 @@ import json
 import os
 import sys
 import time
+import uuid
 
 import campaign_changes
 import campaign_executor as X
@@ -279,11 +280,39 @@ class LiveDriver(Driver):
         import accounts_auth
         target = (accounts_auth.get_tenant_config(self.account_id, "target") or {}).get("domain", "")
         services = "drive,gmail,calendar,contacts,tasks"
-        for path, confirm in (("/api/reset_target", target), ("/api/reset_drive_ledger", self.domain)):
-            self.webui("POST", path, {"confirm_domain": confirm, "services": services, "users": [user],
-                                      "reason": f"campaign {self.name}: a fresh twin"})
-            if not self.wait_idle(3600):
-                raise Unautomated(f"the twin reset ({path}) of {user} did not finish")
+        for path, job, confirm in (("/api/reset_target", "reset target", target),
+                                   ("/api/reset_drive_ledger", "reset drive ledger", self.domain)):
+            request_id = uuid.uuid4().hex
+            reply = self.webui("POST", path, {"confirm_domain": confirm, "services": services, "users": [user],
+                                              "reason": f"campaign {self.name}: a fresh twin",
+                                              "reset_request_id": request_id})
+            if not isinstance(reply, dict) or reply.get("ok") is not True:
+                detail = (reply.get("error") or reply.get("msg")) if isinstance(reply, dict) else None
+                raise Unautomated(f"{job} was not accepted for {user}: {str(detail or 'no success reply')[:150]}")
+            self._wait_reset_result(job, user, request_id, queued=reply.get("queued") is True)
+
+    def _wait_reset_result(self, job: str, user: str, request_id: str,
+                           timeout: int = 3600, *, queued: bool = False) -> None:
+        """Wait for this request's own exit, even if it was initially queued."""
+        import webui
+
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            result = webui.load_job_result(self.account_id, job)
+            if result and result.get("name") == job and result.get("reset_request_id") == request_id:
+                rc = result.get("rc")
+                if result.get("finished") and type(rc) is int:
+                    if rc != 0:
+                        raise Unautomated(f"{job} exited {rc} for {user}")
+                    # The result is saved before the launcher releases admission.
+                    if self.wait_idle(max(0, deadline - time.monotonic())):
+                        return
+                    break
+            if queued:
+                # A slot released by the API process may need the webui's normal queue poll.
+                self.webui("GET", f"/api/queue?account={self.account_id}", None)
+            self.sleep(min(self.poll, max(0, deadline - time.monotonic())))
+        raise Unautomated(f"no successful terminal result for {job} of {user}")
 
     def prepare(self, fixtures: tuple) -> None:
         return None          # the cohort is seeded once (P3.1); a fixture names the cohort user holding it
