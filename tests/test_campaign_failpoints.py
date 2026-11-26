@@ -10,6 +10,10 @@ import campaign_scenarios as S
 from tests.test_campaign_executor import RecDriver, kinds
 
 
+GMAIL_PROOF = {"pid": 4242, "startedAt": "2026-11-26T15:00:00.111Z", "exitCode": 0,
+               "archive": "migrate.20261126T150000Z.log", "fault": "gmail.inserted@1:lost"}
+
+
 class FpDriver(RecDriver):
     """A box whose fault file works: a kill spec ends the next run with 137 and is struck, a lost one fires without a death,
     a follow-on's is the API's own (no job dies); `unreached` points never fire."""
@@ -46,7 +50,7 @@ class FpDriver(RecDriver):
         assert self.exit_of(pid) == 0
         if "gmail.inserted@1:lost" not in self.fired:
             raise C.X.StepFailed(f"no gmail.inserted@1 lost-reply marker in Gmail shot PID {pid}")
-        return {"pid": pid, "fault": "gmail.inserted@1:lost"}
+        return {**GMAIL_PROOF, "pid": pid}
 
     def facts(self, user, since=None):
         out = {**self._facts, "exits": {"stopped": 0, "crashed": self.deaths + self.extra}}
@@ -133,7 +137,7 @@ def test_a_failpoint_scenario_runs_alone_on_one_twin_with_its_service_only(sc):
     assert starts[0]["services"] == [svc] and starts[-1]["services"] == ["all"]      # the restart has no fault and every service
     assert d.calls.index(arm) < d.calls.index(("disarm",))
     if sc.id == "fp:gmail.inserted:lost":
-        assert row["faultEvidence"] == {"pid": 4242, "fault": "gmail.inserted@1:lost"}
+        assert row["faultEvidence"] == GMAIL_PROOF
 
 
 def test_a_point_that_is_never_reached_fails_the_scenario_instead_of_passing_vacuously():
@@ -193,7 +197,7 @@ def gmail_shot_transcript(tmp_path, monkeypatch):
 
     marker = "2026-11-26 15:00:00,900 WARNING [worker        ] failpoints: FAILPOINT gmail.inserted@1: reply lost\n"
     logs = (tmp_path / "logs" / "jobs" / "5").resolve()
-    archive = logs / "runs" / "migrate.2026-11-26T150000.log"
+    archive = logs / "runs" / GMAIL_PROOF["archive"]
     archive.parent.mkdir(parents=True)
     archive.write_text(marker)
     latest = logs / "migrate.log"
@@ -263,20 +267,22 @@ def test_live_gmail_lost_reply_requires_its_admitted_process_archive_and_exit(gm
 
 def test_the_batches_hold_what_can_share_a_run_and_leave_the_rest_alone():
     batches, alone = CF.fp_batches(FP, 6)
-    assert [len(b) for b in batches] == [6, 6, 6, 2] and sum(map(len, batches)) == 20
-    assert {s.id for s in alone} == {s.id for s in FP if s.inject.get("unreachable")} | {"fp:followon.repair.start:kill"}
+    assert [len(b) for b in batches] == [6, 6, 6, 1] and sum(map(len, batches)) == 19
+    assert {s.id for s in alone} == {s.id for s in FP if s.inject.get("unreachable")} | {
+        "fp:followon.repair.start:kill", "fp:gmail.inserted:lost",
+    }
     assert all(len(b) <= 2 for b in CF.fp_batches(FP, 2)[0])
 
 
 def test_a_batch_arms_each_fault_for_its_own_twin_runs_once_per_kill_plus_one_and_judges_every_twin():
-    batch = [S.by_id()[i] for i in ("fp:drive.copy.landed:kill", "fp:gmail.inserted:lost", "fp:calendar.imported:kill",
+    batch = [S.by_id()[i] for i in ("fp:drive.copy.landed:lost", "fp:gmail.inserted:kill", "fp:calendar.imported:kill",
                                     "fp:tasks.created:lost", "fp:run.pass_done:kill")]
     d = FpDriver()
     rows = C._run_batch(batch, d, "n", set())
     assert [r["status"] for r in rows] == ["PASS"] * 5 and {tuple(r["batch"]) for r in rows} == {tuple(s.id for s in batch)}
     assert kinds(d).count("twin") == 5 and len({r["user"] for r in rows}) == 5       # one twin each, one take each
     spec = next(c[1] for c in d.calls if c[0] == "arm").split("\n")
-    assert spec == ["drive.copy.landed@1#t02@a.test", "gmail.inserted@1:lost#t03@a.test", "calendar.imported@1#t04@a.test",
+    assert spec == ["drive.copy.landed@1:lost#t02@a.test", "gmail.inserted@1#t03@a.test", "calendar.imported@1#t04@a.test",
                     "tasks.created@1:lost#t05@a.test", "run.pass_done@1"]          # a run.* point has no user to scope to
     starts = [c[3] for c in d.calls if c[0] == "api" and c[2].endswith("/migrate/start")]
     assert len(starts) == 3 + 1 + 1                                                  # 3 kills + 1 more, then the restart
@@ -316,3 +322,54 @@ def test_run_with_batch_batches_the_failpoints_and_runs_everything_else_as_befor
     assert done["fp:drive.copy.landed:kill"]["batch"] == ["fp:drive.copy.landed:kill", "fp:gmail.inserted:kill"]
     assert "batch" not in done["fp:followon.repair.start:kill"] and done["fp:followon.repair.start:kill"]["status"] == "PASS"
     assert done["fp:shareddrive.created:kill"]["status"] == "UNVERIFIED"
+
+
+def test_batched_campaign_cannot_pass_gmail_lost_reply_without_run_bound_proof(tmp_path, monkeypatch):
+    class ClearedGmailArm(FpDriver):
+        def exit_of(self, pid):
+            self.file = [line for line in self.file if not line.startswith("gmail.inserted@1:lost")]
+            return super().exit_of(pid)
+
+    monkeypatch.setattr(C, "HERE", str(tmp_path))
+    gmail = "fp:gmail.inserted:lost"
+    batch_cases = {"fp:drive.copy.landed:kill", "fp:tasks.created:kill"}
+    rows = C.run("n", ClearedGmailArm(), only={gmail, *batch_cases}, batch=4, out=lambda *_: None)
+
+    assert rows[gmail]["status"] == "FAIL" and "lost-reply marker" in rows[gmail]["reason"]
+    assert "batch" not in rows[gmail]
+    assert all(rows[sid]["status"] == "PASS" and set(rows[sid]["batch"]) == batch_cases for sid in batch_cases)
+
+
+def test_legacy_gmail_lost_reply_pass_is_unverified_and_does_not_skip_resume(tmp_path, monkeypatch):
+    monkeypatch.setattr(C, "HERE", str(tmp_path))
+    gmail = "fp:gmail.inserted:lost"
+    prior = {"id": gmail, "status": "PASS", "reason": "old batch found no remaining arm", "batch": [gmail]}
+    C.append_result("n", prior)
+
+    read = C.read_results("n")
+    assert read[gmail]["status"] == "UNVERIFIED" and "run-bound" in read[gmail]["reason"]
+    assert f"{gmail} | UNVERIFIED" in C.render_md("n", [S.by_id()[gmail]], read)
+
+    driver = FpDriver()
+    C.run("n", driver, only={gmail}, batch=4, out=lambda *_: None)
+    assert kinds(driver).count("twin") == 1
+    assert C.read_results("n")[gmail]["status"] == "PASS"
+    path = Path(C.results_dir("n")) / "results.jsonl"
+    assert json.loads(path.read_text().splitlines()[0]) == prior
+    driver.calls.clear()
+    C.run("n", driver, only={gmail}, batch=4, out=lambda *_: None)
+    assert driver.calls == []
+
+
+@pytest.mark.parametrize(("field", "value"), [
+    ("pid", True), ("pid", 0), ("fault", "gmail.inserted@2:lost"), ("exitCode", False), ("exitCode", 1),
+    ("startedAt", "2026-11-26"), ("startedAt", "invalid"),
+    ("archive", "migrate.log"), ("archive", "arbitrary/migrate.20261126T150000Z.log"),
+])
+def test_gmail_lost_reply_pass_requires_credible_persisted_evidence(tmp_path, monkeypatch, field, value):
+    monkeypatch.setattr(C, "HERE", str(tmp_path))
+    gmail = "fp:gmail.inserted:lost"
+    evidence = {**GMAIL_PROOF, field: value}
+    C.append_result("n", {"id": gmail, "status": "PASS", "faultEvidence": evidence})
+
+    assert C.read_results("n")[gmail]["status"] == "UNVERIFIED"

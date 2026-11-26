@@ -586,6 +586,30 @@ rebuilt layouts (its slides render identical).
 
 ## 11. State (newest first)
 
+- 26 Nov 2026 (Codex): P3.6 planning estimate for 300 matched users at 15% mail. The modeled
+  profile adds 269 users to 30 retained fixture users and one matched administrator. It contains
+  221,192 files, 12,991 folders, 1,048.7 GB of Drive data and 115,892 messages, including 4,096
+  link messages. At the historical rates used by the budget, allow about 72.4 hours for seeding,
+  9.9 hours for the file-only Drive pass, 18.1 hours for DMS import, 2.25 hours for DMS checking
+  and 14 hours for item verification. The seed estimate exceeds the current 12-hour budget.
+  The Drive baseline of 38,513 files in 103 minutes and DMS baseline of 141,977 items in about
+  23 hours came from a different workload. The verification estimate scales an older 41-user
+  check, with retries and follow-ons excluded. A fresh comparable run still needs to measure
+  sustained seed, migration, DMS and verification rates. Reconcile non-cohort accounts and
+  check available licences before deciding the actual user count and requesting P5.1 approval.
+- 26 Nov 2026 (Codex): The VM passed migration readiness for both tenants. Directory counted 46
+  source and 42 target users. Drive reported about 18.7 GB used of 1.48 TB on the source and
+  0.66 GB used of 1.35 TB on the target. Source seeding readiness failed because the VM has no
+  separate seed key. These counts show current use. P0.8 still needs confirmed licence capacity
+  and the separate source seeding preflight.
+- 26 Nov 2026 (Codex): Reduced-mail profiles scale thread and linked-mail counts with the number
+  of messages retained per mailbox. At 15% mail, the previous code made nearly every thread
+  contain one message and inflated the linked-mail fraction from about 3.53% to 23.55%.
+  Regression tests preserve the profile's proportions, rounded counts and full-profile behavior.
+- 26 Nov 2026 (Codex): The individual Gmail lost-reply case now keeps its own run even when
+  batching is requested. A prior PASS without credible run evidence is read as UNVERIFIED and
+  can be rerun. The raw result history is preserved.
+
 - 26 Nov 2026 (Codex): The VM's individual Gmail lost-reply test recorded the live injection and
   reuse of the delivered copy. The final check matched 337 Gmail items and the other five services,
   but found 40 duplicate target copies. All 40 IDs were in original sandbox records before the

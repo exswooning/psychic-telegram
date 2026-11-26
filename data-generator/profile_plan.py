@@ -152,13 +152,16 @@ def _split(total: int, shares: dict) -> dict:
 
 
 def scale_messages(plans: list[dict], factor: float) -> list[dict]:
-    """One factor on every mailbox's message count (and what is counted inside it)."""
+    """Shrink each mailbox while preserving its thread and link-mail proportions."""
     if factor >= 1:
         return plans
     for p in plans:
-        p["messages"] = int(p["messages"] * factor)
-        p["threads"] = min(p["threads"], p["messages"]) if p["messages"] else 0
-        p["link_mail"] = min(p["link_mail"], p["messages"])
+        original = p["messages"]
+        retained = int(original * factor)
+        share = retained / original if original else 0
+        p["messages"] = retained
+        p["threads"] = max(1, round(p["threads"] * share)) if retained else 0
+        p["link_mail"] = round(p["link_mail"] * share)
         p["link_kinds"] = _split(p["link_mail"], LINK_KINDS)
     return plans
 

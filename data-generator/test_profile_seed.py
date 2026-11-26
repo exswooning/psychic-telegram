@@ -79,6 +79,43 @@ def test_threads_labels_and_link_mail_follow_the_profile(profile, plans300):
     assert {k for p in plans300 for k, n in p["link_kinds"].items() if n} == set(pp.LINK_KINDS)
 
 
+@pytest.mark.parametrize("count", ["threads", "link_mail"])
+def test_scaled_mail_preserves_thread_and_link_proportions(plans300, count):
+    scaled = pp.scale_messages(copy.deepcopy(plans300), 0.15)
+    assert scaled == pp.scale_messages(copy.deepcopy(plans300), 0.15)
+
+    for original, reduced in zip(plans300, scaled):
+        assert reduced["messages"] == int(original["messages"] * 0.15)
+        assert (1 if reduced["messages"] else 0) <= reduced["threads"] <= reduced["messages"]
+        assert 0 <= reduced["link_mail"] <= reduced["messages"]
+        assert sum(reduced["link_kinds"].values()) == reduced["link_mail"]
+
+    original_share = sum(p[count] for p in plans300) / sum(p["messages"] for p in plans300)
+    reduced_share = sum(p[count] for p in scaled) / sum(p["messages"] for p in scaled)
+    assert reduced_share == pytest.approx(original_share, rel=0.02)
+
+
+@pytest.mark.parametrize("factor, retained", [(0, [0, 0, 0]), (0.5, [0, 0, 1])])
+def test_scaled_mail_handles_empty_and_single_message_mailboxes(factor, retained):
+    plans = [
+        {"messages": 0, "threads": 0, "link_mail": 0},
+        {"messages": 1, "threads": 1, "link_mail": 1},
+        {"messages": 3, "threads": 1, "link_mail": 3},
+    ]
+    assert pp.scale_messages(plans, factor) is plans
+    for plan, expected in zip(plans, retained):
+        assert plan["messages"] == plan["threads"] == plan["link_mail"] == expected
+        assert set(plan["link_kinds"]) == set(pp.LINK_KINDS)
+        assert sum(plan["link_kinds"].values()) == expected
+
+
+@pytest.mark.parametrize("factor", [1, 1.25])
+def test_full_mail_share_leaves_plan_untouched(factor, plans300):
+    plans = copy.deepcopy(plans300)
+    assert pp.scale_messages(plans, factor) is plans
+    assert plans == plans300
+
+
 def test_a_tree_has_the_planned_counts_depth_names_and_dates(plans300):
     seen = {"deva": 0, "long": 0, "dup": 0, "breaker": 0, "old": 0}
     for p in plans300[:60]:

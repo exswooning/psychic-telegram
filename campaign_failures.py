@@ -228,6 +228,8 @@ FP_UNREACHABLE = {
                        "failpoints' own unit tests cover the point",
 }
 FP_PROCESS_LEVEL = ("run", "followon")        # no user at the call: armed for the whole process, not scoped to a twin
+GMAIL_LOST_REPLY_SCENARIO = "fp:gmail.inserted:lost"
+GMAIL_LOST_REPLY_FAULT = "gmail.inserted@1:lost"
 
 
 def _fp_parts(sc) -> tuple:
@@ -237,13 +239,14 @@ def _fp_parts(sc) -> tuple:
 
 
 def fp_batchable(sc) -> bool:
-    """A scenario that can share a run: the API's own death (a follow-on's point) cannot, nor can an unreachable one."""
-    return sc.id.startswith("fp:") and bool(sc.inject.get("steps")) and not _fp_parts(sc)[1].startswith("followon.")
+    """The Gmail proof needs a run of its own, as does a fault that kills the API."""
+    return (sc.id.startswith("fp:") and sc.id != GMAIL_LOST_REPLY_SCENARIO
+            and bool(sc.inject.get("steps")) and not _fp_parts(sc)[1].startswith("followon."))
 
 
 def fp_steps(sc) -> list:
     fault, name, mode, svc = _fp_parts(sc)
-    if fault == "gmail.inserted@1:lost":
+    if fault == GMAIL_LOST_REPLY_FAULT:
         wait = [{"do": "wait_exit", "gmail_lost_reply": True}, IDLE]
     elif mode == "kill" and not name.startswith("followon."):
         wait = [{"do": "wait_exit", "code": 137}]

@@ -17,10 +17,12 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import stat
 import sys
 import time
 import uuid
+from datetime import datetime
 from pathlib import Path
 
 import campaign_changes
@@ -31,10 +33,26 @@ import campaign_scenarios as S
 HERE = os.path.dirname(os.path.abspath(__file__))
 PASSING = {"PASS", "COVERED"}
 PROCFS = Path("/proc")
+GMAIL_SHOT_ARCHIVE = re.compile(r"migrate\.\d{8}T\d{6}Z(?:-\d+)?\.log")
 
 
 def results_dir(name: str) -> str:
     return os.path.join(HERE, "logs", "campaigns", name)
+
+
+def _has_gmail_lost_reply_proof(evidence) -> bool:
+    if not isinstance(evidence, dict) or evidence.get("fault") != CF.GMAIL_LOST_REPLY_FAULT:
+        return False
+    pid, rc = evidence.get("pid"), evidence.get("exitCode")
+    started, archive = evidence.get("startedAt"), evidence.get("archive")
+    if (type(pid) is not int or pid <= 0 or type(rc) is not int or rc != 0
+            or not isinstance(archive, str) or not GMAIL_SHOT_ARCHIVE.fullmatch(archive)
+            or not isinstance(started, str)):
+        return False
+    try:
+        return datetime.fromisoformat(started.replace("Z", "+00:00")).utcoffset() is not None
+    except ValueError:
+        return False
 
 
 def read_results(name: str) -> dict:
@@ -45,6 +63,9 @@ def read_results(name: str) -> dict:
             for line in fh:
                 if line.strip():
                     row = json.loads(line)
+                    if (row["id"] == CF.GMAIL_LOST_REPLY_SCENARIO and row.get("status") == "PASS"
+                            and not _has_gmail_lost_reply_proof(row.get("faultEvidence"))):
+                        row.update(status="UNVERIFIED", reason="Gmail lost reply has no credible run-bound fault evidence")
                     out[row["id"]] = row
     except FileNotFoundError:
         pass
@@ -492,7 +513,7 @@ class LiveDriver(Driver):
             argv = (proc / "cmdline").read_bytes().decode().rstrip("\0").split("\0")
             archive = fd.readlink()
             if (json.loads(admitted["argv"])[1:] != expected or argv[1:] != expected
-                    or archive.parent != logs or not archive.match("migrate.*.log")):
+                    or archive.parent != logs or not GMAIL_SHOT_ARCHIVE.fullmatch(archive.name)):
                 raise Unautomated(f"could not bind Gmail shot PID {pid} to its own scoped transcript")
             archive_info = archive.stat()
             if not stat.S_ISREG(archive_info.st_mode):
@@ -516,7 +537,7 @@ class LiveDriver(Driver):
                         if not any(line.rstrip().endswith(marker) for line in transcript):
                             raise X.StepFailed(f"no gmail.inserted@1 lost-reply marker in Gmail shot PID {pid}")
                         return {"pid": pid, "startedAt": started, "exitCode": 0,
-                                "archive": archive.name, "fault": "gmail.inserted@1:lost"}
+                                "archive": archive.name, "fault": CF.GMAIL_LOST_REPLY_FAULT}
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
                         raise Unautomated(f"no terminal Gmail shot observed for PID {pid} at {started}")
