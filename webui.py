@@ -3177,6 +3177,7 @@ def reset_target_argv(body: dict, account_id: int | None = None) -> tuple[list[s
 
     st = Settings(account_id=account_id)
     domain = (st.target_domain or "").strip().lower()
+    source = (st.source_domain or "").strip().lower()
     typed = (body.get("confirm_domain") or "").strip().lower()
 
     if not domain:
@@ -3184,10 +3185,11 @@ def reset_target_argv(body: dict, account_id: int | None = None) -> tuple[list[s
     if not typed:
         return [], {}, f"type the target domain ({domain}) to confirm"
     if typed != domain:
-        source = (st.source_domain or "").strip().lower()
         extra = (" — that is the SOURCE domain, which this would never touch, "
                 "but it is also not the target" if typed and typed == source else "")
         return [], {}, f"{typed!r} does not match the target domain {domain!r}{extra}"
+    if account_id is not None and not source:
+        return [], {}, "set the source domain in step 2 first"
 
     import domain_guard
 
@@ -3206,7 +3208,8 @@ def reset_target_argv(body: dict, account_id: int | None = None) -> tuple[list[s
     env = gcloud_env()
     env["SANDBOX_MODE"] = "true"
     if account_id is not None:
-        env.update(TARGET_DOMAIN=st.target_domain, TARGET_ADMIN=st.target_admin,
+        # The child uses the source domain for its guards and Gmail search.
+        env.update(SOURCE_DOMAIN=source, TARGET_DOMAIN=st.target_domain, TARGET_ADMIN=st.target_admin,
                    TARGET_SA_KEY=st.target_sa_key, MIGRATION_DB=st.db_path)
     return argv, env, ""
 
@@ -3240,8 +3243,7 @@ def wipe_target_argv(body: dict, account_id: int | None = None) -> tuple[list[st
     # ledger looking for tenant_configs, a table that only exists in the
     # control-plane database. Live, that is exactly how this failed:
     #   sqlite3.OperationalError: no such table: tenant_configs
-    # The env carries TARGET_DOMAIN, TARGET_ADMIN, TARGET_SA_KEY and the
-    # ledger already, which is everything the child actually needs.
+    # The env carries both domains, the target credentials and the ledger.
     argv = [PY, "wipe_target.py", "--confirm-domain", domain, "--apply"]
     return argv, env, ""
 

@@ -586,6 +586,14 @@ rebuilt layouts (its slides render identical).
 
 ## 11. State (newest first)
 
+- 27 Nov 2026 (Codex): The VM's `t16` Gmail freshness check stopped the campaign before the
+  ledger reset or fault injection. The target reset removed 309 mail items and left 14.
+  A read using the selected source found all 12 non-welcome items, including eight trashed drafts.
+  The web UI passed the selected target and ledger to the reset process but omitted the selected
+  source domain, so the child used its default to search Gmail. The launcher now supplies the
+  selected source domain and refuses a named account without one. The existing deletion filters,
+  tenant protections and user scope still apply. The `t16` ledger retained 71 mappings.
+
 - 26 Nov 2026 (Codex): P3.6 planning estimate for 300 matched users at 15% mail. The modeled
   profile adds 269 users to 30 retained fixture users and one matched administrator. It contains
   221,192 files, 12,991 folders, 1,048.7 GB of Drive data and 115,892 messages, including 4,096

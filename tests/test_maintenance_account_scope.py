@@ -105,9 +105,19 @@ class TestResettingOnlyTheUsersUnderTest:
 
         monkeypatch.setattr(config, "Settings", _S)
         monkeypatch.setattr(domain_guard, "refuse_reason", lambda *a, **k: "")
-        argv, _, err = webui.reset_target_argv(
-            {"confirm_domain": "tgt.example.com", "users": "a@src.example.com, b@src.example.com"}, 3)
+        monkeypatch.setenv("SOURCE_DOMAIN", "ambient-src.example.com")
+        monkeypatch.setenv("TARGET_DOMAIN", "ambient-tgt.example.com")
+        monkeypatch.delenv("SOURCE_ADMIN", raising=False)
+        monkeypatch.delenv("SOURCE_SA_KEY", raising=False)
+        argv, env, err = webui.reset_target_argv(
+            {"confirm_domain": "tgt.example.com", "services": ["gmail"],
+             "users": "a@src.example.com, b@src.example.com"}, 3)
         assert err == "" and argv[-4:] == ["--user", "a@src.example.com", "--user", "b@src.example.com"]
+        assert argv[2:7] == ["--confirm-domain", "tgt.example.com", "--yes", "--services", "gmail"]
+        assert env["SOURCE_DOMAIN"] == "src.example.com"
+        assert env["TARGET_DOMAIN"] == "tgt.example.com"
+        assert env["MIGRATION_DB"] == "/tmp/x.db"
+        assert "SOURCE_ADMIN" not in env and "SOURCE_SA_KEY" not in env
         argv, _, err = webui.reset_drive_ledger_argv(
             {"confirm_domain": "src.example.com", "users": ["a@src.example.com"]}, 3)
         assert err == "" and argv[-2:] == ["--user", "a@src.example.com"]
