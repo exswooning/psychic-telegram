@@ -50,11 +50,15 @@ def arm(fault):
 
 IDLE = {"do": "wait_idle", "timeout": 4 * 3600}
 RESTART_API = shell("systemctl restart bitport-api")
-# Every row ends the same way: the twin is checked and repaired the way the One-to-one button does, then tallied
-# (the counts `equal_to_control` compares), and the box is idle.
+# Every row ends the same way: a Gmail delta, then the twin is checked and repaired the way the One-to-one button does,
+# then tallied (the counts `equal_to_control` compares), and the box is idle. The delta closes mail that reached the
+# source after the twin's mail pass -- Bitport's own Drive comments make Google mail the source user, who made the
+# server-side copy and so follows its discussions (t16, 26 Nov 2026: 3 notices + 3 seeded out-of-office replies).
+# It cannot hide a lost reply: one never adopted is a duplicate, which a delta does not remove.
 def finish(users=None) -> list:
     users = users or [TWIN]
-    return [api("/api/v2/one-to-one/run", {"users": users, "limit": 0, "repair": True}), IDLE,
+    return [api("/api/v2/migrate/delta", {"users": users, "services": ["gmail"], "days": 2}), IDLE,
+            api("/api/v2/one-to-one/run", {"users": users, "limit": 0, "repair": True}), IDLE,
             api("/api/v2/tally/run", {"users": users}), IDLE, {"do": "disarm"}]
 
 
