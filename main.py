@@ -1056,6 +1056,7 @@ def run_batch(auth: AuthManager, db: MigrationDB, settings: Settings,
     if automatic_repairs:
         import verification_repairs
         verification_repairs.enable(db)
+        verification_repairs.allow_services(db, services)
 
     results: list[dict] = []
     coordinated = _coordination_enabled()

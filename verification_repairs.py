@@ -32,6 +32,8 @@ def ensure(db):
         # the write lock: without this a 67,000-row scan, 83 ms each (account 3, 15 Nov 2026); with it 0.02 ms.
         conn.execute("CREATE INDEX IF NOT EXISTS ix_vrq_item ON verification_repair_queue"
                      "(source_user, service, category, item_id)")
+        # The services the account's own runs migrated (allow_services). Empty = never recorded = every service.
+        conn.execute("CREATE TABLE IF NOT EXISTS verification_repair_scope (service TEXT PRIMARY KEY)")
         import known_issues
         known_issues.ensure(conn)
 
@@ -260,6 +262,22 @@ def deploy_pending() -> bool:
         return False
 
 
+def allow_services(db, services) -> None:
+    """A real run records what it migrated, so the backlog repairs only that: after Drive-only runs on dharan
+    (account 7, 23 Nov 2026) it re-verified every service and engine-copied 9,785 messages the DMS owned."""
+    ensure(db)
+    with db.write() as conn:
+        conn.executemany("INSERT OR IGNORE INTO verification_repair_scope VALUES(?)", [(s,) for s in services])
+
+
+def allowed_services(db) -> set | None:
+    try:
+        got = {r[0] for r in db.conn.execute("SELECT service FROM verification_repair_scope")}
+    except Exception:
+        return None
+    return got or None
+
+
 def services_to_check(db, user, services) -> tuple:
     """The services a backlog repair re-reads for this user: those not IDENTICAL on their last check, never
     checked, or with an open queue row. it.department@'s findings were all Drive, yet each repair re-read
@@ -270,7 +288,9 @@ def services_to_check(db, user, services) -> tuple:
     queued = {r[0] for r in db.conn.execute(
         "SELECT DISTINCT service FROM verification_repair_queue WHERE source_user=? AND state!='RESOLVED'",
         (user,))}
-    out = tuple(s for s in services if s in queued or last.get(s) != "IDENTICAL")
+    allowed = allowed_services(db)
+    out = tuple(s for s in services if (s in queued or last.get(s) != "IDENTICAL")
+                and (allowed is None or s in allowed or s == "directory"))
     if "chat" in out:
         # Not part of this user's migration: the check retires it rather than re-reading it (verify_sample).
         import verify_sample
@@ -363,8 +383,10 @@ def due_users(db):
     if not enabled(db):
         return []
     grouped = {}
+    allowed = allowed_services(db)
     for row in db.user_verifications():
-        grouped.setdefault(row["user"], []).append(row)
+        if allowed is None or row.get("service") in allowed or row.get("service") == "directory":
+            grouped.setdefault(row["user"], []).append(row)
     due = []
     for user, rows in grouped.items():
         if not any(r["verdict"] in ("DIFFERENCES", "INCOMPLETE") for r in rows):
