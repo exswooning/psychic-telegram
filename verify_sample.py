@@ -1303,6 +1303,121 @@ class Verifier:
                 (self.src_user,))}
 
     def _target_files(self, svc) -> list[dict]:
+        import verification_inventory as vi
+
+        if not vi.incremental_enabled():
+            return self._target_files_full(svc)
+
+        cache = vi.InventoryCache(self.db, self.src_user, self.tgt_user, "drive", "target")
+        try:
+            prior = cache.load()
+        except Exception:
+            prior = None
+        if prior:
+            old_marker, old_items = prior
+            try:
+                upserts, deletes, marker = self._drive_inventory_delta(svc, old_marker)
+                old_items.update(upserts)
+                for file_id in deletes:
+                    old_items.pop(file_id, None)
+                try:
+                    cache.apply(marker, upserts, deletes)
+                except Exception:
+                    pass
+                self._inventory_stats = getattr(self, "_inventory_stats", {})
+                self._inventory_stats["drive.target"] = {
+                    "mode": "incremental", "changed": len(upserts) + len(deletes),
+                    "items": len(old_items),
+                }
+                return list(old_items.values())
+            except Exception as exc:
+                # An expired or malformed page token never licenses use of the old snapshot.
+                fallback_reason = str(exc)[:160]
+        else:
+            fallback_reason = "inventory absent or version changed"
+
+        marker = None
+        try:
+            response = self._x(lambda: svc.changes().getStartPageToken(
+                userId="me", supportsAllDrives=True, fields="startPageToken").execute(),
+                operation="Drive target inventory checkpoint")
+            candidate = str(response.get("startPageToken") or "")
+            marker = candidate if candidate else None
+        except Exception:
+            marker = None
+        files = self._target_files_full(svc)
+        if marker:
+            items = {file["id"]: vi.drive_record(file) for file in files if file.get("id")}
+            try:
+                cache.replace(marker, items)
+            except Exception:
+                pass
+        self._inventory_stats = getattr(self, "_inventory_stats", {})
+        self._inventory_stats["drive.target"] = {
+            "mode": "full", "changed": len(files), "items": len(files),
+            "fallback": fallback_reason,
+        }
+        return files
+
+    def _drive_inventory_delta(self, svc, start_marker: str):
+        """Apply all Drive changes since a saved start page token."""
+        token, seen, changes, marker = start_marker, set(), [], None
+        while True:
+            response = self._x(lambda t=token: svc.changes().list(
+                userId="me", pageToken=t, pageSize=1000, includeItemsFromAllDrives=True,
+                supportsAllDrives=True,
+                fields="nextPageToken,newStartPageToken,changes(fileId,removed,file(id,name,mimeType,md5Checksum,trashed,ownedByMe,owners(emailAddress)))",
+            ).execute(), operation="Drive target inventory changes")
+            page = response.get("changes", []) or []
+            changes.extend(page)
+            if len(changes) > 100000:
+                raise RuntimeError("Drive change window is too large; full inventory required")
+            next_token = response.get("nextPageToken")
+            if not next_token:
+                marker = str(response.get("newStartPageToken") or "")
+                if not marker:
+                    raise RuntimeError("Drive changes response omitted its next start page token")
+                break
+            if next_token in seen:
+                raise RuntimeError("Drive changes repeated a page token")
+            seen.add(next_token)
+            token = next_token
+
+        import verification_inventory as vi
+        upserts, deletes = {}, set()
+        wanted_owner = self.tgt_user.lower()
+        for change in changes:
+            file_id = change.get("fileId")
+            if not file_id:
+                raise RuntimeError("Drive change omitted its file identity")
+            if change.get("removed"):
+                upserts.pop(file_id, None)
+                deletes.add(file_id)
+                continue
+            file = change.get("file") or {}
+            if not file.get("id") or file.get("id") != file_id:
+                file = self._x(lambda i=file_id: svc.files().get(
+                    fileId=i, supportsAllDrives=True,
+                    fields="id,name,mimeType,md5Checksum,trashed,ownedByMe,owners(emailAddress)").execute(),
+                    operation="Drive changed file metadata")
+            owners = file.get("owners")
+            if file.get("ownedByMe") is not None:
+                owned = bool(file.get("ownedByMe"))
+            elif owners is not None:
+                owned = any((owner.get("emailAddress") or "").lower() == wanted_owner
+                            for owner in owners)
+            else:
+                raise RuntimeError(f"Drive change for {file_id} omitted owner metadata")
+            if (file.get("trashed") or not owned
+                    or file.get("mimeType") == "application/vnd.google-apps.folder"):
+                upserts.pop(file_id, None)
+                deletes.add(file_id)
+            else:
+                deletes.discard(file_id)
+                upserts[file_id] = vi.drive_record(file)
+        return upserts, deletes, marker
+
+    def _target_files_full(self, svc) -> list[dict]:
         out, token, seen_tokens, page = [], None, set(), 0
         while True:
             page += 1
@@ -1505,12 +1620,12 @@ class Verifier:
         return b"", self._x(lambda: svc.users().messages().get(
             userId="me", id=mid, format="metadata", metadataHeaders=list(RECEIPT_HEADERS)).execute())
 
-    def _gmail_single(self, svc, mid, fmt, budget, cost):
+    def _gmail_single(self, svc, mid, fmt, budget, cost, metadata_headers=None):
         def read():
             budget.acquire(cost, _stop_check)
             try:
                 message = svc.users().messages().get(userId="me", id=mid, format=fmt,
-                    **({"metadataHeaders": list(RECEIPT_HEADERS)} if fmt != "raw" else {})).execute()
+                    **({"metadataHeaders": list(metadata_headers or RECEIPT_HEADERS)} if fmt != "raw" else {})).execute()
                 if fmt != "raw":
                     return b"", message
                 raw = message.get("raw", "")
@@ -1522,7 +1637,8 @@ class Verifier:
         return self._x(read)
 
     def _raw_many(self, svc, message_ids: list[str], side: str, progress_offset: int = 0,
-                  progress_total: int | None = None, fmt: str = "raw") -> tuple[dict[int, tuple[bytes, dict]], dict[int, Exception]]:
+                  progress_total: int | None = None, fmt: str = "raw",
+                  metadata_headers=None) -> tuple[dict[int, tuple[bytes, dict]], dict[int, Exception]]:
         """Read a bounded batch of raw messages, falling back for test/service adapters.
 
         Gmail has no collection-level raw export. The old loop made two synchronous HTTP
@@ -1544,7 +1660,7 @@ class Verifier:
                 self._report_progress(operation, progress_offset + index, progress_total,
                                       f"email {message_id}")
                 try:
-                    values[index] = self._gmail_single(svc, message_id, fmt, budget, cost)
+                    values[index] = self._gmail_single(svc, message_id, fmt, budget, cost, metadata_headers)
                 except Exception as exc:  # noqa: BLE001 - retain per-message failure
                     errors[index] = exc
             return values, errors
@@ -1600,7 +1716,7 @@ class Verifier:
                     errors.pop(index, None)
                     request = (svc.users().messages().get(userId="me", id=message_ids[index], format="raw") if fmt == "raw"
                                else svc.users().messages().get(userId="me", id=message_ids[index], format="metadata",
-                                                               metadataHeaders=list(RECEIPT_HEADERS)))
+                                                               metadataHeaders=list(metadata_headers or RECEIPT_HEADERS)))
                     batch.add(request, request_id=str(index))
                 try:
                     batch.execute()
@@ -1633,7 +1749,8 @@ class Verifier:
                     if status_of(errors[index]) == 400:
                         try:
                             # Single-message fallback still passes through quota pacing.
-                            values[index] = self._gmail_single(svc, message_ids[index], fmt, budget, cost)
+                            values[index] = self._gmail_single(
+                                svc, message_ids[index], fmt, budget, cost, metadata_headers)
                             errors.pop(index, None)
                         except Exception as exc:
                             errors[index] = exc
@@ -1727,9 +1844,169 @@ class Verifier:
             diffs.append(f"date differs: source {si}, target {ti}, Date header {hdr_ms}")
         return diffs
 
+    def _gmail_history_delta(self, svc, start: str, current: str):
+        """Return changed/deleted message IDs and a checkpoint covered by the history pages."""
+        if not start.isdigit() or not current.isdigit() or int(current) < int(start):
+            raise RuntimeError("Gmail history checkpoint is unavailable or moved backwards")
+        if start == current:
+            return set(), set(), current
+        changed, deleted = set(), set()
+        token, seen, records, end_marker = None, set(), 0, None
+        known_record_keys = {"id", "messages", "messagesAdded", "messagesDeleted", "labelsAdded", "labelsRemoved"}
+
+        def add_message(container, kind):
+            message = container.get("message") or {}
+            message_id = message.get("id")
+            if not message_id:
+                raise RuntimeError(f"Gmail {kind} history event omitted its message identity")
+            if kind == "messagesDeleted":
+                deleted.add(message_id)
+            else:
+                changed.add(message_id)
+
+        while True:
+            response = self._x(lambda t=token: svc.users().history().list(
+                userId="me", startHistoryId=start, maxResults=500, pageToken=t).execute(),
+                operation="Gmail inventory history")
+            page_marker = str(response.get("historyId") or "")
+            if not page_marker.isdigit() or int(page_marker) < int(current):
+                raise RuntimeError("Gmail history did not cover the observed mailbox checkpoint")
+            end_marker = page_marker
+            for record in response.get("history", []) or []:
+                records += 1
+                if records > 10000:
+                    raise RuntimeError("Gmail history window is too large; full inventory required")
+                if set(record) - known_record_keys:
+                    raise RuntimeError("Gmail history contains an unrecognized change shape")
+                for message in record.get("messages", []) or []:
+                    add_message({"message": message}, "messages")
+                for kind in ("messagesAdded", "messagesDeleted", "labelsAdded", "labelsRemoved"):
+                    for change in record.get(kind, []) or []:
+                        add_message(change, kind)
+                if not any(record.get(k) for k in known_record_keys - {"id"}):
+                    raise RuntimeError("Gmail history record has no usable message identities")
+            next_token = response.get("nextPageToken")
+            if not next_token:
+                break
+            if next_token in seen:
+                raise RuntimeError("Gmail history repeated a page token")
+            seen.add(next_token)
+            token = next_token
+        if not records:
+            raise RuntimeError("Gmail history omitted changes before the observed checkpoint")
+        # A message can be changed and then deleted in the same window. Its current state is absent.
+        changed -= deleted
+        return changed, deleted, end_marker
+
+    def _gmail_inventory(self, svc, side: str) -> dict[str, dict]:
+        """Read one mailbox inventory, advancing from Gmail history when possible."""
+        import verification_inventory as vi
+
+        cache = vi.InventoryCache(self.db, self.src_user, self.tgt_user, "gmail", side)
+        profile_marker = None
+        try:
+            profile = self._x(lambda: svc.users().getProfile(userId="me").execute(),
+                               operation=f"Gmail {side} inventory checkpoint")
+            value = str(profile.get("historyId") or "")
+            profile_marker = value if value.isdigit() else None
+        except Exception:
+            # The inventory remains verifiable by a full read. Without a checkpoint it is not reusable.
+            profile_marker = None
+
+        prior = None
+        try:
+            prior = cache.load()
+        except Exception:
+            prior = None
+
+        changed, deleted, marker = set(), set(), profile_marker
+        mode, fallback_reason = "full", None
+        if prior and profile_marker:
+            old_marker, old_items = prior
+            try:
+                changed, deleted, marker = self._gmail_history_delta(svc, old_marker, profile_marker)
+                updated, missed = self._gmail_inventory_metadata(svc, sorted(changed), side)
+                deleted.update(missed)
+                old_items.update(updated)
+                for item_id in deleted:
+                    old_items.pop(item_id, None)
+                try:
+                    cache.apply(marker, updated, deleted)
+                except Exception:
+                    # The current API read is valid; failure to save only makes the next run do a full read.
+                    pass
+                mode = "incremental"
+                self._inventory_stats = getattr(self, "_inventory_stats", {})
+                self._inventory_stats[f"gmail.{side}"] = {
+                    "mode": mode, "changed": len(changed), "deleted": len(deleted),
+                    "items": len(old_items),
+                }
+                return old_items
+            except Exception as exc:
+                fallback_reason = f"history unavailable: {str(exc)[:160]}"
+
+        message_ids = []
+        for message in self._list_all(svc, side=side):
+            message_id = message.get("id")
+            if message_id:
+                message_ids.append(message_id)
+        items, _missed = self._gmail_inventory_metadata(svc, message_ids, side)
+        if profile_marker:
+            try:
+                cache.replace(profile_marker, items)
+            except Exception:
+                pass
+        stats = {"mode": mode, "changed": len(items), "deleted": 0, "items": len(items)}
+        if fallback_reason:
+            stats["fallback"] = fallback_reason
+        elif not profile_marker:
+            stats["fallback"] = "history checkpoint unavailable"
+        self._inventory_stats = getattr(self, "_inventory_stats", {})
+        self._inventory_stats[f"gmail.{side}"] = stats
+        return items
+
+    def _gmail_inventory_metadata(self, svc, message_ids: list[str], side: str):
+        """Fetch only requested Gmail metadata, keeping the response window bounded."""
+        import verification_inventory as vi
+        from verification_reads import status_of
+
+        records, missed = {}, set()
+        # Bound retained API responses even when a mailbox is much larger than 40k.
+        window = max(10, _gmail_batch_size() * 20)
+        for offset in range(0, len(message_ids), window):
+            _stop_check()
+            chunk = message_ids[offset:offset + window]
+            values, errors = self._raw_many(
+                svc, chunk, side, progress_offset=offset, progress_total=len(message_ids),
+                fmt="metadata", metadata_headers=("Message-ID", "From"),
+            )
+            for index, message_id in enumerate(chunk):
+                if index in errors:
+                    if status_of(errors[index]) == 404:
+                        missed.add(message_id)
+                        continue
+                    raise errors[index]
+                message = values[index][1]
+                record_id = str(message.get("id") or message_id)
+                if record_id != message_id:
+                    raise RuntimeError(f"Gmail metadata response identity changed for {message_id}")
+                records[message_id] = vi.gmail_record(message_id, message)
+        return records, missed
+
     def gmail(self) -> dict:
         res = self._blank()
         src, tgt = self.auth.source_gmail(self.src_user), self.auth.target_gmail(self.tgt_user)
+        source_inventory = target_inventory = None
+        import verification_inventory as vi
+        if vi.incremental_enabled():
+            try:
+                source_inventory = self._gmail_inventory(src, "source")
+            except Exception as exc:      # noqa: BLE001 - do not trust a stale source inventory
+                res["errors"].append(f"could not establish source mailbox inventory: {error_detail(exc)}")
+            try:
+                target_inventory = self._gmail_inventory(tgt, "target")
+            except Exception as exc:      # noqa: BLE001 - do not trust a stale target inventory
+                res["errors"].append(f"could not establish target mailbox inventory: {error_detail(exc)}")
         try:
             sl, tl = self._label_names(src), self._label_names(tgt)
         except Exception as exc:      # noqa: BLE001
@@ -1851,18 +2128,32 @@ class Verifier:
         kept_trash = 0
         try:
             scanned = 0
-            for m in self._list_all(tgt):
+            target_messages = (
+                (({"id": message_id}, metadata) for message_id, metadata in target_inventory.items())
+                if target_inventory is not None else
+                ((message, None) for message in self._list_all(tgt))
+            )
+            target_count = len(target_inventory) if target_inventory is not None else None
+            for m, metadata in target_messages:
                 scanned += 1
-                self._report_progress("Gmail target inventory", scanned,
-                                      item=f"email {m.get('id', '?')}")
+                if (scanned == 1 or scanned % VERIFY_PROGRESS_EVERY == 0
+                        or (target_count is not None and scanned == target_count)):
+                    self._report_progress("Gmail target inventory", scanned,
+                                          total=target_count, item=f"email {m.get('id', '?')}")
                 if m["id"] in mapped_ids:
                     continue
                 if m["id"] in bitport_trashed:
                     kept_trash += 1
                     continue
-                hdr = self._x(lambda i=m["id"]: tgt.users().messages().get(
-                    userId="me", id=i, format="metadata", metadataHeaders=["Message-ID", "From"]).execute())
-                head = {h["name"].lower(): h["value"].strip() for h in hdr.get("payload", {}).get("headers", [])}
+                if metadata is not None:
+                    head = {"message-id": metadata.get("messageId", ""), "from": metadata.get("from", "")}
+                    labels = metadata.get("labels") or []
+                else:
+                    hdr = self._x(lambda i=m["id"]: tgt.users().messages().get(
+                        userId="me", id=i, format="metadata", metadataHeaders=["Message-ID", "From"]).execute())
+                    head = {h["name"].lower(): h["value"].strip()
+                            for h in hdr.get("payload", {}).get("headers", [])}
+                    labels = hdr.get("labelIds") or []
                 mid = head.get("message-id", "")
                 # A sender domain or Trash label is not an accepted-difference record, with ONE exact
                 # exception: Google's own welcome mail, which Google puts in every new target account
@@ -1879,7 +2170,7 @@ class Verifier:
                     continue
                 # Preserve and report every other unmatched destination for review.
                 (res["duplicates"] if mid in mapped_msgids else res["extras"]).append({
-                    "target": m["id"], "messageId": mid, "labels": hdr.get("labelIds") or [],
+                    "target": m["id"], "messageId": mid, "labels": labels,
                     "classification": "UNMATCHED_DESTINATION"})
         except Exception as exc:      # noqa: BLE001
             res["errors"].append(f"could not list the target's mailbox: {error_detail(exc)}")
@@ -1890,7 +2181,7 @@ class Verifier:
             res["notes"].append(f"{welcome} email(s) on the target are Google's own welcome mail for the new "
                                 "account (from mail-noreply@google.com), not the source's data: not counted")
         res["notCopied"] = self._failed(("message", "gmail"))
-        self._source_mail_coverage(src, res)
+        self._source_mail_coverage(src, res, source_inventory)
         reference_gaps = self.db.conn.execute(
             "SELECT item_id,error_message FROM audit_log WHERE source_user=? "
             "AND item_type='source_link_reference' AND status='NEEDS_ATTENTION'",
@@ -1910,7 +2201,7 @@ class Verifier:
         res["cache"] = {**cache.stats(),"freshComparisons":len(pending)}
         return res
 
-    def _source_mail_coverage(self, src, res):
+    def _source_mail_coverage(self, src, res, inventory=None):
         """A matched mapping is not proof that every source message was mapped."""
         known = {sid for sid, _, _ in self._pairs("message")}
         known_drafts = {sid for sid, _, _ in self._pairs("draft")}
@@ -1951,7 +2242,9 @@ class Verifier:
                 "AND status LIKE 'FAILED%'", (self.src_user,)) if owed_to_dms("message", r[1])}
             owed = 0
             scanned = 0
-            for message in self._list_all(src, side="source"):
+            messages = (({"id": message_id} for message_id in inventory)
+                        if inventory is not None else self._list_all(src, side="source"))
+            for message in messages:
                 scanned += 1
                 sid = message.get("id")
                 if sid and sid in deferred and sid not in known:

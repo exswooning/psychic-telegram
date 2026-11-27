@@ -585,6 +585,8 @@ CLI exits 0 whenever the check ran — a non-zero exit reads as a crash to
 report under `logs/quick/`. `reset_drive_ledger` clears a service's verification
 with the items it describes.
 
+`VERIFY_INCREMENTAL` (default on) keeps versioned source/target Gmail message inventories and a target Drive stray inventory in the account ledger. Gmail uses mailbox history IDs; Drive uses saved change page tokens. A missing/changed inventory or expired marker triggers a full read. Set `VERIFY_INCREMENTAL=0` to restore full inventory reads. Inventory read failures remain errors and keep the check `INCOMPLETE`.
+
 **Every user is also tallied -- after the run, not as they finish** (default): a run
 launched from the API ends with a `tally` follow-on (`api_server._start_tally_after_repair`)
 that waits for the repair follow-on, then runs `tally.py` for every user as one `user-tally`
