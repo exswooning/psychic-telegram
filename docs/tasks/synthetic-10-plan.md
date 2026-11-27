@@ -586,6 +586,15 @@ rebuilt layouts (its slides render identical).
 
 ## 11. State (newest first)
 
+- 27 Nov 2026 (Claude, took over from Codex at the operator's word): Codex's uncommitted evidence-time and
+  benchmark-scope work pushed as `29fc89e` (fixed: the `started` stamp had landed in `_spawn`). The six t16 messages
+  that failed the last lost-reply verdict were Bitport's own echo: a server-side copy is made by the SOURCE user, who
+  then follows its discussions, so every comment Bitport writes on the copy makes Google mail the source mailbox
+  (3 Docs/Sheets notices + 3 replies from t16's seeded out-of-office). Campaign rows now end with a Gmail delta
+  before the check (`0e596dd`; a lost reply never adopted is a duplicate, which a delta cannot hide). On dharan the
+  echo is 4 notices in 3 of 45 mailboxes since 23 Nov. `0e596dd` installed on the VM (rollback
+  `/opt/bitport/rollback/fp2-0e596dd`); retry `fp2-vm-gmail-lost-t16-20261127b` started 05:09Z, b. declared a
+  sandbox for it.
 - 27 Nov 2026 (Codex): The VM installed the tested scoped Start release `cfcf36b` with
   matching hashes, a rollback receipt and healthy services. The supervised Gmail delta copied
   the exact six previously unmapped `t16` messages (PID 24694, exit 0). The fresh complete
