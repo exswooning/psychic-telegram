@@ -41,7 +41,7 @@ def test_short_is_migrated_again_for_only_what_is_short_never_mail(wired):
     (argv, name, then), = seen["run"]
     assert name == "migrate" and argv[argv.index("--services") + 1] == "calendar"
     assert argv[argv.index("--user") + 1] == "short@src" and "fine@src" not in argv
-    assert then == ["repair", "tally@short@src"]
+    assert then == "tally@short@src"
     assert db.services_done("short@src") == {"drive", "gmail"}      # calendar reopened, nothing else
 
 
@@ -64,6 +64,13 @@ def test_only_the_named_users_are_looked_at(wired):
     db, seen = wired
     api_server._fix_after_tally(3, ["differs@src"])
     assert seen["run"] == [] and len(seen["repair"]) == 1
+
+
+def test_empty_scoped_autofix_never_widens_to_the_account(wired):
+    db, seen = wired
+    assert api_server._fix_after_tally(3, []) == (False, "no selected users to fix")
+    assert seen == {"run": [], "repair": [], "tally": []}
+    assert db.services_done("short@src") == {"drive", "gmail", "calendar"}
 
 
 def test_a_user_with_no_target_account_is_never_migrated_by_a_fix(wired, monkeypatch):

@@ -118,7 +118,14 @@ class TestTheEndpoint:
         r, seen = _start(cp, monkeypatch, services=["all"], users=["a@x.com"])
         assert r.status_code == 200, r.text
         assert seen["env"]["MAIL_ONLY_WITH_LINKS"] == "true"
-        assert seen["then"] == ["repair", "tally@a@x.com"]
+        assert seen["then"] == ["tally@a@x.com"]
+
+    def test_a_selected_mail_migration_tallies_only_the_selected_users(self, cp, monkeypatch):
+        users = ["a@x.com", "b@x.com"]
+        r, seen = _start(cp, monkeypatch, services=["gmail"], users=users, mail_mode="engine")
+        assert r.status_code == 200 and r.json()["ok"] is True, r.text
+        assert [seen["argv"][i + 1] for i, arg in enumerate(seen["argv"]) if arg == "--user"] == users
+        assert seen["then"] == ["tally@a@x.com,b@x.com"]
 
     def test_naming_no_mode_on_a_whole_tenant_run_uses_split(self, cp, monkeypatch):
         """The operator's default since 2026-10-30: link mail first, then the DMS."""
@@ -142,13 +149,7 @@ class TestTheEndpoint:
     def test_otherwise_it_is_the_engine_as_before(self, cp, monkeypatch, body):
         r, seen = _start(cp, monkeypatch, **body)
         assert r.status_code == 200, r.text
-        # No DMS follow-on, but repair rides along on any real run -- then a tally: of
-        # every user after a whole-tenant run, of just its users after a chosen few,
-        # and none after a sample.
-        users = body.get("users")
-        expect = (["repair"] if body.get("sample") is not None
-                  else ["repair", "tally@" + ",".join(users)] if users else ["repair", "tally"])
-        assert seen["then"] == expect
+        assert seen["then"] == (["repair"] if body.get("sample") is not None else ["repair", "tally"])
         assert "MAIL_ONLY_WITH_LINKS" not in (seen["env"] or {})
 
     def test_an_unknown_mode_is_refused_rather_than_guessed(self, cp, monkeypatch):

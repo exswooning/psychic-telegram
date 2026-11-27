@@ -249,7 +249,7 @@ _SERVICE_ITEMS = {
 }
 
 
-def reconcile_service_markers(db) -> list[tuple]:
+def reconcile_service_markers(db, only=None) -> list[tuple]:
     """Re-open services that are marked done but migrated nothing and failed.
 
     A service marked done is skipped forever, so a bug that failed one
@@ -273,8 +273,11 @@ def reconcile_service_markers(db) -> list[tuple]:
     except Exception:      # noqa: BLE001 - never block a migration
         return reopened
 
+    selected = {user.lower() for user in only} if only else None
     for row in rows:
         user = row["source_email"]
+        if selected is not None and user.lower() not in selected:
+            continue
         try:
             done = db.services_done(user)
             if not done:
@@ -1325,7 +1328,7 @@ def _say_source_access(settings) -> None:
               flush=True)
 
 
-def demote_stale_running(db) -> int:
+def demote_stale_running(db, only=None) -> int:
     """Mark users left RUNNING by a run that is no longer alive.
 
     job_admission allows one job per tenant, so at the moment a run starts
@@ -1341,10 +1344,14 @@ def demote_stale_running(db) -> int:
     _already_done treats INTERRUPTED as unfinished, so the next run picks
     them up without discarding what they achieved.
     """
+    selected = tuple(user.lower() for user in only) if only else ()
+    where = "WHERE status='RUNNING'"
+    if selected:
+        where += f" AND lower(source_email) IN ({','.join('?' for _ in selected)})"
     cur = db.conn.execute(
         "UPDATE identity_map SET status='INTERRUPTED', "
         "notes='left RUNNING by a run that is no longer alive' "
-        "WHERE status='RUNNING'")
+        + where, selected)
     db.conn.commit()
     return cur.rowcount
 
@@ -1416,12 +1423,9 @@ def _after_drive(db, auth, settings, only, more_passes: bool) -> None:
     # ordered at all: a link in mail can name a shared-drive file too.
     if not only and not getattr(settings, "sample_limit", None):
         _migrate_shared_drives(db, auth, settings)
-    # This pass's own worker pool has now fully drained -- the one moment
-    # touching these users' state is provably safe, and the one moment
-    # that matters: the NEXT pass (mail/calendar) is about to read this
-    # pass's id_mapping to rewrite Drive links in it. See
-    # _repair_between_passes for why this is narrower than _auto_repair.
-    if more_passes:
+    # The next pass uses these Drive mappings to rewrite links. This repair
+    # scans the entire account, so only a whole-tenant run can request it.
+    if more_passes and not only:
         _repair_between_passes(db, auth, settings)
 
 
@@ -1447,14 +1451,14 @@ def _run_with_memory_pause(auth, db, settings, services, delta, delta_days,
     readiness.gate(settings)
     _say_source_access(settings)
     try:
-        stale = demote_stale_running(db)
+        stale = demote_stale_running(db, only=only)
         if stale:
             log.warning("%d user(s) were still marked RUNNING by a previous "
                         "run that is no longer alive; re-opening them", stale)
     except Exception as exc:      # noqa: BLE001 - advisory, never blocking
         log.warning("could not demote stale RUNNING users: %s", exc)
     try:
-        reopened = reconcile_service_markers(db)
+        reopened = reconcile_service_markers(db, only=only)
         for user, svc in reopened[:20]:
             log.warning("re-opening %s for %s: marked done but migrated "
                         "nothing and recorded failures", svc, user)
@@ -2738,9 +2742,9 @@ def cmd_migrate(args, settings: Settings, db: MigrationDB, auth: AuthManager):
             verify_sample.run_and_save(
                 auth, db, settings, users, tuple(sorted(services)),
                 retry=retry_on_google_error(max_retries=settings.max_retries), progress=lambda m: print(m, flush=True))
-        # Inside the registration too. Live, dharan.gov.np pilot: an 11-minute repair after
-        # the slot was freed made the watcher record the run's exit as never observed.
-        _auto_repair(db, auth, settings)
+        # Account-wide repair stays inside the admission slot on a whole-tenant run.
+        if not args.user:
+            _auto_repair(db, auth, settings)
     _source_guard_baseline(auth, db, settings)
     results = _run_with_memory_pause(
         auth, db, settings, services, delta=False, delta_days=0,

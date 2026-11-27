@@ -47,6 +47,17 @@ def test_a_job_that_ended_cleanly_while_the_api_was_down_gets_its_follow_ons(fol
     assert not [j for j in job_admission.list_active() if j["job_name"] == "dms"], "its slot is freed"
 
 
+def test_an_old_selected_migration_only_reattaches_its_scoped_tally(follow, monkeypatch):
+    ran, recorded = follow
+    p = subprocess.Popen([sys.executable, "-c", "pass"]); p.wait()
+    _admit("migrate", p.pid, ["python", "main.py", "migrate", "--user", "a@src"],
+           ["repair", "tally", "tally@a@src,other@src", "tally@a@src"])
+    job_exit.record(0, pid=p.pid)
+    monkeypatch.setattr(api_server, "_alive_as", lambda pid, argv: False)
+    assert api_server._reattach_follow_ons() == 1
+    assert ran == [("tally@a@src", 3)] and recorded == [0]
+
+
 @pytest.mark.parametrize("rc", [1, None])
 def test_a_failed_or_unknown_exit_never_starts_follow_ons(follow, rc):
     ran, _ = follow

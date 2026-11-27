@@ -38,6 +38,15 @@ class TestStaleRunningIsReopened:
         assert _status(d, "c@src") == "PENDING"
         d.close()
 
+    def test_scoped_start_leaves_other_interrupted_work_recorded(self, tmp_path):
+        d = _db(tmp_path, [("a@src", "RUNNING"), ("b@src", "RUNNING")])
+        try:
+            assert main.demote_stale_running(d, only=["A@SRC"]) == 1
+            assert _status(d, "a@src") == "INTERRUPTED"
+            assert _status(d, "b@src") == "RUNNING"
+        finally:
+            d.close()
+
     def test_interrupted_not_pending_so_progress_is_kept(self, tmp_path):
         # PENDING would read as "never started" and discard the fact that
         # part of this user's work already landed.

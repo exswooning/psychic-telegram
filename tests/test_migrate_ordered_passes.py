@@ -64,8 +64,8 @@ def runner(monkeypatch, settings, db, capsys):
     monkeypatch.setattr(main, "_registered", fake_registered)
     monkeypatch.setattr(main, "run_batch", fake_batch)
     monkeypatch.setattr(main, "_gate_on_delegation", lambda s: None)
-    monkeypatch.setattr(main, "demote_stale_running", lambda d: 0)
-    monkeypatch.setattr(main, "reconcile_service_markers", lambda d: [])
+    monkeypatch.setattr(main, "demote_stale_running", lambda d, only=None: 0)
+    monkeypatch.setattr(main, "reconcile_service_markers", lambda d, only=None: [])
     monkeypatch.setattr(main.memtrace, "start", lambda: None)
     monkeypatch.setattr(main, "_memory_watchdog", lambda stop, *a, **k: stop.wait(0.01))
     monkeypatch.setattr(main, "_metrics_flusher", lambda stop, *a, **k: stop.wait(0.01))
@@ -234,6 +234,16 @@ class TestTheCheckAfterTheRun:
         main.cmd_migrate(argparse.Namespace(services="drive", user=None, ordered=False), settings, db, None)
         assert order == ["run", "repair", "left"]
 
+    def test_a_selected_user_migration_does_not_run_account_wide_repair(self, monkeypatch, settings, db):
+        repairs = []
+        monkeypatch.setattr(main, "_run_with_memory_pause", lambda *a, **kw: kw["after"]([]) or [])
+        monkeypatch.setattr(main, "_print_batch_summary", lambda *a, **kw: None)
+        monkeypatch.setattr(main, "_auto_repair", lambda *a: repairs.append(1))
+
+        main.cmd_migrate(argparse.Namespace(services="gmail", user=["a@src"], ordered=False), settings, db, None)
+
+        assert repairs == []
+
 
 class TestRepairBetweenPasses:
     """Narrower than _auto_repair (see main._repair_between_passes' own docstring for
@@ -315,6 +325,13 @@ class TestRepairRidesBetweenDriveAndWhateverComesNext:
         calls = self._stub(monkeypatch)
         runner(self.ALL, main.ordered_passes(self.ALL))
         assert calls == [1]   # after drive (pass 1) only -- not after gmail or the rest
+
+    def test_it_does_not_repair_the_account_between_selected_user_passes(self, runner, monkeypatch):
+        calls = self._stub(monkeypatch)
+
+        runner(self.ALL, main.ordered_passes(self.ALL), only=["a@src"])
+
+        assert calls == []
 
     def test_it_does_not_run_after_the_final_pass(self, runner, monkeypatch):
         calls = self._stub(monkeypatch)

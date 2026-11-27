@@ -586,6 +586,22 @@ rebuilt layouts (its slides render identical).
 
 ## 11. State (newest first)
 
+- 27 Nov 2026 (Codex): The corrected `t16` reset removed all 12 stale source-domain mail items.
+  The freshness check passed, the ledger reset had its own success receipt, and the Gmail shot
+  had one fault marker and reused the delivered copy. The full comparison matched 313 Gmail
+  items with zero duplicates and matched the other five services. Source inventory reached 319
+  during the campaign, leaving six unmapped messages. The campaign remains FAIL. A separate
+  selected Gmail Start exited zero but skipped the completed user. A read-only query found
+  exactly those six messages in the current two-day delta window.
+- 27 Nov 2026 (Codex): The `t16` run exposed a scope leak. A selected-user Start could invoke
+  account-wide repair from the launcher, between ordered passes, and at engine exit. Its
+  selected tally could start an unrelated repair through autofix. The scoped paths now omit
+  those account-wide actions, and an explicit read-only tally can request `repair:false`.
+  Startup ledger reconciliation also respects selected users. The VM follow-on summaries
+  recorded no repairs made, and its ledger had no new audit events for other users in the
+  observed test interval. This change leaves independently scheduled jobs and manually
+  requested repair-enabled tally policies outside the selected Start contract.
+
 - 27 Nov 2026 (Codex): The VM's `t16` Gmail freshness check stopped the campaign before the
   ledger reset or fault injection. The target reset removed 309 mail items and left 14.
   A read using the selected source found all 12 non-welcome items, including eight trashed drafts.

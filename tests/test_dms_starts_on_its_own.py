@@ -126,8 +126,7 @@ class TestTheEndpointHandsItOn:
         r = self._go(cp, wired, monkeypatch, mail_mode="split")
         assert r.status_code == 200
         migrate = next(j for j in wired["jobs"] if j["name"] == "migrate")
-        # repair always rides along on a real run (see TestRepairRidesAlong below); dms is
-        # the part that is conditional here, and it must wait for the run, not start with it.
+        # Both follow-ons wait for the run to finish.
         assert migrate["then"] == ["repair", "dms"] and len(wired["jobs"]) == 1
 
     @pytest.mark.parametrize("body", [{"dms_after": False}, {"users": ["u0@a.com"]}])
@@ -136,7 +135,7 @@ class TestTheEndpointHandsItOn:
         # A whole-tenant run with no DMS after it tallies every user once it ends;
         # a run of a chosen few tallies just those users -- never the whole account.
         users = body.get("users")
-        assert wired["jobs"][0]["then"] == (["repair", "tally@" + ",".join(users)] if users
+        assert wired["jobs"][0]["then"] == (["tally@" + ",".join(users)] if users
                                             else ["repair", "tally"])
 
     def test_and_neither_follow_on_for_a_dry_run(self, cp, wired, monkeypatch):
@@ -208,7 +207,7 @@ class TestTheIdentitiesFile:
 
 
 class TestTheWaiterRunsItOnlyAfterACleanExit:
-    def _run(self, monkeypatch, tmp_path, rc, then="dms"):
+    def _run(self, monkeypatch, tmp_path, rc, then="dms", argv=None):
         import threading
 
         import job_admission
@@ -228,7 +227,7 @@ class TestTheWaiterRunsItOnlyAfterACleanExit:
         import run_watch
         monkeypatch.setattr(run_watch, "record_finished", lambda *a, **k: None)
         monkeypatch.setattr(A, "_follow_on", lambda kind, aid: (asked.append((kind, aid)), done.set()))
-        A._start_admitted(["x"], 3, "migrate", None, then)
+        A._start_admitted(argv or ["x"], 3, "migrate", None, then)
         done.wait(2)
         return asked
 
@@ -244,6 +243,12 @@ class TestTheWaiterRunsItOnlyAfterACleanExit:
 
     def test_several_follow_ons_run_in_the_order_given(self, monkeypatch, tmp_path):
         assert self._run(monkeypatch, tmp_path, 0, then=["repair", "dms"]) == [("repair", 3), ("dms", 3)]
+
+    @pytest.mark.parametrize("user_args", [["--user", "u0@a.com"], ["--user=u0@a.com"]])
+    def test_an_old_selected_launch_cannot_replay_account_wide_follow_ons(self, monkeypatch, tmp_path, user_args):
+        argv = ["python", "main.py", "migrate", *user_args]
+        follow_ons = ["repair", "tally", "tally@", "tally@wrong@a.com", "tally@u0@a.com"]
+        assert self._run(monkeypatch, tmp_path, 0, then=follow_ons, argv=argv) == [("tally@u0@a.com", 3)]
 
     def test_one_follow_on_failing_does_not_block_the_next(self, monkeypatch, tmp_path):
         import threading

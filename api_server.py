@@ -603,6 +603,18 @@ def _alive_as(pid: int, argv: list[str]) -> bool:
     return bool(script) and script in cmd
 
 
+def _job_follow_ons(job_name: str, argv: list[str], then: str | list[str] | None) -> list[str]:
+    kinds = [then] if isinstance(then, str) else then or []
+    if job_name != "migrate" or not kinds:
+        return kinds
+    selected = [argv[i + 1] if i + 1 < len(argv) else "" for i, arg in enumerate(argv) if arg == "--user"]
+    selected.extend(arg.partition("=")[2] for arg in argv if arg.startswith("--user="))
+    if selected:
+        # Persisted queue and admission rows may still carry tenant-wide follow-ons.
+        return [kind for kind in kinds if kind.startswith("tally@") and set(_follow_users(kind)) == set(selected)]
+    return kinds
+
+
 def _finish_reattached(row: dict) -> None:
     """A job whose waiter died with the last API process has ended: record it, free its slot, and run its
     follow-ons -- only on an exit code the job itself recorded as 0 (job_exit). Unknown is never clean."""
@@ -623,7 +635,7 @@ def _finish_reattached(row: dict) -> None:
         print(f"reattached {row['job_name']!r} (pid {row['pid']}) ended rc={rc}: its follow-ons "
               f"{row['then']} were not started", flush=True)
         return
-    for kind in row["then"]:
+    for kind in _job_follow_ons(row["job_name"], row["argv"], row["then"]):
         try:
             _follow_on(kind, row["account_id"])
         except Exception as exc:      # noqa: BLE001 - one failing does not block the next
@@ -2089,11 +2101,12 @@ def _start_admitted(argv: list[str], account_id: int | None, job_name: str,
     why = account_isolation.refusal(account_id, env)
     if why:
         return False, why
+    followups = _job_follow_ons(job_name, argv, then)
     out = _child_output(job_name, account_id)
-    if job_name == "migrate" and then:
+    if job_name == "migrate" and followups:
         # Told to the run so its record lists the follow-ons as PENDING even if this process dies first.
         import run_phases
-        kinds = [run_phases.follow_on_name(k) for k in ([then] if isinstance(then, str) else then)]
+        kinds = [run_phases.follow_on_name(k) for k in followups]
         env = {**(env if env is not None else os.environ), "RUN_FOLLOW_ONS": ",".join(k for k in kinds if k)}
     if job_name in _PHASE_OF_JOB:
         _note_phase(account_id, _PHASE_OF_JOB[job_name], "RUNNING")
@@ -2108,7 +2121,7 @@ def _start_admitted(argv: list[str], account_id: int | None, job_name: str,
                                 stdin=subprocess.DEVNULL, env=env)
     finally:
         out.close()
-    if (job_name == "migrate" and then and "dms" in ([then] if isinstance(then, str) else then)
+    if (job_name == "migrate" and "dms" in followups
             and isinstance(log_path, str) and os.getenv("DMS_AT_MAIL_PASS", "0").lower() in ("1", "true", "yes")):
         threading.Thread(target=_dms_at_mail_pass, args=(account_id, proc, log_path, log_start),
                          name=f"dms-at-mail-pass-{account_id}", daemon=True).start()
@@ -2122,15 +2135,14 @@ def _start_admitted(argv: list[str], account_id: int | None, job_name: str,
     # process that knew the argv is usually long restarted by the time a
     # stall is noticed.
     job_admission.record_launch(account_id, job_name, proc.pid, argv, HERE,
-                                 then=([then] if isinstance(then, str) else then) or None)
+                                 then=followups or None)
     started = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
     def _wait_then_release() -> None:
         proc.wait()
         # getattr, not proc.returncode: a real Popen always has it after wait(), but a test
-        # double standing in for one is not obliged to, and this is now read whenever `then`
-        # is set -- which, since repair started riding along on every real migrate, is most
-        # of the time. A fake missing it should read as "unknown", not crash a daemon thread.
+        # double standing in for one is not obliged to. A fake missing it should read
+        # as "unknown", not crash a daemon thread.
         rc = getattr(proc, "returncode", None)
         # The one place an API-launched job's real exit code is known. Recorded
         # before the slot is released, so the watcher never sees "gone" without
@@ -2148,7 +2160,6 @@ def _start_admitted(argv: list[str], account_id: int | None, job_name: str,
         # A verification-triggered repair/recheck must get its chance to act
         # before the just-freed slot is handed to the next queued tenant job.
         # Other follow-ons keep the longstanding dispatch-first behavior.
-        followups = ([then] if isinstance(then, str) else then) if then else []
         verify_repair_first = bool(rc == 0 and any(
             isinstance(kind, str) and kind.startswith("verify-repair:")
             for kind in followups))
@@ -2169,9 +2180,9 @@ def _start_admitted(argv: list[str], account_id: int | None, job_name: str,
         # here once memory is calm, smaller; never after a person's Stop.
         if rc == RESUMABLE_EXIT and job_name in RESUMABLE_JOBS:
             threading.Thread(target=_resume_after_memory_pause, name=f"resume-{job_name}-{account_id}",
-                             args=(argv, account_id, job_name, env, then, proc.pid, started),
+                             args=(argv, account_id, job_name, env, followups, proc.pid, started),
                              daemon=True).start()
-        if then and rc == 0 and not verify_repair_first:
+        if rc == 0 and not verify_repair_first:
             for kind in followups:
                 try:
                     _follow_on(kind, account_id)
@@ -2456,6 +2467,8 @@ def _fix_after_tally(account_id: int | None, users: list[str] | None = None) -> 
     on Google; more on the target is reported, never deleted. At most once per user
     per AUTOFIX_EVERY_HOURS, so a gap a fix cannot close is not retried in a loop."""
     from db import MigrationDB
+    if users == []:
+        return False, "no selected users to fix"
     view = _tally_view(account_id)
     wanted = {u.lower() for u in users} if users else None
     path = _ledger_path(account_id)
@@ -2510,7 +2523,7 @@ def _fix_after_tally(account_id: int | None, users: list[str] | None = None) -> 
         for who in sorted(short):
             argv += ["--user", who]
         ok, detail = _run_admitted(argv, account_id, "migrate", **({"env": env} if env else {}),
-                                   then=(["repair"] if repairs_on else []) + [_tally_follow("tally", sorted(short))])
+                                   then=_tally_follow("tally", sorted(short)))
         did.append(f"{len(short)} short user(s) migrated again for {', '.join(services)}: {detail}")
     if differs and repairs_on:
         _start_repair(account_id, why=f"started automatically: the tally found {len(differs)} "
@@ -2526,10 +2539,14 @@ def _fix_after_tally(account_id: int | None, users: list[str] | None = None) -> 
 
 
 def _start_tally_after_repair(account_id: int | None, users: list[str] | None = None) -> tuple[bool, str]:
-    """Count every user on both tenants once the run -- and the repair behind it --
-    is over: the exhaustive per-user tally used to run inside the migration, after
-    every pass, re-listing both tenants for each user up to three times on the same
-    CPU the copy needed. Now it is one job, after, on the repaired state."""
+    """Count the requested users once the run and any preceding repair are over.
+
+    A selected-user follow-on counts only. Tally autofix can launch an account-wide
+    repair, so only the full-account follow-on can invoke it.
+    """
+    if users == []:
+        return False, "no selected users to tally"
+
     def _go() -> None:
         prior = _REPAIR_THREADS.get(account_id)
         if prior is not None:
@@ -2538,7 +2555,7 @@ def _start_tally_after_repair(account_id: int | None, users: list[str] | None = 
         for u in users or []:
             argv += ["--user", u]
         ok, detail = _run_admitted(argv, account_id, "user-tally",
-                                   then=_tally_follow("tally_fix", users))
+                                   then="tally_fix" if users is None else None)
         log.info("tally after the run for account %s: %s (%s)", account_id, ok, detail)
 
     threading.Thread(target=_go, name=f"tally-after-{account_id}", daemon=True).start()
@@ -2883,13 +2900,11 @@ async def migrate_start(body: StartMigration, op: Operator = Depends(operator)):
     # moved the link mail), beside a dms run (it moves all the mail, nothing waits on it). Only
     # for a whole-tenant, real run -- a sample or a few users leave most mail unmoved either way.
     dms = body.dms_after and not body.dry_run and not body.users and body.sample is None
-    # Repair after any real run, never a dry one (it writes; a dry run touched nothing to
-    # fix). Before the DMS, not that it matters which order -- repair only reconciles
-    # what this tool's own engine did, unrelated to Google's mail import.
-    # Then a tally of every user -- except when the DMS follows, whose own job tallies
-    # once Google's import has finished (a tally before it would read mail as short).
+    # Account-wide repair belongs to runs without a user filter. Selected-user runs
+    # can still tally those users, with no autofix. When DMS follows, it tallies once
+    # Google's import finishes so the tally does not read the mail as short.
     dms_follows = dms and body.mail_mode == "split"
-    then = ([] if body.dry_run else ["repair"]) + (["dms"] if dms_follows else [])
+    then = (["repair"] if not body.dry_run and not body.users else []) + (["dms"] if dms_follows else [])
     if not body.dry_run and not dms_follows and body.sample is None:
         then.append(_tally_follow("tally", body.users or None))
     beside = dms and body.mail_mode == "dms"
@@ -3323,20 +3338,23 @@ async def dms_start(body: DmsStart, op: Operator = Depends(operator)):
 
 @app.post("/api/v2/tally/run")
 async def tally_run(body: RunVerification, op: Operator = Depends(operator)):
-    """Tally again, now: counts both tenants for the chosen users (or every user), writing
-    nothing to either. Runs as a job of its own -- named `user-tally`, not `tally`, so it
+    """Count both tenants for the chosen users (or every user). Use `repair=False`
+    to count without scheduling autofix. Runs as a job named `user-tally` so it
     never shares a slot or a log file with the whole-tenant `main.py tally` behind "Run
     tally" on the reports panel; the two can run independently and neither's output lands
     in the other's log. `limit` from RunVerification is unused here (a tally is exhaustive,
     not sampled) and accepted only so the two share one request shape."""
     account_id = _resolve_account(body, op)
+    users = [u.strip() for u in body.users]
+    if any(not u or "," in u for u in users):
+        raise HTTPException(400, "each selected user must be a single non-blank address")
     argv = [PY, "tally.py"] + _account_argv(account_id)
-    for u in body.users:
+    for u in users:
         argv += ["--user", u]
-    target = ",".join(body.users) if body.users else "ALL"
+    target = ",".join(users) if users else "ALL"
+    then = _tally_follow("tally_fix", users) if body.repair else None
     return await _gated(op, "tally.run", body, target,
-                        lambda: _run_admitted(argv, account_id, "user-tally",
-                                              then=_tally_follow("tally_fix", body.users or None)))
+                        lambda: _run_admitted(argv, account_id, "user-tally", then=then))
 
 
 # -- Server-side copy safety test (copy_safety.py) ---------------------------------
