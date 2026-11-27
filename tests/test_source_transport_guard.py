@@ -158,3 +158,18 @@ def test_api_source_drive_is_the_guarded_client(settings):
     a.settings = settings
     a._service = lambda tenant, api, user, writable=False: object()
     assert isinstance(a.api("source", "drive", "u@x"), auth.ReadOnlyDrive)
+
+
+def test_a_move_run_may_only_make_a_complete_move_into_its_staging_drive():
+    auth._MOVE_TARGETS.add("stage")
+    try:
+        check_source_request("PATCH", "https://www.googleapis.com/drive/v3/files/f?addParents=stage&removeParents=p", b"")
+        for uri in ("https://www.googleapis.com/drive/v3/files/f?addParents=stage",
+                    "https://www.googleapis.com/drive/v3/files/f?addParents=other&removeParents=p"):
+            with pytest.raises(SourceWriteRefused):
+                check_source_request("PATCH", uri, b"")
+        with pytest.raises(SourceWriteRefused):
+            check_source_request("PATCH", "https://www.googleapis.com/drive/v3/files/f?addParents=stage&removeParents=p",
+                                 b'{"name": "x"}')
+    finally:
+        auth._MOVE_TARGETS.discard("stage")

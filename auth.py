@@ -143,7 +143,9 @@ def check_source_request(method: str, uri: str, body=None) -> None:
     if m == "PATCH" and _FILE_PATH.search(path) and _MOVE_TARGETS:
         query = urllib.parse.parse_qs(parts.query)
         added = query.get("addParents", [""])[0]
-        if added in _MOVE_TARGETS and _json_body(body) == {} and set(query) <= {
+        # A complete move only: out of the source parent and into staging (a bare addParents would leave the file
+        # in both, altering the source -- found by the red-team harness, 27 Nov 2026).
+        if added in _MOVE_TARGETS and query.get("removeParents", [""])[0] and _json_body(body) == {} and set(query) <= {
                 "addParents", "removeParents", "supportsAllDrives", "fields", "alt"}:
             return
     raise SourceWriteRefused(f"source {m} {path} refused: a migration only reads the source")
