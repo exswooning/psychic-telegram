@@ -91,7 +91,7 @@ class TestAuthManagerHandsOutTheGuard:
         from types import SimpleNamespace
         am = object.__new__(auth.AuthManager)
         am.settings = SimpleNamespace(source_domain="source.example")
-        am._service = lambda tenant, api, user: raw
+        am._service = lambda tenant, api, user, writable=False: raw
         return am
 
     def test_read_only_by_default(self):
