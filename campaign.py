@@ -733,7 +733,7 @@ def judge(expect: dict, facts: dict) -> tuple:
     driver could not read (missing key) makes that check UNVERIFIED, never a pass."""
     unread = []
     for key, want in expect.items():
-        if key in ("ends_as", "closes_on", "outcome", "report_kind", "accept", "or_evidence", "or_source", "needs_source", "service", "verify_after") or want is None:
+        if key in ("closes_on", "outcome", "report_kind", "accept", "or_evidence", "or_source", "needs_source", "service", "verify_after") or want is None:
             continue
         if key == "finding_classified":
             have = facts.get("findings")
@@ -758,7 +758,9 @@ def judge(expect: dict, facts: dict) -> tuple:
                     verdicts = facts.get("verdicts") or {}
                     if not seen:
                         return "UNVERIFIED", f"no {want} finding and the ledger shows no {ev[1]} row: the fixture may not have been met"
-                    if any(v != "IDENTICAL" for v in verdicts.values()) or not verdicts:
+                    service = expect.get("service")
+                    checked = {service: verdicts.get(service)} if service else verdicts
+                    if any(v != "IDENTICAL" for v in checked.values()) or not checked:
                         return "FAIL", f"{want} was met ({seen} x {ev[1]}) but the user does not read IDENTICAL: {verdicts}"
                     continue
                 return "FAIL", f"{want} was never classified (saw {sorted(have)[:6]})"
@@ -768,6 +770,24 @@ def judge(expect: dict, facts: dict) -> tuple:
                 unread.append(key)
             elif want not in have:
                 return "FAIL", f"{want} was found but not fixed (fix log: {sorted(have)})"
+        elif key == "ends_as":
+            kind = expect.get("finding_classified")
+            found = facts.get("findings")
+            if found is None:
+                unread.append(key)
+            elif kind in found:
+                if want == "fixed":
+                    have = facts.get("fixed")
+                    if have is None:
+                        unread.append("fixed")
+                    elif kind not in have:
+                        return "FAIL", f"{kind} was found but not fixed (fix log: {sorted(have)})"
+                elif want in ("accepted", "listed"):
+                    have = (facts.get("gate") or {}).get(want)
+                    if have is None:
+                        unread.append(want)
+                    elif kind not in have:
+                        return "FAIL", f"{kind} was found but the parity gate does not mark it {want}"
         elif key in ("accepted", "listed"):       # the parity gate's own word for the kind, for this user
             have = (facts.get("gate") or {}).get(key)
             if have is None:
@@ -1008,6 +1028,12 @@ def run_scenario(sc: S.Scenario, driver: Driver, name: str, allow: set, wait: in
                 driver.verify(user, sc.act["beside_verify"])
             if not driver.wait_idle(wait):
                 return {**row, "status": "FAIL", "reason": f"still running after {wait} s", "reply": reply}
+            for follow in sc.act.get("after", ()):
+                follow_reply = driver.api(follow.get("method", "POST"), follow["path"],
+                                          _bind(follow.get("body", {}), user))
+                if not driver.wait_idle(wait):
+                    return {**row, "status": "FAIL", "reason": f"follow-up still running after {wait} s",
+                            "reply": follow_reply}
             if sc.expect.get("verify_after"):
                 driver.verify(user, sc.expect["verify_after"])
                 if not driver.wait_idle(wait):

@@ -323,6 +323,12 @@ def test_a_seeded_case_proved_from_the_source_needs_the_case_there_and_a_clean_u
     assert C.judge(exp, clean)[0] == "UNVERIFIED"
 
 
+def test_seeded_ends_as_checks_the_gate_when_a_finding_is_present_but_allows_clean_source_evidence():
+    exp = {"finding_classified": "tasks.untitled", "ends_as": "fixed", "or_source": "tasks.untitled"}
+    assert C.judge(exp, {"findings": {"tasks.untitled"}, "fixed": set(), "source_has": True})[0] == "FAIL"
+    assert C.judge(exp, {"findings": set(), "source_has": True, "verdicts": {"tasks": "IDENTICAL"}})[0] == "PASS"
+
+
 def test_a_defect_that_must_not_return_proves_nothing_if_the_case_was_never_made():
     exp = {"finding_absent": "drive.comment_quote_escaped", "needs_source": "drive.comment_quote_escaped"}
     assert C.judge(exp, {"findings": set(), "source_has": True})[0] == "PASS"
@@ -406,7 +412,7 @@ def test_every_error_ends_as_its_known_issues_entry_says_and_the_gate_agrees():
         entry = known_issues.BY_ID.get(kid) or known_issues.RUN_BY_ID[kid]
         want = "fixed" if entry[6] else "accepted" if kid in parity_gate.ACCEPTED_KINDS else "listed"
         assert s.expect.get("ends_as") == want, (kid, s.expect.get("ends_as"), want)
-        if s.act and kid != "run.db_rollback":
+        if s.act and kid != "run.db_rollback" and not (s.expect.get("or_source") or s.expect.get("or_evidence")):
             assert s.expect.get(want) == kid, (kid, s.expect)
 
 

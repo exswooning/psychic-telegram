@@ -208,7 +208,18 @@ class _ErrorActDriver(C.Driver):
 IMPLEMENTED = ("err:gmail.labels_missing", "err:drive.mtime", "err:drive.missing_on_target",
               "err:drive.grant_missing", "err:contacts.missing_on_target", "err:tasks.list_missing",
               "err:gmail.unmapped_source", "err:drive.content_changed", "err:contacts.unmapped_source")
-SEEDED_IMPLEMENTED = ("err:gmail.no_message_id", "err:drive.embedded_images", "err:tasks.untitled")
+SEEDED_IMPLEMENTED = (
+    "err:gmail.no_message_id", "err:drive.embedded_images", "err:tasks.untitled",
+    "err:drive.shortcut_target", "err:drive.comments", "err:run.comment_differs",
+    "err:drive.group_grant", "err:drive.sheet_too_large", "err:drive.comments_unreadable",
+    "err:drive.item_absent",
+    "err:run.malware_flag",
+    "err:gmail.labels_added", "err:gmail.duplicate", "err:gmail.body_link_copy",
+    "err:gmail.link_owner_not_migrated", "err:gmail.link_scan_encrypted", "err:run.mail_owed_to_dms",
+    "err:gmail.link_scan_fixed", "err:drive.sheets_scope", "err:drive.office_compared_as_native",
+    "err:drive.comment_quote_escaped",
+    "err:run.form_rebuild",
+)
 
 
 def _sandbox_domain_guard(monkeypatch):
@@ -276,13 +287,17 @@ class _SeededActDriver(C.Driver):
         kind = self.scenario.id.split(":", 1)[1]
         import known_issues
         import parity_gate
-        entry = known_issues.BY_ID[kind]
+        entry = known_issues.BY_ID.get(kind) or known_issues.RUN_BY_ID[kind]
         end = "fixed" if entry[6] else "accepted" if kind in parity_gate.ACCEPTED_KINDS else "listed"
-        service = self.scenario.expect.get("service", "drive")
-        return {"findings": {kind}, "fixed": {kind} if self.handled and end == "fixed" else set(),
+        service = self.scenario.expect.get("service") or ("drive" if kind.startswith("run.") else kind.split(".", 1)[0])
+        evidence = self.scenario.expect.get("or_evidence")
+        handled_absence = self.scenario.how == "must_not_happen"
+        findings = set() if self.handled and (evidence or handled_absence) else {kind}
+        audit_counts = {tuple(evidence): 1} if self.handled and evidence else {}
+        return {"findings": findings, "fixed": {kind} if self.handled and end == "fixed" else set(),
                 "gate": {"accepted": {kind} if self.handled and end == "accepted" else set(),
                          "listed": {kind} if self.handled and end == "listed" else set()},
-                "audit_counts": {}, "verdicts": {service: "IDENTICAL"}}
+                "audit_counts": audit_counts, "verdicts": {service: "IDENTICAL"}}
 
 
 def test_seeded_fixture_acts_run_through_the_driver_and_fail_when_unhandled():
@@ -310,7 +325,18 @@ def test_seeded_fixture_acts_run_through_the_driver_and_fail_when_unhandled():
         prepare = next(e for e in positive.events if e[0] == "prepare")
         assert prepare[1:] == (sc.seed_fixtures, f"{owner}@a.sandbox.test")
         kinds = [e[0] for e in positive.events]
-        assert kinds.index("prepare") < kinds.index("api") < kinds.index("verify") < kinds.index("source_has")
+        assert kinds.index("prepare") < kinds.index("api") < kinds.index("verify")
+        if sc.expect.get("or_source") or sc.expect.get("needs_source"):
+            assert kinds.index("verify") < kinds.index("source_has")
+        else:
+            assert "source_has" not in kinds
+        followups = sc.act.get("after", ())
+        if followups:
+            apis = [event for event in positive.events if event[0] == "api"]
+            assert len(apis) == 1 + len(followups)
+            assert apis[-1][2] == followups[0]["path"]
+            assert apis[-1][3] == followups[0]["body"]
+            assert positive.events.index(apis[-1]) < max(i for i, event in enumerate(positive.events) if event[0] == "verify")
 
         negative = _SeededActDriver(sc, handled=False)
         failed = C.run_scenario(sc, negative, "offline", set())
