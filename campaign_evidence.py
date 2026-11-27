@@ -202,7 +202,7 @@ PROBES = {
     "drive.embedded_images": _by_name("fableplan2 doc with image", "application/vnd.google-apps.document"),
     "run.form_rebuild": _by_name("fableplan2 ward survey", "application/vnd.google-apps.form"),
     "drive.group_grant": _group_grant,
-    "gmail.no_message_id": _mail("Old mail with no Message-ID"),
+    "gmail.no_message_id": _mail("No Message-ID link fixture"),
     "gmail.body_link_copy": _mail("Re: link"),
     "gmail.link_owner_not_migrated": _mail("Link: a file of a user outside the run"),
     "tasks.untitled": _untitled_task,

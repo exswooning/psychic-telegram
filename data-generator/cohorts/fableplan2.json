@@ -44,6 +44,7 @@
    "events": 6,
    "fixtures": [
     "mail_shapes",
+    "mail_no_message_id_link",
     "mail_threads"
    ]
   },

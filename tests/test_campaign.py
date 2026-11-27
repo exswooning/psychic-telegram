@@ -104,7 +104,7 @@ class FakeDriver(C.Driver):
         self.calls.append("twin")
         return "t02"
 
-    def prepare(self, fixtures):
+    def prepare(self, fixtures, user=None):
         self.calls.append(("prepare", fixtures))
 
     def api(self, method, path, body):
@@ -266,7 +266,7 @@ def test_a_dry_run_touches_nothing(tmp_path, monkeypatch, capsys):
 
 
 def test_a_cause_the_driver_cannot_make_yet_is_unverified_not_failed():
-    sc = S.Scenario(id="x", group="errors", title="t", how="changed_after", act={"path": "/p"},
+    sc = S.Scenario(id="err:drive.mtime", group="errors", title="t", how="changed_after", act={"path": "/p"},
                     inject={"cause": "touch a file on b."}, expect={"finding_classified": "drive.mtime"})
     row = C.run_scenario(sc, FakeDriver(boom=C.Unautomated("inject touch a file on b.")), "n", set())
     assert row["status"] == "UNVERIFIED" and "not automated yet" in row["reason"]
@@ -343,13 +343,17 @@ class _ChangeDriver(FakeDriver):
     def verify(self, user, service):
         self.calls.append(("verify", user, service))
 
-    def delta(self, user):
-        self.calls.append(("delta", user))
+    def delta(self, user, service="drive"):
+        self.calls.append(("delta", user, service))
+
+
+_CHANGE_ACT = {"path": "/api/v2/migrate/start", "body": {"users": ["$user"], "services": ["drive"]}}
 
 
 def test_a_changed_after_scenario_changes_a_twin_checks_it_and_reads_the_fix_log():
     d = _ChangeDriver(facts={"findings": {"drive.mtime"}, "fixed": {"drive.mtime"}})
     s = S.Scenario("err:drive.mtime", "errors", "t", "changed_after",
+                   act=_CHANGE_ACT,
                    expect={"finding_classified": "drive.mtime", "service": "drive", "fixed": "drive.mtime"})
     r = C.run_scenario(s, d, "t", set())
     assert r["status"] == "PASS" and ("change", "drive.mtime", "t02") in d.calls and ("verify", "t02", "drive") in d.calls
@@ -358,6 +362,7 @@ def test_a_changed_after_scenario_changes_a_twin_checks_it_and_reads_the_fix_log
 def test_a_change_found_but_not_fixed_fails():
     d = _ChangeDriver(facts={"findings": {"drive.mtime"}, "fixed": set()})
     s = S.Scenario("err:drive.mtime", "errors", "t", "changed_after",
+                   act=_CHANGE_ACT,
                    expect={"finding_classified": "drive.mtime", "service": "drive", "fixed": "drive.mtime"})
     assert C.run_scenario(s, d, "t", set())["status"] == "FAIL"
 
@@ -365,6 +370,7 @@ def test_a_change_found_but_not_fixed_fails():
 def test_an_edit_on_the_source_is_followed_by_a_delta_and_a_second_check():
     d = _ChangeDriver(facts={"findings": {"drive.content_changed"}, "fixed": {"drive.content_changed"}})
     s = S.Scenario("err:drive.content_changed", "errors", "t", "changed_after",
+                   act=_CHANGE_ACT,
                    expect={"finding_classified": "drive.content_changed", "service": "drive", "fixed": "drive.content_changed"})
     assert C.run_scenario(s, d, "t", set())["status"] == "PASS"
     kinds = [c[0] for c in d.calls if isinstance(c, tuple)]

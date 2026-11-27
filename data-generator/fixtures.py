@@ -193,6 +193,24 @@ def mail_shapes(ctx: Ctx) -> dict:
     return {"made": made, "notes": notes}
 
 
+@fixture("mail_no_message_id_link")
+def mail_no_message_id_link(ctx: Ctx) -> dict:
+    """A distinct no-Message-ID link mail for split mode: link rewriting must find the exact copy by MIME hash."""
+    subject = "No Message-ID link fixture"
+    if _made(ctx, "gmail", f'subject:"{subject}"'):
+        return {"made": 0, "notes": ["already made"]}
+    ids = [v for v in (ctx.items or {}).values() if isinstance(v, str)]
+    if not ids:
+        return {"made": 0, "notes": ["no seeded Drive file to link"]}
+    raw = _raw(_headers(ctx, subject, message_id=None),
+               f"See https://drive.google.com/open?id={ids[0]}")
+    try:
+        ctx.seed.insert_message(ctx.gmail, ctx.retry, raw, ["INBOX"])
+        return {"made": 1, "notes": []}
+    except Exception as exc:      # noqa: BLE001
+        return {"made": 0, "notes": [f"{type(exc).__name__}: {str(exc)[:140]}"]}
+
+
 @fixture("mail_threads")
 def mail_threads(ctx: Ctx) -> dict:
     """A three-message conversation: Gmail threads an inserted message only with the first one's threadId,

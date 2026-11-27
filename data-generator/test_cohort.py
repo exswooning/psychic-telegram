@@ -33,6 +33,7 @@ def test_an_unknown_fixture_param_duplicate_or_bad_name_is_refused(tmp_path):
 def test_every_fixture_a_scenario_names_exists():
     import campaign_scenarios as S
     wanted = {f for sc in S.all_scenarios() for f in sc.fixtures if not (len(f) == 3 and f[0] in "ct" and f[1:].isdigit())}
+    wanted |= {f for sc in S.all_scenarios() for f in sc.seed_fixtures}
     assert wanted <= set(F.REGISTRY), sorted(wanted - set(F.REGISTRY))
 
 
@@ -41,7 +42,8 @@ def test_entries_carry_each_users_knobs_and_twins_share_content(monkeypatch):
     entries = F.entries_from_cohort(F.load_cohort(COHORT), "a.example")
     by = {e["local"]: e for e in entries}
     assert by["c01"]["edge_cases"] is True and by["c10"]["params"]["bulk_messages"] == 5000
-    assert by["c04"]["fixtures"][0] == "mail_shapes" and by["t01"]["email"] == "t01@a.example"
+    assert by["c04"]["fixtures"][0] == "mail_shapes" and "mail_no_message_id_link" in by["c04"]["fixtures"]
+    assert by["t01"]["email"] == "t01@a.example"
     assert corpus.stable_seed("t01@a.example") == corpus.stable_seed("t02@a.example")
     assert corpus.stable_seed("c01@a.example") != corpus.stable_seed("c02@a.example")
 
@@ -57,7 +59,9 @@ class _Gmail:
         return self
 
     def list(self, userId, q="", maxResults=1, includeSpamTrash=False):
-        hit = [{"id": "m"}] if self.raws and "twice" in q else []
+        hit = [{"id": "m"}] if ((self.raws and "twice" in q)
+                                  or ("No Message-ID link fixture" in q
+                                      and any(b"No Message-ID link fixture" in raw for raw in self.raws))) else []
         return type("R", (), {"execute": lambda s: {"messages": hit}})()
 
     def insert(self, userId, body, media_body=None, internalDateSource=""):
@@ -97,6 +101,18 @@ def test_mail_shapes_makes_every_awkward_message(monkeypatch):
     assert len(ids) - len(set(ids)) == 1                                                    # exactly one id appears twice
     assert any(not r.isascii() for r in g.raws) and any(b"pkcs7-mime" in r for r in g.raws)
     assert b"drive.google.com/drive/folders/" in b"".join(g.raws) and b"docs.google.com/document/d/" in b"".join(g.raws)
+
+
+def test_the_missing_message_id_fixture_is_a_split_link_and_idempotent(monkeypatch):
+    g = _Gmail()
+    ctx = _ctx(monkeypatch, g)
+    first = F.mail_no_message_id_link(ctx)
+    again = F.mail_no_message_id_link(ctx)
+    raw = g.raws[0]
+    assert first == {"made": 1, "notes": []}
+    assert again == {"made": 0, "notes": ["already made"]}
+    assert b"No Message-ID link fixture" in raw and b"drive.google.com/open?id=" in raw
+    assert b"Message-ID:" not in raw.split(b"\r\n\r\n", 1)[0]
 
 
 def test_a_refused_shape_is_a_note_not_a_crash(monkeypatch):

@@ -36,6 +36,7 @@ class Scenario:
     title: str
     how: str
     fixtures: tuple = ()
+    seed_fixtures: tuple = ()    # names in data-generator/fixtures.py, seeded on the fixture user in a.
     act: dict = field(default_factory=dict)
     inject: dict = field(default_factory=dict)
     expect: dict = field(default_factory=dict)
@@ -96,6 +97,34 @@ _ERRORS = {
     "chat": ({"chat.not_migrated": "c07", "chat.attributed": "c07", "chat.space_type": "c07", "chat.members": "c07",
               "chat.sender": "c07", "chat.text": "c07"}, "opt-in, outside the score"),
 }
+
+# Explicit source fixtures for the seeded and must-not-happen error cases. The
+# cohort seed uses these same names; tests keep the registry and owner aligned.
+_ERROR_FIXTURES = {
+    "gmail.labels_added": ("mail_shapes",), "gmail.duplicate": ("mail_shapes",),
+    "gmail.no_message_id": ("mail_no_message_id_link",), "gmail.body_link_copy": ("mail_shapes",),
+    "gmail.link_owner_not_migrated": ("mail_shapes",), "gmail.link_scan_encrypted": ("mail_shapes",),
+    "run.mail_owed_to_dms": ("mail_shapes",),
+    "drive.shortcut_target": ("drive_shortcuts",), "drive.item_absent": ("colleague_shortcut",),
+    "drive.group_grant": ("sharing_extras",), "drive.embedded_images": ("doc_with_image",),
+    "run.form_rebuild": ("forms_basic",), "drive.comments": ("drive_comments",),
+    "run.comment_differs": ("comment_actions",), "drive.comments_unreadable": ("forms_basic",),
+    "drive.sheet_too_large": ("big_sheet",), "tasks.untitled": ("tasks_shapes",),
+    "run.malware_flag": ("eicar",),
+    "gmail.link_scan_fixed": ("mail_shapes",), "drive.sheets_scope": ("big_sheet",),
+    "drive.comment_quote_escaped": ("drive_comments",),
+}
+_SEEDED_ACTS = {"gmail.no_message_id", "drive.embedded_images", "tasks.untitled"}
+
+
+def _seeded_act(kid: str) -> tuple[dict, dict]:
+    """A scoped product migration plus the check that reads the seeded case."""
+    service = "drive" if kid.startswith("run.") else kid.split(".", 1)[0]
+    if service == "gmail":
+        # The missing-Message-ID fixture carries a Drive link, so split mode
+        # sends this one candidate through the engine without moving bulk mail.
+        return _migrate(services=["drive", "gmail"], mail_mode="split", dms_after=False), {"verify_after": "gmail"}
+    return _migrate(services=[service]), {"verify_after": service}
 # What covers an unseedable or google-decided kind when it cannot be caused live.
 UNIT_TESTS = {
     "run.resource_key": "tests/test_resource_keys.py",
@@ -181,6 +210,15 @@ _ACT = {
     **{k: (_migrate(services=["chat"]), {}, {"verify_after": "chat"})
        for k in ("chat.attributed", "chat.space_type", "chat.members", "chat.sender", "chat.text")},
 }
+
+# The changed-after acts always make a baseline copy first, then make exactly one
+# change on a. or b. and read it with the normal check/repair path. Keep this list
+# explicit so an unimplemented change stays UNVERIFIED in the campaign.
+_CHANGED_AFTER_ACTS = {
+    "gmail.labels_missing", "drive.mtime", "drive.missing_on_target", "drive.grant_missing",
+    "contacts.missing_on_target", "tasks.list_missing", "gmail.unmapped_source",
+    "drive.content_changed", "contacts.unmapped_source",
+}
 # Kinds a failure scenario causes: this one reads what that one left on its twin (so that one runs first).
 _VIA_FAILURE = {"run.disk_full": "fail:F-disk", "run.db_rollback": "fail:F-disk", "run.dns": "fail:F-net-12"}
 
@@ -202,8 +240,13 @@ def _errors() -> list:
             end = _ends(kid)
             if how == "changed_after":
                 expect = {"finding_classified": kid, "ends_as": end, "service": kid.split(".")[0],
-                          **({end: kid} if end != "listed" else {})}
+                          **{end: kid}}
             act, inject, more = _ACT.get(kid, ({}, None, {}))
+            if how == "seeded" and kid in _SEEDED_ACTS:
+                act, more = _seeded_act(kid)
+                expect.update({**more, end: kid})
+            if how == "changed_after" and kid in _CHANGED_AFTER_ACTS:
+                act = _migrate(services=[kid.split(".")[0]])
             if kid in _ACT or kid in _VIA_FAILURE:
                 # a fixed defect must not return; every other kind is classified, then ends as its entry says
                 expect = ({"finding_absent": kid, "ends_as": end} if kid == "run.db_rollback"
@@ -214,6 +257,7 @@ def _errors() -> list:
             out.append(Scenario(
                 id=f"err:{kid}", group=group, title=f"{kid} ({why})", how=how, act=act,
                 fixtures=(what,) if what in {f"c{n:02d}" for n in range(1, 11)} else (),
+                seed_fixtures=_ERROR_FIXTURES.get(kid, ()),
                 inject=inject if inject is not None else (
                     {"failure": _VIA_FAILURE[kid]} if kid in _VIA_FAILURE else
                     {"cause": what} if how in ("changed_after", "on_target", "failpoint", "failure",
