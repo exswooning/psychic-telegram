@@ -265,21 +265,91 @@ def test_a_natural_exit_does_not_count_as_an_audited_stop():
         run_steps([{"do": "wait_exit", "stopped": True}], RecDriver(exit_code=0))
 
 
+def test_live_job_pid_uses_the_newest_terminal_run_in_the_cutoff_second(monkeypatch):
+    import job_admission
+    import run_watch
+
+    live = C.LiveDriver.__new__(C.LiveDriver)
+    live.account_id, live.started = 5, "2026-11-27T02:45:51Z"
+    whole = {"pid": 1, "jobName": "delta", "startedAt": live.started, "running": False, "rc": 0}
+    recent = {**whole, "pid": 2, "startedAt": "2026-11-27T02:45:51.997Z", "rc": 1}
+    monkeypatch.setattr(job_admission, "list_active", lambda: [
+        {"account_id": 7, "job_name": "delta", "pid": 10}])
+    monkeypatch.setattr(run_watch, "list_runs", lambda account, limit: [
+        {**whole, "pid": 3, "startedAt": "2026-11-27T08:30:50.999+05:45"},
+        {**whole, "pid": 4, "startedAt": "unknown"}, whole, recent])
+
+    assert live.job_pid("delta", timeout=0) == 2
+    assert live.exit_of(2) == 1
+    assert live.job_pid("delta", exclude={2}, timeout=0) == 1
+    assert live.job_pid("delta", exclude={1, 2}, timeout=0) is None
+    assert live.job_pid("delta", active_only=True, timeout=0) is None
+
+
+def test_live_job_pid_still_takes_the_account_current_active_job_first(monkeypatch):
+    import job_admission
+    import run_watch
+
+    live = C.LiveDriver.__new__(C.LiveDriver)
+    live.account_id, live.started = 5, "2026-11-27T02:45:51Z"
+    monkeypatch.setattr(job_admission, "list_active", lambda: [
+        {"account_id": 5, "job_name": "delta", "pid": 10, "started_at": "2026-11-27T02:45:50Z"}])
+    monkeypatch.setattr(run_watch, "list_runs", lambda *a, **kw: pytest.fail("history must remain a fallback"))
+    assert live.job_pid("delta", timeout=0) == 10
+
+
 def test_live_stop_evidence_uses_the_current_finished_migrations_pid_and_start(monkeypatch):
     import run_watch
 
     live = C.LiveDriver.__new__(C.LiveDriver)
     live.account_id, live.started = 5, "2026-11-24T11:00:00Z"
     before = {"pid": 1, "jobName": "migrate", "running": False, "startedAt": "2026-11-24T10:59:59Z"}
-    current = {**before, "pid": 2, "startedAt": "2026-11-24T11:01:00Z"}
+    current = {**before, "pid": 2, "startedAt": "2026-11-24T11:00:00.997Z"}
     calls = []
     monkeypatch.setattr(run_watch, "list_runs", lambda account, limit: [
-        {**current, "pid": 3, "jobName": "verify"}, current, before])
+        {**current, "pid": 3, "jobName": "verify"},
+        {**current, "pid": 4, "startedAt": "unknown"}, current, before])
     monkeypatch.setattr(run_watch, "stopped_by", lambda pid, since: calls.append((pid, since)) or "test")
     assert not live.stop_was_audited(1)
     assert not live.stop_was_audited(3)
     assert live.stop_was_audited(2)
+    assert not live.stop_was_audited(4)
     assert calls == [(2, current["startedAt"])]
+
+
+def test_live_exit_counts_same_second_stop_and_crash_separately(monkeypatch):
+    import run_watch
+
+    live = C.LiveDriver.__new__(C.LiveDriver)
+    live.account_id, live.started = 5, "2026-11-27T02:45:51Z"
+    stopped = {"pid": 1, "startedAt": "2026-11-27T02:45:51.100Z", "running": False, "rc": -15}
+    crashed = {"pid": 2, "startedAt": "2026-11-27T02:45:51.997Z", "running": False, "rc": 1}
+    rows = [stopped, crashed, {**crashed, "pid": 3, "startedAt": "2026-11-27T02:45:50.999Z"}]
+    monkeypatch.setattr(run_watch, "list_runs", lambda *a, **kw: rows)
+    monkeypatch.setattr(run_watch, "stopped_by", lambda pid, since: "operator" if pid == 1 else None)
+
+    exits = live.exits()
+    assert exits == {"stopped": 1, "crashed": 1}
+    assert C.judge({"stopped_not_crashed": True}, {"exits": exits})[0] == "FAIL"
+
+    rows.append({**crashed, "pid": 4, "startedAt": "2026-11-27", "finishedAt": "2026-11-27T02:45:50.999Z"})
+    assert live.exits() == exits
+
+    rows.append({**crashed, "pid": 5, "startedAt": None, "finishedAt": "2026-11-27T02:45:51.999Z"})
+    with pytest.raises(C.Unautomated, match="start time"):
+        live.exits()
+
+
+def test_live_incidents_include_only_events_opened_after_the_cutoff(monkeypatch):
+    import run_watch
+
+    live = C.LiveDriver.__new__(C.LiveDriver)
+    live.account_id, live.started = 5, "2026-11-27T02:45:51Z"
+    current = {"kind": "current", "opened_at": "2026-11-27T02:45:51.997Z", "status": "resolved"}
+    monkeypatch.setattr(run_watch, "list_incidents", lambda **kw: [
+        current, {**current, "kind": "stale", "opened_at": "2026-11-27T02:45:50.999Z"},
+        {**current, "kind": "unknown", "opened_at": "unknown"}])
+    assert live.incidents() == {"current": {"opens", "closes"}}
 
 
 def test_a_step_that_raises_is_a_failed_scenario_and_an_unmakeable_one_is_unverified():

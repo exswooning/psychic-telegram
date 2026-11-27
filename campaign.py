@@ -138,10 +138,23 @@ TWINS = tuple(f"t{n:02d}" for n in range(2, 21))      # t01 is the control
 CONTROL = "t01"
 
 
+def _evidence_time(timestamp: str | None) -> float | None:
+    """Compare UTC instants because run and ledger evidence may use different precision."""
+    from run_watch import _epoch
+
+    if not isinstance(timestamp, str) or not re.match(r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}", timestamp):
+        return None
+    return _epoch(timestamp)
+
+
 def recovery_facts(conn, user: str, control: str, since: str) -> dict:
     """Compare full item checks and each mailbox's own expected counts."""
     from parity_gate import SERVICES as checked_services
     from tally import SERVICES as tallied_services
+
+    cutoff = _evidence_time(since)
+    if since and cutoff is None:
+        return {}
 
     checks = {user: {}, control: {}}
     for address, service, verdict, checked_at, raw in conn.execute(
@@ -150,7 +163,8 @@ def recovery_facts(conn, user: str, control: str, since: str) -> dict:
         payload = json.loads(raw or "{}")
         if payload.get("completion") != "COMPLETE" or payload.get("sampled"):
             continue
-        if not checked_at or (address == user and checked_at < since):
+        checked = _evidence_time(checked_at)
+        if checked is None or (address == user and cutoff is not None and checked < cutoff):
             continue
         duplicates = (payload.get("counts") or {}).get("duplicates")
         if type(duplicates) is int and duplicates >= 0:
@@ -168,7 +182,8 @@ def recovery_facts(conn, user: str, control: str, since: str) -> dict:
     for address, recorded_at, raw in conn.execute(
             "SELECT source_user, recorded_at, payload FROM user_tally WHERE source_user IN (?, ?)", (user, control)):
         services = json.loads(raw or "{}").get("services") or {}
-        if not recorded_at or (address == user and recorded_at < since):
+        recorded = _evidence_time(recorded_at)
+        if recorded is None or (address == user and cutoff is not None and recorded < cutoff):
             continue
         if any(services.get(service, {}).get("usersCompared") != 1 for service in tallied_services):
             continue
@@ -460,14 +475,18 @@ class LiveDriver(Driver):
         import job_admission
         import run_watch
         end = time.time() + timeout
+        cutoff = _evidence_time(self.started)
         while True:
             for j in reversed(job_admission.list_active()):
                 if j.get("account_id") == self.account_id and job in (None, j["job_name"]) and j["pid"] not in exclude:
                     return j["pid"]
-            if not active_only:
-                for r in run_watch.list_runs(self.account_id, limit=20):
-                    if job in (None, r["jobName"]) and r["pid"] not in exclude and (r["startedAt"] or "") >= self.started:
-                        return r["pid"]
+            if not active_only and cutoff is not None:
+                candidates = ((started, r["pid"]) for r in run_watch.list_runs(self.account_id, limit=20)
+                              if not r["running"] and job in (None, r["jobName"]) and r["pid"] not in exclude
+                              and (started := _evidence_time(r["startedAt"])) is not None and started >= cutoff)
+                newest = max(candidates, key=lambda r: r[0], default=None)
+                if newest is not None:
+                    return newest[1]
             if time.time() >= end:
                 return None
             time.sleep(min(self.poll, 2))
@@ -547,17 +566,25 @@ class LiveDriver(Driver):
 
     def stop_was_audited(self, pid: int) -> bool:
         import run_watch
-        run = next((r for r in run_watch.list_runs(self.account_id, limit=50)
-                    if r["pid"] == pid and r["jobName"] == "migrate" and not r["running"]
-                    and (r["startedAt"] or "") >= self.started), None)
-        return run is not None and bool(run_watch.stopped_by(pid, run["startedAt"]))
+        cutoff = _evidence_time(self.started)
+        if cutoff is None:
+            return False
+        candidates = ((started, r["startedAt"]) for r in run_watch.list_runs(self.account_id, limit=50)
+                      if r["pid"] == pid and r["jobName"] == "migrate" and not r["running"]
+                      and (started := _evidence_time(r["startedAt"])) is not None and started >= cutoff)
+        newest = max(candidates, key=lambda r: r[0], default=None)
+        return newest is not None and bool(run_watch.stopped_by(pid, newest[1]))
 
     def incidents(self) -> dict:
         """{incident kind: {"opens", "closes"}} for the incidents opened since this scenario's twin was taken."""
         import run_watch
         out: dict = {}
+        cutoff = _evidence_time(self.started)
+        if cutoff is None:
+            return out
         for inc in run_watch.list_incidents(account_id=self.account_id, limit=500):
-            if (inc.get("opened_at") or "") >= self.started:
+            opened = _evidence_time(inc.get("opened_at"))
+            if opened is not None and opened >= cutoff:
                 out.setdefault(inc.get("kind"), set()).add("opens")
                 if inc.get("status") == "resolved":
                     out[inc.get("kind")].add("closes")
@@ -566,9 +593,20 @@ class LiveDriver(Driver):
     def exits(self) -> dict:
         """Runs since the twin was taken that ended non-zero: STOPPED (an audited Stop names the pid) or crashed."""
         import run_watch
+        cutoff = _evidence_time(self.started)
+        if cutoff is None:
+            raise Unautomated("could not read the scenario start time for exit evidence")
         out = {"stopped": 0, "crashed": 0}
         for r in run_watch.list_runs(self.account_id, limit=200):
-            if not r["running"] and r["rc"] not in (None, 0) and (r["startedAt"] or "") >= self.started:
+            if r["running"] or r["rc"] in (None, 0):
+                continue
+            started = _evidence_time(r["startedAt"])
+            if started is None:
+                finished = _evidence_time(r.get("finishedAt"))
+                if finished is not None and finished < cutoff:
+                    continue
+                raise Unautomated("could not read a failed run's start time for exit evidence")
+            if started >= cutoff:
                 out["stopped" if run_watch.stopped_by(r["pid"], r["startedAt"]) else "crashed"] += 1
         return out
 

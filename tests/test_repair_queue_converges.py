@@ -38,7 +38,7 @@ def test_queued_manifest_gaps_reach_the_repair_even_when_the_fresh_check_is_iden
     R.enable(db)
     queue(db, "drive", DRIVE_GAP)
     seen = {}
-    monkeypatch.setattr(R, "scoped_repair", lambda auth, db_, st, user, work: seen.update(work) or {})
+    monkeypatch.setattr(R, "scoped_repair", lambda auth, db_, st, user, work, *_: seen.update(work) or {})
     # The backlog's own check samples, so it neither lists the manifest gap nor closes it.
     R.finished_user(None, db, settings, U, {"drive": result(sampled={"of": 100})}, None, lambda f: f, lambda m: None)
     assert [i["id"] for i in seen["drive"]["notCopied"]] == ["f1"]

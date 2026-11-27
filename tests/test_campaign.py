@@ -167,18 +167,20 @@ def test_a_failure_scenario_must_end_equal_to_the_control_with_nothing_twice():
 
 
 @pytest.mark.parametrize(
-    ("verdict", "duplicates", "sampled", "checked_at", "mail_count", "contacts_count", "status"),
+    ("verdict", "duplicates", "sampled", "checked_at", "tallied_at", "mail_count", "contacts_count", "status"),
     [
-        ("IDENTICAL", 0, None, "2026-11-24T13:01:00Z", 335, 25, "PASS"),
-        ("DIFFERENCES", 2, None, "2026-11-24T13:01:00Z", 353, 25, "FAIL"),
-        ("IDENTICAL", 0, {"checked": 25, "of": 321}, "2026-11-24T13:01:00Z", 335, 25, "UNVERIFIED"),
-        ("IDENTICAL", 0, None, "2026-11-24T12:59:00Z", 335, 25, "UNVERIFIED"),
-        ("IDENTICAL", 0, None, "2026-11-24T13:01:00Z", 320, 25, "FAIL"),
-        ("IDENTICAL", 0, None, "2026-11-24T13:01:00Z", 335, 50, "FAIL"),
+        ("IDENTICAL", 0, None, "2026-11-24T13:00:00.997Z", "2026-11-24T13:00:00.999Z", 335, 25, "PASS"),
+        ("DIFFERENCES", 2, None, "2026-11-24T13:01:00Z", "2026-11-24T13:02:00Z", 353, 25, "FAIL"),
+        ("IDENTICAL", 0, {"checked": 25, "of": 321}, "2026-11-24T13:01:00Z", "2026-11-24T13:02:00Z", 335, 25, "UNVERIFIED"),
+        ("IDENTICAL", 0, None, "2026-11-24T18:44:59.999+05:45", "2026-11-24T13:02:00Z", 335, 25, "UNVERIFIED"),
+        ("IDENTICAL", 0, None, "2026-11-24T13:01:00Z", "unknown", 335, 25, "UNVERIFIED"),
+        ("IDENTICAL", 0, None, "2026-11-24T13:01:00Z", "2026-11-24T18:44:59.999+05:45", 335, 25, "UNVERIFIED"),
+        ("IDENTICAL", 0, None, "2026-11-24T13:01:00Z", "2026-11-24T13:02:00Z", 320, 25, "FAIL"),
+        ("IDENTICAL", 0, None, "2026-11-24T13:01:00Z", "2026-11-24T13:02:00Z", 335, 50, "FAIL"),
     ],
 )
 def test_recovery_requires_current_full_verification_and_uses_each_twins_expected_count(
-        verdict, duplicates, sampled, checked_at, mail_count, contacts_count, status):
+        verdict, duplicates, sampled, checked_at, tallied_at, mail_count, contacts_count, status):
     import json
     import sqlite3
 
@@ -206,7 +208,8 @@ def test_recovery_requires_current_full_verification_and_uses_each_twins_expecte
             if user == twin:
                 services["contacts"]["target"] = contacts_count
             conn.execute("INSERT INTO user_tally VALUES (?, ?, ?)",
-                         (user, "2026-11-24T13:02:00Z", json.dumps({"services": services})))
+                         (user, "2026-11-23T03:10:00Z" if user == control else tallied_at,
+                          json.dumps({"services": services})))
 
         facts = C.recovery_facts(conn, twin, control, start)
         outcome, reason = C.judge({"equal_to_control": True, "no_item_twice": True}, facts)

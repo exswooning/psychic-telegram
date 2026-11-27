@@ -627,7 +627,8 @@ def _finish_reattached(row: dict) -> None:
         pass
     rc = job_exit.read(row["pid"], since=started)
     try:
-        run_watch.record_finished(row["account_id"], row["job_name"], rc, row["pid"])
+        run_watch.record_finished(row["account_id"], row["job_name"], rc, row["pid"],
+                                  started_at=row["started_at"])
     except Exception as exc:      # noqa: BLE001 - recording must never block the release
         print(f"could not record the exit of reattached {row['job_name']!r}: {exc}", flush=True)
     job_admission.release(row["account_id"], row["job_name"])
@@ -2134,8 +2135,8 @@ def _start_admitted(argv: list[str], account_id: int | None, job_name: str,
     # without the command that started it nothing can put it back. The API
     # process that knew the argv is usually long restarted by the time a
     # stall is noticed.
-    job_admission.record_launch(account_id, job_name, proc.pid, argv, HERE,
-                                 then=followups or None)
+    admitted_at = job_admission.record_launch(account_id, job_name, proc.pid, argv, HERE,
+                                             then=followups or None)
     started = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
     def _wait_then_release() -> None:
@@ -2150,7 +2151,7 @@ def _start_admitted(argv: list[str], account_id: int | None, job_name: str,
         # and the watcher records the exit as not observed rather than guessing.)
         try:
             import run_watch
-            run_watch.record_finished(account_id, job_name, rc, proc.pid)
+            run_watch.record_finished(account_id, job_name, rc, proc.pid, started_at=admitted_at or started)
         except Exception as exc:      # noqa: BLE001 - recording must never block the release
             print(f"could not record the exit of {job_name!r}: {exc}", flush=True)
         job_admission.release(account_id, job_name)
@@ -4543,26 +4544,18 @@ async def benchmark_start(body: StartBenchmark, op: Operator = Depends(operator)
     RBAC + Reason Code (as everything) + a typed domain that must match
     TARGET_DOMAIN, which reset_target.py then re-checks independently.
     """
-    from config import Settings
+    from benchmark_run import benchmark_scope
 
-    # Scoped to the caller: this is the typed-confirmation gate for an
-    # action that can wipe a target tenant, and comparing against the
-    # LEGACY env.sh domain meant a SaaS account was being asked to confirm
-    # somebody else's tenant name. Same bare-Settings() bug as
-    # /api/v2/dwd/status. reset_target.py re-checks independently, so this
-    # was defence-in-depth rather than the only guard -- but a confirmation
-    # prompt that names the wrong tenant is worse than no prompt, because
-    # it reads as verification.
-    st = Settings(account_id=op.account_id)
-    target = (st.target_domain or "").strip().lower()
-    typed = (body.confirm_domain or "").strip().lower()
-    if not target:
-        raise HTTPException(400, "TARGET_DOMAIN is not configured")
-    if typed != target:
-        source = (st.source_domain or "").strip().lower()
-        extra = (" -- that is the SOURCE domain" if typed and typed == source else "")
-        raise HTTPException(400, f"{typed!r} does not match the target domain "
-                                 f"{target!r}{extra}")
+    account_id = _resolve_account(body, op)
+    scoped_env = None
+
+    def _validate(_op: Operator) -> None:
+        nonlocal scoped_env
+        try:
+            _, scoped_env = benchmark_scope(account_id, body.confirm_domain)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
     # No ceiling of 4 here any more. Its reason -- "the account is already at
     # Google's 3 writes/sec ceiling at 4" -- assumed ~1.33 s per file; the
     # measured figure is 2.47 s (resources.MIGRATE_FILE_SECONDS), which puts
@@ -4572,10 +4565,10 @@ async def benchmark_start(body: StartBenchmark, op: Operator = Depends(operator)
     def _launch() -> tuple[bool, str]:
         argv = [PY, "benchmark_run.py", "--label", body.label,
                 "--confirm-domain", body.confirm_domain,
-                "--services", body.services, "--yes"]
+                "--services", body.services, "--yes", *_account_argv(account_id)]
         if body.skip_wipe:
             argv.append("--skip-wipe")
-        env = dict(os.environ)
+        env = scoped_env if scoped_env is not None else dict(os.environ)
         env["DRIVE_FILE_WORKERS"] = str(body.drive_file_workers)
         env["DRIVE_WRITE_QPS"] = str(body.drive_write_qps)
         log = os.path.join(HERE, f"benchmark-{body.label}.log")
@@ -4587,7 +4580,7 @@ async def benchmark_start(body: StartBenchmark, op: Operator = Depends(operator)
                       f"(W={body.drive_file_workers}, qps={body.drive_write_qps}) "
                       f"-> {log}")
 
-    return await _gated(op, "benchmark.start", body, body.label, _launch)
+    return await _gated(op, "benchmark.start", body, body.label, _launch, extra_check=_validate)
 
 
 @app.get("/api/v2/benchmark/results")

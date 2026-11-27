@@ -177,7 +177,8 @@ def list_runs(account_id, limit: int = 200) -> list[dict]:
                 "startedAt": started["started_at"] or started["at"],
                 "finishedAt": None, "rc": None, "detail": "", "running": True,
             })
-    runs.sort(key=lambda x: x["startedAt"] or "", reverse=True)
+    runs.sort(key=lambda run: started if (started := _epoch(run["startedAt"])) is not None
+              else float("-inf"), reverse=True)
     return runs[:limit]
 
 

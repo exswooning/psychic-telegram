@@ -190,8 +190,8 @@ def _ensure_then_column(conn) -> None:
 
 
 def record_launch(account_id: int | None, job_name: str, pid: int,
-                  argv: list[str], cwd: str, then: list[str] | None = None) -> None:
-    """Store what it would take to start this job again.
+                  argv: list[str], cwd: str, then: list[str] | None = None) -> str | None:
+    """Store what it would take to start this job again and return its admission time.
 
     The supervisor can kill a wedged run and free its slot, but until this
     existed nothing could resume it: the argv lived only in the API process
@@ -214,6 +214,10 @@ def record_launch(account_id: int | None, job_name: str, pid: int,
             _ensure_then_column(conn)
             conn.execute("UPDATE active_jobs SET then_json=? WHERE pid=? AND job_name=?",
                          (json.dumps(list(then)), pid, job_name))
+        row = conn.execute(
+            "SELECT started_at FROM active_jobs WHERE account_id IS ? AND job_name=? "
+            "AND pid=? ORDER BY id LIMIT 1", (account_id, job_name, pid)).fetchone()
+        return row["started_at"] if row else None
 
 
 def with_follow_ons() -> list[dict]:

@@ -214,6 +214,13 @@ class TestListRuns:
         W.record_finished(2, "seed", 0, 101)
         assert [r["jobName"] for r in W.list_runs(2)] == ["seed", "migrate"]
 
+    def test_newest_first_with_mixed_timestamp_precision(self, cp):
+        W.record_started(2, "migrate", 100, "2026-09-26T01:00:00Z")
+        W.record_finished(2, "migrate", 0, 100)
+        W.record_finished(2, "verify", 0, 101, started_at="2026-09-26T01:00:00.997Z")
+        run, = W.list_runs(2, limit=1)
+        assert run["pid"] == 101
+
     def test_a_recycled_pid_pairs_each_run_with_its_own_started_event(self, cp):
         """Two separate runs of the same job, same pid, one after another -- not one
         run matched to the wrong started event, and not the two collapsed into one."""

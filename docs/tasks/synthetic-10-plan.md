@@ -586,6 +586,21 @@ rebuilt layouts (its slides render identical).
 
 ## 11. State (newest first)
 
+- 27 Nov 2026 (Codex): The VM installed the tested scoped Start release `cfcf36b` with
+  matching hashes, a rollback receipt and healthy services. The supervised Gmail delta copied
+  the exact six previously unmapped `t16` messages (PID 24694, exit 0). The fresh complete
+  read-only Gmail check matched 319 of 319, with zero outstanding items, errors or duplicates.
+  The non-fixing tally confirmed 319 expected and 319 present. There were no repair runs or
+  other-user audit events during this follow-up. Both tenant protections were active and the
+  verification repair policy remained paused. The original fault campaign's FAIL is retained.
+  The next unattended run needs its own fresh end-to-end recovery evidence.
+- 27 Nov 2026 (Codex): The scoped delta's finish exposed a text comparison between
+  whole-second and fractional timestamps. A separate short verification saved a successful
+  exit and complete result but the watcher missed the start, so it was absent from recent
+  history. Campaign evidence and history now compare actual times. The API retains the
+  admission time in the exit record even when the observer misses the run. The original
+  missing start is left unknown. These changes are qualified with isolated regressions.
+
 - 27 Nov 2026 (Codex): The corrected `t16` reset removed all 12 stale source-domain mail items.
   The freshness check passed, the ledger reset had its own success receipt, and the Gmail shot
   had one fault marker and reused the delivered copy. The full comparison matched 313 Gmail
