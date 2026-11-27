@@ -589,6 +589,11 @@ rebuilt layouts (its slides render identical).
 - 27 Nov 2026, 12:20 pm NPT (Claude): **`fp:gmail.inserted:lost` PASS** (`fp2-vm-gmail-lost-t16-20261127c`, VM,
   06:01-06:35Z): the fault fired, the delivered copy was adopted, the complete check equalled the control, nothing
   landed twice. F-kill started on t16 (`fp2-vm-fkill-t16-20261127`).
+- 27 Nov 2026, 2:20 pm NPT (Claude): **F-kill FAIL, fixed in 2eb46cd** (`fp2-vm-fkill-t16-20261127b`, 07:02-08:16Z):
+  all 12 kill points fired, but `contacts.created@2` and `tasks.created@2` killed the run between the create and
+  `record_mapping`, and the rerun made each again (contacts 27 for 26, tasks 21 for 20; the tasks check read
+  IDENTICAL over its extra). Both engines now adopt an unmapped target item with the source's identity; the tasks
+  check names an unrecorded second copy. Installed on the VM; F-kill rerun `...-20261127d` started 08:33Z.
 - 27 Nov 2026, 11:30 am NPT (Claude): retry `...-20261127b` read FAIL with every service IDENTICAL on a complete check,
   0 duplicates, the fault fired and adopted: t16's contacts were 27 on b. for 26 expected. A "Campaign Added..."
   contact (campaign_changes, no seed marker) copied on 26 Nov outlived the reset; the run added a second. Fixed in
