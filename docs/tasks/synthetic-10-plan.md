@@ -589,6 +589,15 @@ rebuilt layouts (its slides render identical).
 - 27 Nov 2026, 12:20 pm NPT (Claude): **`fp:gmail.inserted:lost` PASS** (`fp2-vm-gmail-lost-t16-20261127c`, VM,
   06:01-06:35Z): the fault fired, the delivered copy was adopted, the complete check equalled the control, nothing
   landed twice. F-kill started on t16 (`fp2-vm-fkill-t16-20261127`).
+- 27 Nov 2026, 3:15 pm NPT (Claude): **Unattended lanes started** (operator: run everything unsupervised).
+  VM: systemd unit `fp2-failq` (`/opt/bitport/logs/failq.sh`) waits for the F-kill rerun, then runs campaign
+  `fp2-vm-failq-20261127` over F-lost, F-stop, F-kill-random, F-double, F-api, F-webui, F-rate, F-memory, F-disk,
+  F-scope, F-suspend, F-source-delete, F-source-edit, F-tamper, F-dms-held, F-net-3, F-net-12 (`--allow net`; F-reboot
+  waits for db48518, F-deploy is the operator's, F-licence is a unit test); then removes the fault file, restores b.'s
+  protection and turns the VM's apt timers back on (stopped for the queue). Codex A (`codex/last-day-2026-11-27`):
+  create/record gaps, verification at scale (big Sheets/Docs/binaries/mailboxes), db48518, the full suite, a codebase
+  sweep, dc44e8f. Codex B (`codex/err-acts-2026-11-27`): acts for the 32 "no act yet" error scenarios (row 2).
+  Claude: a 40-minute steward check in-session (fix FAILs, review and push Codex commits); it ends with the session.
 - 27 Nov 2026, 2:20 pm NPT (Claude): **F-kill FAIL, fixed in 2eb46cd** (`fp2-vm-fkill-t16-20261127b`, 07:02-08:16Z):
   all 12 kill points fired, but `contacts.created@2` and `tasks.created@2` killed the run between the create and
   `record_mapping`, and the rerun made each again (contacts 27 for 26, tasks 21 for 20; the tasks check read
