@@ -589,6 +589,14 @@ rebuilt layouts (its slides render identical).
 - 27 Nov 2026, 12:20 pm NPT (Claude): **`fp:gmail.inserted:lost` PASS** (`fp2-vm-gmail-lost-t16-20261127c`, VM,
   06:01-06:35Z): the fault fired, the delivered copy was adopted, the complete check equalled the control, nothing
   landed twice. F-kill started on t16 (`fp2-vm-fkill-t16-20261127`).
+- 27 Nov 2026, 5:20 pm NPT (Claude): **Field results.** F-kill rerun d PASS (12/12 points, contacts/tasks adopted,
+  0 duplicates). Source guard: with the installed code 5 routes WROTE to a. (probe on c05, restored); the transport
+  guard (5100c7c, 17e82f4) refuses all; a 696-attempt discovery sweep over 12 APIs sent no write; deployed to l3novo
+  (17e82f4) and dharan's first delta under it finished clean (0 refusals). My probe tripped a.'s audit-log tripwire,
+  which halted account 3 (proof it works); re-baselined, queue relaunched as `fp2-vm-failq-20261127c`. F-lost FAIL
+  (contacts/tasks retried a create whose reply was lost) fixed in b560daf, re-run after the queue. Codex branches
+  committed: err-acts (31/32 error acts), phase-binding, finding-kinds (dharan unclassified 1,067 -> 11, replayed
+  read-only on the live ledger), verify-incremental, source-redteam.
 - 27 Nov 2026, 3:15 pm NPT (Claude): **Unattended lanes started** (operator: run everything unsupervised).
   VM: systemd unit `fp2-failq` (`/opt/bitport/logs/failq.sh`) waits for the F-kill rerun, then runs campaign
   `fp2-vm-failq-20261127` over F-lost, F-stop, F-kill-random, F-double, F-api, F-webui, F-rate, F-memory, F-disk,
