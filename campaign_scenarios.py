@@ -257,7 +257,10 @@ def _failures() -> list:
 # ---- failpoints (P2.3): F-kill at every point, F-lost at every Google write --------------------------------
 # A point after a ledger write or around the run has no reply to lose: kill only.
 KILL_ONLY = ("drive.mapped", "gmail.mapped", "run.pass_done", "run.exit", "followon.repair.start",
-             "followon.dms.start")
+             "followon.dms.start", "contacts.group.created", "tasks.list.created",
+             "calendar.secondary.created", "calendar.subscription.created",
+             "groups.created", "groups.member.created", "rooms.building.created",
+             "rooms.feature.created", "rooms.room.created", "drive.folder.created")
 
 
 def _failpoints() -> list:

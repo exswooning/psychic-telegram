@@ -23,7 +23,12 @@ log = logging.getLogger(__name__)
 NAMES = (
     "drive.copy.landed", "drive.mapped", "drive.acl.granted", "drive.comment.created",
     "drive.moved_out", "drive.native_links", "gmail.inserted", "gmail.mapped", "calendar.imported",
-    "contacts.created", "tasks.created", "shareddrive.created", "run.pass_done", "run.exit",
+    "contacts.created", "contacts.group.created", "tasks.created", "tasks.list.created",
+    "calendar.secondary.created", "calendar.subscription.created",
+    "groups.created", "groups.member.created",
+    "rooms.building.created", "rooms.feature.created", "rooms.room.created",
+    "drive.folder.created",
+    "shareddrive.created", "run.pass_done", "run.exit",
     "followon.repair.start", "followon.dms.start",
 )
 

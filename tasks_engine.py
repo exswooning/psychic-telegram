@@ -128,6 +128,11 @@ class TasksMigrator:
             self.stats["skipped"] += len(lists)
             return dict(self.stats)
 
+        # A task-list has no client-supplied idempotency key. Keep the target
+        # inventory once so a list created just before a process kill can be
+        # paired back to its source by title on the next run.
+        self._stray_lists = self._unmapped_target_lists()
+
         # migrate_user() only checks SHUTDOWN between whole services, so
         # someone with many lists would otherwise run to the end of them
         # regardless of how long ago Stop was pressed.
@@ -154,6 +159,38 @@ class TasksMigrator:
             # Anything else (a network blip, a quota) is not a statement
             # about provisioning, so do not turn it into a permanent skip.
             return True
+
+    def _unmapped_target_lists(self) -> dict[str, list[str]]:
+        if self.settings.dry_run:
+            return {}
+        mapped = {r[0] for r in self.db.conn.execute(
+            "SELECT target_id FROM id_mapping WHERE source_user=? AND type='task_list'",
+            (self.source_user,))}
+        rows, token, first = [], None, True
+        default_id = None
+        try:
+            while True:
+                page = self._retry(lambda t=token: self.tgt.tasklists().list(
+                    maxResults=100, pageToken=t).execute())
+                items = page.get("items", [])
+                if first and items:
+                    # Google Tasks' first list (also returned by get('@default'))
+                    # is a permanent system list, never a recovery candidate.
+                    default_id = items[0].get("id")
+                    first = False
+                rows.extend(items)
+                token = page.get("nextPageToken")
+                if not token:
+                    break
+        except (PermanentAPIError, RuntimeError) as exc:
+            log.warning("[%s] could not list target task lists for recovery: %s",
+                        self.source_user, exc)
+            return {}
+        stray: dict[str, list[str]] = {}
+        for row in rows:
+            if row.get("id") not in mapped and row.get("id") not in (default_id, "@default"):
+                stray.setdefault(row.get("title") or "", []).append(row["id"])
+        return stray
 
     def _list_is_gone(self, tgt_list: str) -> bool:
         try:
@@ -184,16 +221,23 @@ class TasksMigrator:
             self.stats["lists"] += 1
             return
         else:
-            try:
-                self.limiter.acquire()
-                created = self._retry(lambda: self.tgt.tasklists().insert(
-                    body={"title": title}).execute())
-            except (PermanentAPIError, RuntimeError) as exc:
-                self.db.log_audit(self.source_user, src_id, "task_list",
-                                  "FAILED", str(exc))
-                self.stats["failed"] += 1
-                return
-            tgt_id = created["id"]
+            stray_lists = getattr(self, "_stray_lists", {}).get(title, [])
+            if stray_lists:
+                tgt_id = stray_lists.pop(0)
+                self.stats["adopted_lists"] = self.stats.get("adopted_lists", 0) + 1
+            else:
+                try:
+                    self.limiter.acquire()
+                    created = self._retry(lambda: self.tgt.tasklists().insert(
+                        body={"title": title}).execute())
+                    created = failpoints.hit("tasks.list.created", created,
+                                             user=self.source_user)
+                except (PermanentAPIError, RuntimeError) as exc:
+                    self.db.log_audit(self.source_user, src_id, "task_list",
+                                      "FAILED", str(exc))
+                    self.stats["failed"] += 1
+                    return
+                tgt_id = created["id"]
             self.db.record_mapping(self.source_user, src_id, tgt_id,
                                    "task_list", source_name=title)
             self.stats["lists"] += 1

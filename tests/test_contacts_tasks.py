@@ -328,6 +328,34 @@ def test_a_task_inserted_but_never_recorded_is_adopted_not_made_twice(tasks, aut
     assert len(tgt.task_store[next(iter(tgt.lists))]) == 2
 
 
+def test_task_list_after_a_kill_is_adopted_but_default_list_is_never_adopted(
+        auth, db, settings, identity):
+    """The default list is a permanent system list; recovery must scan past it."""
+    import tasks_engine
+
+    settings.migrate_tasks = True
+    tgt = auth.target_tasks(TGT_USER)
+    default_id = tgt.add_list("Move")
+    # Put the interrupted copy on the next page after the permanent default.
+    for i in range(99):
+        tgt.add_list(f"unrelated-{i}")
+    src = auth.source_tasks(SRC_USER)
+    src.add_list("Move")
+
+    tasks_engine.TasksMigrator(auth, db, settings, SRC_USER, TGT_USER).run()
+    first_target_id = db.get_target_id(
+        SRC_USER, next(iter(src.lists)), "task_list")
+    assert first_target_id != default_id
+    assert len([x for x in tgt.lists.values() if x["title"] == "Move"]) == 2
+
+    _lose_mappings(db, "task_list")  # process died after insert, before recording the list
+    again = tasks_engine.TasksMigrator(auth, db, settings, SRC_USER, TGT_USER).run()
+
+    assert again.get("adopted_lists") == 1
+    assert db.get_target_id(SRC_USER, next(iter(src.lists)), "task_list") == first_target_id
+    assert len([x for x in tgt.lists.values() if x["title"] == "Move"]) == 2
+
+
 def test_the_tasks_check_names_an_unrecorded_second_copy():
     from types import SimpleNamespace
     import verify_sample as V

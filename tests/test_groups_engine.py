@@ -33,8 +33,14 @@ class _Svc:
             data = {"members": self._members.get(groupKey, [])}
         return type("R", (), {"execute": lambda s=None: data})()
     def insert(self, body=None, groupKey=None):
-        (self.added if groupKey else self.created).append((groupKey, body))
-        return type("R", (), {"execute": lambda s=None: {}})()
+        def run():
+            (self.added if groupKey else self.created).append((groupKey, body))
+            if groupKey:
+                self._members.setdefault(groupKey, []).append(dict(body))
+            else:
+                self._groups.setdefault("list", []).append(dict(body))
+            return {}
+        return type("R", (), {"execute": lambda s=None: run()})()
 
 
 def _mig(settings, db, src, tgt):
@@ -127,6 +133,27 @@ class TestMembership:
             [{"email": "leads@source.test", "role": "MEMBER", "type": "GROUP"}],
             {})
         assert tgt.added[0][1]["email"] == "leads@target.test"
+
+    def test_a_member_created_before_a_kill_is_adopted(self, settings):
+        settings.target_domain = "target.test"
+        settings.dry_run = False
+        src = _Svc(groups={"list": [{"email": "eng@source.test"}]},
+                   members={"eng@source.test": [
+                       {"email": "a@source.test", "role": "MEMBER", "type": "USER"}]})
+        tgt = _Svc(groups={"list": []}, members={"eng@target.test": []})
+        db = _DB({"a@source.test": "a@target.test"})
+        m = _mig(settings, db, src, tgt)
+        m.migrate()
+        assert len(tgt.added) == 1
+
+        # The API write landed; only its ledger row was lost with the process.
+        db.mappings = [row for row in db.mappings if row[2] != "group_member"]
+        again = _mig(settings, db, src, tgt)
+        again.migrate()
+
+        assert len(tgt.added) == 1
+        assert [row for row in db.mappings if row[2] == "group_member"] == [
+            ("eng@source.test:a@source.test", "eng@target.test:a@target.test", "group_member")]
 
 
 class TestDryRun:

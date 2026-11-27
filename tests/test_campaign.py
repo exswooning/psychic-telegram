@@ -261,7 +261,8 @@ def test_a_dry_run_touches_nothing(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(C, "HERE", str(tmp_path))
     assert C.main(["--account-id", "5", "--name", "n", "--group", "failures", "--dry-run"]) == 0
     out = capsys.readouterr().out
-    assert "47 scenario(s) to run" in out and "fail:F-net-3  [failure]  needs net" in out
+    expected = sum(s.group == "failures" for s in S.all_scenarios())
+    assert f"{expected} scenario(s) to run" in out and "fail:F-net-3  [failure]  needs net" in out
     assert not (tmp_path / "logs").exists()
 
 

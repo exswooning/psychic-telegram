@@ -120,6 +120,7 @@ class TestTasksStopsMidListAndMidTree:
         m.source_user = "u@src.test"
         m.stats = {"lists": 0, "tasks": 0, "skipped": 0, "failed": 0}
         m._unmapped_targets = lambda tgt_list: {}     # no target to read here
+        m._unmapped_target_lists = lambda: {}
         return m
 
     def test_stops_before_the_next_list_once_flagged(self, settings, monkeypatch):
