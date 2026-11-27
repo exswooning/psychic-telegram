@@ -16,6 +16,7 @@ import bisect
 import math
 import os
 import re
+import tempfile
 import time
 import zlib
 from email.header import Header
@@ -27,6 +28,7 @@ POOL = "BITPORT-SEED-POOL"
 CHUNK = 100                        # messages sent together, and at most what a kill can leave half-done
 OWN_LINKS = 20                     # own file ids kept for link mail
 DEPT_FILES = 4                     # files in a department's shared folder
+POOL_STREAM_THRESHOLD = 128 * 2**20  # keep multi-GB tails off the Python heap
 
 
 def _mark(**extra) -> dict:
@@ -82,6 +84,42 @@ def _blob(label: str, size: int) -> bytes:
     return (head + b"0123456789abcdef" * (size // 16 + 1))[:max(size, 0)]
 
 
+def _pool_media(s, settings, label: str, size: int, mime: str):
+    """Build small pool media in memory and stream large files from scratch storage.
+
+    The old bytes + BytesIO path held a large pool item twice in RAM. A
+    2-10 GiB profile tail therefore needs resumable file upload and temporary
+    disk, not a machine with 20 GiB of free heap. Returns (media, temp_path).
+    """
+    if size <= POOL_STREAM_THRESHOLD:
+        return s._media(_blob(label, size), mime), None
+    scratch = getattr(settings, "scratch_dir", None) or tempfile.gettempdir()
+    os.makedirs(scratch, exist_ok=True)
+    fd, path = tempfile.mkstemp(prefix="bitport-profile-pool-", suffix=".bin", dir=scratch)
+    os.close(fd)
+    head = f"BITPORT-POOL {label}\n".encode()
+    pattern = b"0123456789abcdef" * 4096
+    remaining = size
+    try:
+        with open(path, "wb") as fh:
+            first = head[:remaining]
+            fh.write(first)
+            remaining -= len(first)
+            while remaining:
+                chunk = pattern[:min(len(pattern), remaining)]
+                fh.write(chunk)
+                remaining -= len(chunk)
+        from googleapiclient.http import MediaFileUpload
+        return MediaFileUpload(path, mimetype=mime, resumable=True,
+                               chunksize=8 * 1024 * 1024), path
+    except BaseException:
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+        raise
+
+
 def build_pool(s, settings, user: str, mix: dict, pool_bytes: int, largest_cap: int, share_domain: bool = True) -> dict:
     """Upload the pool once, as `user`. Safe to run again: a file already there (by name) is reused."""
     drive, _, _ = s.build_services(settings, user)
@@ -99,17 +137,27 @@ def build_pool(s, settings, user: str, mix: dict, pool_bytes: int, largest_cap: 
                 fileId=folder, body={"type": "domain", "role": "reader", "domain": settings.source_domain,
                                      "allowFileDiscovery": False}, sendNotificationEmail=False, fields="id").execute())
     have = {f["name"]: f["id"] for f in _list(drive, retry, f"'{folder}' in parents and trashed = false", "id,name")}
-    pool: dict = {"folder": folder, "files": {}, "natives": {}, "ids": [], "bytes": 0, "uploaded": 0, "largest": 0}
+    pool: dict = {"folder": folder, "files": {}, "natives": {}, "ids": [], "bytes": 0, "uploaded": 0,
+                  "largest": 0, "owner": user}
 
-    def put(nm, mime, data=None, native=False):
+    def put(nm, mime, data=None, native=False, blob_size=0):
         fid = have.get(nm)
         if fid is None:
             body = {"name": nm, "parents": [folder]}
             if native:
                 body["mimeType"] = mime
-            media = s._media(data, "text/plain" if native else mime) if data is not None else None
-            fid = _call(retry, lambda: drive.files().create(body=body, media_body=media, fields="id").execute())["id"]
-            pool["uploaded"] += len(data or b"")
+            media, temp_path = ((s._media(data, "text/plain" if native else mime), None)
+                                if data is not None else
+                                _pool_media(s, settings, nm, blob_size, mime) if blob_size else (None, None))
+            try:
+                fid = _call(retry, lambda: drive.files().create(body=body, media_body=media, fields="id").execute())["id"]
+            finally:
+                if temp_path:
+                    try:
+                        os.unlink(temp_path)
+                    except FileNotFoundError:
+                        pass
+            pool["uploaded"] += blob_size or len(data or b"")
         pool["ids"].append(fid)
         return fid
 
@@ -117,7 +165,7 @@ def build_pool(s, settings, user: str, mix: dict, pool_bytes: int, largest_cap: 
         slug = f"{zlib.crc32(mime.encode()):08x}"
         for size in classes:
             nm = f"pool-{slug}-{size}"
-            pool["files"].setdefault(mime, []).append((size, put(nm, mime, _blob(nm, size))))
+            pool["files"].setdefault(mime, []).append((size, put(nm, mime, blob_size=size)))
             pool["bytes"] += size
             pool["largest"] = max(pool["largest"], size)
     for mime in pp.NATIVES:
@@ -250,12 +298,19 @@ def build_drive(s, drive, user: str, p: dict, pool: dict, retry) -> dict:
     return m
 
 
-def link_items(s, drive, p: dict, pool: dict, retry, shared: dict | None = None) -> dict:
+def link_items(s, drive, p: dict, pool: dict, retry, shared: dict | None = None,
+               user: str | None = None) -> dict:
     """The ids Drive-link mail points at: this user's own files and a folder, one file that is deleted, a colleague's
     file (the department folder's) and a shared-drive file when seed_sharing made them (`shared`), and the pool's files
     (owned by the pool user) for what has no real item: a user outside the run's, and every kind before sharing exists.
     A user who has not been through build_drive yet has no own files, and those links fall back to the pool's."""
-    items = {"pool": list(pool["ids"]) if pool else [], **{k: v for k, v in (shared or {}).items() if k in ("colleague", "shared_drive")}}
+    items = {"pool": list(pool["ids"]) if pool else [],
+             **{k: v for k, v in (shared or {}).items() if k in ("colleague", "shared_drive")}}
+    # The pool is held by SOURCE_ADMIN, which is deliberately outside the
+    # profile user list. This gives the "outside user" mail kind a real item
+    # owned by another account rather than another copy in the user's Drive.
+    if pool and user and pool.get("owner") and pool["owner"].lower() != user.lower():
+        items["outside"] = list(pool["ids"])
     root = _root(drive, retry, create=False)
     if root:
         mine = sorted(_existing(drive, retry).items())
@@ -418,7 +473,9 @@ def _link_id(items: dict, kind: str, rng):
         pool = [items["folder"]] if items.get("folder") else None
     elif kind == "deleted":
         pool = [items["deleted"]] if items.get("deleted") else None
-    else:      # a colleague's, a shared drive's: the real item when there is one; a user outside the run's: a pool file
+    elif kind == "outside":
+        pool = items.get("outside")
+    else:      # colleague and shared-drive links use the real item when sharing has produced one
         pool = items.get(kind) or items.get("pool")
     return rng.choice(pool) if pool else None
 

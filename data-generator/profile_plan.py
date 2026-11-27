@@ -21,8 +21,12 @@ FOLDER = GOOGLE_APPS + "folder"
 SHORTCUT = GOOGLE_APPS + "shortcut"
 NATIVES = (GOOGLE_APPS + "document", GOOGLE_APPS + "spreadsheet", GOOGLE_APPS + "presentation")
 
-# The profile has no figure for these; they are the plan's own, stated here and nowhere else.
-LINK_KINDS = {"own": 0.40, "colleague": 0.25, "shared_drive": 0.10, "folder": 0.10, "deleted": 0.05, "outside": 0.10}
+# The profile has no figure for these; these are assumptions, not extracted
+# observations.  The named default is printed with each plan and can be
+# replaced by --link-kind-split.
+DEFAULT_LINK_KIND_SPLIT = {"own": 0.40, "colleague": 0.25, "shared_drive": 0.10,
+                          "folder": 0.10, "deleted": 0.05, "outside": 0.10}
+LINK_KINDS = DEFAULT_LINK_KIND_SPLIT       # compatibility for existing callers
 OUTSIDE_ADDRESS = "learn.aryanpaul@gmail.com"   # P0.6 (17 Nov, the operator): the only address outside the tenant ever shared with
 # Departments and their relative size (the profile says nothing about either), and the rest of the sharing shape: the
 # plan's own numbers, stated here and nowhere else.
@@ -39,6 +43,36 @@ LONG_NAME = 0.03
 DEVANAGARI = 0.25
 MIN_MSG_BYTES = 1024        # a header block and a one-line body: the smallest message the generator makes
 NATURAL_MSG_BYTES = 1_700_000   # 245 GB over 141,416 messages (the plan's table; the profile holds no mail bytes)
+RECORDED_PLAN_UPLOAD_MB_PER_SEC = 1.84  # 23 Nov 2026, 5-user profile seed's 60s box upload probe; assumption for offline --plan-only
+DEFAULT_DIRECTORY_REQUESTS_PER_SEC = 1.0  # explicit conservative assumption: sequential Directory get/insert requests
+
+# account 3's ledger has no useful calendar/contact/task rows (P4.1). These
+# explicit assumptions follow existing seed_sandbox.py defaults: medium
+# calendar = SCALES["medium"]["per_leaf"] * 4 events (the value 14 is defined
+# in corpus.py), plus its weekly and all-day examples;
+# two secondary calendars with three events each; 25 contacts and 20 tasks.
+# Profile mode does not silently inherit --scale, so the assumed rates live
+# here and appear in every per-user plan.
+PROFILE_CALENDAR_BASE_EVENTS = 56
+PROFILE_CALENDAR_FIXED_EVENTS = 2
+PROFILE_SECONDARY_CALENDARS = 2
+PROFILE_EVENTS_PER_SECONDARY_CALENDAR = 3
+PROFILE_CONTACTS_PER_USER = 25
+PROFILE_CONTACT_GROUPS_PER_USER = 2
+PROFILE_TASKS_PER_USER = 20
+PROFILE_TASK_LISTS_PER_USER = 1
+# Each mailbox seeded by seed_gmail_settings() gets three settings updates,
+# one forwarding address and one delegate when peers are present. Profile mode
+# always runs beside its cohort, so every seeded mailbox has peers; settings
+# are applied to cohort mailboxes too even when their fixture content is kept.
+PROFILE_GMAIL_SETTINGS_WRITES_PER_USER = {
+    "vacation": 1,
+    "pop": 1,
+    "imap": 1,
+    "forwarding_address": 1,
+    "personal_delegate": 1,
+}
+PROFILE_GMAIL_SETTINGS_READS_PER_USER = {"forwarding_addresses": 1, "delegates": 1}
 
 _LATIN = ["Report", "Budget", "Minutes", "Invoice", "Survey", "Plan", "Notes", "Photo", "Scan", "Draft", "Tender",
           "Ward", "Census", "Permit", "Letter", "Proposal", "Audit", "Contract", "Schedule", "Summary", "Map"]
@@ -83,7 +117,22 @@ def file_mix(profile: dict) -> dict:
     return mix
 
 
-def plan(profile: dict, users: int, seed: int) -> list[dict]:
+def validate_link_kind_split(split: dict | None = None) -> dict:
+    """Normalize a link-kind distribution after validating its keys and weights."""
+    split = DEFAULT_LINK_KIND_SPLIT if split is None else split
+    if set(split) != set(DEFAULT_LINK_KIND_SPLIT):
+        missing = sorted(set(DEFAULT_LINK_KIND_SPLIT) - set(split))
+        extra = sorted(set(split) - set(DEFAULT_LINK_KIND_SPLIT))
+        raise ValueError(f"link-kind split needs exactly {sorted(DEFAULT_LINK_KIND_SPLIT)} (missing={missing}, extra={extra})")
+    values = {k: float(v) for k, v in split.items()}
+    if any(v < 0 for v in values.values()) or sum(values.values()) <= 0:
+        raise ValueError("link-kind weights must be non-negative and have a positive total")
+    total = sum(values.values())
+    return {k: v / total for k, v in values.items()}
+
+
+def plan(profile: dict, users: int, seed: int, link_kind_split: dict | None = None) -> list[dict]:
+    link_kind_split = validate_link_kind_split(link_kind_split)
     rows = profile["per_user"]
     vec = lambda k: [r[k] for r in rows]                      # noqa: E731
     msg_total = sum(vec("messages_total")) or 1
@@ -107,7 +156,7 @@ def plan(profile: dict, users: int, seed: int) -> list[dict]:
         shortcuts = min(d["shortcut_count"][rd], max(0, files - 1))
         messages = m["messages_total"][rm]
         links = min(messages, round(messages * link_ratio))
-        kinds = _split(links, LINK_KINDS)
+        kinds = _split(links, link_kind_split)
         counts: dict = {}
         for mime in rng.choices(mimes, weights=weights, k=files - shortcuts):
             counts[mime] = counts.get(mime, 0) + 1
@@ -118,6 +167,16 @@ def plan(profile: dict, users: int, seed: int) -> list[dict]:
             "bytes": d["total_bytes"][rd], "largest": min(d["largest_bytes"][rd], d["total_bytes"][rd]),
             "messages": messages, "threads": max(1, min(m["threads_total"][rm], messages)) if messages else 0,
             "labels": lab[rl], "link_mail": links, "link_kinds": kinds,
+            "link_kind_split": dict(link_kind_split),
+            "calendar_base_events": PROFILE_CALENDAR_BASE_EVENTS,
+            "secondary_calendars": PROFILE_SECONDARY_CALENDARS,
+            "secondary_events_per_calendar": PROFILE_EVENTS_PER_SECONDARY_CALENDAR,
+            "calendar_events": (PROFILE_CALENDAR_BASE_EVENTS + PROFILE_CALENDAR_FIXED_EVENTS
+                                + PROFILE_SECONDARY_CALENDARS * PROFILE_EVENTS_PER_SECONDARY_CALENDAR),
+            "contacts": PROFILE_CONTACTS_PER_USER,
+            "contact_groups": PROFILE_CONTACT_GROUPS_PER_USER,
+            "tasks": PROFILE_TASKS_PER_USER,
+            "task_lists": PROFILE_TASK_LISTS_PER_USER,
         })
     return out
 
@@ -162,7 +221,7 @@ def scale_messages(plans: list[dict], factor: float) -> list[dict]:
         p["messages"] = retained
         p["threads"] = max(1, round(p["threads"] * share)) if retained else 0
         p["link_mail"] = round(p["link_mail"] * share)
-        p["link_kinds"] = _split(p["link_mail"], LINK_KINDS)
+        p["link_kinds"] = _split(p["link_mail"], p.get("link_kind_split", DEFAULT_LINK_KIND_SPLIT))
     return plans
 
 
@@ -251,32 +310,148 @@ def pool_sizes(mix: dict, pool_bytes: int, largest_cap: int) -> dict:
     return sizes
 
 
-def budget(plans: list[dict], *, upload_bps: float, drive_per_sec: float, mail_per_sec: float, workers: int,
-           pool_bytes: int, pool_files: int, max_hours: float, natural_msg_bytes: int = NATURAL_MSG_BYTES) -> dict:
-    """Items, bytes that cross the box and hours, from rates measured elsewhere. Drive is one tenant-wide budget
-    (files.copy, folders, shortcuts); mail is per mailbox, so mailboxes in parallel divide it; the upload line is shared.
-    Mail keeps the profile's counts and shrinks its sizes to fit the window; if even the smallest message does not fit,
-    one factor scales every mailbox's count. `refuse` names why the window cannot hold the plan."""
+def service_counts(plans: list[dict], seed: int, pool_files: int = 0,
+                   settings_users: int | None = None) -> dict:
+    """Logical item counts for every profile service, including the tenant sharing layer."""
     users = len(plans)
-    drive_items = sum(p["files"] + p["folders"] for p in plans)
-    messages = sum(p["messages"] for p in plans)
-    window = max_hours * 3600
-    pool_t = pool_bytes / upload_bps
-    drive_t = (drive_items + pool_files) / drive_per_sec
-    room = max(0.0, window - pool_t) * upload_bps                    # bytes the line can carry for mail
+    settings_users = users if settings_users is None else settings_users
+    sh = sharing(plans, seed)
+    active_depts = sum(1 for d in set(sh["dept"]) if sh["dept"].count(d) > 1)
+    dept_files = active_depts * 4
+    dept_folders = active_depts
+    sd_count = len(sh["drives"])
+    sd_members = sum(len(group) for group in sh["drives"])
+    sd_files, sd_folders = sd_count * 16, sd_count * 2
+    outside_grants = sum(sh["outside"].values())
+    dept_groups = len(set(sh["dept"]))
+    dept_members = users
+    return {
+        "users": users,
+        "drive_files": sum(p["files"] for p in plans) + pool_files + dept_files + sd_files,
+        "drive_folders": sum(p["folders"] for p in plans) + users + 1 + dept_folders + sd_folders,
+        "drive_copies": sum(p["files"] - p["shortcuts"] for p in plans) + dept_files + sd_files,
+        "drive_shortcuts": sum(p["shortcuts"] for p in plans),
+        "drive_permissions": outside_grants + sd_members + dept_folders + bool(pool_files),
+        "shared_drives": sd_count,
+        "shared_drive_members": sd_members,
+        "gmail_messages": sum(p["messages"] for p in plans),
+        "gmail_labels": sum(p["labels"] for p in plans),
+        "gmail_delegates": len(sh["readers"]),
+        "gmail_settings_users": settings_users,
+        "gmail_vacation_settings": settings_users * PROFILE_GMAIL_SETTINGS_WRITES_PER_USER["vacation"],
+        "gmail_pop_settings": settings_users * PROFILE_GMAIL_SETTINGS_WRITES_PER_USER["pop"],
+        "gmail_imap_settings": settings_users * PROFILE_GMAIL_SETTINGS_WRITES_PER_USER["imap"],
+        "gmail_forwarding_addresses": settings_users * PROFILE_GMAIL_SETTINGS_WRITES_PER_USER["forwarding_address"],
+        "gmail_user_delegates": settings_users * PROFILE_GMAIL_SETTINGS_WRITES_PER_USER["personal_delegate"],
+        "gmail_settings_writes": settings_users * sum(PROFILE_GMAIL_SETTINGS_WRITES_PER_USER.values()),
+        "gmail_settings_reads": settings_users * sum(PROFILE_GMAIL_SETTINGS_READS_PER_USER.values()),
+        "gmail_settings_requests": settings_users * (
+            sum(PROFILE_GMAIL_SETTINGS_WRITES_PER_USER.values())
+            + sum(PROFILE_GMAIL_SETTINGS_READS_PER_USER.values())),
+        "calendar_events": sum(p["calendar_events"] for p in plans),
+        "secondary_calendars": sum(p["secondary_calendars"] for p in plans),
+        "contacts": sum(p["contacts"] for p in plans),
+        "contact_groups": sum(p["contact_groups"] for p in plans),
+        "tasks": sum(p["tasks"] for p in plans),
+        "task_lists": sum(p["task_lists"] for p in plans),
+        "directory_groups": dept_groups,
+        "directory_members": dept_members,
+        "department_files": dept_files,
+        "department_folders": dept_folders,
+        "outside_grants": outside_grants,
+    }
+
+
+def budget(plans: list[dict], *, upload_bps: float, drive_per_sec: float, mail_per_sec: float, workers: int,
+           pool_bytes: int, pool_files: int, max_hours: float, natural_msg_bytes: int = NATURAL_MSG_BYTES,
+           seed: int = 0, per_user_per_sec: float | None = None, new_accounts: int = 0,
+           fixed_users: int = 0, directory_per_sec: float = DEFAULT_DIRECTORY_REQUESTS_PER_SEC) -> dict:
+    """Per-service counts and a sequential phase estimate from explicit rates.
+
+    API payload bytes crossing this box are pool files plus raw mail; API JSON
+    metadata is not counted. The upload speed is shared; Drive is tenant-wide;
+    the other API rates are per active user. The sequential estimate takes no
+    credit for phase overlap, so --max-hours is a conservative refusal gate.
+    Mail keeps its planned counts and shrinks message sizes first; if even the
+    smallest message does not fit, all mailboxes scale by one count factor.
+    """
+    per_user_per_sec = per_user_per_sec or mail_per_sec
+    if min(upload_bps, drive_per_sec, mail_per_sec, per_user_per_sec, directory_per_sec, max_hours) <= 0:
+        raise ValueError("upload, API and time budgets must be positive")
+    users = len(plans)
+    workers = max(1, min(workers, max(1, users)))
+    # Profile mode also re-applies idempotent Gmail settings to the existing
+    # cohort entries. The admin is reserved but is not impersonated/seeded.
+    settings_users = users + max(0, fixed_users - 1)
+    counts = service_counts(plans, seed, pool_files, settings_users=settings_users)
+    # --create-users checks every cohort/profile address with users.get and
+    # inserts only the new profile accounts. provision.ensure_users is serial,
+    # so the Directory phase gets no user-worker speedup. fixed_users reserves
+    # the admin too; the admin is not in the seed's get/create list.
+    account_lookups = users + max(0, fixed_users - 1) if (new_accounts or fixed_users) else 0
+    account_calls = account_lookups + new_accounts
+    counts["directory_users_created"] = new_accounts
+    counts["directory_user_lookups"] = account_lookups
+    messages = counts["gmail_messages"]
+    concurrency = max(1, min(workers, users))
+    pool_upload_h = pool_bytes / upload_bps / 3600
+    drive_writes = (counts["drive_files"] + counts["drive_folders"]
+                    + counts["drive_permissions"] + counts["shared_drives"])
+    directory_writes = counts["directory_groups"] + counts["directory_members"]
+    calendar_writes = counts["calendar_events"] + counts["secondary_calendars"] * 2
+    contact_writes = counts["contacts"] * 2 + counts["contact_groups"]
+    task_writes = counts["tasks"] + counts["task_lists"]
+    fixed_phases = {
+        "account_creation": (account_calls / directory_per_sec + (20 if new_accounts else 0)) / 3600,
+        "pool_upload": pool_upload_h,
+        "directory_sharing": directory_writes / (per_user_per_sec * concurrency) / 3600,
+        "drive": drive_writes / drive_per_sec / 3600,
+        "calendar": calendar_writes / (per_user_per_sec * concurrency) / 3600,
+        "gmail_settings": counts["gmail_settings_requests"] / (per_user_per_sec * concurrency) / 3600,
+        "contacts": contact_writes / (per_user_per_sec * concurrency) / 3600,
+        "tasks": task_writes / (per_user_per_sec * concurrency) / 3600,
+    }
+    gmail_fixed_writes = counts["gmail_labels"] + counts["gmail_delegates"]
+    available_mail_hours = max(0.0, max_hours - sum(fixed_phases.values())
+                               - gmail_fixed_writes / (mail_per_sec * concurrency) / 3600)
+    available_mail_seconds = available_mail_hours * 3600
     msg_bytes, factor = natural_msg_bytes, 1.0
-    if messages and messages * msg_bytes > room:
-        msg_bytes = room / messages
-        if msg_bytes < MIN_MSG_BYTES:
-            factor, msg_bytes = room / (messages * MIN_MSG_BYTES), MIN_MSG_BYTES
-    sent = int(messages * factor)
-    mail_api_t = sent / (mail_per_sec * max(1, min(workers, users)))
+    if messages and available_mail_seconds > 0:
+        remaining_after_mail_api = max(0.0, available_mail_seconds - messages / (mail_per_sec * concurrency))
+        room = remaining_after_mail_api * upload_bps
+        if messages * msg_bytes > room:
+            msg_bytes = room / messages
+            if msg_bytes < MIN_MSG_BYTES:
+                per_message_seconds = MIN_MSG_BYTES / upload_bps + 1 / (mail_per_sec * concurrency)
+                factor = min(1.0, available_mail_seconds / (messages * per_message_seconds))
+                sent_at_floor = int(messages * factor)
+                if sent_at_floor:
+                    upload_seconds = max(0.0, available_mail_seconds - sent_at_floor / (mail_per_sec * concurrency))
+                    msg_bytes = min(MIN_MSG_BYTES, upload_seconds * upload_bps / sent_at_floor)
+                else:
+                    msg_bytes = MIN_MSG_BYTES
+    sent = min(messages, int(messages * factor))
+    if factor == 1.0:
+        sent = messages
     mail_bytes = int(sent * msg_bytes)
-    hours = (pool_t + max(drive_t, mail_api_t, mail_bytes / upload_bps)) / 3600
-    return {"users": users, "files": sum(p["files"] for p in plans), "folders": sum(p["folders"] for p in plans),
-            "messages_planned": messages, "messages": sent, "count_factor": factor, "msg_bytes": int(msg_bytes),
-            "items": drive_items + sent + pool_files, "pool_bytes": pool_bytes, "mail_bytes": mail_bytes,
+    counts["gmail_messages"] = sent
+    mail_writes = sent + counts["gmail_labels"] + counts["gmail_delegates"]
+    phase_hours = dict(fixed_phases)
+    phase_hours["gmail"] = mail_writes / (mail_per_sec * concurrency) / 3600
+    hours = sum(phase_hours.values()) + mail_bytes / upload_bps / 3600
+    total_items = sum(counts[k] for k in (
+        "drive_files", "drive_folders", "drive_permissions", "shared_drives",
+        "gmail_messages", "gmail_labels", "gmail_delegates", "calendar_events",
+        "gmail_settings_writes",
+        "secondary_calendars", "contacts", "contact_groups", "tasks", "task_lists",
+        "directory_groups", "directory_members", "directory_users_created"))
+    return {"users": users, "fixed_users": fixed_users, "new_accounts": new_accounts,
+            "files": sum(p["files"] for p in plans), "folders": sum(p["folders"] for p in plans),
+            "messages_planned": messages, "messages": sent,
+            "count_factor": factor, "msg_bytes": int(msg_bytes), "items": total_items,
+            "items_by_service": counts, "pool_bytes": pool_bytes, "mail_bytes": mail_bytes,
             "bytes_crossing_box": pool_bytes + mail_bytes, "drive_bytes_planned": sum(p["bytes"] for p in plans),
-            "hours": hours, "drive_hours": drive_t / 3600, "mail_api_hours": mail_api_t / 3600,
-            "upload_hours": (pool_t + mail_bytes / upload_bps) / 3600,
+            "hours": hours, "phase_hours": phase_hours,
+            "drive_hours": phase_hours["drive"], "mail_api_hours": phase_hours["gmail"],
+            "upload_hours": phase_hours["pool_upload"] + mail_bytes / upload_bps / 3600,
             "refuse": (f"{hours:.1f} h is over --max-hours {max_hours:g}" if hours > max_hours else "")}
