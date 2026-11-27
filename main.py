@@ -1364,7 +1364,9 @@ def _phase_name(one) -> str:
 def _open_run_record(db, settings, plan, recordable: bool):
     """The run's phase record (run_phases.py): its passes, 'after_drive' behind Drive, and the
     follow-ons the API asked for in RUN_FOLLOW_ONS. A sample, a chosen few, a delta or a dry run
-    keeps none -- such a run must not reopen, or be mistaken for, the whole tenant's record.
+    keeps none by default. The recovery campaign can explicitly record its selected twin so a
+    rebooted retry resumes from this run's saved phase; ordinary selected-user launches still
+    keep no account-wide record.
     Returns the record's id, or None (a record is a report: it never stops a run)."""
     if not recordable or getattr(settings, "dry_run", False):
         return None
@@ -1508,7 +1510,10 @@ def _run_with_memory_pause(auth, db, settings, services, delta, delta_days,
             if ("drive" in everything and "gmail" in everything and getattr(settings, "mail_only_with_links", False)
                     and not settings.dry_run and not getattr(settings, "sample_limit", None)):
                 _start_link_inventory(auth, db, settings, only)
-            rec = _open_run_record(db, settings, plan, whole_tenant and not delta)
+            scoped_record = os.getenv("RUN_RECORD_SCOPED", "").strip().lower() in {"1", "true", "yes"}
+            rec = _open_run_record(db, settings, plan,
+                                   (whole_tenant or (scoped_record and not getattr(settings, "sample_limit", None)))
+                                   and not delta)
             for i, one in enumerate(plan, 1):
                 pn = _phase_name(one)
                 if len(plan) > 1:

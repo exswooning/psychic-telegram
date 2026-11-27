@@ -2,6 +2,9 @@
 
     python campaign.py --account-id ID --name NAME [--group G] [--only id,id] [--redo] [--dry-run] [--batch N]
 
+F-reboot requires --only fail:F-reboot --allow reboot --reboot-guest MACHINE_ID on the dedicated VM.
+After boot, use the same command and add --continue-reboot. Keep the original checkpoint if evidence is missing.
+
 Runs on the box, as root, so it needs no password: it makes its own session for the superadmin the way the
 tests do. Every request is the one the UI's button sends, with `reason: "campaign <name> <id>"`. It never
 wipes a tenant. A result is PASS, FAIL, UNVERIFIED (a check nobody could make, or a scenario with no `act`
@@ -297,7 +300,7 @@ class LiveDriver(Driver):
         self.api("POST", "/api/v2/migrate/delta", {"users": [user], "services": ["drive"], "days": 3,
                                                     "reason": f"campaign {self.name}: the delta that copies an edit made on the source"})
 
-    def take_twin(self) -> str:
+    def take_twin(self, *, before_reset=None) -> str:
         path = os.path.join(results_dir(self.name), "twins.json")
         try:
             with open(path, encoding="utf-8") as fh:
@@ -307,11 +310,13 @@ class LiveDriver(Driver):
         free = [t for t in TWINS if t not in used]
         if not free:
             raise Unautomated("every twin is used: wipe-and-migrate the cohort before the next scenario")
+        user = f"{free[0]}@{self.domain}"
+        if before_reset is not None:
+            before_reset(user)
         os.makedirs(results_dir(self.name), exist_ok=True)
         with open(path, "w", encoding="utf-8") as fh:
             json.dump(used + [free[0]], fh)
         self.started = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        user = f"{free[0]}@{self.domain}"
         self._fresh(user)
         return user
 
@@ -884,6 +889,8 @@ def run_scenario(sc: S.Scenario, driver: Driver, name: str, allow: set, wait: in
         return {**row, "status": "UNVERIFIED", "reason": f"cannot be caused on a twin: {sc.inject['unreachable']}"}
     if sc.needs and not set(sc.needs) <= allow:
         return {**row, "status": "SKIPPED", "reason": f"the operator did not allow {', '.join(sc.needs)}"}
+    if sc.id == "fail:F-reboot":
+        return {**row, "status": "UNVERIFIED", "reason": "F-reboot needs an explicit pinned VM invocation"}
     if sc.how == "unseedable":
         return {**row, "status": "COVERED" if sc.unit_test else "UNVERIFIED",
                 "reason": f"cannot be caused live; unit test {sc.unit_test}" if sc.unit_test else "unseedable with no unit test named"}
@@ -1014,14 +1021,40 @@ def main(argv=None) -> int:
     ap.add_argument("--allow", default="", help="operator permissions given: net,reboot")
     ap.add_argument("--dry-run", action="store_true", help="print what would run; touch nothing")
     ap.add_argument("--batch", type=int, default=0, help="put up to N failpoint scenarios on N twins, one pass (2 or more)")
+    ap.add_argument("--reboot-guest", metavar="MACHINE_ID", help="pin the virtual guest for an explicit F-reboot test")
+    ap.add_argument("--continue-reboot", action="store_true", help="continue the F-reboot checkpoint after boot")
     args = ap.parse_args(argv)
     only = {x.strip() for x in args.only.split(",") if x.strip()} if args.only else None
+    allow = set(args.allow.split(",")) - {""}
+    if args.reboot_guest or args.continue_reboot:
+        if (only != {"fail:F-reboot"} or "reboot" not in allow or not args.reboot_guest
+                or args.group not in (None, "failures") or args.batch or args.redo):
+            ap.error("F-reboot needs --only fail:F-reboot --allow reboot --reboot-guest MACHINE_ID")
     if args.dry_run:
-        run(args.name, Driver(), args.group, only, args.redo, set(args.allow.split(",")) - {""}, dry_run=True)
+        run(args.name, Driver(), args.group, only, args.redo, allow, dry_run=True)
         return 0
     driver = LiveDriver(args.account_id, args.name)
+    if args.reboot_guest:
+        import campaign_reboot
+
+        path = Path(results_dir(args.name)) / "F-reboot.json"
+        evidence = campaign_reboot.LinuxEvidence(driver)
+        try:
+            row = campaign_reboot.run(path, driver, evidence, args.name, args.reboot_guest.lower(), allow,
+                                      args.continue_reboot, judge)
+        except campaign_reboot.Held as exc:
+            print(f"UNVERIFIED  fail:F-reboot  {exc}", flush=True)
+            return 0
+        except Exception as exc:  # noqa: BLE001 - never print a remote reply, credentials or mail as proof
+            print(f"UNVERIFIED  fail:F-reboot  evidence unavailable ({type(exc).__name__})", flush=True)
+            return 0
+        if read_results(args.name).get(row["id"]) != row:
+            append_result(args.name, row)
+        path.with_name("RESULTS.md").write_text(render_md(args.name, S.all_scenarios(), read_results(args.name)), encoding="utf-8")
+        print(f"{row['status']:<10} fail:F-reboot  {row['reason']}", flush=True)
+        return 0
     try:
-        run(args.name, driver, args.group, only, args.redo, set(args.allow.split(",")) - {""}, batch=args.batch)
+        run(args.name, driver, args.group, only, args.redo, allow, batch=args.batch)
     finally:
         driver.disarm()
     return 0

@@ -238,6 +238,9 @@ def test_every_failure_row_runs_end_to_end(fid):
     if fid == "F-deploy":      # the operator's side: the deploy script is not on the allow-list
         assert row["status"] == "UNVERIFIED" and "sync_vps.sh" in row["reason"] and "twin" not in kinds(d)
         return
+    if fid == "F-reboot":
+        assert row["status"] == "UNVERIFIED" and "pinned VM" in row["reason"] and d.calls == []
+        return
     assert row["status"] == "PASS", row
     assert kinds(d).count("twin") == S.by_id()[f"fail:{fid}"].inject["twin"] and row["twins"]
 

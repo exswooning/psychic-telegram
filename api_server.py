@@ -412,6 +412,9 @@ class StartMigration(WriteAction):
     # one off is data a whole-tenant run leaves behind. Checked per launch with
     # a token mint, because one ungranted scope fails every call in the run.
     full_fidelity: bool = True
+    # Opt a selected-user recovery run into the durable phase record. Ordinary
+    # selected-user runs stay out of the account-wide Run phases history.
+    record_phases: bool = False
 
 
 def _tuning_env(body: StartMigration, env: dict | None) -> dict | None:
@@ -2866,6 +2869,8 @@ async def migrate_start(body: StartMigration, op: Operator = Depends(operator)):
     if body.mail_link_scan and body.mail_mode == "split":
         env = {**(env or os.environ), "MAIL_LINK_SCAN": body.mail_link_scan}
     env = _tuning_env(body, env)
+    if body.record_phases or "RUN_RECORD_SCOPED" in (env or os.environ):
+        env = {**(env or os.environ), "RUN_RECORD_SCOPED": "true" if body.record_phases else "false"}
     left_off: list[str] = []
     if not body.dry_run:
         left_off += await _off_loop(_apis_for_the_run, account_id)
