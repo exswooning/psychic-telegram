@@ -1,8 +1,6 @@
 """An embedded image read must stop at the file's deadline (education@, live 7 Nov 2026: a Doc's
 image downloads ran 11+ min inside one counted call; urlopen's timeout is per read, not total)."""
-import threading
 import time
-from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
 
@@ -10,48 +8,40 @@ from native_fidelity import _fetch_image
 from resilience import RetryBudgetExceeded
 
 
-class _Drip(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.send_header("Content-Length", "100000")
-        self.end_headers()
-        try:
-            for _ in range(100):
-                self.wfile.write(b"x" * 1000)
-                self.wfile.flush()
-                time.sleep(0.2)
-        except OSError:
-            pass
-
-    def log_message(self, *a):
-        pass
+class _Response:
+    def __init__(self, chunks, delay=0):
+        self.chunks, self.delay = iter(chunks), delay
+    def __enter__(self): return self
+    def __exit__(self, *args): return False
+    def read1(self, _size):
+        if self.delay: time.sleep(self.delay)
+        return next(self.chunks, b"")
 
 
-def test_slow_image_stops_at_deadline():
-    srv = HTTPServer(("127.0.0.1", 0), _Drip)
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
+def test_slow_image_stops_at_deadline(monkeypatch):
+    import urllib.request
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: _Response([b"x" * 1000] * 100, .2))
     start = time.monotonic()
     try:
         with pytest.raises(RetryBudgetExceeded):
-            _fetch_image(f"http://127.0.0.1:{srv.server_port}/", deadline=time.monotonic() + 1)
-        assert time.monotonic() - start < 5      # before shutdown(), which waits for the drip to end
+            _fetch_image("fake://slow", deadline=time.monotonic() + 1)
+        assert time.monotonic() - start < 2
     finally:
-        srv.shutdown()
+        pass
 
 
-def test_no_deadline_reads_whole_image():
-    class Fast(_Drip):
-        def do_GET(self):
-            self.send_response(200)
-            self.send_header("Content-Length", "3")
-            self.end_headers()
-            self.wfile.write(b"abc")
-    srv = HTTPServer(("127.0.0.1", 0), Fast)
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
-    try:
-        assert _fetch_image(f"http://127.0.0.1:{srv.server_port}/") == b"abc"
-    finally:
-        srv.shutdown()
+def test_no_deadline_reads_whole_image(monkeypatch):
+    import urllib.request
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: _Response([b"a", b"bc"]))
+    assert _fetch_image("fake://fast") == b"abc"
+
+
+def test_digest_reader_hashes_chunks_without_joining_them(monkeypatch):
+    import hashlib
+    import urllib.request
+    from native_fidelity import _fetch_image_digest
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: _Response([b"ab", b"c"]))
+    assert _fetch_image_digest("fake://image") == "sha256:" + hashlib.sha256(b"abc").hexdigest()
 
 
 def test_images_are_fetched_side_by_side_once_per_distinct_url_and_swapped_in_place():

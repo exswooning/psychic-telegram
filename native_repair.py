@@ -7,8 +7,9 @@ Unsupported structures stay explicit instead of silently losing native features.
 from __future__ import annotations
 
 import copy
+import json
 
-from link_rewrite import rewrite_text, _rewrite_importrange
+from link_rewrite import rewrite_text, _rewrite_importrange, DRIVE_ID, IMPORTRANGE_ID
 
 CELL_FIELDS = "userEnteredValue,userEnteredFormat,note,textFormatRuns,dataValidation"
 SHEET_FIELDS = (
@@ -27,6 +28,29 @@ def _rewrite(value, lookup):
         text = rewrite_text(value, lookup)[0]
         return _rewrite_importrange(text.encode(), lookup)[0].decode()
     return value
+
+
+def _contains_rewritable_link(value, seen=None):
+    """Fast exact gate for cell equality; only rewrite_text's two link forms matter."""
+    if seen is None:
+        seen=set()
+    if isinstance(value, str):
+        if "google.com" in value.lower():
+            return bool(DRIVE_ID.search(value.encode("utf-8", "surrogatepass")))
+        if "importrange" in value.lower():
+            return bool(IMPORTRANGE_ID.search(value.encode("utf-8", "surrogatepass")))
+        return False
+    if isinstance(value, dict):
+        if id(value) in seen:
+            return False
+        seen.add(id(value))
+        return any(_contains_rewritable_link(v,seen) for v in value.values())
+    if isinstance(value, list):
+        if id(value) in seen:
+            return False
+        seen.add(id(value))
+        return any(_contains_rewritable_link(v,seen) for v in value)
+    return False
 
 
 def _same_display(cell):
@@ -594,7 +618,7 @@ def repair_empty_doc(auth, db, settings, user, target, sid, tid, sm, tm, backup)
 
 def compare_sheets_streamed(source, target, sid, tid, lookup=lambda fid: None,
                             fetch=lambda request: request.execute(), pace=lambda: None,
-                            max_cells=10_000_000, window_cells=10000):
+                            max_cells=None, window_cells=10000):
     """Compare every allocated cell in bounded windows; never retain whole grids.
 
     Request/cell limits still fail closed. Structures are compared independently;
@@ -604,8 +628,11 @@ def compare_sheets_streamed(source, target, sid, tid, lookup=lambda fid: None,
     def get(api, fid, **kwargs):
         pace()
         return fetch(api.spreadsheets().get(spreadsheetId=fid, **kwargs))
-    a = get(source, sid, fields=fields)
-    b = get(target, tid, fields=fields)
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=2, thread_name_prefix="sheet-verify") as pool:
+        fa = pool.submit(get, source, sid, fields=fields)
+        fb = pool.submit(get, target, tid, fields=fields)
+        a, b = fa.result(), fb.result()
     # A provider ignoring a field mask must not make the metadata comparison
     # retain huge grid data; grid windows below are the authoritative cell reads.
     def metadata(doc):
@@ -618,42 +645,134 @@ def compare_sheets_streamed(source, target, sid, tid, lookup=lambda fid: None,
         return ['native Sheet structures differ'] + diffs
     cells = sum(int(s['properties'].get('gridProperties', {}).get('rowCount',0))*
                 int(s['properties'].get('gridProperties', {}).get('columnCount',0)) for s in a.get('sheets',[]))
-    if cells > max_cells:
+    if max_cells is not None and cells > max_cells:
         raise RuntimeError('Streaming Sheet comparison exceeds qualified cell budget; coverage incomplete')
-    shown = {id(a): _sheet_defaults(a), id(b): _sheet_defaults(b)}
-    def display(cell, side):
-        d = shown[id(side)]
-        return _display_cell(copy.deepcopy(cell), *d) if d else cell
     def content(doc, sheet_id, side):
         matches=[s for s in doc.get('sheets',[]) if s.get('properties',{}).get('sheetId')==sheet_id]
         if len(matches)!=1:
             raise RuntimeError('Sheet window response omitted or duplicated its sheet identity')
-        values={}
+        shown=_sheet_defaults(side)
         for grid in matches[0].get('data',[]):
             row0,col0=grid.get('startRow',0),grid.get('startColumn',0)
             for ri,row in enumerate(grid.get('rowData',[])):
                 for ci,cell in enumerate(row.get('values',[])):
-                    cell=display(cell, side) if cell else cell
-                    if cell:values[f'{row0+ri}:{col0+ci}']=_same_display(cell)
-        return values
-    for sa,sb in zip(a.get('sheets',[]),b.get('sheets',[])):
+                    if not cell:
+                        continue
+                    if shown:
+                        cell=_display_cell(copy.deepcopy(cell),*shown)
+                    yield (row0+ri,col0+ci),_same_display(cell)
+
+    def content_differs(xr, yr, source_sheet_id, target_sheet_id):
+        # Ordered sparse iterators avoid million-entry dictionaries for dense windows.
+        xi,yi=iter(content(xr,source_sheet_id,a)),iter(content(yr,target_sheet_id,b))
+        sx,sy=next(xi,None),next(yi,None)
+        has_values=sx is not None or sy is not None
+        while sx is not None or sy is not None:
+            if sx is None or sy is None or sx[0]!=sy[0]:
+                return True,True
+            if sx[1]==sy[1] and not _contains_rewritable_link(sx[1]):
+                sx,sy=next(xi,None),next(yi,None)
+                continue
+            if _rewrite(sx[1],lookup)!=sy[1]:
+                return True,True
+            sx,sy=next(xi,None),next(yi,None)
+        return False,has_values
+    # Sheets API responses are limited to 10 MB. Keep a margin for transport and
+    # client decoding; the window adapts to an estimated JSON response size, not a fixed
+    # 10,000-cell guess. Empty windows can cover the remaining allocated extent in
+    # one request; a dense response grows only as fast as the observed payload allows.
+    response_budget = 8 * 1024 * 1024
+    def response_size(doc):
+        rows=cells=0
+        samples=[]
+        for sheet in doc.get('sheets',[]):
+            for grid in sheet.get('data',[]):
+                row_data_list=grid.get('rowData',[])
+                for row_data in row_data_list:
+                    values=row_data.get('values',[])
+                    rows+=1;cells+=len(values)
+                # Sample 32 rows across each grid and four columns across each
+                # sampled row. A high-width sample makes the estimate conservative
+                # for variable cell contents without serializing every cell again.
+                sample_rows=row_data_list
+                for i in range(min(32,len(sample_rows))):
+                    row_index=0 if len(sample_rows)<=1 else i*(len(sample_rows)-1)//(min(32,len(sample_rows))-1)
+                    values=sample_rows[row_index].get('values',[])
+                    if not values:
+                        continue
+                    col_indexes=sorted({0,len(values)//3,(2*len(values))//3,len(values)-1})
+                    samples.extend(values[j] for j in col_indexes)
+        max_cell=max((len(json.dumps(cell,separators=(',',':'),ensure_ascii=False).encode('utf-8'))
+                      for cell in samples),default=2)
+        max_cell=max((len(json.dumps(cell,separators=(',',':'),ensure_ascii=False).encode('utf-8'))
+                      for cell in samples),default=2)
+        # Sampled cell width is padded by 50%; row and grid framing is budgeted
+        # separately. An HTTP response-limit error halves and retries the range.
+        return int(512+rows*64+cells*(max_cell+1)*1.5)
+
+    def grid_data(doc,sheet_id):
+        matches=[s for s in doc.get('sheets',[]) if s.get('properties',{}).get('sheetId')==sheet_id]
+        if len(matches)!=1:
+            raise RuntimeError('Sheet window response omitted or duplicated its sheet identity')
+        return matches[0].get('data',[])
+
+    with ThreadPoolExecutor(max_workers=2, thread_name_prefix="sheet-verify") as pool:
+      for sa,sb in zip(a.get('sheets',[]),b.get('sheets',[])):
         props=sa['properties'];grid=props.get('gridProperties',{})
         if props.get('sheetType','GRID')!='GRID':continue
         width,height=int(grid.get('columnCount',0)),int(grid.get('rowCount',0))
         if width <= 0 or height <= 0:
             raise RuntimeError('Sheet grid dimensions are unavailable; coverage incomplete')
-        for col in range(0,width,100):
-            end=min(width,col+100); base=max(1,window_cells//max(1,end-col)); step=base; row=0
-            # A blank stretch widens the next window (x4, at most 10x): P3.7 run 13's 20,000 x 120 Sheet held no
-            # value and took 480 paced reads, ~17 min a check. Any cell drops back to the base window.
-            while row<height:
-                rng="'"+props['title'].replace("'","''")+"'!"+_a1(col,row)+':'+_a1(end-1,min(height,row+step)-1)
-                fields='sheets(properties.sheetId,data(startRow,startColumn,rowData(values('+CELL_FIELDS+'))))'
-                x=content(get(source,sid,ranges=[rng],includeGridData=True,fields=fields),props['sheetId'],a)
-                y=content(get(target,tid,ranges=[rng],includeGridData=True,fields=fields),sb['properties']['sheetId'],b)
-                row+=step; step=base if (x or y) else min(step*4, base*10)
-                if _rewrite(x, lookup)!=y:
-                    diffs.append('native Sheet cell content/style differs in '+rng)
-                    # Even after a mismatch, continue reading every range; output alone is bounded.
-                    if len(diffs)>20:diffs=diffs[:20]
+        row=0; step=max(1,window_cells//width)
+        while row<height:
+            end_row=min(height,row+step)
+            rng="'"+props['title'].replace("'","''")+"'!"+_a1(0,row)+':'+_a1(width-1,end_row-1)
+            grid_fields='sheets(properties.sheetId,data(startRow,startColumn,rowData(values('+CELL_FIELDS+'))))'
+            # A response-limit error is retried as smaller adjacent windows. Other
+            # errors propagate, so an incomplete read can never be reported equal.
+            while True:
+                try:
+                    fx=pool.submit(get,source,sid,ranges=[rng],includeGridData=True,fields=grid_fields)
+                    fy=pool.submit(get,target,tid,ranges=[rng],includeGridData=True,fields=grid_fields)
+                    xr,yr=fx.result(),fy.result()
+                    xb,yb=response_size(xr),response_size(yr)
+                    if max(xb,yb)>response_budget:
+                        if step<=1:
+                            raise RuntimeError('A single-row Sheet response exceeds the safe API response budget; coverage incomplete')
+                        step=max(1,step//2); end_row=min(height,row+step)
+                        rng="'"+props['title'].replace("'","''")+"'!"+_a1(0,row)+':'+_a1(width-1,end_row-1)
+                        continue
+                    break
+                except Exception as exc:
+                    status=getattr(getattr(exc,'resp',None),'status',None)
+                    detail=str(exc).lower()
+                    too_large=(status==413 or any(mark in detail for mark in
+                             ('response too large','response size','returned too much data')))
+                    if not too_large or step<=1:
+                        raise
+                    step=max(1,step//2); end_row=min(height,row+step)
+                    rng="'"+props['title'].replace("'","''")+"'!"+_a1(0,row)+':'+_a1(width-1,end_row-1)
+            xdata=grid_data(xr,props['sheetId'])
+            ydata=grid_data(yr,sb['properties']['sheetId'])
+            has_values=any(grid.get('rowData') for grid in xdata+ydata)
+            same_defaults=_sheet_defaults(a)==_sheet_defaults(b)
+            if xdata==ydata and same_defaults and not _contains_rewritable_link(xdata):
+                differs=False
+            else:
+                differs,_=content_differs(xr,yr,props['sheetId'],sb['properties']['sheetId'])
+            if differs:
+                diffs.append('native Sheet cell content/style differs in '+rng)
+                if len(diffs)>20:diffs=diffs[:20]
+            actual_step=end_row-row
+            row=end_row
+            if not has_values:
+                # The empty response itself is the used-extent signal: ask for the
+                # entire remaining allocated tail, then split only if the API says
+                # its real response limit would be exceeded.
+                step=max(1,height-row)
+            else:
+                observed=max(xb,yb,1)
+                area=width*actual_step
+                grown=max(step,min(step*4,max(1,int(area*response_budget/observed)//width)))
+                step=grown
     return diffs

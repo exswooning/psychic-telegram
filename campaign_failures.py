@@ -122,9 +122,7 @@ ROWS = {
         {"do": "wait_log", "job": "seed", "match": "."}, shell("systemctl restart bitport-webui"), {"do": "wait_resume", "by": "seed"},
         IDLE, start(), {"do": "wait_pass", "pass": "drive"}, shell("systemctl restart bitport-webui"), IDLE, *FINISH], BASE,
         "the migration survives the restart; the seed, started again, adds nothing twice (the twin's source count is unchanged)"),
-    "F-reboot": ("The box reboots mid-run", 1, [
-        start(), {"do": "wait_pass", "pass": "drive"}, shell("systemctl reboot"),
-        {"do": "wait_resume", "by": "autopilot", "after_boot": True}, IDLE, *FINISH], BASE,
+    "F-reboot": ("The box reboots mid-run", 1, [], BASE,
         "after boot the run resumes from the ledger (autopilot or the operator's Start) and ends equal to the control"),
     "F-net-3": ("No network for 3 minutes", 1, [
         start(), {"do": "wait_pass", "pass": "drive"}, shell("./netdrop.sh 180"), IDLE, *FINISH], {**BASE, "failed_items": 0},

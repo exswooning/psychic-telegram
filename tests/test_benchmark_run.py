@@ -19,6 +19,8 @@ from __future__ import annotations
 import os
 import sys
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import benchmark_run as _br      # noqa: E402
@@ -247,3 +249,15 @@ class TestSelectedAccount:
 
         assert rc == 2
         assert "does not match the target domain" in capsys.readouterr().err
+
+    @pytest.mark.parametrize("mode", ["oauth", "impersonate"])
+    def test_selected_benchmark_rejects_process_wide_credentials(self, tmp_path, monkeypatch, capsys, mode):
+        self._configured_pair(tmp_path, monkeypatch)
+        monkeypatch.setenv("AUTH_MODE", mode)
+        monkeypatch.setattr(_br, "sh", lambda *args, **kwargs: pytest.fail("benchmark launched a child"))
+
+        rc = _br.main(["--account-id", "3", "--label", "T1", "--yes", "--skip-wipe",
+                       "--confirm-domain", "target.test"])
+
+        assert rc == 2
+        assert "selected account's service account keys" in capsys.readouterr().err

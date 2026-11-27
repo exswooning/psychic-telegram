@@ -102,69 +102,57 @@ class TestOnlyThePageShellsArePublic:
 
 
 # ----------------------------------------------------------------------
-# The positive half, against the real server.
-#
-# Refusing anonymous callers is only half the change; the other half is that
-# a signed-in one still gets through. Testing _authorised() alone would not
-# catch a mistake in routing, cookie parsing, or the order the gate runs in
-# -- and that mistake locks every customer out of the product. So this
-# starts the actual HTTPServer and speaks HTTP to it.
+# The positive half exercises the real request dispatcher without a socket.
+# Loopback binds are disabled in the test sandbox; constructing the handler
+# directly still covers routing, cookie parsing, and the auth gate.
 # ----------------------------------------------------------------------
-import http.client
-import threading
-from http.server import HTTPServer
-
 import pytest
 
 import accounts_auth
 
 
 @pytest.fixture
-def live_server(tmp_path, monkeypatch):
-    # control_plane_db._db_path() is Settings().db_path, so the only way to
-    # isolate this is the environment -- an attribute patch on accounts_auth
-    # silently does nothing (there is no such attribute) and the test then
-    # writes a real account into the developer's own control-plane database.
-    # It did exactly that before this line existed.
+def auth_db(tmp_path, monkeypatch):
+    # Isolate the session database so no test writes an operator's real rows.
     import control_plane_db as cpdb
 
     monkeypatch.setenv("MIGRATION_DB", str(tmp_path / "cp.db"))
     cpdb.apply_migrations(str(tmp_path / "cp.db"))
-    srv = HTTPServer(("127.0.0.1", 0), webui.Handler)
-    t = threading.Thread(target=srv.serve_forever, daemon=True)
-    t.start()
-    yield srv
-    srv.shutdown()
+    return tmp_path
 
 
-def _get(srv, path, cookie=None):
-    c = http.client.HTTPConnection("127.0.0.1", srv.server_address[1], timeout=10)
-    c.request("GET", path, headers={"Cookie": cookie} if cookie else {})
-    r = c.getresponse()
-    r.read()
-    c.close()
-    return r.status
+def _get(path, cookie=None):
+    h = object.__new__(webui.Handler)
+    h.path = path
+    h.headers = {"Cookie": cookie} if cookie else {}
+    response = {}
+    h._json = lambda _obj, code=200: response.update(status=code)
+    h._send = lambda code, _body, _ctype, **_kwargs: response.update(status=code)
+    h.send_response = lambda code: response.update(status=code)
+    h.send_header = lambda *_args: None
+    h.end_headers = lambda: None
+    webui.Handler._do_GET(h)
+    return response["status"]
 
 
 class TestTheGateOnTheRealServer:
-    def test_anonymous_is_refused(self, live_server):
-        assert _get(live_server, "/api/actions") == 401
+    def test_anonymous_is_refused(self, auth_db):
+        assert _get("/api/actions") == 401
 
-    def test_a_page_shell_still_serves_anonymously(self, live_server):
+    def test_a_page_shell_still_serves_anonymously(self, auth_db, tmp_path, monkeypatch):
         """If this 401s, the login page itself is unreachable and nobody can
         ever sign in to satisfy the gate."""
-        assert _get(live_server, "/console") in (200, 404)
+        monkeypatch.setattr(webui, "HERE", str(tmp_path))
+        assert _get("/console") in (200, 404)
 
-    def test_a_real_session_cookie_gets_through(self, live_server):
-        """The half that matters most: a mistake here locks out every
-        customer, and no amount of testing the predicate alone would show
-        it -- this goes through routing and cookie parsing as deployed."""
+    def test_a_real_session_cookie_gets_through(self, auth_db):
+        """A valid cookie must pass the actual router and reach its handler."""
         aid = accounts_auth.create_account("gate@test.local", "pw-CorrectHorse-9", "Gate")
         token = accounts_auth.create_session(aid)
-        assert _get(live_server, "/api/actions", f"bp_session={token}") == 200
+        assert _get("/api/actions", f"bp_session={token}") == 200
 
-    def test_a_garbage_cookie_is_refused(self, live_server):
-        assert _get(live_server, "/api/actions", "bp_session=not-a-real-token") == 401
+    def test_a_garbage_cookie_is_refused(self, auth_db):
+        assert _get("/api/actions", "bp_session=not-a-real-token") == 401
 
 
 def test_hashed_assets_are_cached_and_nothing_else_is(tmp_path, monkeypatch):

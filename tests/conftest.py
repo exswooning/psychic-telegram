@@ -36,6 +36,7 @@ _test_cpdb.apply_migrations(os.environ["MIGRATION_DB"])
 import calendar_engine  # noqa: E402
 import drive_engine  # noqa: E402
 import gmail_engine  # noqa: E402
+import verify_sample  # noqa: E402
 from config import Settings  # noqa: E402
 from db import MigrationDB  # noqa: E402
 from resilience import DailyQuotaGuard  # noqa: E402
@@ -296,6 +297,7 @@ def auth(settings, monkeypatch) -> FakeAuth:
     """
     monkeypatch.setattr(drive_engine, "MediaFileUpload", FakeMediaUpload)
     monkeypatch.setattr(drive_engine, "MediaIoBaseDownload", FakeDownloader)
+    monkeypatch.setattr(verify_sample, "MediaIoBaseDownload", FakeDownloader)
     monkeypatch.setattr(gmail_engine, "MediaFileUpload", FakeMediaUpload)
     monkeypatch.setattr(gmail_engine, "MediaIoBaseUpload", FakeIoUpload)
     return FakeAuth(settings)

@@ -157,7 +157,7 @@ def _verify(d, retry=lambda f: f):
 def _fake(monkeypatch, fail_ids, error, then_ok_after=None, differ=()):
     calls = {}
 
-    def fake(auth, su, tu, sid, tid, mime, lookup, fetch=None, pace=lambda: None):
+    def fake(auth, su, tu, sid, tid, mime, lookup, fetch=None, pace=lambda: None, fetch_digest=None):
         calls[sid] = calls.get(sid, 0) + 1
         if sid in fail_ids and (then_ok_after is None or calls[sid] <= then_ok_after):
             raise error() if callable(error) else error
