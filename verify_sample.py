@@ -2201,9 +2201,32 @@ class Verifier:
             else:
                 res["identical"] += 1
         self._report_progress("Contacts compare people", len(pairs), len(pairs))
+        res["duplicates"] = self._contact_duplicates(tgt, {tid for _, tid, _ in all_pairs}, res)
         self._note_sample(res, "contact")
         res["notCopied"] = self._failed(("contact", "contacts"))
         return res
+
+    def _contact_duplicates(self, svc, mapped_targets: set, res: dict) -> list:
+        """An unmapped target contact named like a mapped one is a second copy (t16, 27 Nov 2026: a copy older
+        than the ledger's outlived the reset and the run added another; the check read IDENTICAL). One with a
+        name of its own may be the user's own new contact, and is left alone."""
+        people, token = {}, None
+        try:
+            while True:
+                r = self._x(lambda t=token: svc.people().connections().list(
+                    resourceName="people/me", pageSize=1000, pageToken=t, personFields="names").execute(),
+                    operation="Contacts target inventory")
+                for p in r.get("connections", []):
+                    people[p["resourceName"]] = ((p.get("names") or [{}])[0].get("displayName") or "").strip()
+                token = r.get("nextPageToken")
+                if not token:
+                    break
+        except Exception as exc:      # noqa: BLE001 - a failed read is said, never read as "no duplicates"
+            res["errors"].append(f"could not inventory target contacts: {error_detail(exc)}")
+            return []
+        named = {people[t] for t in mapped_targets if people.get(t)}
+        return [{"item": name, "target": rn, "error": "a second copy of a migrated contact (not in the ledger)"}
+                for rn, name in sorted(people.items()) if rn not in mapped_targets and name and name in named]
 
     def _contact_source_ids(self, svc) -> set[str] | None:
         """Inventory source contact resource names to confirm empty sources and

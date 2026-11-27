@@ -273,6 +273,14 @@ def reset_one(settings: Settings, auth: AuthManager, user: str,
                 print(f"    {user}: removed {moved} message(s) naming {settings.source_domain} (Google's import included)")
         except Exception as exc:  # noqa: BLE001 - the seeded mail is already gone; this is tidying
             print(f"    ! {user} welcome mail: {str(exc)[:90]}")
+    if "contacts" in services and "contacts" not in unreachable:
+        try:
+            gone = _delete_ledger_contacts(settings, auth, user)
+            out["contacts"] += gone
+            if gone:
+                print(f"    {user}: deleted {gone} migrated contact(s) without the seed marker")
+        except Exception as exc:  # noqa: BLE001 - the seeded contacts are already gone; this is tidying
+            print(f"    ! {user} migrated contacts: {str(exc)[:90]}")
     if "chat" in services:
         try:
             out["chat"] = seed.reset_chat(auth.target_chat(user), settings, local)
@@ -281,6 +289,34 @@ def reset_one(settings: Settings, auth: AuthManager, user: str,
         out["chat"] += _delete_ledger_spaces(settings, auth, user)
     out["unreachable"] = sorted(unreachable)
     return out
+
+
+def _delete_ledger_contacts(settings: Settings, auth: AuthManager, target_user: str) -> int:
+    """Every contact the ledger says the migration wrote for this user, by resource name. A contact made on the source
+    without the seed marker (campaign_changes' "Campaign Added...") was copied without it, outlived each reset, and
+    the next run added a second one beside it (t16, 27 Nov 2026: contacts 27 on the target for 26 expected)."""
+    import sqlite3
+    try:
+        conn = sqlite3.connect(f"file:{settings.db_path}?mode=ro", uri=True)
+        ids = [r[0] for r in conn.execute(
+            "SELECT m.target_id FROM id_mapping m JOIN identity_map i ON i.source_email = m.source_user "
+            "WHERE lower(i.target_email) = lower(?) AND m.type = 'contact'", (target_user,))]
+        conn.close()
+    except Exception:  # noqa: BLE001 - no ledger to read is nothing to delete
+        return 0
+    from resilience import retry_on_google_error
+    people, n = auth.target_people(target_user), 0
+    delete = retry_on_google_error(label="reset.contacts.delete")(
+        lambda rn: people.people().deleteContact(resourceName=rn).execute())
+    for rn in ids:
+        if not str(rn).startswith("people/"):
+            continue
+        try:
+            delete(rn)
+            n += 1
+        except Exception:  # noqa: BLE001 - already gone (404) is the usual answer after the seeded reset
+            pass
+    return n
 
 
 REPAIR_COPY_PREFIXES = (".Quarantined duplicate ", ".Repair backup - ")

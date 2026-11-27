@@ -507,3 +507,31 @@ def test_a_reset_removes_mail_naming_the_source_that_google_imported():
     purge = G()
     assert reset_target.remove_source_mail(None, "a.example", purge) == 3
     assert purge.m.box == set() and purge.m.queries[0] == "from:a.example OR to:a.example OR cc:a.example"
+
+
+def test_the_contacts_the_ledger_maps_are_deleted_marker_or_not(tmp_path):
+    """t16, 27 Nov 2026: a source contact without the seed marker was copied without it, outlived every reset, and the
+    next run added a second one beside it."""
+    import sqlite3
+    from types import SimpleNamespace
+    import reset_target
+    path = tmp_path / "l.db"
+    c = sqlite3.connect(path)
+    c.execute("CREATE TABLE id_mapping (source_user, source_id, target_id, type)")
+    c.execute("CREATE TABLE identity_map (source_email, target_email)")
+    c.execute("INSERT INTO identity_map VALUES ('u@a.example.com', 'u@b.example.com')")
+    c.executemany("INSERT INTO id_mapping VALUES (?,?,?,?)", [
+        ("u@a.example.com", "people/s1", "people/c1", "contact"), ("u@a.example.com", "people/s2", "people/c2", "contact"),
+        ("u@a.example.com", "f", "t", "file"), ("v@a.example.com", "people/s3", "people/c3", "contact")])
+    c.commit(); c.close()
+    deleted = []
+
+    def delete(resourceName):
+        deleted.append(resourceName)
+        if resourceName == "people/c2":
+            return SimpleNamespace(execute=lambda: (_ for _ in ()).throw(RuntimeError("HttpError 404 notFound")))
+        return SimpleNamespace(execute=lambda: {})
+
+    auth = SimpleNamespace(target_people=lambda who: SimpleNamespace(people=lambda: SimpleNamespace(deleteContact=delete)))
+    assert reset_target._delete_ledger_contacts(SimpleNamespace(db_path=str(path)), auth, "u@b.example.com") == 1
+    assert set(deleted) == {"people/c1", "people/c2"}
