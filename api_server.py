@@ -3162,7 +3162,7 @@ def _migration_checks_view(account_id, offset=0):
             out["queueTotals"] = [dict(r) for r in conn.execute(
                 "SELECT state,COUNT(*) AS count FROM verification_repair_queue GROUP BY state")]
             out["repairQueue"] = [{**dict(r), "detail": json.loads(r["detail"])} for r in conn.execute(
-                "SELECT * FROM verification_repair_queue ORDER BY CASE WHEN state='RESOLVED' THEN 1 ELSE 0 END,"
+                "SELECT * FROM verification_repair_queue ORDER BY CASE WHEN state IN ('RESOLVED','OUT_OF_SCOPE') THEN 1 ELSE 0 END,"
                 "last_seen DESC,source_user,service,finding_key LIMIT 200 OFFSET ?", (offset,))]
     return out
 

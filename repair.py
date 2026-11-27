@@ -145,6 +145,54 @@ def survey(db) -> dict:
     }
 
 
+def resolve_gmail_source_gone(db, apply: bool = False, users: set[str] | None = None) -> dict:
+    """Replace a failed Gmail raw read with a durable SOURCE_GONE record.
+
+    A 404 from the source raw-read path means Gmail listed a message that was
+    deleted before the migration fetched it. There is no content to retry.
+    """
+    import known_issues
+
+    rows = db.conn.execute(
+        "SELECT source_user,item_id,item_type,error_message FROM audit_log "
+        "WHERE status='FAILED' AND item_type='message' ORDER BY source_user,item_id").fetchall()
+    gone = [r for r in rows if (users is None or r["source_user"] in users)
+            and known_issues.classify_failure(r["item_type"], r["error_message"] or "") == "gmail.source_gone"]
+    out = {"candidates": len(gone), "recorded": 0, "items": [
+        {"source_user": r["source_user"], "item_id": r["item_id"]} for r in gone[:20]]}
+    if not apply:
+        return out
+    for row in gone:
+        db.log_audit(row["source_user"], row["item_id"], "message", "SOURCE_GONE",
+                     "Source message returned HTTP 404 after listing; recorded as gone, not failed")
+        out["recorded"] += 1
+    return out
+
+
+def run_failure_review(db, sample_limit: int = 5) -> list[dict]:
+    """Group current nonautomatic run failures by kind and show the person's next step."""
+    import known_issues
+
+    rows = db.conn.execute(
+        "SELECT a.source_user,a.item_id,a.item_type,a.error_message FROM audit_log a "
+        "WHERE a.status='FAILED' AND (NOT EXISTS (SELECT 1 FROM identity_map) "
+        "OR EXISTS (SELECT 1 FROM identity_map m WHERE m.source_email=a.source_user)) "
+        "ORDER BY a.source_user,a.item_type,a.item_id").fetchall()
+    grouped = {}
+    for row in rows:
+        kind = known_issues.classify_failure(row["item_type"], row["error_message"] or "")
+        spec = known_issues.RUN_BY_ID.get(kind)
+        if not spec or spec[6]:
+            continue
+        group = grouped.setdefault(kind, {"id": kind, "title": spec[3], "cause": spec[4],
+            "nextStep": spec[5], "open": 0, "samples": []})
+        group["open"] += 1
+        if len(group["samples"]) < sample_limit:
+            group["samples"].append({"source_user": row["source_user"], "item_id": row["item_id"],
+                                     "item_type": row["item_type"]})
+    return sorted(grouped.values(), key=lambda item: (-item["open"], item["id"]))
+
+
 def retry_failed_contact_names(auth, db, settings, apply: bool = False,
                                users: set[str] | None = None) -> dict:
     """Retry only contacts rejected for multiple names on one People source.
@@ -215,6 +263,14 @@ def repairable_mail_item(i: dict) -> bool:
     NOT "Unresolved Drive link mapping": that link's owner is not migrated yet, and delivering now would
     leave it pointing at the source."""
     err = i.get("error", "") or ""
+    # This conflict appears in both FAILED audit rows and the verification
+    # queue. Retrying it via missing-mail recovery cannot resolve the existing
+    # target content, and may try to create a second copy. Keep it for the
+    # explicit needs-person path in known_issues.RUN_KINDS.
+    import known_issues
+    if ("existing destination message-id has different content" in err.lower()
+            or known_issues.classify_failure(i.get("type", ""), err) == "gmail.reset_leftover"):
+        return False
     return i.get("type") == "message" and (
         i.get("status") == "UNMAPPED_SOURCE" or "Missing Message-ID" in err
         or "Existing destination Message-ID" in err or "Split classification incomplete" in err
@@ -770,7 +826,7 @@ def unmapped_source_users(db) -> list[str]:
         return []
     return [r[0] for r in db.conn.execute(
         """SELECT DISTINCT q.source_user FROM verification_repair_queue q
-            WHERE q.service='drive' AND q.state!='RESOLVED' AND q.detail LIKE '%UNMAPPED_SOURCE%'
+            WHERE q.service='drive' AND q.state NOT IN ('RESOLVED','OUT_OF_SCOPE') AND q.detail LIKE '%UNMAPPED_SOURCE%'
               AND EXISTS (SELECT 1 FROM identity_map i WHERE i.source_email=q.source_user)""")]
 
 
@@ -1435,7 +1491,8 @@ def run_all(db, auth, settings, apply: bool = False,
     Never raises. A repair pass that can break the migration it follows is
     worse than no repair pass.
     """
-    out = {"survey": {}, "resolved": 0, "reconciled": 0, "errors": []}
+    out = {"survey": {}, "resolved": 0, "reconciled": 0, "errors": [],
+           "source_gone": {"candidates": 0, "recorded": 0}, "needs_person": []}
     if apply:
         # Every repair writes to the target -- duplicates deleted, files moved, sharing changed,
         # staging drives swept. Run beside another job that writes Drive for this account, it
@@ -1478,12 +1535,22 @@ def run_all(db, auth, settings, apply: bool = False,
         out["errors"].extend(out["form_links"]["errors"])
     except Exception as exc:      # noqa: BLE001
         out["errors"].append(f"form links: {str(exc)[:160]}")
+    # Source 404s have no content left to retry. Record them as gone before
+    # the survey so they no longer inflate the open failure count.
+    try:
+        out["source_gone"] = resolve_gmail_source_gone(db, apply=apply)
+    except Exception as exc:      # noqa: BLE001
+        out["errors"].append(f"Gmail source-gone reconciliation: {str(exc)[:160]}")
     step("failure survey")
     try:
         out["survey"] = survey(db)
     except Exception as exc:      # noqa: BLE001
         out["errors"].append(f"survey: {str(exc)[:160]}")
         return out
+    try:
+        out["needs_person"] = run_failure_review(db)
+    except Exception as exc:      # noqa: BLE001
+        out["errors"].append(f"manual failure review: {str(exc)[:160]}")
     if not out["survey"].get("total"):
         return out
 
@@ -1637,10 +1704,16 @@ def summarise(result: dict) -> str:
     forms = (f"{fl.get('linked', 0)}/{fl['pending']} form(s) relinked to their responses sheet"
              if fl.get("pending") else "")
     if not s.get("total"):
-        return "; ".join(p for p in ("no failed items recorded", times, owed, staging, forms) if p)
+        gone = result.get("source_gone") or {}
+        gone_text = (f"{gone.get('recorded', 0):,} Gmail source message(s) recorded gone"
+                     if gone.get("recorded") else "")
+        return "; ".join(p for p in ("no failed items recorded", gone_text, times, owed, staging, forms) if p)
     parts = [f"{s['total']:,} failed item(s)"]
     if times:
         parts.append(times)
+    gone = result.get("source_gone") or {}
+    if gone.get("recorded"):
+        parts.append(f"{gone['recorded']:,} Gmail source message(s) recorded gone")
     if staging:
         parts.append(staging)
     if forms:
@@ -1674,6 +1747,8 @@ def summarise(result: dict) -> str:
     if result.get("reapplied"):
         parts.append(f"{result['reapplied']:,} grant(s) re-applied in "
                      f"{result.get('reapply_passes', 0)} pass(es)")
+    for finding in result.get("needs_person") or []:
+        parts.append(f"{finding['open']:,} {finding['title']} need a person: {finding['nextStep']}")
     if result.get("demoted"):
         parts.append(f"{result['demoted']:,} user(s) demoted from done "
                      f"(migrated nothing)")

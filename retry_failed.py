@@ -18,8 +18,6 @@ from __future__ import annotations
 
 import logging
 
-from config import GMAIL_RECOVERY_AMBIGUOUS, GMAIL_RECOVERY_DIFFERENT
-
 log = logging.getLogger("retry_failed")
 
 # Only what a retry can actually reach. A failed 'user' row means the whole
@@ -35,10 +33,12 @@ def failed_items(db, item_types=RETRYABLE_TYPES) -> dict:
              WHERE status = 'FAILED' AND item_type IN ({marks})""",
         tuple(item_types)).fetchall()
     out: dict = {}
+    import known_issues
     for r in rows:
-        if r["item_type"] == "message" and r["error_message"] in (
-                GMAIL_RECOVERY_AMBIGUOUS, GMAIL_RECOVERY_DIFFERENT):
-            continue
+        if r["item_type"] in ("message", "draft"):
+            kind = known_issues.classify_failure(r["item_type"], r["error_message"] or "")
+            if kind in ("gmail.destination_ambiguous", "gmail.reset_leftover"):
+                continue
         out.setdefault(r["source_user"], {}).setdefault(
             r["item_type"], []).append(r["item_id"])
     return out

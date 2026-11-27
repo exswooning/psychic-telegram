@@ -99,7 +99,7 @@ def assess(conn, accepted: list[dict] | None = None, dms_failed: int | None = No
         note(u, "gmail", t)
     opened = {}
     for r in _rows(conn, "SELECT source_user, service, category, item_id, detail, issue FROM verification_repair_queue "
-                         "WHERE state!='RESOLVED'") or []:
+                         "WHERE state NOT IN ('RESOLVED','OUT_OF_SCOPE')") or []:
         kind = r["issue"] if r["issue"] and r["issue"] != "unclassified" else known_issues.classify(r["service"], r["detail"])
         opened.setdefault((r["source_user"], r["service"]), []).append(
             {"user": r["source_user"], "service": r["service"], "category": r["category"], "item": r["item_id"],

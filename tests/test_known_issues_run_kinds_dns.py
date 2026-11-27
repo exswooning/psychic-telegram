@@ -24,9 +24,13 @@ def test_an_outsiders_file_delivered_as_a_copy_is_one_accepted_kind():
     """dharan.gov.np, 23 Nov 2026: 1,132 findings on 42 users; the operator accepted them on 24 Nov."""
     import known_issues, parity_gate
     for text in ('{"type": "external_access", "id": "X"}', "external original shortcut missing or placement differs",
-                 "external fallback has unreviewed sharing",
                  "sharing of X: original access inspection failed: Visible source parent has no mapped target folder"):
         assert known_issues.classify("drive", text) == "drive.external_copy", text
+    for text in ("external fallback has unreviewed sharing",
+                 "Repair remains incomplete: X: Retained fallback has other grants; review is required"):
+        assert known_issues.classify("drive", text) == "drive.external_copy_review", text
+    combined = '{"diffs": ["external original shortcut missing or placement differs", "external fallback has unreviewed sharing"]}'
+    assert known_issues.classify("drive", combined) == "drive.external_copy"
     assert "drive.external_copy" in parity_gate.ACCEPTED_KINDS
 
 
@@ -48,3 +52,18 @@ def test_a_lost_reply_is_named():
     for t in ("failpoint drive.comment.created@1: reply lost", "[Errno 104] Connection reset by peer",
               "('Connection aborted.', RemoteDisconnected('Remote end closed connection without response'))"):
         assert known_issues.classify_failure("comment", t) == "run.reply_lost", t
+
+
+def test_gmail_source_gone_and_manual_recovery_conflicts_are_named_with_correct_automation():
+    gone = "Gmail raw read <id>: HTTP 404 notFound: message not found"
+    ambiguous = "Ambiguous unclaimed destination Message-ID; recovery blocked"
+    leftover = "Existing destination Message-ID has different content; manual review required"
+    assert known_issues.classify_failure("message", gone) == "gmail.source_gone"
+    assert known_issues.classify_failure("message", ambiguous) == "gmail.destination_ambiguous"
+    assert known_issues.classify_failure("message", leftover) == "gmail.reset_leftover"
+    by_id = {row[0]: row for row in known_issues.RUN_KINDS}
+    assert by_id["gmail.source_gone"][6] is True
+    assert by_id["gmail.destination_ambiguous"][6] is False
+    assert by_id["gmail.reset_leftover"][6] is False
+    assert "inspect the target messages" in by_id["gmail.destination_ambiguous"][5]
+    assert "compare the source and destination raw messages" in by_id["gmail.reset_leftover"][5]

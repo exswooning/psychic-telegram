@@ -79,6 +79,7 @@ def test_unknown_findings_are_classified_once_per_version_in_bounded_batches(mon
                   [('gmail','errors','"unknown"','unclassified')] * 450)
     calls = []
     monkeypatch.setattr(K, 'classify', lambda *args: calls.append(args) or 'unclassified')
+    monkeypatch.setattr(K, 'CLASSIFY_BATCH', 200)
     K.ensure(c)
     assert len(calls) <= 200
     for _ in range(3):

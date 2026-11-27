@@ -429,8 +429,8 @@ def test_a_fix_is_read_after_a_verify_with_repair():
     d = _Verifying({"findings": {"drive.native_structure"}, "fixed": {"drive.native_structure"}})
     status = C.run_scenario(s, d, "n", set())["status"]
     assert ("verify", "t02", "drive") in d.calls
-    # native_structure ends "listed": it passes when the parity gate lists it, which this fake cannot say
-    assert status == "UNVERIFIED"
+    # A supported native-structure repair is automatic and the follow-up read sees it fixed.
+    assert status == "PASS"
 
 
 def test_the_gate_must_name_an_accepted_kind_accepted_and_a_person_kind_listed():

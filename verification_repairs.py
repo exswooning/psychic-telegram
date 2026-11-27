@@ -14,6 +14,9 @@ import time
 
 from db import utc_now
 
+TERMINAL_QUEUE_STATES = ("RESOLVED", "OUT_OF_SCOPE")
+ACTIVE_QUEUE_SQL = "state NOT IN ('RESOLVED','OUT_OF_SCOPE')"
+
 
 def ensure(db):
     with db.write() as conn:
@@ -27,7 +30,10 @@ def ensure(db):
             source_user TEXT NOT NULL, service TEXT NOT NULL, finding_key TEXT NOT NULL,
             category TEXT NOT NULL, item_id TEXT, state TEXT NOT NULL,
             detail TEXT NOT NULL, first_seen TEXT NOT NULL, last_seen TEXT NOT NULL,
-            resolved_at TEXT, PRIMARY KEY(source_user,service,finding_key))""")
+            resolved_at TEXT, resolution_reason TEXT, PRIMARY KEY(source_user,service,finding_key))""")
+        queue_cols = {r[1] for r in conn.execute("PRAGMA table_info(verification_repair_queue)")}
+        if "resolution_reason" not in queue_cols:
+            conn.execute("ALTER TABLE verification_repair_queue ADD COLUMN resolution_reason TEXT")
         # Every verified DMS message looks up its own open findings by item (split_mail.resolve_findings), inside
         # the write lock: without this a 67,000-row scan, 83 ms each (account 3, 15 Nov 2026); with it 0.02 ms.
         conn.execute("CREATE INDEX IF NOT EXISTS ix_vrq_item ON verification_repair_queue"
@@ -90,8 +96,8 @@ def enqueue_findings(db, user, per):
                         VALUES(?,?,?,?,?,'QUEUED',?,?,?,?,?)
                         ON CONFLICT(source_user,service,finding_key) DO UPDATE SET
                         last_seen=excluded.last_seen,issue=excluded.issue,issue_version=excluded.issue_version,
-                        state=CASE WHEN verification_repair_queue.state='RESOLVED' THEN 'QUEUED'
-                                   ELSE verification_repair_queue.state END,resolved_at=NULL""",
+                        state=CASE WHEN verification_repair_queue.state IN ('RESOLVED','OUT_OF_SCOPE') THEN 'QUEUED'
+                                   ELSE verification_repair_queue.state END,resolved_at=NULL,resolution_reason=NULL""",
                         (user, service, key, category, iid, detail, now, now,
                          known_issues.classify(service, item if category != "notCopied" else {"notCopied": item}),
                          known_issues.CLASSIFIER_VERSION))
@@ -103,7 +109,7 @@ def enqueue_findings(db, user, per):
                 # messages held open for days, 7 Nov 2026).
                 gone = [r for r in conn.execute(
                     "SELECT source_user,service,finding_key,item_id,issue FROM verification_repair_queue "
-                    "WHERE source_user=? AND service=? AND state!='RESOLVED' AND category='notCopied' "
+            "WHERE source_user=? AND service=? AND " + ACTIVE_QUEUE_SQL + " AND category='notCopied' "
                     "AND detail LIKE '%UNMAPPED_SOURCE%'", (user, service)).fetchall()
                     if r["finding_key"] not in seen]
                 _resolve(conn, gone, now)
@@ -112,11 +118,12 @@ def enqueue_findings(db, user, per):
                     result.get("checked", 0) > 0 or result.get("emptySource")):
                 gone = [r for r in conn.execute(
                     "SELECT source_user,service,finding_key,item_id,issue,last_seen FROM verification_repair_queue "
-                    "WHERE source_user=? AND service=? AND state!='RESOLVED'", (user, service)).fetchall()
+                    "WHERE source_user=? AND service=? AND " + ACTIVE_QUEUE_SQL, (user, service)).fetchall()
                     if r["finding_key"] not in seen and r["item_id"] not in blocked
                     and (not (result.get("provenance") or {}).get("serviceStartedAt")
                          or r["last_seen"] < result["provenance"]["serviceStartedAt"])]
                 _resolve(conn, gone, now)
+    reconcile_out_of_scope(db)
     return count
 
 
@@ -125,7 +132,7 @@ def _resolve(conn, rows, now):
     known_issues.log_resolved(conn, rows, now)
     for row in rows:
         conn.execute("UPDATE verification_repair_queue SET state='RESOLVED',resolved_at=? "
-                     "WHERE source_user=? AND service=? AND finding_key=?",
+                     ",resolution_reason=NULL WHERE source_user=? AND service=? AND finding_key=?",
                      (now, row["source_user"], row["service"], row["finding_key"]))
 
 
@@ -136,7 +143,7 @@ def reconcile_mapped(db, user) -> int:
     ensure(db)
     with db.write() as conn:
         rows = conn.execute("SELECT source_user,service,finding_key,item_id,issue,detail FROM "
-                            "verification_repair_queue WHERE source_user=? AND state!='RESOLVED' "
+                            "verification_repair_queue WHERE source_user=? AND " + ACTIVE_QUEUE_SQL + " "
                             "AND category='notCopied' AND item_id IS NOT NULL", (user,)).fetchall()
         done = []
         for r in rows:
@@ -144,6 +151,8 @@ def reconcile_mapped(db, user) -> int:
                 kind = (json.loads(r["detail"]) or {}).get("type")
             except (ValueError, AttributeError):
                 kind = None
+            if kind == "external_access":
+                kind = "file"
             if kind and db.get_target_id(user, r["item_id"], kind):
                 done.append(r)
         _resolve(conn, done, utc_now())
@@ -169,7 +178,7 @@ def reconcile_target_copies(auth, db, settings, user) -> int:
     ensure(db)
     rows = []
     for r in db.conn.execute("SELECT source_user,service,finding_key,item_id,issue,detail FROM "
-                             "verification_repair_queue WHERE source_user=? AND state!='RESOLVED' AND issue IN "
+                             "verification_repair_queue WHERE source_user=? AND " + ACTIVE_QUEUE_SQL + " AND issue IN "
                              "('drive.unmapped_source','drive.source_changed','drive.comments_unreadable')", (user,)):
         fid = r["item_id"] or _named_file(r["detail"])
         if fid:
@@ -206,7 +215,7 @@ def reconcile_owed_to_dms(db, user) -> int:
     ensure(db)
     rows = db.conn.execute(
         "SELECT q.source_user,q.service,q.finding_key,q.item_id,q.issue FROM verification_repair_queue q "
-        "WHERE q.source_user=? AND q.service='gmail' AND q.category='notCopied' AND q.state!='RESOLVED' "
+        "WHERE q.source_user=? AND q.service='gmail' AND q.category='notCopied' AND " + ACTIVE_QUEUE_SQL + " "
         "AND EXISTS (SELECT 1 FROM audit_log a WHERE a.source_user=q.source_user AND a.item_id=q.item_id "
         "AND a.item_type='message' AND a.status=?)", (user, DEFERRED_TO_DMS)).fetchall()
     if rows:
@@ -220,7 +229,7 @@ def reconcile_ledger(db) -> int:
     Run by the dispatcher each pass, so stale rows close without waiting for that user's next check."""
     ensure(db)
     users = [r[0] for r in db.conn.execute(
-        "SELECT DISTINCT source_user FROM verification_repair_queue WHERE state!='RESOLVED' AND category='notCopied'")]
+        "SELECT DISTINCT source_user FROM verification_repair_queue WHERE " + ACTIVE_QUEUE_SQL + " AND category='notCopied'")]
     return sum(reconcile_mapped(db, u) + reconcile_owed_to_dms(db, u) for u in users)
 
 
@@ -234,7 +243,7 @@ def queued_repairable(db, user) -> dict:
     automatic = {i[0] for i in known_issues.ISSUES if i[6]}
     out: dict[str, list] = {}
     for r in db.conn.execute("SELECT service, issue, detail FROM verification_repair_queue WHERE "
-                             "source_user=? AND state!='RESOLVED' AND category='notCopied'", (user,)):
+                             "source_user=? AND " + ACTIVE_QUEUE_SQL + " AND category='notCopied'", (user,)):
         if r["issue"] not in automatic:
             continue
         try:
@@ -268,6 +277,8 @@ def allow_services(db, services) -> None:
     ensure(db)
     with db.write() as conn:
         conn.executemany("INSERT OR IGNORE INTO verification_repair_scope VALUES(?)", [(s,) for s in services])
+    reopen_in_scope(db)
+    reconcile_out_of_scope(db)
 
 
 def allowed_services(db) -> set | None:
@@ -278,15 +289,65 @@ def allowed_services(db) -> set | None:
     return got or None
 
 
+def _out_of_scope_reason(service: str) -> str:
+    if service == "gmail":
+        return "OUT_OF_SCOPE: this account's migration did not include Gmail; mail is handled by Google's DMS."
+    return f"OUT_OF_SCOPE: this account's recorded migration scope did not include {service}."
+
+
+def reconcile_out_of_scope(db) -> int:
+    """Close findings for services absent from the account's recorded migration scope.
+
+    The mailbox on a Drive-only account is moved by Google's DMS; a verification
+    backlog must not turn it into engine work or leave its findings open forever.
+    """
+    ensure(db)
+    allowed = allowed_services(db)
+    if allowed is None:
+        return 0
+    out_of_scope = allowed | {"directory"}
+    now = utc_now()
+    with db.write() as conn:
+        rows = conn.execute(
+            "SELECT source_user,service,finding_key FROM verification_repair_queue WHERE "
+            + ACTIVE_QUEUE_SQL).fetchall()
+        closed = 0
+        for row in rows:
+            if row["service"] in out_of_scope:
+                continue
+            closed += conn.execute(
+                "UPDATE verification_repair_queue SET state='OUT_OF_SCOPE',resolved_at=?,resolution_reason=? "
+                "WHERE source_user=? AND service=? AND finding_key=? AND " + ACTIVE_QUEUE_SQL,
+                (now, _out_of_scope_reason(row["service"]), row["source_user"], row["service"],
+                 row["finding_key"])).rowcount
+    return closed
+
+
+def reopen_in_scope(db) -> int:
+    """Requeue rows if a later migration adds their service back into scope."""
+    allowed = allowed_services(db)
+    if allowed is None:
+        return 0
+    reopen = allowed | {"directory"}
+    with db.write() as conn:
+        count = 0
+        for service in reopen:
+            count += conn.execute(
+                "UPDATE verification_repair_queue SET state='QUEUED',resolved_at=NULL,resolution_reason=NULL "
+                "WHERE service=? AND state='OUT_OF_SCOPE'", (service,)).rowcount
+    return count
+
+
 def services_to_check(db, user, services) -> tuple:
     """The services a backlog repair re-reads for this user: those not IDENTICAL on their last check, never
     checked, or with an open queue row. it.department@'s findings were all Drive, yet each repair re-read
     its whole mailbox first (account 3: Gmail is a third of all verify time, 54 h of 165)."""
     ensure(db)
+    reconcile_out_of_scope(db)
     last = {r["service"]: r["verdict"] for r in db.conn.execute(
         "SELECT service, verdict FROM user_verification WHERE source_user=?", (user,))}
     queued = {r[0] for r in db.conn.execute(
-        "SELECT DISTINCT service FROM verification_repair_queue WHERE source_user=? AND state!='RESOLVED'",
+        "SELECT DISTINCT service FROM verification_repair_queue WHERE source_user=? AND " + ACTIVE_QUEUE_SQL,
         (user,))}
     allowed = allowed_services(db)
     out = tuple(s for s in services if (s in queued or last.get(s) != "IDENTICAL")
@@ -380,6 +441,7 @@ def _alive(pid):
 
 
 def due_users(db):
+    reconcile_out_of_scope(db)
     if not enabled(db):
         return []
     grouped = {}
@@ -485,10 +547,10 @@ def _finish(db, user, keys, state, summary):
                 import known_issues
                 known_issues.log_resolved(conn, conn.execute(
                     "SELECT source_user,service,finding_key,item_id,issue FROM verification_repair_queue "
-                    f"WHERE source_user=? AND state!='RESOLVED' AND service IN ({marks})",
+                    f"WHERE source_user=? AND {ACTIVE_QUEUE_SQL} AND service IN ({marks})",
                     (user, *services)).fetchall(), utc_now())
             conn.execute("UPDATE verification_repair_queue SET state=?,resolved_at=? WHERE source_user=? "
-                         "AND state!='RESOLVED' AND service IN (" + marks + ")",
+                         "AND " + ACTIVE_QUEUE_SQL + " AND service IN (" + marks + ")",
                          (queue_state, utc_now() if queue_state == "RESOLVED" else None, user, *services))
 
 
@@ -526,7 +588,13 @@ def scoped_repair(auth, db, settings, user, per, progress=print):
         out["tasks"] = finding_repairs.repair_tasks(auth, db, st, user, per["tasks"], apply=True)
     if "drive" in per:
         out["drive_findings"] = finding_repairs.repair_drive(auth, db, st, user, per["drive"], apply=True)
-        if ((per["drive"].get("sharing") or {}).get("external") or {}).get("items"):
+        if (((per["drive"].get("sharing") or {}).get("external") or {}).get("items")
+                or any(i.get("scope") == "external-original-access"
+                       for i in per["drive"].get("differences", []))
+                or any("visible source parent has no mapped target folder" in str(e).lower()
+                       for e in per["drive"].get("errors", []))
+                or any("retained fallback has other grants" in str(e).lower()
+                       for e in per["drive"].get("errors", []))):
             import external_access
             out["external_access"] = external_access.repair(auth, db, st, user, per["drive"])
     read_errors = [e for result in per.values() for e in result.get("errors", [])
