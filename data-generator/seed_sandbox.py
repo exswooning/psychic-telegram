@@ -376,8 +376,16 @@ def _save_seed_metrics(settings: Settings) -> None:
             _SEED_RUN.update(kind="seed", pid=os.getpid(),
                              started_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                              source_domain=settings.source_domain, target_domain=None)
+        snap["pid"] = os.getpid()
+        snap["run_kind"] = "seed"
+        snap["run_started_at"] = _SEED_RUN["started_at"]
+        snap["elapsed_sec"] = max(0.0, time.time() - _SEED_RUN.get("started_epoch", time.time()))
         db = MigrationDB(settings.db_path)
         try:
+            # Keep the same bounded snapshot series the migration flusher
+            # writes. The per-run summary is useful after the hour of samples
+            # rolls over, but it cannot explain a phase's changing limits.
+            db.record_metrics(snap)
             db.record_run_summary(_SEED_RUN, snap)
         finally:
             db.close()
@@ -3013,6 +3021,7 @@ def _profile_entries(plans: list, domain: str, sharing: dict | None = None) -> l
 # CLI
 # ======================================================================
 def main(argv: list[str] | None = None) -> int:
+    global _SEED_RUN
     ap = argparse.ArgumentParser(
         description="Seed or reset a sandbox organisation."
     )
@@ -3801,6 +3810,11 @@ def main(argv: list[str] | None = None) -> int:
                     e["share"] = sharing["per_user"].get(e["email"], {})
 
     t0 = time.time()
+    _SEED_RUN = {
+        "kind": "seed", "pid": os.getpid(),
+        "started_at": datetime.fromtimestamp(t0, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "started_epoch": t0, "source_domain": settings.source_domain, "target_domain": None,
+    }
     results = []
     # The same silence the reset path already fixed, in the half that runs
     # far longer. Seeding one user at scale 'huge' takes about an hour
@@ -3836,22 +3850,28 @@ def main(argv: list[str] | None = None) -> int:
     _steps["users"] = len(entries)
     if args.target_gb_per_user or args.fill_until_full:
         _fill_totals["users_total"] = len(entries)
-    with futures.ThreadPoolExecutor(max_workers=args.workers) as pool:
-        jobs = {
-            pool.submit(
-                seed_one_user, settings, e, all_users, args.external_email,
+    def _seed_tracked(entry, index):
+        import metrics
+        metrics.METRICS.worker_started(args.workers)
+        try:
+            return seed_one_user(
+                settings, entry, all_users, args.external_email,
                 args.scale, mail_count, event_count,
-                args.edge_cases == "all" or (args.edge_cases == "first" and i == 0),
+                args.edge_cases == "all" or (args.edge_cases == "first" and index == 0),
                 args.target_gb_per_user,
                 group_emails,
                 only,
                 args.reseed,
                 args.fill_until_full,
                 args.fill_percent,
-                shares.get(e["email"].lower()),
-            ): e["email"]
-            for i, e in enumerate(entries)
-        }
+                shares.get(entry["email"].lower()),
+            )
+        finally:
+            metrics.METRICS.worker_finished()
+
+    with futures.ThreadPoolExecutor(max_workers=args.workers) as pool:
+        jobs = {pool.submit(_seed_tracked, e, i): e["email"]
+                for i, e in enumerate(entries)}
         for fut in futures.as_completed(jobs):
             beat_done += 1
             _content_settle(jobs[fut])

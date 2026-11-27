@@ -2766,9 +2766,17 @@ def run(auth, db, settings, users: list[str] | None = None, services=ALL_SERVICE
         emit(f"verify: [{finished}/{len(chosen)}] {u} checked; completion={user_completion}; "
              f"verdict={user_verdict}")
 
+    def tracked_one(user):
+        import metrics
+        metrics.METRICS.worker_started(workers)
+        try:
+            return one(user)
+        finally:
+            metrics.METRICS.worker_finished()
+
     try:
         with ThreadPoolExecutor(max_workers=workers) as pool:
-            list(pool.map(one, chosen))
+            list(pool.map(tracked_one, chosen))
     finally:
         stop_heartbeats.set()
         heartbeat_thread.join(timeout=2)

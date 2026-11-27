@@ -1071,6 +1071,8 @@ def run_batch(auth: AuthManager, db: MigrationDB, settings: Settings,
         did not do that work and must not report on it.
         """
         if not coordinated:
+            import metrics
+            metrics.METRICS.worker_started(settings.user_workers)
             try:
                 return migrate_user(auth, db, settings, src, tgt,
                                     services, delta, delta_days)
@@ -1080,12 +1082,15 @@ def run_batch(auth: AuthManager, db: MigrationDB, settings: Settings,
                 # be gone by now, so anything still held is held wrongly.
                 memtrace.user_finished(src)
                 progress.finish(src)
+                metrics.METRICS.worker_finished()
 
         claimed, why = user_claims.acquire(account_id, src, services=svc_label)
         if not claimed:
             log.info("skipping %s: %s", src, why)
             return None
 
+        import metrics
+        metrics.METRICS.worker_started(settings.user_workers)
         stop = threading.Event()
         renewer = threading.Thread(
             target=_renew_until, args=(stop, account_id, src),
@@ -1109,6 +1114,7 @@ def run_batch(auth: AuthManager, db: MigrationDB, settings: Settings,
         finally:
             stop.set()
             renewer.join(timeout=2)
+            metrics.METRICS.worker_finished()
 
     with futures.ThreadPoolExecutor(
         max_workers=settings.user_workers, thread_name_prefix="user"
@@ -1753,8 +1759,10 @@ def _metrics_flusher(stop_event: threading.Event, db,
                 payload["inheritedAcls"] = drive_engine.inherited_acl_stats()
             except Exception:      # noqa: BLE001
                 logging.getLogger(__name__).debug("ignored an error", exc_info=True)
-            payload["workers_configured"] = getattr(
-                db, "_workers_configured", None) or 0
+            # Thread count is not pool occupancy. The metrics object receives
+            # task entry/exit from run_batch and reports configured slots and
+            # their current busy share separately.
+            payload["workers_configured"] = payload.get("worker_slots_configured") or 0
             # What a perf test needs and nothing recorded: this process's resident
             # memory, which process it is (a pass split N ways has N writers), and
             # how often the mapping cache sent a lookup to SQL or evicted a user.

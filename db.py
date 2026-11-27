@@ -1144,7 +1144,9 @@ class MigrationDB:
                                (key,)).fetchone()
             prev = _json.loads(row[0]) if row else {}
             out = {k: sample.get(k) for k in ("calls", "retries", "failures", "p50", "p95",
-                                              "elapsed_sec", "workers", "rss_mb")}
+                                              "elapsed_sec", "workers", "rss_mb",
+                                              "worker_slots_configured", "worker_slots_busy",
+                                              "idle_workers_share")}
             out["requests_per_sec"] = sample.get("requests_per_sec")
             for k, src in (("peak_requests_per_sec", "requests_per_sec"),
                            ("peak_rss_mb", "rss_mb"), ("peak_workers", "workers")):

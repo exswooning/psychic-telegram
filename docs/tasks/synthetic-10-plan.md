@@ -384,7 +384,7 @@ Phase 1 and the code of Phase 2 need no tenant. Start them while Phase 0 is open
   be refused with "MOVE REFUSED" on this edition, and that refusal is its pass. Errors rank before
   speed. `/api/v2/benchmark/start` (`benchmark_run.py`) wipes the target tenant: use it only under
   P0.7(a).
-- [ ] P2.10 (c) What binds each phase. Record for the Drive pass, the mail pass, the DMS import, the
+- [~] P2.10 (27 Nov, Codex: read-only phase analyzer and Linux CPU/network sampler in `phase_binding.py` and `sampler.py`; 13 focused tests pass; see [phase-binding.md](phase-binding.md). The historical baselines are rated, but live twin measurements and speed fixes remain.) (c) What binds each phase. Record for the Drive pass, the mail pass, the DMS import, the
   DMS check, verify, tally and seeding: items per minute, the limiter's rate, ceiling and
   rejections, CPU, bytes per second on `wlp2s0`, and the share of idle workers. Name the binding
   limit: a Google quota, the line, the CPU, or nothing. "Nothing" (idle workers, no pushback, a free
