@@ -347,3 +347,48 @@ def test_the_tasks_check_names_an_unrecorded_second_copy():
     res = v.tasks()
 
     assert [d["target"] for d in res["duplicates"]] == ["t9"] and res["identical"] == 1
+
+
+def _lost_reply(monkeypatch, spec):
+    """Arm a real failpoint the way tests/test_failpoints.py does: a declared-sandbox target, counts reset."""
+    import domain_guard
+    import failpoints
+    monkeypatch.setenv("TARGET_DOMAIN", "b.example.test")
+    monkeypatch.setattr(domain_guard, "revocations", lambda: {"b.example.test": {}})
+    failpoints._counts.clear()
+    monkeypatch.setenv("BITPORT_FAULT", spec)
+
+
+def test_a_contact_whose_create_reply_was_lost_is_adopted_on_retry_not_made_twice(contacts, auth, db, monkeypatch):
+    """F-lost, 27 Nov 2026: contacts.created@2:lost made the retry create 'Jordan Petrov' a second time."""
+    _lost_reply(monkeypatch, "contacts.created@1:lost")
+    src = auth.source_people(SRC_USER)
+    src.add_contact("Jordan Petrov", "jordan@example.com")
+    stats = contacts.run()
+    tgt = auth.target_people(TGT_USER)
+    assert len(tgt.contacts) == 1 and stats.get("adopted") == 1 and stats["failed"] == 0
+
+
+def test_bitports_marked_second_copy_is_removed_and_a_users_own_contact_never_is(contacts, auth, db):
+    import contacts_engine
+    auth.source_people(SRC_USER).add_contact("Ada", "ada@example.com")
+    contacts.run()
+    tgt = auth.target_people(TGT_USER)
+    rid = next(iter(auth.source_people(SRC_USER).contacts))
+    tgt.people().createContact(body={"names": [{"displayName": "Ada"}], "emailAddresses": [{"value": "ada@example.com"}],
+                                     "clientData": [{"key": contacts_engine.MARKER_KEY, "value": rid}]}).execute()
+    tgt.people().createContact(body={"names": [{"displayName": "Ada"}]}).execute()      # the user's own
+    again = contacts_engine.ContactsMigrator(auth, db, contacts.settings, SRC_USER, TGT_USER).run()
+    assert again.get("duplicates_removed") == 1 and len(tgt.contacts) == 2
+
+
+def test_a_task_whose_insert_reply_was_lost_is_adopted_on_retry_not_made_twice(tasks, auth, monkeypatch):
+    """F-lost, 27 Nov 2026: tasks.created@2:lost made the retry insert 'Schedule security review' twice."""
+    _lost_reply(monkeypatch, "tasks.created@1:lost")
+    src = auth.source_tasks(SRC_USER)
+    tl = src.add_list("Move")
+    src.add_task(tl, "Schedule security review")
+    stats = tasks.run()
+    tgt = auth.target_tasks(TGT_USER)
+    assert stats.get("adopted") == 1 and stats["failed"] == 0
+    assert len(tgt.task_store[next(iter(tgt.lists))]) == 1

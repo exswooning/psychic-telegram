@@ -138,6 +138,16 @@ def _contact_write_body(person: dict) -> tuple[dict, int]:
     return body, added
 
 
+# Every contact Bitport creates names its source in clientData, so a second copy (a create whose reply was lost and
+# was retried, F-lost 27 Nov 2026) is provably Bitport's own and can be adopted or removed; a contact the user made
+# carries no marker and is never touched.
+MARKER_KEY = "bitport.source"
+
+
+def _marker(person: dict) -> str | None:
+    return next((d.get("value") for d in person.get("clientData") or [] if d.get("key") == MARKER_KEY), None)
+
+
 def _identity(person: dict):
     """Name and email addresses: how a target contact a killed run created, but never recorded, is told apart
     from the user's own. None for a contact with neither: nothing safe to match on."""
@@ -228,19 +238,8 @@ class ContactsMigrator:
         self._strays = {}
         if self.settings.dry_run:
             return
-        live, token = {}, None
-        try:
-            while True:
-                self.limiter.acquire()
-                r = self._retry(lambda t=token: self.tgt.people().connections().list(
-                    resourceName="people/me", personFields="names,emailAddresses", pageSize=1000,
-                    pageToken=t).execute())
-                live.update({p["resourceName"]: p for p in r.get("connections", [])})
-                token = r.get("nextPageToken")
-                if not token:
-                    break
-        except Exception as exc:      # noqa: BLE001 - no listing, no forgetting
-            log.warning("[%s] could not list the target's contacts: %s", self.source_user, exc)
+        live = self._list_target()
+        if live is None:      # no listing, no forgetting
             return
         # An unmapped target contact is kept by identity: a run killed between createContact and
         # record_mapping left it, and the next run adopts it instead of making a second (F-kill, 27 Nov 2026:
@@ -261,6 +260,50 @@ class ContactsMigrator:
                     self.db.forget_mapping(self.source_user, source_id, "contact")
                     self.stats["recopied_missing"] = self.stats.get("recopied_missing", 0) + 1
 
+    def _list_target(self) -> dict | None:
+        """Every target contact by resource name (names, addresses, Bitport's marker); None when it cannot be read."""
+        live, token = {}, None
+        try:
+            while True:
+                self.limiter.acquire()
+                r = self._retry(lambda t=token: self.tgt.people().connections().list(
+                    resourceName="people/me", personFields="names,emailAddresses,clientData", pageSize=1000,
+                    pageToken=t).execute())
+                live.update({p["resourceName"]: p for p in r.get("connections", [])})
+                token = r.get("nextPageToken")
+                if not token:
+                    return live
+        except Exception as exc:      # noqa: BLE001
+            log.warning("[%s] could not list the target's contacts: %s", self.source_user, exc)
+            return None
+
+    def _landed_copy(self, rid: str, person: dict) -> str | None:
+        """Before a create is retried: the copy an earlier attempt already made (its reply was lost), by Bitport's
+        marker first, then by identity -- unmapped either way."""
+        live = self._list_target() or {}
+        mapped = {r[0] for r in self.db.conn.execute(
+            "SELECT target_id FROM id_mapping WHERE source_user=? AND type='contact'", (self.source_user,))}
+        free = {rn: p for rn, p in live.items() if rn not in mapped}
+        return (next((rn for rn, p in free.items() if _marker(p) == rid), None)
+                or next((rn for rn, p in free.items() if _identity(person) and _identity(p) == _identity(person)), None))
+
+    def _drop_marked_duplicates(self) -> None:
+        """A second copy carrying the marker of a contact already mapped to another target contact is Bitport's own
+        leftover (a lost reply whose copy was not yet listed when the retry ran): removed. Unmarked contacts stay."""
+        if self.settings.dry_run:
+            return
+        mapped = dict(self.db.conn.execute(
+            "SELECT source_id, target_id FROM id_mapping WHERE source_user=? AND type='contact'", (self.source_user,)))
+        for rn, p in (self._list_target() or {}).items():
+            src = _marker(p)
+            if src and src in mapped and mapped[src] != rn:
+                try:
+                    self.limiter.acquire()
+                    self._retry(lambda r=rn: self.tgt.people().deleteContact(resourceName=r).execute())
+                    self.stats["duplicates_removed"] = self.stats.get("duplicates_removed", 0) + 1
+                except (PermanentAPIError, RuntimeError) as exc:
+                    log.warning("[%s] Bitport's second copy %s of %s not removed: %s", self.source_user, rn, src, exc)
+
     def run(self) -> dict:
         self._forget_gone_contacts()
         group_map = self._migrate_groups()
@@ -274,6 +317,7 @@ class ContactsMigrator:
                            "signal received", self.source_user)
                 break
             self._migrate_contact(person, group_map)
+        self._drop_marked_duplicates()
         return dict(self.stats)
 
     def _migrate_groups(self) -> dict:
@@ -436,10 +480,21 @@ class ContactsMigrator:
             created = {"resourceName": strays.pop()}
             self.stats["adopted"] = self.stats.get("adopted", 0) + 1
         else:
+            body["clientData"] = [*(body.get("clientData") or []), {"key": MARKER_KEY, "value": rid}]
+            attempts = []
+
+            def create(b=body):
+                attempts.append(1)
+                if len(attempts) > 1:      # a retry: an earlier attempt may have landed with its reply lost
+                    landed = self._landed_copy(rid, person)
+                    if landed:
+                        self.stats["adopted"] = self.stats.get("adopted", 0) + 1
+                        return {"resourceName": landed}
+                return failpoints.hit("contacts.created", self.tgt.people().createContact(body=b).execute(),
+                                      user=self.source_user)
             try:
                 self.limiter.acquire()
-                created = self._retry(lambda b=body: failpoints.hit("contacts.created", self.tgt.people().createContact(
-                    body=b).execute(), user=self.source_user))
+                created = self._retry(create)
             except (PermanentAPIError, RuntimeError) as exc:
                 self.db.log_audit(self.source_user, rid, "contact", "FAILED",
                                   str(exc))

@@ -309,9 +309,20 @@ class TasksMigrator:
             created = {"id": strays.pop()}
             self.stats["adopted"] = self.stats.get("adopted", 0) + 1
         else:
+            attempts = []
+
+            def insert(k=kw):
+                attempts.append(1)
+                if len(attempts) > 1:      # a retry: an earlier insert may have landed with its reply lost (F-lost)
+                    self._strays = self._unmapped_targets(tgt_list)
+                    landed = self._strays.get(_task_key(task, parent))
+                    if landed:
+                        self.stats["adopted"] = self.stats.get("adopted", 0) + 1
+                        return {"id": landed.pop()}
+                return failpoints.hit("tasks.created", self.tgt.tasks().insert(**k).execute(), user=self.source_user)
             try:
                 self.limiter.acquire()
-                created = self._retry(lambda k=kw: failpoints.hit("tasks.created", self.tgt.tasks().insert(**k).execute(), user=self.source_user))
+                created = self._retry(insert)
             except (PermanentAPIError, RuntimeError) as exc:
                 self.db.log_audit(self.source_user, src_id, "task", "FAILED",
                                   str(exc))
