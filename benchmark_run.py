@@ -88,6 +88,10 @@ def benchmark_scope(account_id: int | None, confirm_domain: str):
 
     account = accounts_auth.get_account(account_id) or {}
     legacy = account_id == 1 and account.get("plan") == "legacy"
+    if not legacy and settings.auth_mode != "key":
+        # The reset and audit children use bare Settings. OAuth tokens and
+        # impersonation principals come from the process, outside the account registry.
+        raise ValueError("This benchmark requires the selected account's service account keys")
     control = os.path.realpath(cpdb._db_path())
     ledger = os.path.realpath(settings.db_path)
     if not legacy and ledger == control:
