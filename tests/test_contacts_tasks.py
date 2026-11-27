@@ -288,3 +288,62 @@ def test_a_task_list_deleted_on_the_target_is_made_again_with_its_tasks(auth, db
     stats = tasks_engine.TasksMigrator(auth, db, settings, SRC_USER, TGT_USER).run()
     assert stats.get("recopied_missing") == 1 and stats["lists"] == 1 and stats["tasks"] == 1
     assert len(tgt.lists) == 1 and sum(len(v) for v in tgt.task_store.values()) == 1
+
+
+def _lose_mappings(db, kind):
+    """What a kill between the create and record_mapping leaves: the copy on the target, no ledger row."""
+    for (sid,) in list(db.conn.execute("SELECT source_id FROM id_mapping WHERE type=?", (kind,))):
+        db.forget_mapping(SRC_USER, sid, kind)
+
+
+def test_a_contact_created_but_never_recorded_is_adopted_not_made_twice(contacts, auth, db, settings):
+    """F-kill, 27 Nov 2026: contacts.created@2 left two "Jordan Petrov" on b."""
+    import contacts_engine
+
+    auth.source_people(SRC_USER).add_contact("Jordan Petrov", "jordan@example.com")
+    contacts.run()
+    _lose_mappings(db, "contact")
+
+    again = contacts_engine.ContactsMigrator(auth, db, settings, SRC_USER, TGT_USER).run()
+
+    assert again.get("adopted") == 1 and len(auth.target_people(TGT_USER).contacts) == 1
+    assert db.get_target_id(SRC_USER, next(iter(auth.source_people(SRC_USER).contacts)), "contact")
+
+
+def test_a_task_inserted_but_never_recorded_is_adopted_not_made_twice(tasks, auth, db, settings):
+    """F-kill, 27 Nov 2026: tasks.created@2 left 21 tasks on b. for 20."""
+    import tasks_engine
+
+    src = auth.source_tasks(SRC_USER)
+    tl = src.add_list("Move")
+    parent = src.add_task(tl, "Cutover")
+    src.add_task(tl, "Freeze mail", parent=parent)
+    tasks.run()
+    _lose_mappings(db, "task")
+
+    again = tasks_engine.TasksMigrator(auth, db, settings, SRC_USER, TGT_USER).run()
+
+    tgt = auth.target_tasks(TGT_USER)
+    assert again.get("adopted") == 2 and again["failed"] == 0
+    assert len(tgt.task_store[next(iter(tgt.lists))]) == 2
+
+
+def test_the_tasks_check_names_an_unrecorded_second_copy():
+    from types import SimpleNamespace
+    import verify_sample as V
+
+    lists = {"S": [{"id": "s1", "title": "Pay rent"}],
+             "T": [{"id": "t1", "title": "Pay rent"}, {"id": "t9", "title": "Pay rent"}, {"id": "t7", "title": "Mine"}]}
+    svc = SimpleNamespace(tasks=lambda: SimpleNamespace(list=lambda tasklist, **kw: SimpleNamespace(
+        execute=lambda: {"items": lists[tasklist]})))
+    v = V.Verifier.__new__(V.Verifier)
+    v.src_user, v.tgt_user, v.evidence = SRC_USER, TGT_USER, []
+    v.auth = SimpleNamespace(source_tasks=lambda u: svc, target_tasks=lambda u: svc)
+    v._x = lambda fn, **kw: fn()
+    v._report_progress = v._note_sample = lambda *a, **k: None
+    v._failed = lambda kinds: []
+    v._pairs = lambda kind, sample=False: [("S", "T", "L")] if kind == "task_list" else [("s1", "t1", None)]
+
+    res = v.tasks()
+
+    assert [d["target"] for d in res["duplicates"]] == ["t9"] and res["identical"] == 1

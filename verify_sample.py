@@ -2336,6 +2336,13 @@ class Verifier:
                 continue
             lists += 1
             seen += len(sts)
+            # An unmapped target task titled like a mapped one in the same list is a second copy (F-kill, 27 Nov
+            # 2026: tasks.created@2 left 21 on b. for 20 and this check read IDENTICAL). One with a title of its
+            # own may be the user's own new task, and is left alone.
+            mapped = set(task_map.values())
+            named = {tts[t].get("title") for t in mapped if t in tts and tts[t].get("title")}
+            res["duplicates"] += [{"item": tt.get("title"), "target": tid, "error": "a second copy of a migrated task (not in the ledger)"}
+                                  for tid, tt in sorted(tts.items()) if tid not in mapped and tt.get("title") in named]
             for sid, st in sts.items():
                 tid = task_map.get(sid)
                 if not tid or sid not in keep:

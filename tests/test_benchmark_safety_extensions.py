@@ -18,3 +18,23 @@ def test_even_one_missing_grant_cannot_pass_a_benchmark():
             'acl':{'extraGrants':0,'fidelityPct':99.99,'missingGrants':1,'missingFiles':0}}
     passed,reasons=judge(result,set())
     assert not passed and any('FIDELITY' in reason for reason in reasons)
+
+
+def test_a_benchmark_refuses_an_account_without_both_tenants_set_up(monkeypatch, tmp_path):
+    """A benchmark wipes the target: an account missing a side, or sharing the control plane's database as its
+    ledger, must never reach the wipe."""
+    import accounts_auth, config, control_plane_db
+    from benchmark_run import benchmark_scope
+
+    monkeypatch.delenv("BITPORT_LEDGER", raising=False)
+    ledger = str(tmp_path / "migration.db")
+    monkeypatch.setattr(config, "Settings", lambda account_id=None: SimpleNamespace(
+        source_domain="a.test", target_domain="b.test", db_path=ledger))
+    monkeypatch.setattr(control_plane_db, "_db_path", lambda: str(tmp_path / "control.db"))
+    monkeypatch.setattr(accounts_auth, "get_account", lambda a: {"plan": "pro"})
+    monkeypatch.setattr(accounts_auth, "get_tenant_config", lambda a, side: None if side == "source" else {})
+    with pytest.raises(ValueError, match="no complete source configuration"):
+        benchmark_scope(5, "b.test")
+    monkeypatch.setattr(control_plane_db, "_db_path", lambda: ledger)
+    with pytest.raises(ValueError, match="separate migration ledger"):
+        benchmark_scope(5, "b.test")

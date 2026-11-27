@@ -39,6 +39,11 @@ log = logging.getLogger(__name__)
 TASK_FIELDS = ["title", "notes", "due", "status", "completed", "deleted"]
 
 
+
+def _task_key(task: dict, parent: str | None) -> tuple:
+    """What a copy shares with its source: title, notes, due day, and its parent on the target."""
+    return (task.get("title") or "", task.get("notes") or "", (task.get("due") or "")[:10], parent or "")
+
 class TasksMigrator:
     # Unlimited by default, and shared: an unlimited Budget never changes, so this is
     # safe for every instance -- including ones built without __init__ (tests do).
@@ -79,11 +84,11 @@ class TasksMigrator:
             if not token:
                 return
 
-    def _iter_tasks(self, list_id: str):
+    def _iter_tasks(self, list_id: str, client=None):
         token = None
         while True:
             self.limiter.acquire()
-            resp = self._retry(lambda t=token: self.src.tasks().list(
+            resp = self._retry(lambda t=token: (client or self.src).tasks().list(
                 tasklist=list_id, maxResults=100, pageToken=t,
                 showCompleted=True, showHidden=True, showDeleted=False,
             ).execute())
@@ -211,6 +216,8 @@ class TasksMigrator:
         for t in self.budget.trim(tasks):
             by_parent.setdefault(t.get("parent") or "", []).append(t)
 
+        self._strays = self._unmapped_targets(tgt_list)
+
         def emit(parent_src: str, parent_tgt: str | None) -> None:
             for t in by_parent.get(parent_src, []):
                 if shutdown_requested():
@@ -220,6 +227,24 @@ class TasksMigrator:
                     emit(t["id"], new_id)
 
         emit("", None)
+
+    def _unmapped_targets(self, tgt_list: str) -> dict:
+        """The list's target tasks no ledger row names, by content: a run killed between tasks.insert and
+        record_mapping left one, and the next run adopts it instead of inserting a second (F-kill, 27 Nov
+        2026: tasks.created@2 left 21 tasks on b. for 20). A list that cannot be read adopts nothing."""
+        if self.settings.dry_run:
+            return {}
+        mapped = {r[0] for r in self.db.conn.execute(
+            "SELECT target_id FROM id_mapping WHERE source_user=? AND type='task'", (self.source_user,))}
+        strays: dict = {}
+        try:
+            for t in self._iter_tasks(tgt_list, client=self.tgt):
+                if t["id"] not in mapped:
+                    strays.setdefault(_task_key(t, t.get("parent")), []).append(t["id"])
+        except (PermanentAPIError, RuntimeError) as exc:
+            log.warning("[%s] could not list target tasks of %s: %s", self.source_user, tgt_list, exc)
+            return {}
+        return strays
 
     def _is_stale(self, src_id: str, task: dict) -> bool:
         """Has the source task changed since it was copied?
@@ -279,14 +304,19 @@ class TasksMigrator:
         kw = {"tasklist": tgt_list, "body": body}
         if parent:
             kw["parent"] = parent
-        try:
-            self.limiter.acquire()
-            created = self._retry(lambda k=kw: failpoints.hit("tasks.created", self.tgt.tasks().insert(**k).execute(), user=self.source_user))
-        except (PermanentAPIError, RuntimeError) as exc:
-            self.db.log_audit(self.source_user, src_id, "task", "FAILED",
-                              str(exc))
-            self.stats["failed"] += 1
-            return None
+        strays = getattr(self, "_strays", {}).get(_task_key(task, parent))
+        if strays:
+            created = {"id": strays.pop()}
+            self.stats["adopted"] = self.stats.get("adopted", 0) + 1
+        else:
+            try:
+                self.limiter.acquire()
+                created = self._retry(lambda k=kw: failpoints.hit("tasks.created", self.tgt.tasks().insert(**k).execute(), user=self.source_user))
+            except (PermanentAPIError, RuntimeError) as exc:
+                self.db.log_audit(self.source_user, src_id, "task", "FAILED",
+                                  str(exc))
+                self.stats["failed"] += 1
+                return None
 
         self.db.record_mapping(self.source_user, src_id, created["id"], "task")
         # The source stamp, so a later pass can tell a changed task from an

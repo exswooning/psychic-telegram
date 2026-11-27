@@ -138,6 +138,15 @@ def _contact_write_body(person: dict) -> tuple[dict, int]:
     return body, added
 
 
+def _identity(person: dict):
+    """Name and email addresses: how a target contact a killed run created, but never recorded, is told apart
+    from the user's own. None for a contact with neither: nothing safe to match on."""
+    name = ((person.get("names") or [{}])[0].get("displayName") or "").strip()
+    mails = tuple(sorted({(e.get("value") or "").strip().lower()
+                          for e in person.get("emailAddresses") or [] if e.get("value")}))
+    return (name, mails) if name or mails else None
+
+
 def _update_time(person: dict) -> str | None:
     """When People last changed this contact.
 
@@ -216,21 +225,30 @@ class ContactsMigrator:
         rows = list(self.db.conn.execute(
             "SELECT source_id, target_id FROM id_mapping WHERE source_user=? AND type='contact'",
             (self.source_user,)))
-        if not rows or self.settings.dry_run:
+        self._strays = {}
+        if self.settings.dry_run:
             return
-        live, token = set(), None
+        live, token = {}, None
         try:
             while True:
                 self.limiter.acquire()
                 r = self._retry(lambda t=token: self.tgt.people().connections().list(
-                    resourceName="people/me", personFields="names", pageSize=1000, pageToken=t).execute())
-                live |= {p["resourceName"] for p in r.get("connections", [])}
+                    resourceName="people/me", personFields="names,emailAddresses", pageSize=1000,
+                    pageToken=t).execute())
+                live.update({p["resourceName"]: p for p in r.get("connections", [])})
                 token = r.get("nextPageToken")
                 if not token:
                     break
         except Exception as exc:      # noqa: BLE001 - no listing, no forgetting
             log.warning("[%s] could not list the target's contacts: %s", self.source_user, exc)
             return
+        # An unmapped target contact is kept by identity: a run killed between createContact and
+        # record_mapping left it, and the next run adopts it instead of making a second (F-kill, 27 Nov 2026:
+        # contacts.created@2 left two "Jordan Petrov" on b.).
+        mapped = {t for _, t in rows}
+        for rn, p in live.items():
+            if rn not in mapped and _identity(p):
+                self._strays.setdefault(_identity(p), []).append(rn)
         for source_id, target_id in rows:
             if target_id in live:
                 continue
@@ -413,15 +431,20 @@ class ContactsMigrator:
                               "SKIPPED_EMPTY", "no writable fields")
             self.stats["skipped"] += 1
             return
-        try:
-            self.limiter.acquire()
-            created = self._retry(lambda b=body: failpoints.hit("contacts.created", self.tgt.people().createContact(
-                body=b).execute(), user=self.source_user))
-        except (PermanentAPIError, RuntimeError) as exc:
-            self.db.log_audit(self.source_user, rid, "contact", "FAILED",
-                              str(exc))
-            self.stats["failed"] += 1
-            return
+        strays = getattr(self, "_strays", {}).get(_identity(person))
+        if strays:
+            created = {"resourceName": strays.pop()}
+            self.stats["adopted"] = self.stats.get("adopted", 0) + 1
+        else:
+            try:
+                self.limiter.acquire()
+                created = self._retry(lambda b=body: failpoints.hit("contacts.created", self.tgt.people().createContact(
+                    body=b).execute(), user=self.source_user))
+            except (PermanentAPIError, RuntimeError) as exc:
+                self.db.log_audit(self.source_user, rid, "contact", "FAILED",
+                                  str(exc))
+                self.stats["failed"] += 1
+                return
 
         self.db.record_mapping(self.source_user, rid, created["resourceName"],
                                "contact")

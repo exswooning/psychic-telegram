@@ -360,6 +360,8 @@ class TestTheBenchmarkTakesMoreThanFourFileWorkers:
         monkeypatch.setattr(config, "Settings", lambda account_id=None: types.SimpleNamespace(
             target_domain="b.test", source_domain="a.test") if account_id is not None else real())
         monkeypatch.setattr(A, "HERE", str(tmp_path))
+        import benchmark_run    # the account scope is benchmark_run's own tests' concern; this one is about workers
+        monkeypatch.setattr(benchmark_run, "benchmark_scope", lambda account_id, typed: (None, dict(os.environ)))
         launched = []
         monkeypatch.setattr(A.subprocess, "Popen",
                             lambda argv, **k: launched.append((argv, k.get("env"))) or types.SimpleNamespace(pid=9))
