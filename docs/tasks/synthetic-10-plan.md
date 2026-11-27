@@ -586,6 +586,12 @@ rebuilt layouts (its slides render identical).
 
 ## 11. State (newest first)
 
+- 27 Nov 2026, 11:30 am NPT (Claude): retry `...-20261127b` read FAIL with every service IDENTICAL on a complete check,
+  0 duplicates, the fault fired and adopted: t16's contacts were 27 on b. for 26 expected. A "Campaign Added..."
+  contact (campaign_changes, no seed marker) copied on 26 Nov outlived the reset; the run added a second. Fixed in
+  `3c20acb`: the reset deletes every contact the ledger maps, and the contacts check names an unmapped copy of a
+  migrated contact as a duplicate (it read IDENTICAL). Also `1a2705a`: the backlog repairs only services the
+  account's runs migrated. Installed on the VM; leftover deleted by hand; retry `...-20261127c` started.
 - 27 Nov 2026 (Claude, took over from Codex at the operator's word): Codex's uncommitted evidence-time and
   benchmark-scope work pushed as `29fc89e` (fixed: the `started` stamp had landed in `_spawn`). The six t16 messages
   that failed the last lost-reply verdict were Bitport's own echo: a server-side copy is made by the SOURCE user, who
