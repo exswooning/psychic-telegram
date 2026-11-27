@@ -586,6 +586,9 @@ rebuilt layouts (its slides render identical).
 
 ## 11. State (newest first)
 
+- 27 Nov 2026, 12:20 pm NPT (Claude): **`fp:gmail.inserted:lost` PASS** (`fp2-vm-gmail-lost-t16-20261127c`, VM,
+  06:01-06:35Z): the fault fired, the delivered copy was adopted, the complete check equalled the control, nothing
+  landed twice. F-kill started on t16 (`fp2-vm-fkill-t16-20261127`).
 - 27 Nov 2026, 11:30 am NPT (Claude): retry `...-20261127b` read FAIL with every service IDENTICAL on a complete check,
   0 duplicates, the fault fired and adopted: t16's contacts were 27 on b. for 26 expected. A "Campaign Added..."
   contact (campaign_changes, no seed marker) copied on 26 Nov outlived the reset; the run added a second. Fixed in
