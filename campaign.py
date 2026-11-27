@@ -413,16 +413,16 @@ class LiveDriver(Driver):
             with urllib.request.urlopen(req, timeout=300) as resp:
                 return json.loads(resp.read() or b"{}")
         except HTTPError as exc:
-            if exc.code != 409 or path != "/api/v2/migrate/start":
-                raise
+            # Every refusal names its reason: F-kill-random's bare "409: Conflict" never said which step was refused.
             with exc:
                 try:
                     rejected = json.loads(exc.read(2048))
                 except ValueError:
                     rejected = None
             detail = rejected.get("detail") if isinstance(rejected, dict) else None
-            if isinstance(detail, str) and detail.startswith("Not started:"):
-                raise HTTPError(exc.url, exc.code, " ".join(detail.split())[:160], exc.headers, None) from exc
+            if isinstance(detail, str) and detail.strip():
+                raise HTTPError(exc.url, exc.code, f"{method} {path}: " + " ".join(detail.split())[:160],
+                                exc.headers, None) from exc
             raise
 
     def api(self, method: str, path: str, body: dict | None) -> dict:
