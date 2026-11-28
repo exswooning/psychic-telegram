@@ -40,7 +40,7 @@ SHELL = [
     (r"sqlite3 data/accounts/\d+/migration\.db 'select tenant,ceiling from rate_limiter_ceiling'", None),
 ]
 KINDS = {"arm", "arm_chain", "disarm", "api", "webui", "shell", "wait_idle", "wait_pass", "wait_log", "wait_exit",
-         "wait_resume", "wait_incident", "wait_incident_closed", "repeat", "twin", "directory", "source", "change", "dwd", "fired",
+         "wait_resume", "wait_running", "wait_incident", "wait_incident_closed", "repeat", "twin", "directory", "source", "change", "dwd", "fired",
          "bench"}
 
 
@@ -246,6 +246,11 @@ class Runner:
                 raise StepFailed(f"job {pid} finished normally before Stop took effect")
             if not self.d.stop_was_audited(pid):
                 raise StepFailed(f"job {pid} exited {got[0]} without its own audited Stop")
+
+    def do_wait_running(self, st):
+        """A job of this kind is running now -- one this scenario has not seen finish -- so a restart lands inside it."""
+        if self.d.job_pid(job=st["job"], exclude=self.ctx.done, timeout=st.get("timeout", 600), active_only=True) is None:
+            raise StepFailed(f"no {st['job']} job started to restart the API inside")
 
     def do_wait_resume(self, st):
         """A job is running again by itself (the API's pickup, the autopilot), else the operator's Start / seed again."""

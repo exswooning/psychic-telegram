@@ -27,7 +27,7 @@ TWIN = "<twin>"
 # t01 is started with exactly this body.
 START = {"users": [TWIN], "services": ["all"], "mail_mode": "engine", "transfer_mode": "server_side", "dms_after": False}
 STEPS = {"arm", "arm_chain", "disarm", "api", "webui", "shell", "wait_idle", "wait_pass", "wait_log", "wait_exit",
-         "wait_resume", "wait_incident", "wait_incident_closed", "repeat", "twin", "directory", "source", "change", "dwd", "fired",
+         "wait_resume", "wait_running", "wait_incident", "wait_incident_closed", "repeat", "twin", "directory", "source", "change", "dwd", "fired",
          "bench"}
 BASE = {"equal_to_control": True, "no_item_twice": True}
 
@@ -111,9 +111,11 @@ ROWS = {
     "F-api": ("The API restarts in the Drive pass, the mail pass and a follow-on", 1, [
         start(), {"do": "wait_pass", "pass": "drive"}, RESTART_API, {"do": "wait_resume", "by": "start"},
         {"do": "wait_pass", "pass": "gmail"}, RESTART_API, {"do": "wait_resume", "by": "start"},
-        {"do": "wait_log", "job": "repair", "match": "."}, RESTART_API, {"do": "wait_resume", "by": "start"},
-        IDLE, *FINISH], BASE,
-        "the run and its follow-ons go on or are picked up; no phase starts twice (one migrate, one repair in the run history); "
+        # The follow-on restarted is the verify the One-to-one check launches: it runs for minutes and is a real job. The
+        # repair follow-on was waited for here, but it is a thread with no job log, and the VM's account keeps its
+        # repair policy paused -- the step could only time out after four hours (28 Nov 2026).
+        IDLE, *FINISH[:3], {"do": "wait_running", "job": "verify"}, RESTART_API, *FINISH[3:]], BASE,
+        "the run and its follow-ons go on or are picked up; no phase starts twice (one migrate, one verify per launch in the run history); "
         "this is also where watch_box_busy can be read"),
     "F-webui": ("The web UI restarts during a seed, then a migration", 1, [
         {"do": "webui", "method": "POST", "path": "/api/seed", "body": {
