@@ -243,7 +243,8 @@ class ContactsMigrator:
         if live is None:
             # No inventory, no evidence of what an interrupted run already made: stop rather than create
             # duplicates (the sweep's rule, 27 Nov).
-            raise RuntimeError("Target Contacts inventory could not be read; no contact is created without it")
+            raise RuntimeError("Target Contacts inventory could not be read; no contact is created without it: "
+                               f"{getattr(self, '_list_error', '')}")
         # An unmapped target contact is kept by identity: a run killed between createContact and
         # record_mapping left it, and the next run adopts it instead of making a second (F-kill, 27 Nov 2026:
         # contacts.created@2 left two "Jordan Petrov" on b.).
@@ -278,6 +279,7 @@ class ContactsMigrator:
                     return live
         except Exception as exc:      # noqa: BLE001
             log.warning("[%s] could not list the target's contacts: %s", self.source_user, exc)
+            self._list_error = exc
             return None
 
     def _landed_copy(self, rid: str, person: dict) -> str | None:

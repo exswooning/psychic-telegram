@@ -29,7 +29,7 @@ def test_a_benchmark_refuses_an_account_without_both_tenants_set_up(monkeypatch,
     monkeypatch.delenv("BITPORT_LEDGER", raising=False)
     ledger = str(tmp_path / "migration.db")
     monkeypatch.setattr(config, "Settings", lambda account_id=None: SimpleNamespace(
-        source_domain="a.test", target_domain="b.test", db_path=ledger))
+        source_domain="a.test", target_domain="b.test", db_path=ledger, auth_mode="key"))
     monkeypatch.setattr(control_plane_db, "_db_path", lambda: str(tmp_path / "control.db"))
     monkeypatch.setattr(accounts_auth, "get_account", lambda a: {"plan": "pro"})
     monkeypatch.setattr(accounts_auth, "get_tenant_config", lambda a, side: None if side == "source" else {})

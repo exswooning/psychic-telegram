@@ -233,7 +233,7 @@ def compare_drive_file(src: dict, tgt: dict, src_path: str, tgt_path: str) -> li
     return out
 
 
-def normalise_message(raw: bytes, *, ignored_root_headers=()) -> tuple[dict, bytes]:
+def normalise_message(raw: bytes, *, ignored_root_headers=(), root_keep=None) -> tuple[dict, bytes]:
     """(normalised root headers, canonical MIME tree) for non-byte-identical mail.
 
     Flattening leaf bytes alone loses attachment filenames, content types and
@@ -250,15 +250,13 @@ def normalise_message(raw: bytes, *, ignored_root_headers=()) -> tuple[dict, byt
         headers: dict[str, list[str]] = {}
         for name, value in part.items():
             key = name.lower()
-            if key in VOLATILE_HEADERS or key in omit or key == "content-transfer-encoding":
+            # Content-Type is taken from the part itself below, so an absent header (text/plain) equals the
+            # default one a mail system adds; MIME-Version carries no content (28 Nov: a plain draft and its Gmail
+            # copy with only those added read 'different', and draft recovery never mapped a copy).
+            if (key in VOLATILE_HEADERS or key in omit or key in ("content-transfer-encoding", "mime-version",
+                                                                  "content-type")):
                 continue
-            if key == "content-type":
-                params = part.get_params(header="content-type", unquote=True) or []
-                semantic = sorted((str(k).lower(), " ".join(str(v or "").split()))
-                                  for k, v in params[1:] if str(k).lower() != "boundary")
-                normalized = json.dumps([part.get_content_type().lower(), semantic],
-                                        ensure_ascii=True, separators=(",", ":"))
-            elif key == "content-disposition":
+            if key == "content-disposition":
                 params = part.get_params(header="content-disposition", unquote=True) or []
                 semantic = sorted((str(k).lower(), " ".join(str(v or "").split()))
                                   for k, v in params[1:])
@@ -268,6 +266,13 @@ def normalise_message(raw: bytes, *, ignored_root_headers=()) -> tuple[dict, byt
             else:
                 normalized = " ".join(str(value).split())
             headers.setdefault(key, []).append(normalized)
+        params = part.get_params(header="content-type", unquote=True) or []
+        # A text part's charset only says how its bytes were encoded; the decoded text is what is compared.
+        dropped = {"boundary"} | ({"charset"} if part.get_content_maintype() == "text" else set())
+        semantic = sorted((str(k).lower(), " ".join(str(v or "").split()))
+                          for k, v in params[1:] if str(k).lower() not in dropped)
+        headers["content-type"] = [json.dumps([part.get_content_type().lower(), semantic],
+                                              ensure_ascii=True, separators=(",", ":"))]
         return headers
 
     def mime_tree(part, root=False):
@@ -283,7 +288,12 @@ def normalise_message(raw: bytes, *, ignored_root_headers=()) -> tuple[dict, byt
                 # Line endings in text are not content: link rewriting may turn CRLF into LF.
                 data = data.replace(b"\r\n", b"\n")
             body = base64.b64encode(data).decode("ascii")
-        return [part_headers(part, ignored_root if root else ()), body]
+        headers = part_headers(part, ignored_root if root else ())
+        if root and root_keep is not None:
+            # A caller that compares the addressed headers itself (compare_draft) keeps only the root's structure:
+            # Bitport's own recovery marker on a draft copy is not a difference (28 Nov 2026).
+            headers = {k: v for k, v in headers.items() if k in root_keep}
+        return [headers, body]
 
     headers = part_headers(msg)
     body = json.dumps(mime_tree(msg, root=True), ensure_ascii=True,
@@ -399,8 +409,9 @@ def compare_draft(src_raw: bytes, tgt_raw: bytes, translate) -> tuple[str, list[
         diffs.append(f"from: {sa} -> {ta}")
     regenerated = ("message-id", "date", "from", "to", "cc", "bcc", "subject",
                    "reply-to", "in-reply-to", "references")
-    if (normalise_message(src_raw, ignored_root_headers=regenerated)[1]
-            != normalise_message(tgt_raw, ignored_root_headers=regenerated)[1]):
+    structure = {"content-type", "content-disposition"}
+    if (normalise_message(src_raw, ignored_root_headers=regenerated, root_keep=structure)[1]
+            != normalise_message(tgt_raw, ignored_root_headers=regenerated, root_keep=structure)[1]):
         diffs.append("body or attachments differ")
     return ("different" if diffs else "equivalent"), diffs
 

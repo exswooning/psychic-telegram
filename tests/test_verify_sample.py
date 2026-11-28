@@ -1036,3 +1036,13 @@ def test_a_shared_drives_natives_never_count_toward_the_users_own():
     ev = [{"service": "drive", "nativeFeaturesChecked": True, "source": s} for s in ("a", "b", "sd1", "sd2", "a")]
     assert C.native_checked_count(ev, ["a", "b"]) == 2
     assert C.native_checked_count(ev, ["a", "b", "c"]) == 2      # c never compared: still short
+
+
+def test_a_draft_copy_with_only_default_mime_headers_added_is_the_same_draft():
+    """28 Nov 2026: after the MIME-identity change a plain draft and its copy carrying only Gmail's default
+    MIME-Version / Content-Type read 'different', so draft recovery never mapped a copy. A real type change stays."""
+    import verify_sample as V
+    src = b"Subject: 0\r\n\r\nsource draft"
+    gmail = b"MIME-Version: 1.0\r\nContent-Type: text/plain; charset=\"us-ascii\"\r\nSubject: 0\r\n\r\nsource draft"
+    assert V.compare_draft(src, gmail, lambda a: a)[0] == "equivalent"
+    assert V.compare_draft(src, b"Subject: 0\r\nContent-Type: text/html\r\n\r\nsource draft", lambda a: a)[0] == "different"

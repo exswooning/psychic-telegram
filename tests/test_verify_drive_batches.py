@@ -88,7 +88,7 @@ def test_target_stray_inventory_yields_one_page_at_a_time(db,settings):
 
     svc = Paged()
     v = V.Verifier(None, db, settings, "u@src", "u@tgt")
-    files = iter(v._target_files(svc))
+    files = v._target_files_iter(svc)      # the full read streams; the incremental cache wraps it
     assert next(files)["id"] == "one"
     assert svc.calls == 1
     assert next(files)["id"] == "two"

@@ -80,7 +80,10 @@ def test_preflight_scans_even_previously_mapped_mail(gmail_migrator, settings, d
     monkeypatch.setattr(gmail_migrator, "_split_classify", classify)
     assert list(gmail_migrator._scan_split_before_delivery("")) == [{"id": "existing"}]
     classify.assert_called_once_with("existing")
-    assert "payload" not in gmail_migrator._split_scan["existing"][0]
+    # The preflight spools to SQLite (gmail_split_scan); no row may keep the message payload.
+    rows = db.conn.execute("SELECT classified FROM gmail_split_scan WHERE source_user=?", (SRC_USER,)).fetchall() \
+        if db.conn.execute("SELECT 1 FROM sqlite_master WHERE name='gmail_split_scan'").fetchone() else []
+    assert all('"payload"' not in (r[0] or "") for r in rows)
 
 
 def test_engine_count_mode_does_not_read_back_every_insert(gmail_migrator, settings, auth, monkeypatch):
