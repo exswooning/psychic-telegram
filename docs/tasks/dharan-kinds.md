@@ -2,6 +2,10 @@
 
 Counts below are the sanitized 27 Nov 2026 snapshot supplied for account 7. Identifiers, names, addresses, and message contents are intentionally omitted.
 
+## Read-only classifier replay
+
+On the first replay, finding `unclassified` counts fell from 1,067 to 981 and run-failure `unclassified` counts fell from 25 to 0. Of the remaining 981 findings, 948 were Gmail `notCopied` rows with the same sanitized different-content Message-ID error. `classify()` wrapped these items as `{"notCopied": item}`; the run-failure classifier was not given the nested `type` (`message`) and `error`. `classify()` now sends that nested pair directly to `classify_failure()`, and classifier version 3 reclassifies historical rows in a bounded batch of up to 5,000. The exact sanitized row has an enqueue-and-ledger regression test. A new live replay was not run because network access is prohibited for this task.
+
 ## One-to-one findings
 
 | Family | Count | Kind | Automatic handling / person’s next step |
@@ -33,7 +37,7 @@ Counts below are the sanitized 27 Nov 2026 snapshot supplied for account 7. Iden
 
 ## Additional sanitized evidence still needed
 
-The replay after the first classifier changes left 2 Drive `notCopied` findings, 1 Calendar error, 1 Directory difference, and 1 Gmail difference without their text. The later replay showed the remaining 981 unclassified findings were 948 instances of the Gmail row above plus the other residual families. The nested `notCopied` error/type root cause is fixed in `classify()`, with an exact sanitized ledger-row regression; no post-fix live replay was performed because this task forbids network access. The other five rows still need their sanitized `error`/`diff` strings before a specific kind can be named safely. No IDs, names, addresses, or error wording have been invented.
+The replay after the first classifier changes left 2 Drive `notCopied` findings, 1 Calendar error, 1 Directory difference, and 1 Gmail difference without their text. These five rows still need their sanitized `error`/`diff` strings before a specific kind can be named safely. No IDs, names, addresses, or error wording have been invented.
 
 ## Verification
 

@@ -41,3 +41,9 @@
 - **Files:** `campaign_scenarios.py`, `known_issues.py`, `finding_repairs.py`, `verification_repairs.py`, `tests/test_campaign.py`, `tests/test_escalation_recovery.py`.
 - **Tests:** `.venv/bin/python -m pytest tests/test_campaign.py tests/test_escalation_recovery.py tests/test_resource_keys.py tests/test_lint.py tests/test_known_issues.py tests/test_known_issues_run_kinds_dns.py tests/test_repair_scope_services.py tests/test_government_finding_repairs.py tests/test_government_run_failure_repairs.py tests/test_missing_mail_recovery.py tests/test_verification_repairs.py tests/test_retry_failed.py tests/test_retry_failed_drafts.py -q -rA` — passed (exit 0).
 - **Result:** Added a campaign scenario and covering test path for each new kind, kept native-structure’s existing user-facing title stable, retained bounded classifier batches in the batch regression, and removed unused locals flagged by lint. The run’s progress reached 100% with no failures.
+
+## Piece 8 — verify queued findings close after target repairs
+
+- **Files:** `tests/test_government_finding_repairs.py`.
+- **Tests:** `.venv/bin/python -m pytest tests/test_government_finding_repairs.py tests/test_government_run_failure_repairs.py tests/test_known_issues.py tests/test_campaign.py -q` — passed (exit 0).
+- **Result:** The native Sheet and Form fake repairs now enqueue their sanitized findings, verify target-only changes, then simulate a clean follow-up check and assert the queue closes. The combined external shortcut/fallback row is asserted as accepted `drive.external_copy`, while its unreviewed fallback grants remain open with the person-review reason.

@@ -12,6 +12,13 @@ def _drive_result(**values):
     return {"differences": [], "notCopied": [], "errors": [], **values}
 
 
+def _finish_clean_recheck(db, user):
+    Q.enqueue_findings(db, user, {"drive": _drive_result(checked=1)})
+    row = db.conn.execute("SELECT state FROM verification_repair_queue WHERE source_user=? AND service='drive'",
+                          (user,)).fetchone()
+    assert row["state"] == "RESOLVED"
+
+
 def test_unique_matching_unrecorded_copy_is_adopted_and_queue_row_closes(auth, db, settings, identity):
     settings.source_read_only = True
     source = auth._get("source", "drive", SRC_USER)
@@ -112,6 +119,7 @@ def test_sheet_structure_repair_removes_only_extra_target_editors(auth, db, sett
     report = _drive_result(differences=[{"source": sid, "target": tid, "diffs": [
         "native Sheet structures differ",
         "sheets[0].protectedRanges[0].editors: extra on target"]}])
+    Q.enqueue_findings(db, SRC_USER, {"drive": report})
 
     got = F.repair_drive(auth, db, settings, SRC_USER, report, apply=True)
 
@@ -119,6 +127,7 @@ def test_sheet_structure_repair_removes_only_extra_target_editors(auth, db, sett
     assert source_sheet.writes == []
     assert len(target_sheet.writes) == 1
     assert target_sheet.document["sheets"][0]["protectedRanges"][0]["editors"]["users"] == [TGT_USER]
+    _finish_clean_recheck(db, SRC_USER)
 
 
 def test_prior_non_cell_sheet_failure_runs_the_same_target_only_repair(auth, db, settings, identity, monkeypatch):
@@ -133,11 +142,13 @@ def test_prior_non_cell_sheet_failure_runs_the_same_target_only_repair(auth, db,
     target_sheet = _Sheets(_sheet_doc(9, {"users": [TGT_USER, "extra@tenantb.com"], "groups": []}))
     monkeypatch.setattr(auth, "api", lambda side, name, user: source_sheet if side == "source" else target_sheet)
     report = _drive_result(errors=[f"Repair remains incomplete: {sid}: Non-cell native Sheet features differ; a lossless structure repair is required"])
+    Q.enqueue_findings(db, SRC_USER, {"drive": report})
 
     got = F.repair_drive(auth, db, settings, SRC_USER, report, apply=True)
 
     assert got["candidates"] == 1 and got["changed"] == 1, got
     assert source_sheet.writes == [] and len(target_sheet.writes) == 1
+    _finish_clean_recheck(db, SRC_USER)
 
 
 class _Forms:
@@ -172,6 +183,7 @@ def test_form_title_is_repaired_on_target_only(auth, db, settings, identity, mon
     source_form, target_form = _Forms("Source title"), _Forms("Untitled form")
     monkeypatch.setattr(auth, "api", lambda side, name, user: source_form if side == "source" else target_form)
     report = _drive_result(differences=[{"source": sid, "target": tid, "diffs": ["Form title differs"]}])
+    Q.enqueue_findings(db, SRC_USER, {"drive": report})
 
     got = F.repair_drive(auth, db, settings, SRC_USER, report, apply=True)
 
@@ -180,6 +192,7 @@ def test_form_title_is_repaired_on_target_only(auth, db, settings, identity, mon
     assert target_form.form["info"]["title"] == "Source title"
     assert target_form.writes == [{"requests": [{"updateFormInfo": {
         "info": {"title": "Source title"}, "updateMask": "title"}}]}]
+    _finish_clean_recheck(db, SRC_USER)
 
 
 def test_external_shortcut_is_created_even_when_fallback_needs_person_review(auth, db, settings, identity, monkeypatch):
@@ -207,6 +220,7 @@ def test_external_shortcut_is_created_even_when_fallback_needs_person_review(aut
                                "scope": "external-original-access",
                                "diffs": ["external original shortcut missing or placement differs",
                                          "external fallback has unreviewed sharing"]}]}
+    Q.enqueue_findings(db, SRC_USER, {"drive": report})
 
     got = external_access.repair(auth, db, settings, SRC_USER, report)
 
@@ -214,6 +228,8 @@ def test_external_shortcut_is_created_even_when_fallback_needs_person_review(aut
                  if f.get("mimeType") == "application/vnd.google-apps.shortcut"
                  and (f.get("shortcutDetails") or {}).get("targetId") == sid]
     assert len(shortcuts) == 1 and shortcuts[0]["parents"] == [target_root]
+    row = db.conn.execute("SELECT issue,state FROM verification_repair_queue WHERE item_id=?", (sid,)).fetchone()
+    assert row["issue"] == "drive.external_copy" and row["state"] == "QUEUED"
     assert got["changed"] == 1
     assert got["needsPerson"] == [{"source": sid,
         "reason": "Retained fallback has other grants; review is required before accepting original-reference mode"}]
