@@ -34,6 +34,7 @@ import os
 import subprocess
 import sys
 import time
+from seed_loader import load_seed_sandbox
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PY = sys.executable
@@ -57,10 +58,14 @@ def migrate_scopes(settings) -> list[str]:
 def seed_scopes() -> list[str]:
     """Exactly what the seeder and its source reset request: its corpus writes, plus
     account creation, headcount, groups, licence usage, purging mail and chat."""
-    sys.path.insert(0, os.path.join(HERE, "data-generator"))
-    from seed_sandbox import (SEED_SCOPES, GROUP_WRITE_SCOPE, REPORTS_SCOPE, GMAIL_PURGE_SCOPE,
-                              DIRECTORY_READONLY_SCOPE, GMAIL_SETTINGS_SCOPE)
+    seeder = load_seed_sandbox()
     from provision import DIRECTORY_WRITE_SCOPE
+    SEED_SCOPES = seeder.SEED_SCOPES
+    GROUP_WRITE_SCOPE = seeder.GROUP_WRITE_SCOPE
+    REPORTS_SCOPE = seeder.REPORTS_SCOPE
+    GMAIL_PURGE_SCOPE = seeder.GMAIL_PURGE_SCOPE
+    DIRECTORY_READONLY_SCOPE = seeder.DIRECTORY_READONLY_SCOPE
+    GMAIL_SETTINGS_SCOPE = seeder.GMAIL_SETTINGS_SCOPE
     extra = {GROUP_WRITE_SCOPE, REPORTS_SCOPE, GMAIL_PURGE_SCOPE, DIRECTORY_READONLY_SCOPE,
              GMAIL_SETTINGS_SCOPE, DIRECTORY_WRITE_SCOPE,
              "https://www.googleapis.com/auth/gmail.settings.sharing",

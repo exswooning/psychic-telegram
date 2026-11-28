@@ -290,7 +290,9 @@ class TestItDoesNotShadowTheRealVerify:
     def test_the_seeder_is_loaded_by_file_path(self):
         """Appending rather than prepending would still shadow later imports;
         loading by path shadows nothing."""
-        src = inspect.getsource(reset_target._load_seeder)
+        from seed_loader import load_seed_sandbox
+
+        src = inspect.getsource(load_seed_sandbox)
         assert "spec_from_file_location" in src
         assert "sys.path.remove" in src
 
