@@ -38,6 +38,16 @@ from fastapi.testclient import TestClient  # noqa: E402
 def cp(monkeypatch):
     """A control plane over a throwaway ledger, with a known operator table."""
     path = tempfile.mktemp(suffix=".db")
+    # Control-plane tests exercise file-backed status parsing, not the host's
+    # process table. Supply a clean empty table so these remain hermetic on
+    # hosts where launching `ps` is restricted (and so no developer jobs are
+    # mistaken for a fixture job).
+    ps_bin = tempfile.mkdtemp(prefix="cp-test-bin-")
+    ps = os.path.join(ps_bin, "ps")
+    with open(ps, "w", encoding="utf-8") as fh:
+        fh.write("#!/bin/sh\nexit 0\n")
+    os.chmod(ps, 0o755)
+    monkeypatch.setenv("PATH", ps_bin + os.pathsep + os.environ.get("PATH", ""))
     monkeypatch.setenv("MIGRATION_DB", path)
     monkeypatch.setenv("CP_OPERATORS", "boss:admin,intern:viewer")
     # The X-Operator claim now costs a shared secret, so the fixture holds
@@ -203,6 +213,8 @@ class TestProvisioning:
 
         class _FakeProc:
             pid = 4242
+            def wait(self):
+                return 0
         monkeypatch.setattr(api_server.subprocess, "Popen", lambda *a, **k: _FakeProc())
 
         r = cp.post("/api/v2/provision/start",
@@ -728,6 +740,8 @@ class TestCloudProvisioning:
 
         class _FakeProc:
             pid = 5150
+            def wait(self):
+                return 0
         monkeypatch.setattr(api_server.subprocess, "Popen",
                             lambda *a, **k: _FakeProc())
 

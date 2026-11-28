@@ -1534,6 +1534,8 @@ class DriveMigrator:
             result = with_carried_fallback(lambda b: self._retry(lambda: self.tgt.files().create(
                 body=b, fields="id", supportsAllDrives=True,
             ).execute()), body)
+            result = failpoints.hit("drive.folder.created", result,
+                                    user=self.source_user)
         except (PermanentAPIError, RuntimeError) as exc:
             self.db.log_audit(self.source_user, item["id"], "folder", "FAILED", str(exc))
             self._bump("failed")

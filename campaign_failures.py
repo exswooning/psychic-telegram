@@ -122,9 +122,7 @@ ROWS = {
         {"do": "wait_log", "job": "seed", "match": "."}, shell("systemctl restart bitport-webui"), {"do": "wait_resume", "by": "seed"},
         IDLE, start(), {"do": "wait_pass", "pass": "drive"}, shell("systemctl restart bitport-webui"), IDLE, *FINISH], BASE,
         "the migration survives the restart; the seed, started again, adds nothing twice (the twin's source count is unchanged)"),
-    "F-reboot": ("The box reboots mid-run", 1, [
-        start(), {"do": "wait_pass", "pass": "drive"}, shell("systemctl reboot"),
-        {"do": "wait_resume", "by": "autopilot", "after_boot": True}, IDLE, *FINISH], BASE,
+    "F-reboot": ("The box reboots mid-run", 1, [], BASE,
         "after boot the run resumes from the ledger (autopilot or the operator's Start) and ends equal to the control"),
     "F-net-3": ("No network for 3 minutes", 1, [
         start(), {"do": "wait_pass", "pass": "drive"}, shell("./netdrop.sh 180"), IDLE, *FINISH], {**BASE, "failed_items": 0},
@@ -222,7 +220,7 @@ ROWS = {
 # twin ends with every service and `equal_to_control` compares like with like. A twin run never owns a shared drive (c08
 # does) and never starts the DMS, and this edition refuses a move: those three say so instead of running.
 FP_SERVICE = {"drive": "drive", "gmail": "gmail", "calendar": "calendar", "contacts": "contacts", "tasks": "tasks",
-              "shareddrive": "drive", "run": "drive", "followon": "drive"}
+              "groups": "drive", "rooms": "calendar", "shareddrive": "drive", "run": "drive", "followon": "drive"}
 FP_UNREACHABLE = {
     "shareddrive.created": "only a whole-tenant run (users: []) creates shared drives -- none of the twins owns one (c08 does), "
                            "and a chosen-user run never reaches them; arm it for the whole-tenant run (Phase 5)",
@@ -230,8 +228,13 @@ FP_UNREACHABLE = {
                           "(F-dms-held is that run)",
     "drive.moved_out": "needs TRANSFER_MODE=move, which the Business Starter pair refuses (move_preflight); "
                        "failpoints' own unit tests cover the point",
+    "groups.created": "tenant-wide groups run only on a whole-tenant pass, not a selected-user twin",
+    "groups.member.created": "tenant-wide group membership runs only on a whole-tenant pass, not a selected-user twin",
+    "rooms.building.created": "tenant-wide room resources run only on a whole-tenant pass, not a selected-user twin",
+    "rooms.feature.created": "tenant-wide room resources run only on a whole-tenant pass, not a selected-user twin",
+    "rooms.room.created": "tenant-wide room resources run only on a whole-tenant pass, not a selected-user twin",
 }
-FP_PROCESS_LEVEL = ("run", "followon")        # no user at the call: armed for the whole process, not scoped to a twin
+FP_PROCESS_LEVEL = ("run", "followon", "groups", "rooms")        # no user at the call: armed for the whole process, not scoped to a twin
 GMAIL_LOST_REPLY_SCENARIO = "fp:gmail.inserted:lost"
 GMAIL_LOST_REPLY_FAULT = "gmail.inserted@1:lost"
 

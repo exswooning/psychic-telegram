@@ -346,6 +346,8 @@ class ContactsMigrator:
                 created = self._retry(
                     lambda n=name: self.tgt.contactGroups().create(
                         body={"contactGroup": {"name": n}}).execute())
+                created = failpoints.hit("contacts.group.created", created,
+                                         user=self.source_user)
             except (PermanentAPIError, RuntimeError) as exc:
                 # A group of this name already exists on the target, so the
                 # work is done and only the mapping is missing. People

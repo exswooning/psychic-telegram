@@ -2648,8 +2648,26 @@ class _TaskLists:
     def list(self, **kw):
         return _Call(self.s, "tasklists.list", self._list, kw)
 
-    def _list(self, **_):
-        return {"items": [copy.deepcopy(v) for v in self.s.lists.values()]}
+    def _list(self, maxResults: int = 100, pageToken: Optional[str] = None, **_):
+        rows = list(self.s.lists.values())
+        start = int(pageToken or 0)
+        page = rows[start:start + maxResults]
+        out: dict[str, Any] = {"items": [copy.deepcopy(v) for v in page]}
+        if start + maxResults < len(rows):
+            out["nextPageToken"] = str(start + maxResults)
+        return out
+
+    def get(self, **kw):
+        return _Call(self.s, "tasklists.get", self._get, kw)
+
+    def _get(self, tasklist: str, **_):
+        if tasklist == "@default":
+            if self.s.lists:
+                return copy.deepcopy(next(iter(self.s.lists.values())))
+            raise http_error(404, "notFound", tasklist)
+        if tasklist not in self.s.lists:
+            raise http_error(404, "notFound", tasklist)
+        return copy.deepcopy(self.s.lists[tasklist])
 
     def insert(self, **kw):
         return _Call(self.s, "tasklists.insert", self._insert, kw)

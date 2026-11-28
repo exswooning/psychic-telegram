@@ -104,17 +104,18 @@ def test_an_old_selected_migration_only_reattaches_its_scoped_tally(follow, monk
 
 
 @pytest.mark.parametrize("rc", [1, None])
-def test_a_failed_or_unknown_exit_never_starts_follow_ons(follow, rc):
+def test_a_failed_or_unknown_exit_never_starts_follow_ons(follow, rc, monkeypatch):
     ran, _ = follow
     p = subprocess.Popen([sys.executable, "-c", "pass"]); p.wait()
     _admit("dms", p.pid, ["python", "dms_pipeline.py"], ["verify-after-dms"])
+    monkeypatch.setattr(api_server, "_alive_as", lambda pid, argv: False)
     if rc is not None:
         job_exit.record(rc, pid=p.pid)
     api_server._reattach_follow_ons()
     assert ran == []
 
 
-def test_a_job_still_running_is_watched_and_finished_when_it_ends(follow, tmp_path):
+def test_a_job_still_running_is_watched_and_finished_when_it_ends(follow, tmp_path, monkeypatch):
     ran, _ = follow
     go, script = tmp_path / "go", tmp_path / "fake_job.py"
     script.write_text(f"import time, sys, pathlib; sys.path.insert(0, {os.getcwd()!r}); import job_exit\n"
@@ -123,6 +124,10 @@ def test_a_job_still_running_is_watched_and_finished_when_it_ends(follow, tmp_pa
                       "job_exit.record(0)\n")
     p = subprocess.Popen([sys.executable, str(script)])
     _admit("verify", p.pid, [sys.executable, str(script)], ["parity-gate"])
+    # The contract under test is the reattachment/waiter lifecycle. Check
+    # this child with Popen.poll() rather than `ps`, which the sandbox denies.
+    monkeypatch.setattr(api_server, "_alive_as",
+                        lambda pid, argv: pid == p.pid and p.poll() is None)
     api_server._reattach_follow_ons(poll=0.1)
     time.sleep(0.3)
     assert ran == [], "not before it ends"

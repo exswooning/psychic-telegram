@@ -109,7 +109,8 @@ def test_lost_reply_chain_cannot_reuse_an_unrelated_fault_marker(driver, reason)
 
 FP = [s for s in S.all_scenarios() if s.id.startswith("fp:")]
 RUNNABLE = [s for s in FP if not s.inject.get("unreachable")]
-UNREACHABLE = {"drive.moved_out", "shareddrive.created", "followon.dms.start"}
+UNREACHABLE = {"drive.moved_out", "shareddrive.created", "followon.dms.start", "groups.created", "groups.member.created",
+               "rooms.building.created", "rooms.feature.created", "rooms.room.created"}   # tenant-wide: no twin reaches them
 
 
 def point(sc):
@@ -117,8 +118,8 @@ def point(sc):
 
 
 def test_every_failpoint_scenario_runs_or_says_why_it_cannot():
-    assert len(FP) == 26 and {point(s) for s in FP if s.inject.get("unreachable")} == UNREACHABLE
-    assert all(s.inject.get("steps") for s in RUNNABLE) and len(RUNNABLE) == 21
+    assert len(FP) == 36 and {point(s) for s in FP if s.inject.get("unreachable")} == UNREACHABLE
+    assert all(s.inject.get("steps") for s in RUNNABLE) and len(RUNNABLE) == 26
     for s in FP:
         if s.inject.get("unreachable"):
             row = C.run_scenario(s, FpDriver(), "n", set())
@@ -267,7 +268,7 @@ def test_live_gmail_lost_reply_requires_its_admitted_process_archive_and_exit(gm
 
 def test_the_batches_hold_what_can_share_a_run_and_leave_the_rest_alone():
     batches, alone = CF.fp_batches(FP, 6)
-    assert [len(b) for b in batches] == [6, 6, 6, 1] and sum(map(len, batches)) == 19
+    assert [len(b) for b in batches] == [6, 6, 6, 6] and sum(map(len, batches)) == 24
     assert {s.id for s in alone} == {s.id for s in FP if s.inject.get("unreachable")} | {
         "fp:followon.repair.start:kill", "fp:gmail.inserted:lost",
     }

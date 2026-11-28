@@ -38,6 +38,7 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+import failpoints
 
 from auth import AuthManager
 from config import Settings
@@ -135,7 +136,8 @@ class GroupMigrator:
                 if g.get(k):
                     body[k] = g[k]
             try:
-                self._dir("target", write=True).groups().insert(body=body).execute()
+                created = self._dir("target", write=True).groups().insert(body=body).execute()
+                failpoints.hit("groups.created", created)
             except Exception as exc:  # noqa: BLE001
                 self.db.log_audit(LEDGER_USER, src_email, "group", "FAILED", str(exc))
                 self.stats["failed"] += 1
@@ -173,6 +175,11 @@ class GroupMigrator:
                 self.stats["members_skipped"] += 1
                 continue
             if mapped.lower() in already:
+                # A prior insert may have landed immediately before a kill.
+                # The target membership inventory is authoritative; restore
+                # the missing ledger row while keeping the member count stable.
+                self.db.record_mapping(LEDGER_USER, key,
+                                       f"{tgt_email}:{mapped}", "group_member")
                 self.stats["members_skipped"] += 1
                 continue
             if self.settings.dry_run:
@@ -180,8 +187,9 @@ class GroupMigrator:
                 continue
             body = {"email": mapped, "role": m.get("role", "MEMBER")}
             try:
-                self._dir("target", write=True).members().insert(
+                created = self._dir("target", write=True).members().insert(
                     groupKey=tgt_email, body=body).execute()
+                failpoints.hit("groups.member.created", created)
             except Exception as exc:  # noqa: BLE001
                 self.db.log_audit(LEDGER_USER, key, "group_member", "FAILED",
                                   str(exc))

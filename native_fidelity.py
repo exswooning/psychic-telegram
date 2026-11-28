@@ -156,6 +156,7 @@ def canonical_native(document, lookup=lambda _: None):
 
 IMAGE_KEYS = ("contentUri", "contentUrl")
 IMAGE_MAX_BYTES = 64 * 1024 * 1024
+IMAGE_WORKERS = 8
 
 
 def _fetch_image(url: str, deadline: float | None = None) -> bytes:
@@ -180,6 +181,28 @@ def _fetch_image(url: str, deadline: float | None = None) -> bytes:
     return data
 
 
+def _fetch_image_digest(url: str, deadline: float | None = None) -> str:
+    """Hash an embedded image as it arrives, without retaining its body in memory."""
+    import hashlib
+    import time
+    import urllib.request
+    from resilience import RetryBudgetExceeded
+    digest, size = hashlib.sha256(), 0
+    with urllib.request.urlopen(url, timeout=30) as resp:
+        while True:
+            if deadline is not None and time.monotonic() > deadline:
+                raise RetryBudgetExceeded("this file's time budget ran out while reading an embedded image; "
+                                          "recorded as unverified", None)
+            chunk = resp.read1(1 << 16)
+            if not chunk:
+                break
+            size += len(chunk)
+            if size > IMAGE_MAX_BYTES:
+                raise RuntimeError("Embedded image is larger than the comparison limit")
+            digest.update(chunk)
+    return "sha256:" + digest.hexdigest()
+
+
 def _image_urls(value, out: dict) -> dict:
     """Every distinct embedded-image URL in a document, first seen first."""
     if isinstance(value, dict):
@@ -194,22 +217,28 @@ def _image_urls(value, out: dict) -> dict:
     return out
 
 
-def _hash_images(value, fetch=None, workers: int | None = None):
-    """Every embedded image's signed URL replaced by sha256 of its bytes. Each distinct URL is fetched
-    once, IMAGE_FETCH_WORKERS (8) at a time: one after another, an image-heavy Doc could not be read
-    inside its 300 s budget and stayed UNVERIFIED on every check (education@, live 7 Nov 2026)."""
+def _hash_images_pair(source, target, fetch=None, digest_fetch=None, workers: int | None = None):
+    """Hash distinct images from both documents in one bounded worker pool.
+
+    Production passes ``digest_fetch`` so each response is streamed into SHA-256;
+    byte-returning ``fetch`` remains supported by tests and render fallbacks.
+    """
     import hashlib
     fetch = fetch or _fetch_image
-    urls = list(_image_urls(value, {}))
+    urls = list(dict.fromkeys([*_image_urls(source, {}), *_image_urls(target, {})]))
     if not urls:
-        return value
-    workers = max(1, min(len(urls), workers or int(os.getenv("IMAGE_FETCH_WORKERS", "8") or 8)))
+        return source, target
+    workers = max(1, min(len(urls), workers or int(os.getenv("IMAGE_FETCH_WORKERS", str(IMAGE_WORKERS)) or IMAGE_WORKERS)))
+    def digest_url(url):
+        if digest_fetch is not None:
+            return digest_fetch(url)
+        return "sha256:" + hashlib.sha256(fetch(url)).hexdigest()
     if workers == 1:
-        digests = {u: "sha256:" + hashlib.sha256(fetch(u)).hexdigest() for u in urls}
+        digests = {u: digest_url(u) for u in urls}
     else:
         from concurrent.futures import ThreadPoolExecutor
         with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="verify-image") as pool:
-            digests = dict(zip(urls, pool.map(lambda u: "sha256:" + hashlib.sha256(fetch(u)).hexdigest(), urls)))
+            digests = dict(zip(urls, pool.map(digest_url, urls)))
 
     def swap(v):
         if isinstance(v, dict):
@@ -217,7 +246,12 @@ def _hash_images(value, fetch=None, workers: int | None = None):
         if isinstance(v, list):
             return [swap(x) for x in v]
         return v
-    return swap(value)
+    return swap(source), swap(target)
+
+
+def _hash_images(value, fetch=None, workers: int | None = None):
+    """Replace signed image URLs with SHA-256 hashes, fetching each URL once."""
+    return _hash_images_pair(value, {}, fetch=fetch, workers=workers)[0]
 
 
 def _side(side: str, endpoint: str, read):
@@ -230,26 +264,32 @@ def _side(side: str, endpoint: str, read):
         raise
 
 
-def compare_native(auth, source_user, target_user, sid, tid, mime, lookup, fetch=None, pace=lambda: None):
+def compare_native(auth, source_user, target_user, sid, tid, mime, lookup, fetch=None,
+                   pace=lambda: None, fetch_digest=None):
+    from concurrent.futures import ThreadPoolExecutor
     if mime.endswith(".document"):
         endpoint = "docs.googleapis.com/v1/documents.get"
-        source = _side("source", endpoint, lambda: (
-            pace() or auth.api("source", "docs", source_user)
-            .documents().get(documentId=sid, includeTabsContent=True).execute()))
-        target = _side("target", endpoint, lambda: (
-            pace() or auth.api("target", "docs", target_user)
-            .documents().get(documentId=tid, includeTabsContent=True).execute()))
+        def read(side, user, fid):
+            return _side(side, endpoint, lambda: (
+                pace() or auth.api(side, "docs", user)
+                .documents().get(documentId=fid, includeTabsContent=True).execute()))
+        with ThreadPoolExecutor(max_workers=2, thread_name_prefix="verify-doc") as pool:
+            fs = pool.submit(read, "source", source_user, sid)
+            ft = pool.submit(read, "target", target_user, tid)
+            source, target = fs.result(), ft.result()
         scope = (
             "all readable Docs tabs, text-run styles, document styles and structures"
         )
     elif mime.endswith(".presentation"):
         endpoint = "slides.googleapis.com/v1/presentations.get"
-        source = _side("source", endpoint, lambda: (
-            pace() or auth.api("source", "slides", source_user)
-            .presentations().get(presentationId=sid).execute()))
-        target = _side("target", endpoint, lambda: (
-            pace() or auth.api("target", "slides", target_user)
-            .presentations().get(presentationId=tid).execute()))
+        def read(side, user, fid):
+            return _side(side, endpoint, lambda: (
+                pace() or auth.api(side, "slides", user)
+                .presentations().get(presentationId=fid).execute()))
+        with ThreadPoolExecutor(max_workers=2, thread_name_prefix="verify-slides") as pool:
+            fs = pool.submit(read, "source", source_user, sid)
+            ft = pool.submit(read, "target", target_user, tid)
+            source, target = fs.result(), ft.result()
         scope = "readable Slides pages, masters, layouts, notes and element properties"
     else:
         raise RuntimeError("Native feature reader not implemented for " + mime)
@@ -258,7 +298,7 @@ def compare_native(auth, source_user, target_user, sid, tid, mime, lookup, fetch
     # image is fetched (the URL acts as the requester, for a short while) and compared
     # by its bytes' hash -- Docs call it contentUri, Slides contentUrl.
     raw_source, raw_target = source, target
-    source, target = _hash_images(source, fetch), _hash_images(target, fetch)
+    source, target = _hash_images_pair(source, target, fetch=fetch, digest_fetch=fetch_digest)
     if mime.endswith(".document"):
         source, target = _merge_runs(source), _merge_runs(target)
     a, b = canonical_native(source, lookup), canonical_native(target)

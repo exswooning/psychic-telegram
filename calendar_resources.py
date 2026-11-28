@@ -17,6 +17,7 @@ not created again. Needs MIGRATE_RESOURCES and the directory resource scopes
 from __future__ import annotations
 
 import logging
+import failpoints
 
 log = logging.getLogger(__name__)
 
@@ -61,8 +62,9 @@ class ResourceMigrator:
             if b["buildingId"] in have_b or self.settings.dry_run:
                 continue
             try:
-                tgt.buildings().insert(customer=cust, body={
+                created = tgt.buildings().insert(customer=cust, body={
                     k: b[k] for k in _BUILDING_KEYS if k in b}).execute()
+                failpoints.hit("rooms.building.created", created)
                 self.stats["buildings"] += 1
             except Exception as exc:      # noqa: BLE001 - its rooms fail and say so
                 log.warning("building %s not created: %s", b.get("buildingName"), exc)
@@ -73,7 +75,8 @@ class ResourceMigrator:
             if f["name"] in have_f or self.settings.dry_run:
                 continue
             try:
-                tgt.features().insert(customer=cust, body={"name": f["name"]}).execute()
+                created = tgt.features().insert(customer=cust, body={"name": f["name"]}).execute()
+                failpoints.hit("rooms.feature.created", created)
                 self.stats["features"] += 1
             except Exception as exc:      # noqa: BLE001
                 log.warning("feature %s not created: %s", f["name"], exc)
@@ -89,6 +92,7 @@ class ResourceMigrator:
                 try:
                     made = tgt.calendars().insert(customer=cust, body={
                         k: r[k] for k in _ROOM_KEYS if k in r}).execute()
+                    made = failpoints.hit("rooms.room.created", made)
                     self.stats["rooms"] += 1
                 except Exception as exc:      # noqa: BLE001
                     self.db.log_audit(LEDGER_USER, src_email, "resource", "FAILED", str(exc))

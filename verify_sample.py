@@ -46,6 +46,7 @@ from collections.abc import Iterator
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from email.parser import BytesHeaderParser
+from googleapiclient.http import MediaIoBaseDownload
 from verification_reads import error_detail
 
 # The CLI and repair callbacks must share the same module and cancellation type.
@@ -55,6 +56,23 @@ if __name__ == "__main__":
 
 class VerificationCancelled(BaseException):
     """Cooperative stop must escape per-item error collectors."""
+
+
+class _HashSink:
+    """File-like sink for chunked Drive downloads; retain only fixed-size digests."""
+    def __init__(self):
+        self.size = 0
+        self.md5 = hashlib.md5()
+        self.sha256 = hashlib.sha256()
+
+    def write(self, chunk):
+        self.size += len(chunk)
+        self.md5.update(chunk)
+        self.sha256.update(chunk)
+        return len(chunk)
+
+    def result(self):
+        return {"size": self.size, "md5": self.md5.hexdigest(), "sha256": self.sha256.hexdigest()}
 
 
 def _stop_check():
@@ -968,6 +986,26 @@ class Verifier:
             return self._x(lambda: svc.files().get_media(fileId=fid, supportsAllDrives=True,
                                                         acknowledgeAbuse=True).execute())
 
+    def _download_digest(self, svc, fid) -> dict:
+        """Compare Drive bytes through a bounded 1 MiB downloader, never whole-file buffers."""
+        def drain(acknowledge=False):
+            kwargs = {"fileId": fid, "supportsAllDrives": True}
+            if acknowledge:
+                kwargs["acknowledgeAbuse"] = True
+            request = svc.files().get_media(**kwargs)
+            sink = _HashSink()
+            downloader = MediaIoBaseDownload(sink, request, chunksize=1 << 20)
+            done = False
+            while not done:
+                _, done = self._x(downloader.next_chunk, operation="Drive binary verification download")
+            return sink.result()
+        try:
+            return drain()
+        except Exception as exc:
+            if "cannotDownloadAbusiveFile" not in error_detail(exc):
+                raise
+            return drain(acknowledge=True)
+
     def _export(self, svc, fid, mime) -> bytes:
         return self._x(lambda: svc.files().export_media(fileId=fid, mimeType=mime).execute())
 
@@ -1376,14 +1414,15 @@ class Verifier:
                               "generated ids, past responses and the responses-Sheet link excluded")
                 return differences
             if mime in ("application/vnd.google-apps.document", "application/vnd.google-apps.presentation"):
-                from native_fidelity import compare_native, _fetch_image
+                from native_fidelity import compare_native, _fetch_image, _fetch_image_digest
                 kind = "docs" if mime.endswith(".document") else "slides"
                 # One breaker per API family: after a few documents fail on a Google 5xx the rest are
                 # not sent for a cooldown (they are queued as unverified, never passed).
                 differences,scope=self._vr.guarded(kind, lambda: self._x(
                     lambda: compare_native(self.auth,self.src_user,self.tgt_user,sid,tid,mime,self.db.target_for_source_id,
                                            pace=lambda: self._native_pace(kind, "read"),
-                                           fetch=lambda u: _fetch_image(u, self._file_deadline))))
+                                           fetch=lambda u: _fetch_image(u, self._file_deadline),
+                                           fetch_digest=lambda u: _fetch_image_digest(u, self._file_deadline))))
                 ev.update(opened=True,how=scope,nativeFeaturesChecked=True,nativeFeaturesMatched=not differences)
                 return differences
             if mime in NATIVE_EXPORT:
@@ -1409,7 +1448,6 @@ class Verifier:
             if mime.startswith("application/vnd.google-apps."):
                 ev["how"] = "not opened: this Google type has no text export"
                 return []
-            size = int(sm.get("size") or 0)
             # Drive's md5Checksum is computed by Google from the bytes it stores, on each tenant. Equal
             # MD5 and size on both sides already says what downloading both would; downloading them
             # cost 71 of it.department's 103 minutes (2.6 GB, twice, through the box's uplink). Set
@@ -1419,16 +1457,14 @@ class Verifier:
                     and str(sm.get("size")) == str(tm.get("size"))):
                 ev.update(opened=False, how="identical by Drive's own MD5 and size on both tenants (not downloaded)")
                 return []
-            if size > MAX_COMPARE_BYTES:
-                ev["how"] = f"not opened: {size:,} bytes is over the {MAX_COMPARE_BYTES:,}-byte comparison limit (size and MD5 only)"
-                return []
-            a, b = self._download(src, sid), self._download(tgt, tid)
-            ev.update(opened=True, how="downloaded from both and compared", bytes=len(a), sha256=sha256(a)[:16])
+            a, b = self._download_digest(src, sid), self._download_digest(tgt, tid)
+            ev.update(opened=True, how="downloaded from both in bounded chunks and compared SHA-256 and size",
+                      bytes=a["size"], sha256=a["sha256"][:16])
             out = []
-            if sm.get("md5Checksum") and hashlib.md5(a).hexdigest() != sm["md5Checksum"]:
+            if sm.get("md5Checksum") and a["md5"] != sm["md5Checksum"]:
                 out.append("the SOURCE download does not match its own MD5 (read error, not a migration fault)")
-            if a != b:
-                out.append(f"content differs: sha256 {sha256(a)[:12]} -> {sha256(b)[:12]} ({len(a)} -> {len(b)} bytes)")
+            if (a["sha256"], a["size"]) != (b["sha256"], b["size"]):
+                out.append(f"content differs: sha256 {a['sha256'][:12]} -> {b['sha256'][:12]} ({a['size']} -> {b['size']} bytes)")
             return out
         except Exception as exc:      # noqa: BLE001
             failure = self._vr.classify(exc)

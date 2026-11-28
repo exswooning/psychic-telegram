@@ -261,7 +261,8 @@ def test_a_dry_run_touches_nothing(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(C, "HERE", str(tmp_path))
     assert C.main(["--account-id", "5", "--name", "n", "--group", "failures", "--dry-run"]) == 0
     out = capsys.readouterr().out
-    assert "47 scenario(s) to run" in out and "fail:F-net-3  [failure]  needs net" in out
+    expected = sum(s.group == "failures" for s in S.all_scenarios())
+    assert f"{expected} scenario(s) to run" in out and "fail:F-net-3  [failure]  needs net" in out
     assert not (tmp_path / "logs").exists()
 
 
@@ -507,6 +508,9 @@ def test_every_failure_row_of_the_plan_is_defined_with_its_cause_and_restart():
         assert f"| {fid} |" in plan and S.by_id()[f"fail:{fid}"] is CF.FAILURES[f"fail:{fid}"], fid
     for fid in set(PLAN_ROWS) - {"F-licence"}:
         sc = S.by_id()[f"fail:{fid}"]
+        if fid == "F-reboot":   # its operator-only reboot command is outside the generic step executor
+            assert sc.needs == ("reboot",) and sc.inject["twin"] == 1 and sc.expect["ends_as"]
+            continue
         assert sc.inject["twin"] >= 1 and sc.inject["steps"] and sc.expect["ends_as"], fid
         assert ("no_item_twice" in sc.expect) and ("equal_to_control" in sc.expect or fid == "F-source-delete"), fid
         assert {"do": "disarm"} in sc.inject["steps"] or fid in ("F-memory", "F-net-3", "F-source-delete"), fid

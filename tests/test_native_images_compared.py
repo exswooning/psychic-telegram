@@ -39,3 +39,11 @@ def test_a_different_image_is_a_difference():
     diffs, _ = N.compare_native(auth, "u", "t", "S", "T", "application/vnd.google-apps.document",
                                 lambda x: None, fetch=bytes_at.__getitem__)
     assert diffs == ["native document content, formatting or structure differs"]
+
+
+def test_streamed_image_digests_keep_a_one_image_mismatch_visible():
+    auth = _Auth({"source": _doc("https://src/sig"), "target": _doc("https://tgt/sig")})
+    digests = {"https://src/sig": "sha256:one", "https://tgt/sig": "sha256:two"}
+    diffs, _ = N.compare_native(auth, "u", "t", "S", "T", "application/vnd.google-apps.document",
+                                lambda x: None, fetch_digest=digests.__getitem__)
+    assert diffs == ["native document content, formatting or structure differs"]

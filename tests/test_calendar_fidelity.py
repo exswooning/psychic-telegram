@@ -133,3 +133,26 @@ def test_an_owned_calendar_is_not_followed(auth, db, settings, identity):
     src.add_calendar("Mine")
     m = calendar_engine.CalendarMigrator(auth, db, settings, SRC_USER, TGT_USER)
     assert m.sync_subscriptions() == 0
+
+
+def test_a_secondary_calendar_created_before_a_kill_is_adopted(auth, db, settings, identity):
+    src = auth.source_calendar(SRC_USER)
+    src.calendar_store["source-secondary"] = {
+        "id": "source-secondary", "summary": "Operations",
+        "description": "Ops calendar", "timeZone": "UTC",
+        "accessRole": "owner", "primary": False,
+    }
+    src.cal_events["source-secondary"] = {}
+
+    first = calendar_engine.CalendarMigrator(auth, db, settings, SRC_USER, TGT_USER)
+    first._migrate_secondary_calendars(None)
+    target_id = db.get_target_id(SRC_USER, "source-secondary", "calendar")
+    assert target_id and len(auth.target_calendar(TGT_USER).calendar_store) == 1
+
+    db.forget_mapping(SRC_USER, "source-secondary", "calendar")
+    again = calendar_engine.CalendarMigrator(auth, db, settings, SRC_USER, TGT_USER)
+    again._migrate_secondary_calendars(None)
+
+    assert again.stats["adopted_calendars"] == 1
+    assert db.get_target_id(SRC_USER, "source-secondary", "calendar") == target_id
+    assert len(auth.target_calendar(TGT_USER).calendar_store) == 1
