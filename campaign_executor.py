@@ -31,7 +31,7 @@ SHELL = [
     (rf"mkdir -p {_E(os.path.dirname(DROPIN))}", None),
     (rf"mount -t tmpfs -o size=64m tmpfs {_E(TMPFS)}", None),
     (rf'test "\$\(stat -f -c %T {_E(TMPFS)}\)" = tmpfs', None),
-    (rf"fallocate -l 60M {_E(TMPFS)}/ballast", None),
+    (rf"fallocate -l 6[03]M {_E(TMPFS)}/ballast", None),      # 63M: filled mid-run, after Start's preflight
     (rf"rm -f {_E(TMPFS)}/ballast", None),
     (rf"umount {_E(TMPFS)}", None),
     (rf"rmdir {_E(TMPFS)}", None),

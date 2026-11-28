@@ -134,10 +134,15 @@ ROWS = {
         {"do": "wait_exit", "timeout": 1800}, start(), IDLE, *FINISH], BASE,
         "a clean stop with a named incident, then the resume ends equal to the control"),
     "F-disk": ("The scratch disk fills (a 64 MB tmpfs, never the real disk)", 1, [
+        # The disk fills DURING the run: Start's own preflight rightly refuses a scratch disk already 94% full (VM, 28 Nov
+        # 2026: the ballast was laid before Start and the run was never admitted), so the ballast goes in once the
+        # Drive pass is copying.
         shell(f"mkdir -p {TMPFS} && mount -t tmpfs -o size=64m tmpfs {TMPFS} && "
-              f"test \"$(stat -f -c %T {TMPFS})\" = tmpfs && fallocate -l 60M {TMPFS}/ballast", guard="tmpfs"),
+              f"test \"$(stat -f -c %T {TMPFS})\" = tmpfs", guard="tmpfs"),
         *_dropin(f"SCRATCH_DIR={TMPFS}"),
-        start(transfer_mode="download_upload"), {"do": "wait_log", "match": "No space left|disk is full|ENOSPC"},
+        start(transfer_mode="download_upload"), {"do": "wait_log", "match": "drive"},
+        shell(f"test \"$(stat -f -c %T {TMPFS})\" = tmpfs && fallocate -l 63M {TMPFS}/ballast", guard="tmpfs"),
+        {"do": "wait_log", "match": "No space left|disk is full|ENOSPC"},
         {"do": "wait_incident", "kind": "disk_full", "timeout": 1200},
         {"do": "wait_exit", "timeout": 1800}, shell(f"rm -f {TMPFS}/ballast"),
         {"do": "wait_incident_closed", "kind": "disk_full", "timeout": 300},
