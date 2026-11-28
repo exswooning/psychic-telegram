@@ -247,10 +247,12 @@ def test_link_mail_points_at_the_real_colleague_and_shared_drive_files(world, pr
     text = b"".join(base64.urlsafe_b64decode(m["raw"]) for m in world.gmails[user].messages.values())
     assert text.count(b"real-colleague-file") == 10 and text.count(b"real-drive-file") == 10
 
-def test_a_kind_with_no_real_item_falls_back_to_the_pool_and_outside_always_does():
+def test_a_kind_with_no_real_item_falls_back_to_the_pool_but_outside_requires_outside_ownership():
     import random
     rng = random.Random(1)
     items = {"pool": ["p1", "p2"], "colleague": ["c"], "shared_drive": []}
     assert profile_seed._link_id(items, "colleague", rng) == "c"
     assert profile_seed._link_id(items, "shared_drive", rng) in ("p1", "p2")
-    assert profile_seed._link_id(items, "outside", rng) in ("p1", "p2")
+    assert profile_seed._link_id(items, "outside", rng) is None
+    items["outside"] = ["outside-owned-file"]
+    assert profile_seed._link_id(items, "outside", rng) == "outside-owned-file"

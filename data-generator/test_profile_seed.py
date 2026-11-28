@@ -10,7 +10,7 @@ import profile_plan as pp
 import profile_seed
 import seed_sandbox as seed
 from profile_extract import _pct
-from tests.fakes import FakeDrive, FakeGmail
+from tests.fakes import FakeCalendar, FakeChat, FakeDrive, FakeGmail, FakePeople, FakeProcessKilled, FakeTasks
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PROFILE = os.path.join(HERE, "profiles", "org45.json")
@@ -53,6 +53,35 @@ def test_the_tail_survives(profile, plans300):
     # a user's Drive numbers move together: the biggest Drive is also the widest
     big = max(plans300, key=lambda p: p["files"])
     assert big["folders"] >= max(p["folders"] for p in plans300) * 0.5
+
+
+def test_profile_service_rates_are_explicit_assumptions_from_the_seed_defaults(plans300):
+    assert {p["calendar_base_events"] for p in plans300} == {56}
+    assert {p["calendar_events"] for p in plans300} == {64}
+    assert {p["secondary_calendars"] for p in plans300} == {2}
+    assert {p["contacts"] for p in plans300} == {25}
+    assert {p["contact_groups"] for p in plans300} == {2}
+    assert {p["tasks"] for p in plans300} == {20}
+    assert {p["task_lists"] for p in plans300} == {1}
+    import profile_plan
+    source = open(profile_plan.__file__, encoding="utf-8").read()
+    seed_source = open(seed.__file__, encoding="utf-8").read()
+    corpus_source = open(__import__("corpus").__file__, encoding="utf-8").read()
+    assert 'SCALES["medium"]["per_leaf"]' in source
+    assert '"medium": {"per_leaf": 14' in corpus_source
+    assert "seed_secondary_calendars" in seed_source
+    assert "def seed_contacts" in seed_source and "def seed_tasks" in seed_source
+
+
+def test_link_kind_split_is_a_validated_plan_input(profile):
+    split = {"own": 0, "colleague": 0, "shared_drive": 0, "folder": 0, "deleted": 0, "outside": 5}
+    plans = pp.plan(profile, 45, 8, link_kind_split=split)
+    assert all(p["link_kind_split"] == {k: v / 5 for k, v in split.items()} for p in plans)
+    assert all(p["link_kinds"]["outside"] == p["link_mail"] for p in plans)
+    with pytest.raises(ValueError, match="exactly"):
+        pp.plan(profile, 1, 8, link_kind_split={"own": 1})
+    with pytest.raises(ValueError, match="non-negative"):
+        pp.plan(profile, 1, 8, link_kind_split={**pp.DEFAULT_LINK_KIND_SPLIT, "own": -1})
 
 
 def test_file_type_shares_follow_the_histogram_within_three_points(profile, plans300):
@@ -151,7 +180,10 @@ def test_the_budget_prints_what_it_costs_and_refuses_past_max_hours(monkeypatch,
     rc, out = _plan_only(monkeypatch, capsys, "--upload-mb-per-sec", "0.9", "--drive-per-sec", "20", "--mail-per-sec", "20",
                          "--max-hours", "1")
     assert rc == 1 and "REFUSED" in out and "--max-hours 1" in out
-    for word in ("items", "across this box", "hours", "pool file", "profile's"):
+    for word in ("items", "Upload payloads across this box", "phase hours", "pool file", "profile maximum",
+                 "Drive     :", "Gmail     :", "Calendar  :", "Contacts  :", "Tasks     :", "269 new profile users",
+                 "Gmail settings: 1,495 writes + 598 existence reads (2,093 API calls) across 299 mailboxes",
+                 "Directory : 269 new accounts, 299 account lookups"):
         assert word in out
     rc, out = _plan_only(monkeypatch, capsys, "--upload-mb-per-sec", "0.9", "--drive-per-sec", "20", "--mail-per-sec", "20",
                          "--max-hours", "100")
@@ -164,9 +196,27 @@ def test_the_default_rates_come_from_the_repos_own_measurements(monkeypatch, cap
     assert rc == 0 and f"{resources.DRIVE_WRITES_PER_SEC:g} Drive writes/s" in out
 
 
-def test_a_dry_plan_needs_an_upload_rate_and_a_users_number(monkeypatch, capsys):
+def test_the_corrected_300_user_plan_command_runs_offline_and_reserves_every_seat(monkeypatch, capsys):
+    monkeypatch.setenv("SEED_CAMPAIGN", "0")
+    rc = seed.main(["--profile", PROFILE, "--users", "300", "--plan-only"])
+    out = capsys.readouterr().out
+    assert rc == 1 and "REFUSED" in out       # cost limit, not a licence overflow
+    assert "Profile plan: 300 of 300 tenant seats" in out
+    assert "admin 1 + existing cohort 30 (including twins) + 269 new profile users" in out
+    assert "new accounts to create: 269" in out
+    assert "23 Nov 2026 5-user profile-seed upload probe" in out
+
+
+def test_plan_rejects_more_than_the_business_starter_seat_limit(monkeypatch, capsys):
+    monkeypatch.setenv("SEED_CAMPAIGN", "0")
+    with pytest.raises(SystemExit, match="exceeds --seat-limit"):
+        seed.main(["--profile", PROFILE, "--users", "301", "--plan-only"])
+    assert "Nothing was written" not in capsys.readouterr().out
+
+
+def test_a_dry_plan_still_requires_a_users_number(monkeypatch, capsys):
     with pytest.raises(SystemExit):
-        _plan_only(monkeypatch, capsys)
+        _plan_only(monkeypatch, capsys, users="a,b")
     with pytest.raises(SystemExit):
         _plan_only(monkeypatch, capsys, "--upload-mb-per-sec", "1", users="a,b")
 
@@ -186,12 +236,43 @@ def test_message_sizes_shrink_then_counts_scale_to_fit(plans300):
     assert not starved["refuse"] and starved["hours"] <= 12 + 1e-9
 
 
+def test_account_creation_budget_counts_serial_lookups_and_inserts(plans300):
+    result = pp.budget(plans300[:2], upload_bps=1e9, drive_per_sec=1e9,
+                       mail_per_sec=1e9, per_user_per_sec=1e9, workers=8,
+                       pool_bytes=0, pool_files=0, max_hours=100,
+                       new_accounts=7, fixed_users=4, directory_per_sec=2)
+    # Two profile users + three non-admin fixed users are looked up; seven
+    # new users are inserted. Directory provisioning is serial despite the
+    # eight-user seed worker pool.
+    assert result["items_by_service"]["directory_user_lookups"] == 5
+    assert result["items_by_service"]["directory_users_created"] == 7
+    assert result["items_by_service"]["gmail_settings_users"] == 5
+    assert result["items_by_service"]["gmail_settings_writes"] == 25
+    assert result["items_by_service"]["gmail_settings_reads"] == 10
+    assert result["phase_hours"]["account_creation"] == pytest.approx(26 / 3600)
+    assert result["phase_hours"]["gmail_settings"] == pytest.approx(35 / (1e9 * 2) / 3600)
+
+
 def test_the_pool_has_a_largest_file_below_the_profiles(profile):
     sizes = pp.pool_sizes(pp.file_mix(profile), 5_000_000_000, 50 * 2**20)
     assert max(max(v) for v in sizes.values()) == 50 * 2**20 < profile["summary"]["largest_bytes"]["max"]
     assert all(v == sorted(v) for v in sizes.values())
     small = pp.pool_sizes(pp.file_mix(profile), 50_000_000, 50 * 2**20)
     assert sum(sum(v) for v in small.values()) <= 50_000_000
+
+
+def test_pool_can_budget_a_ten_gigabyte_tail(profile, plans300):
+    # Decimal GB cap: --pool-max-file-mb accepts MiB and can be set up to the
+    # profile's observed 10.1 GB maximum. A 40 GB budget can hold 10 GB.
+    sizes = pp.pool_sizes({"application/pdf": 10}, 40_000_000_000, 10_000_000_000)
+    actual_pool_bytes = sum(sum(v) for v in sizes.values())
+    assert max(max(v) for v in sizes.values()) == 10_000_000_000
+    budget = pp.budget(plans300[:1], upload_bps=1_000_000, drive_per_sec=1_000_000,
+                       mail_per_sec=1_000_000, per_user_per_sec=1_000_000,
+                       workers=1, pool_bytes=actual_pool_bytes, pool_files=sum(map(len, sizes.values())),
+                       max_hours=100_000, new_accounts=0)
+    assert budget["bytes_crossing_box"] >= actual_pool_bytes
+    assert budget["phase_hours"]["pool_upload"] == pytest.approx(actual_pool_bytes / 1_000_000 / 3600)
 
 
 # ---- P4.5: nothing that identifies a person -------------------------------------------------------------------
@@ -235,14 +316,20 @@ class _Media:
 
 @pytest.fixture
 def tenant(monkeypatch, settings):
-    """One user's Drive and Gmail in memory, with the seeder's own pacing and clients stubbed out."""
+    """One user's profile services in memory, with the seeder's pacing stubbed out."""
     drive, gmail = FakeDrive("p001@tenanta.com", "a"), FakeGmail("p001@tenanta.com", "a")
+    cal = FakeCalendar("p001@tenanta.com", "a")
+    people, tasks = FakePeople("p001@tenanta.com", "a"), FakeTasks("p001@tenanta.com", "a")
+    FakeChat.reset_shared()
+    chat = FakeChat("p001@tenanta.com", "a")
     monkeypatch.setattr(seed, "_media", _Media)
     monkeypatch.setattr(seed, "_retry_factory", lambda settings, limiter=None: (lambda fn: fn))
     monkeypatch.setattr(seed, "_seed_drive_limiter", lambda settings: _NoLimiter())
-    monkeypatch.setattr(seed, "build_services", lambda settings, user: (drive, gmail, None))
-    monkeypatch.setattr(seed, "build_chat", lambda settings, user: None)
-    return drive, gmail
+    monkeypatch.setattr(seed, "build_services", lambda settings, user: (drive, gmail, cal))
+    monkeypatch.setattr(seed, "build_people_tasks", lambda settings, user: (people, tasks))
+    monkeypatch.setattr(seed, "build_chat", lambda settings, user: chat)
+    monkeypatch.setattr(seed, "build_gmail_settings", lambda settings, user: gmail)
+    return drive, gmail, cal, people, tasks, chat
 
 
 def _mini_profile(profile):
@@ -259,15 +346,24 @@ def _mini_profile(profile):
 def _one(profile, settings, tenant):
     """A planned user (the one with most files of three) and its pool, ready for seed_one_user."""
     plan = max(pp.plan(_mini_profile(profile), 3, 5), key=lambda p: p["files"])
-    plan.update(messages=230, threads=190, link_mail=12, link_kinds=pp._split(12, pp.LINK_KINDS), labels=2)
+    outside_only = {"own": 0, "colleague": 0, "shared_drive": 0, "folder": 0, "deleted": 0, "outside": 1}
+    plan.update(messages=230, threads=190, link_mail=12, link_kind_split=outside_only,
+                link_kinds=pp._split(12, outside_only), labels=2)
     pool = profile_seed.build_pool(seed, settings, "p001@tenanta.com", pp.file_mix(profile), 2_000_000, 40_000, share_domain=True)
+    # The real pool is owned by SOURCE_ADMIN, outside the generated profile
+    # user list. Model that ownership on the fake pool items as well.
+    pool["owner"] = "admin@tenanta.com"
+    for fid in pool["ids"]:
+        tenant[0].store[fid]["owners"] = [{"emailAddress": pool["owner"]}]
     return {"local": "p001", "email": "p001@tenanta.com", "dept": "Engineering", "project": "PRJ", "plan": plan, "pool": pool,
             "msg_bytes": 3000}
 
 
 def _run(entry):
-    return seed.seed_one_user(seed.Settings(), entry, [entry["email"]], "ext@example.com", "tiny", 10, 5, False,
-                              only=frozenset({"drive", "gmail"}))
+    users = [entry["email"], "peer@tenanta.com", "other@tenanta.com"]
+    return seed.seed_one_user(seed.Settings(), entry, users, "ext@example.com", "tiny", 10, 5, False,
+                              only=frozenset({"drive", "gmail", "calendar", "chat", "contacts", "tasks",
+                                              "gmail_settings"}))
 
 
 def _mine(drive):
@@ -280,7 +376,7 @@ def _ids(gmail):
 
 
 def test_a_profile_user_lands_as_planned_through_copies_and_old_dates(profile, settings, tenant):
-    drive, gmail = tenant
+    drive, gmail, cal, people, tasks, chat = tenant
     entry = _one(profile, settings, tenant)
     plan, uploads = entry["plan"], drive.call_count("files.create")
     r = _run(entry)
@@ -298,26 +394,61 @@ def test_a_profile_user_lands_as_planned_through_copies_and_old_dates(profile, s
     assert any(b"In-Reply-To" in __import__("base64").urlsafe_b64decode(m["raw"]) for m in gmail.messages.values())
     assert r["gmail"]["with_drive_link"] == plan["link_mail"]
     assert len(gmail.labels) - len(FakeGmail("x", "y").labels) == plan["labels"]
+    assert r["calendar"]["events"] == plan["calendar_base_events"] + 2
+    assert r["calendar"]["calendars"] == plan["secondary_calendars"]
+    assert r["calendar"]["calendar_events"] == plan["secondary_calendars"] * plan["secondary_events_per_calendar"]
+    assert len(cal.store) + sum(len(x) for x in cal.cal_events.values()) == plan["calendar_events"]
+    assert len(people.contacts) == plan["contacts"]
+    assert len(people.groups) == plan["contact_groups"]
+    assert sum(len(x) for x in tasks.task_store.values()) == plan["tasks"]
+    assert len(tasks.lists) == plan["task_lists"]
+    assert len(chat.space_store) == 2
+    assert sum(len(x) for x in chat.message_store.values()) == 12
+    assert len(gmail.forwarding_addresses) == len(gmail.mailbox_delegates) == 1
+    outside = profile_seed.link_items(seed, drive, plan, entry["pool"], lambda fn: fn,
+                                      user=entry["email"])
+    assert outside["outside"]
+    assert all(drive.store[fid]["owners"][0]["emailAddress"] == "admin@tenanta.com" for fid in outside["outside"])
 
 
 def test_the_second_run_adds_nothing(profile, settings, tenant):
-    drive, gmail = tenant
+    drive, gmail, cal, people, tasks, chat = tenant
     entry = _one(profile, settings, tenant)
     _run(entry)
-    stored, messages, labels = len(drive.store), len(gmail.messages), len(gmail.labels)
+    state = (len(drive.store), len(gmail.messages), len(gmail.labels), len(cal.store), len(cal.calendar_store),
+             len(people.contacts), len(people.groups), sum(map(len, people.group_members.values())),
+             len(tasks.lists), sum(len(x) for x in tasks.task_store.values()),
+             len(chat.space_store), sum(len(x) for x in chat.message_store.values()),
+             len(gmail.forwarding_addresses), len(gmail.mailbox_delegates),
+             gmail.vacation_settings.copy(), gmail.pop_settings.copy(), gmail.imap_settings.copy())
     drive.reset_calls()
     gmail.reset_calls()
+    cal.reset_calls()
+    people.reset_calls()
+    tasks.reset_calls()
+    chat.reset_calls()
     r = _run(entry)
-    assert (len(drive.store), len(gmail.messages), len(gmail.labels)) == (stored, messages, labels)
-    assert not [n for n in ("files.create", "files.copy", "messages.insert", "labels.create") if drive.call_count(n) + gmail.call_count(n)]
+    after = (len(drive.store), len(gmail.messages), len(gmail.labels), len(cal.store), len(cal.calendar_store),
+             len(people.contacts), len(people.groups), sum(map(len, people.group_members.values())),
+             len(tasks.lists), sum(len(x) for x in tasks.task_store.values()),
+             len(chat.space_store), sum(len(x) for x in chat.message_store.values()),
+             len(gmail.forwarding_addresses), len(gmail.mailbox_delegates),
+             gmail.vacation_settings.copy(), gmail.pop_settings.copy(), gmail.imap_settings.copy())
+    assert after == state
+    calls = drive.calls + gmail.calls + cal.calls + people.calls + tasks.calls + chat.calls
+    assert not [name for name, _ in calls if name in {
+        "files.create", "files.copy", "messages.insert", "labels.create", "events.import",
+        "calendars.insert", "acl.insert", "people.createContact", "contactGroups.create",
+        "contactGroups.members.modify", "tasklists.insert", "tasks.insert", "spaces.create",
+        "chat.messages.create", "forwardingAddresses.create", "delegates.create"}]
     assert r["gmail"].get("messages", 0) == 0 and r["drive"].get("total_files", 0) == 0
 
 
 def test_a_seed_killed_in_drive_resumes_without_a_duplicate(profile, settings, tenant):
-    drive, gmail = tenant
+    drive, gmail, cal, people, tasks, chat = tenant
     entry = _one(profile, settings, tenant)
-    drive.fail_next("files.copy", status=500, reason="backendError", times=4)
-    with pytest.raises(Exception):
+    drive.kill_after("files.copy", 8)
+    with pytest.raises(FakeProcessKilled):
         _run(entry)
     partial = len(_mine(drive))
     assert 0 < partial < entry["plan"]["files"] + entry["plan"]["folders"] + 1
@@ -328,11 +459,12 @@ def test_a_seed_killed_in_drive_resumes_without_a_duplicate(profile, settings, t
 
 
 def test_a_seed_killed_in_mail_resumes_without_a_duplicate(profile, settings, tenant):
-    drive, gmail = tenant
+    drive, gmail, cal, people, tasks, chat = tenant
     entry = _one(profile, settings, tenant)
-    gmail.fail_next("messages.insert", status=500, reason="backendError", times=7)
-    r = _run(entry)
-    assert r["gmail"]["failed"] == 7 and len(gmail.messages) < entry["plan"]["messages"]
+    gmail.kill_after("messages.insert", 35)
+    with pytest.raises(FakeProcessKilled):
+        _run(entry)
+    assert 0 < len(gmail.messages) < entry["plan"]["messages"]
     assert "gmail" not in profile_seed.done_services(drive, lambda fn: fn)
     r = _run(entry)
     ids = _ids(gmail)
@@ -340,8 +472,57 @@ def test_a_seed_killed_in_mail_resumes_without_a_duplicate(profile, settings, te
     assert "gmail" in profile_seed.done_services(drive, lambda fn: fn)
 
 
+@pytest.mark.parametrize("service,method,successful_calls", [
+    ("calendar", "events.import", 8),
+    ("contacts", "people.createContact", 5),
+    ("tasks", "tasks.insert", 5),
+    ("chat", "chat.messages.create", 4),
+    # This fires after the forwarding address committed and before delegate
+    # creation, so replay must discover the existing address and add one delegate.
+    ("gmail_settings", "delegates.list", 0),
+])
+def test_a_seed_interrupted_in_every_remaining_service_resumes_without_duplicates(
+        profile, settings, tenant, service, method, successful_calls):
+    drive, gmail, cal, people, tasks, chat = tenant
+    entry = _one(profile, settings, tenant)
+    api = {"calendar": cal, "contacts": people, "tasks": tasks,
+           "chat": chat, "gmail_settings": gmail}[service]
+    api.kill_after(method, successful_calls)
+    with pytest.raises(FakeProcessKilled):
+        _run(entry)
+    done = profile_seed.done_services(drive, lambda fn: fn)
+    if service != "gmail_settings":
+        assert service not in done
+    if service == "gmail_settings":
+        assert len(gmail.forwarding_addresses) == 1 and not gmail.mailbox_delegates
+    _run(entry)
+    if service != "gmail_settings":
+        assert service in profile_seed.done_services(drive, lambda fn: fn)
+    assert len(drive.store)  # the user's root is the durable service journal
+    if service == "calendar":
+        uids = [e.get("iCalUID") for e in cal.store.values()]
+        uids += [e.get("iCalUID") for events in cal.cal_events.values() for e in events.values()]
+        assert len(uids) == len(set(uids)) == entry["plan"]["calendar_events"]
+    elif service == "contacts":
+        markers = [u.get("value") for c in people.contacts.values() for u in c.get("userDefined", [])
+                   if u.get("key") == "seed_sandbox_index"]
+        assert len(markers) == len(set(markers)) == entry["plan"]["contacts"]
+        assert len(people.groups) == entry["plan"]["contact_groups"]
+    elif service == "tasks":
+        profile_tasks = [task for rows in tasks.task_store.values() for task in rows
+                         if "[seed_sandbox_profile_task:" in task.get("notes", "")]
+        assert len(profile_tasks) == entry["plan"]["tasks"]
+        assert len({t["notes"] for t in profile_tasks}) == entry["plan"]["tasks"]
+        assert len(tasks.lists) == entry["plan"]["task_lists"]
+    elif service == "chat":
+        assert len(chat.space_store) == 2
+        assert sum(len(x) for x in chat.message_store.values()) == 12
+    else:
+        assert len(gmail.forwarding_addresses) == len(gmail.mailbox_delegates) == 1
+
+
 def test_the_upload_probe_measures_and_cleans_up(settings, tenant):
-    drive, _ = tenant
+    drive, _, _, _, _, _ = tenant
     rate = profile_seed.probe_upload(seed, settings, "p001@tenanta.com", 0.0, chunk=100_000)
     assert rate > 0 and not [f for f in drive.store.values() if f["name"].startswith("bitport-upload-probe")]
 

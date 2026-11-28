@@ -37,6 +37,7 @@ import copy
 import hashlib
 import itertools
 import re
+import threading
 from collections import defaultdict, deque
 from typing import Any, Callable, Optional
 
@@ -102,12 +103,18 @@ class _Call:
         return out
 
 
+class FakeProcessKilled(BaseException):
+    """A hard process stop that bypasses the seeders' per-item error handlers."""
+
+
 class FakeService:
     def __init__(self, owner: str, tenant: str):
         self.owner = owner
         self.tenant = tenant
         self.calls: list[tuple[str, dict]] = []
         self._faults: dict[str, deque] = defaultdict(deque)
+        self._delayed_faults: dict[str, deque] = defaultdict(deque)
+        self._fault_lock = threading.Lock()
         self._ids = itertools.count(1)
 
     # -- introspection helpers used by tests ----------------------------
@@ -123,13 +130,40 @@ class FakeService:
     # -- fault injection ------------------------------------------------
     def fail_next(self, method: str, status: int = 403,
                   reason: str = "rateLimitExceeded", times: int = 1) -> None:
-        for _ in range(times):
-            self._faults[method].append(http_error(status, reason))
+        with self._fault_lock:
+            for _ in range(times):
+                self._faults[method].append(http_error(status, reason))
+
+    def fail_after(self, method: str, successful_calls: int, status: int = 500,
+                   reason: str = "backendError", times: int = 1) -> None:
+        """Inject a fault after N successful calls to model a mid-pass kill point."""
+        if successful_calls < 0:
+            raise ValueError("successful_calls must be non-negative")
+        with self._fault_lock:
+            for _ in range(times):
+                self._delayed_faults[method].append([successful_calls, http_error(status, reason)])
+
+    def kill_after(self, method: str, successful_calls: int) -> None:
+        """Raise a BaseException after N successful calls to model a SIGKILL/restart boundary."""
+        if successful_calls < 0:
+            raise ValueError("successful_calls must be non-negative")
+        with self._fault_lock:
+            self._delayed_faults[method].append(
+                [successful_calls, FakeProcessKilled(f"fake process killed at {method}")])
 
     def _maybe_fail(self, name: str) -> None:
-        q = self._faults.get(name)
-        if q:
-            raise q.popleft()
+        with self._fault_lock:
+            q = self._faults.get(name)
+            if q:
+                error = q.popleft()
+                raise error
+            delayed = self._delayed_faults.get(name)
+            if delayed:
+                remaining, error = delayed[0]
+                if remaining == 0:
+                    delayed.popleft()
+                    raise error
+                delayed[0][0] -= 1
 
     def _new_id(self, prefix: str) -> str:
         return f"{prefix}-{self.tenant}-{next(self._ids)}"
@@ -1027,6 +1061,11 @@ class FakeGmail(FakeService):
         self.labels: list[dict] = [
             {"id": n, "name": n, "type": "system"} for n in SYSTEM_LABELS
         ]
+        self.vacation_settings: dict = {}
+        self.pop_settings: dict = {}
+        self.imap_settings: dict = {}
+        self.forwarding_addresses: list[dict] = []
+        self.mailbox_delegates: list[dict] = []
         # history.list, for the mirror. A start id below `history_floor` is one
         # Gmail no longer keeps -- it answers 404 and the caller must re-scan.
         self.history: list[dict] = []
@@ -1418,6 +1457,73 @@ class _GmailSettings:
 
     def sendAs(self):
         return _GmailSendAs(self.s)
+
+    def updateVacation(self, **kw):
+        return _Call(self.s, "settings.updateVacation", self._update_vacation, kw)
+
+    def _update_vacation(self, body: dict, **_):
+        self.s.vacation_settings = copy.deepcopy(body)
+        return copy.deepcopy(body)
+
+    def updatePop(self, **kw):
+        return _Call(self.s, "settings.updatePop", self._update_pop, kw)
+
+    def _update_pop(self, body: dict, **_):
+        self.s.pop_settings = copy.deepcopy(body)
+        return copy.deepcopy(body)
+
+    def updateImap(self, **kw):
+        return _Call(self.s, "settings.updateImap", self._update_imap, kw)
+
+    def _update_imap(self, body: dict, **_):
+        self.s.imap_settings = copy.deepcopy(body)
+        return copy.deepcopy(body)
+
+    def forwardingAddresses(self):
+        return _GmailForwardingAddresses(self.s)
+
+    def delegates(self):
+        return _GmailDelegates(self.s)
+
+
+class _GmailForwardingAddresses:
+    def __init__(self, svc: FakeGmail):
+        self.s = svc
+
+    def list(self, **kw):
+        return _Call(self.s, "forwardingAddresses.list",
+                     lambda **_: {"forwardingAddresses": copy.deepcopy(self.s.forwarding_addresses)}, kw)
+
+    def create(self, **kw):
+        return _Call(self.s, "forwardingAddresses.create", self._create, kw)
+
+    def _create(self, body: dict, **_):
+        address = body["forwardingEmail"].lower()
+        if any(x.get("forwardingEmail", "").lower() == address for x in self.s.forwarding_addresses):
+            raise http_error(409, "duplicate", "forwarding address already exists")
+        item = {"forwardingEmail": body["forwardingEmail"], "verificationStatus": "accepted"}
+        self.s.forwarding_addresses.append(item)
+        return copy.deepcopy(item)
+
+
+class _GmailDelegates:
+    def __init__(self, svc: FakeGmail):
+        self.s = svc
+
+    def list(self, **kw):
+        return _Call(self.s, "delegates.list",
+                     lambda **_: {"delegates": copy.deepcopy(self.s.mailbox_delegates)}, kw)
+
+    def create(self, **kw):
+        return _Call(self.s, "delegates.create", self._create, kw)
+
+    def _create(self, body: dict, **_):
+        address = body["delegateEmail"].lower()
+        if any(x.get("delegateEmail", "").lower() == address for x in self.s.mailbox_delegates):
+            raise http_error(409, "duplicate", "delegate already exists")
+        item = {"delegateEmail": body["delegateEmail"]}
+        self.s.mailbox_delegates.append(item)
+        return copy.deepcopy(item)
 
 
 class _GmailSendAs:

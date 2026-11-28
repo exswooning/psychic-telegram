@@ -849,6 +849,18 @@ def test_fit_keeps_existing_users_first():
         "dave@tenanta.com"]
 
 
+def test_profile_user_count_does_not_narrow_the_existing_cohort():
+    import seed_sandbox as s
+
+    cohort = _entries(["c01", "t01", "t02"])
+    profile = _entries(["p001", "p002"])
+    all_entries = cohort + profile
+    assert s._narrow_cohort_entries(all_entries, "fableplan2.json", "300",
+                                    profile_mode=True) == all_entries
+    assert [e["local"] for e in s._narrow_cohort_entries(
+        cohort, "fableplan2.json", "t01", profile_mode=False)] == ["t01"]
+
+
 def test_fit_pads_unused_seats_with_generated_users():
     """Unused headroom is filled so every licence gets exercised."""
     import seed_sandbox as s
