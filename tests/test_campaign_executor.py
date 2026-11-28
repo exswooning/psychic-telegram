@@ -541,3 +541,14 @@ def test_the_failure_rows_that_need_them_ask_for_the_two_new_checks():
     for fid in ("F-stop", "F-kill-random"):
         assert S.by_id()[f"fail:{fid}"].expect["stopped_not_crashed"] is True
     assert S.by_id()["fail:F-net-3"].expect["failed_items"] == 0
+
+
+def test_a_start_accepted_but_neither_started_nor_queued_fails_at_once():
+    """28 Nov 2026: F-disk waited four hours for a disk-full message from a run that never began."""
+    class Silent(RecDriver):
+        def api(self, method, path, body):
+            if path.endswith("/migrate/start"):
+                return {"ok": True, "detail": "nothing to do: preflight declined"}
+            return super().api(method, path, body)
+    row = C.run_scenario(S.by_id()["fail:F-disk"], Silent(), "n", {"net", "reboot"})
+    assert row["status"] in ("FAIL", "UNVERIFIED") and "nothing started or was queued" in row["reason"], row

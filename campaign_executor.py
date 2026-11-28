@@ -191,6 +191,11 @@ class Runner:
             detail = str(reply.get("detail", "")) if isinstance(reply, dict) and reply.get("ok") is True else ""
             started = re.match(r"^started pid ([1-9]\d*):", detail)
             self.ctx.launch_pid = int(started[1]) if started else None
+            if detail and not started and "queued" not in detail.lower():
+                # Accepted, yet neither started nor queued: nothing will run, so every wait after this would only time
+                # out (F-disk waited four hours for a disk-full message from a run that never began, VM 28 Nov 2026).
+                # A queued start is left alone: the queue starts it, and its pid is never guessed from another run.
+                raise StepFailed(f"{path} was accepted but nothing started or was queued: {str(reply)[:150]}")
 
     def do_api(self, st): self._request(self.d.api, st)
 
