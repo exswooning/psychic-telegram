@@ -5913,9 +5913,24 @@ def _audit_instant(stamp: str):
 
 def _source_writer_running(aid) -> bool:
     try:
-        return any(r.get("job_name") in SOURCE_WRITERS for r in _account_jobs(aid))
+        if any(r.get("job_name") in SOURCE_WRITERS for r in _account_jobs(aid)):
+            return True
+        # A seed started from the command line (the 300-user seed runs for days as its own service) is not an
+        # admitted job, so the guard read its writes as Bitport's and stopped the account's migrations (VM, 28 Nov
+        # 2026). Only a declared sandbox can be seeded (seed_sandbox refuses anything else), so this cannot excuse a
+        # write to a real source.
+        from config import Settings
+        domain = (Settings(account_id=aid).source_domain or "").lower()
+        return bool(domain) and _cli_seed_running(domain)
     except Exception:      # noqa: BLE001 - cannot tell: keep guarding
         return False
+
+
+def _cli_seed_running(domain: str, ps_output=None) -> bool:
+    out = ps_output if ps_output is not None else subprocess.run(
+        ["ps", "-eo", "args="], capture_output=True, text=True, timeout=5).stdout
+    return any("seed_sandbox.py" in line and f"--confirm-domain {domain}" in line.lower()
+               for line in out.splitlines())
 
 
 def _stop_account_jobs(aid, why: str) -> int:
