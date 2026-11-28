@@ -26,7 +26,7 @@ def assess(conn):
     failed = rows("SELECT status,COUNT(*) n FROM audit_log WHERE status LIKE 'FAIL%' GROUP BY status")
     add('FAILED_AUDIT_ITEMS', sum(r['n'] for r in failed), 'Inspect per-item causes and fresh provider evidence.',
         detail=[dict(r) for r in failed])
-    queue = rows("SELECT service,category,COUNT(*) n FROM verification_repair_queue WHERE state!='RESOLVED' GROUP BY service,category")
+    queue = rows("SELECT service,category,COUNT(*) n FROM verification_repair_queue WHERE state NOT IN ('RESOLVED','OUT_OF_SCOPE') GROUP BY service,category")
     add('OPEN_FINDING_QUEUE', sum(r['n'] for r in queue), 'Recheck by item and cause; historical queue rows are not distinct new defects.',
         detail=[dict(r) for r in queue])
     pending = rows("SELECT COUNT(*) FROM migration_item_receipts WHERE status='NEEDS_RECHECK'")

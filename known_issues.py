@@ -76,14 +76,29 @@ ISSUES = [
      "Untitled task got the title \"(untitled)\"",
      "An old engine rule; Google accepts an empty title (measured 2026-10-23).",
      "Patch the title back to empty (finding_repairs.repair_tasks); the engine keeps it empty now.", True),
-    ("drive.external_copy", "drive", lambda t: ("external_access" in t or "external original shortcut missing" in t
-                                              or "external fallback has unreviewed sharing" in t
-                                              or "original access inspection failed" in t),
+    ("drive.external_copy_review", "drive", lambda t: "retained fallback has other grants" in t.lower()
+        or ("external fallback has unreviewed sharing" in t.lower()
+            and "external original shortcut missing" not in t.lower()),
+     "An external file's retained fallback has unreviewed sharing",
+     "The fallback copy has grants beyond its target owner, so its intended recipients are not established.",
+     "Needs a person: review the fallback's target grants and decide who should retain access. The original and fallback "
+     "are left unchanged; the separate original shortcut can still be repaired automatically.", False),
+    ("drive.external_copy", "drive", lambda t: ("external_access" in t.lower()
+        or "external original shortcut missing" in t.lower()
+        or "original access inspection failed" in t.lower()
+        or "visible source parent has no mapped target folder" in t.lower()),
      "A file owned outside the source organisation, delivered as the user's own copy",
      "Its owner is outside the migration: the original keeps its owner and sharing, which the old address cannot pass "
      "on; the user gets a copy with the same content (dharan.gov.np, 1,132 findings on 42 users, 23 Nov 2026).",
-     "Accepted by the operator (24 Nov 2026): nothing to repair; the outside owner can share the original with the new "
-     "address if the live version is wanted.", False),
+     "Create or move the target shortcut to the original's corresponding target folder. A fallback with extra grants "
+     "is left unchanged and listed for a person to review; if the source parent has no target mapping, map it and "
+     "rerun placement. The outside owner controls original access.", True),
+    ("drive.copy_unrecorded", "drive", lambda t: "copyResolution" in t
+        and '"type": "external_access"' not in t.lower(),
+     "A matching target copy exists without a ledger mapping",
+     "An earlier copy landed, but the run or verification did not record its source-to-target mapping.",
+     "Adopt only one target copy whose content is freshly proven equal (finding_repairs.repair_unrecorded_copies); "
+     "zero or multiple matches remain listed for a person.", True),
     ("drive.sheets_scope", "drive", lambda t: "ACCESS_TOKEN_SCOPE_INSUFFICIENT" in t or "insufficient authen" in t,
      "A Sheet could not be read for comparison",
      "The checker used a Sheets method Google allows only with write access; the source grant is read-only.",
@@ -98,16 +113,35 @@ ISSUES = [
      "\"Form Responses\" tab; no API links a Form, and no link adds none.",
      "None: the operator chose a linked Form over an identical Sheet (2026-10-24). Done by "
      "form_relink.py as the target admin, in repair's \"form links\" step.", False),
-    ("drive.native_structure", "drive", lambda t: ("native document content, formatting or structure differs" in t
-                                                 or "native Sheet entered values, formatting, or structures differ" in t
+    ("drive.native_structure", "drive", lambda t: ("native document content, formatting or structure differs" in t.lower()
+                                                 or "native sheet entered values, formatting, or structures differ" in t.lower()
+                                                 or "native sheet structures differ" in t.lower()
+                                                 or "non-cell native sheet features differ" in t.lower()
+                                                 or "protectedranges" in t.lower()
                                                  # the same round trip judged by Google's rendering (native_fidelity)
-                                                 or " renders differently" in t),
+                                                 or " renders differently" in t.lower()),
      "Doc/Slide structure differs from the source",
-     "A read-only source forces download+upload: the Office round trip changes a Doc's paragraph spacing and "
-     "header margin, a Sheet's time zone, grid and default padding, and rebuilds a deck's layouts and masters.",
-     "Since 21 Nov 2026 the copy is repaired after every import (native_styles: Docs and Sheets identical) and a "
-     "deck is judged by Google's rendering of each slide (11 of 11 pixel-identical). What is left is listed "
-     "in the final report.", False),
+     "A copy or later edit left a readable native structure different; supported Sheet protection-editor residue can "
+     "be removed without changing the source.",
+     "Remove target-only protected-range editors after comparing source and target structure; unsupported structure "
+     "differences remain listed for a person.", True),
+    ("drive.script_project", "drive", lambda t: "script project differs:" in t.lower(),
+     "An Apps Script project's source files differ",
+     "The project's file names, types or code differ between the source and target.",
+     "Needs a person: compare the Apps Script source files and reconcile them on the target. Automatic repair is not enabled because the migration's target grant does not include the Apps Script project-write scope.", False),
+    ("drive.form_upload_question", "drive", lambda t: "file-upload question" in t.lower()
+        and "not carried" in t.lower(),
+     "A Form file-upload question was not carried",
+     "The Forms API cannot create this question type.",
+     "Needs a person: recreate and verify the file-upload question in the target Form; the API cannot create it.", False),
+    ("drive.sheet_tabs", "drive", lambda t: "sheet tabs differ; lossless tab repair must preserve existing gid references" in t.lower(),
+     "Sheet tabs differ and existing links depend on their IDs",
+     "A tab rebuild could change gid references already used by people or content.",
+     "Needs a person: compare the tabs and preserve existing gid references while reconciling them.", False),
+    ("drive.form_title", "drive", lambda t: "form title differs" in t.lower(),
+     "A copied Form has a different title",
+     "The Forms rebuild or a later target edit left its title different from the source.",
+     "Set only the target Form title to the freshly read source title with the Forms API, then read it back.", True),
     ("drive.content_export", "drive", lambda t: "content differs when exported" in t,
      "Exported content differs",
      "Rebuild differences or a later edit.",
@@ -278,6 +312,16 @@ BY_ID = {i[0]: i for i in ISSUES}
 
 def classify(service: str, item) -> str:
     """The kind of one finding, from its own words; 'unclassified' when none fits."""
+    # A notCopied finding can carry a migration audit failure verbatim. Its
+    # `type` is the audit item type (`message`, `draft`, ...), not the service
+    # name, so it must enter the run-failure classifier directly instead of
+    # falling through to the legacy service-name comparison below.
+    if isinstance(item, dict) and isinstance(item.get("notCopied"), dict):
+        failure = item["notCopied"]
+        if failure.get("type") and failure.get("error"):
+            kind = classify_failure(str(failure["type"]), str(failure["error"]))
+            if kind != "unclassified":
+                return kind
     text = json.dumps(item, default=str) if not isinstance(item, str) else item
     for issue_id, svc, matches, *_ in ISSUES:
         if svc == service and matches(text):
@@ -292,8 +336,8 @@ def classify(service: str, item) -> str:
 
 # Bump when classification rules change. Unknown is a result, not an instruction
 # to rescan every historical finding for every newly checked message.
-CLASSIFIER_VERSION = 1
-CLASSIFY_BATCH = 200
+CLASSIFIER_VERSION = 3
+CLASSIFY_BATCH = 5000
 
 
 def ensure(conn) -> None:
@@ -326,7 +370,8 @@ def log_resolved(conn, rows, now: str) -> None:
     """One line per finding a fresh check no longer finds: how its kind is fixed."""
     for r in rows:
         issue = r["issue"] or "unclassified"
-        how = BY_ID[issue][5] if issue in BY_ID else "No longer found by a fresh, complete check."
+        spec = BY_ID.get(issue) or RUN_BY_ID.get(issue)
+        how = spec[5] if spec else "No longer found by a fresh, complete check."
         conn.execute("INSERT INTO issue_fix_log(fixed_at,source_user,service,issue,item_id,how) "
                      "VALUES(?,?,?,?,?,?)", (now, r["source_user"], r["service"], issue, r["item_id"], how))
 
@@ -348,7 +393,7 @@ def _open_rows(conn) -> list[tuple[str, str, str]]:
     out = []
     for issue, service, category, detail, user in conn.execute(
             f"SELECT {pick}, service, category, detail, source_user FROM verification_repair_queue "
-            "WHERE state!='RESOLVED'"):
+        "WHERE state NOT IN ('RESOLVED','OUT_OF_SCOPE')"):
         if not issue or issue == "unclassified":
             try:
                 item = json.loads(detail)
@@ -369,7 +414,7 @@ def user_reason(conn, source_user: str, limit: int = 4) -> str:
             counts[issue] = counts.get(issue, 0) + 1
     if not counts:
         return ""
-    parts = [f"{n} {BY_ID[k][3] if k in BY_ID else 'not a known kind yet'}"
+    parts = [f"{n} {(BY_ID.get(k) or RUN_BY_ID.get(k))[3] if (BY_ID.get(k) or RUN_BY_ID.get(k)) else 'not a known kind yet'}"
              for k, n in sorted(counts.items(), key=lambda kv: -kv[1])[:limit]]
     more = len(counts) - limit
     return "; ".join(parts) + (f"; and {more} more kind(s)" if more > 0 else "")
@@ -392,6 +437,14 @@ def summary(conn) -> dict:
               "open": open_.get(i, 0), "openByCategory": by_cat.get(i, {}),
               "fixed": fixed.get(i, 0), "lastFixed": last.get(i)}
              for i, svc, _m, title, cause, fix, auto in ISSUES]
+    issue_ids = {row[0] for row in ISSUES}
+    for kind, spec in RUN_BY_ID.items():
+        if kind in issue_ids or not (open_.get(kind) or fixed.get(kind)):
+            continue
+        kinds.append({"id": kind, "service": kind.split(".", 1)[0], "title": spec[3],
+                      "cause": spec[4], "fix": spec[5], "auto": spec[6],
+                      "open": open_.get(kind, 0), "openByCategory": by_cat.get(kind, {}),
+                      "fixed": fixed.get(kind, 0), "lastFixed": last.get(kind)})
     if open_.get("unclassified") or fixed.get("unclassified"):
         kinds.append({"id": "unclassified", "service": "", "title": "Not a known kind yet",
                       "cause": "", "fix": "Read the finding; add its kind here once understood.", "auto": False,
@@ -552,11 +605,21 @@ RUN_KINDS = [
     ("gmail.reset_leftover", ("message", "draft"),
      lambda t: "Existing destination Message-ID has different content" in t,
      "The target already holds this Message-ID with other content",
-     "A reset moves the migrated mail to Trash, and the next run found the previous run's own copy there (its links "
-     "were rewritten, so it differs from the source): 1,431 messages blocked on 41 users (P3.5, 19 Nov 2026).",
-     "Fixed 2026-11-19: a trashed copy with the same headers is the previous run's copy; a fresh one is inserted "
-     "beside it and the old one stays in Trash (gmail_engine). A LIVE copy that differs is still left for a person.",
-     True),
+     "The destination has the same Message-ID but its content does not prove it is the expected copy. The existing "
+     "message may be a live user edit or an unrelated collision, not a reset leftover.",
+     "Needs a person: compare the source and destination raw messages, decide which copy should remain, and reconcile "
+     "the mapping before retrying. Automatic retry is intentionally blocked for this conflict.", False),
+    ("gmail.source_gone", ("message",),
+     lambda t: "Gmail raw read" in t and "HTTP 404" in t and ("notFound" in t or "Not Found" in t),
+     "The source message disappeared after it was listed",
+     "Gmail listed a message that was deleted before the raw read.",
+     "Record the item as SOURCE_GONE. There is no source content left to migrate and it is not a run failure.", True),
+    ("gmail.destination_ambiguous", ("message", "draft"),
+     lambda t: "Ambiguous unclaimed destination Message-ID" in t,
+     "More than one destination message could match",
+     "Several unclaimed destination messages share the Message-ID, so Bitport cannot identify the right copy safely.",
+     "Needs a person: inspect the target messages with this Message-ID, identify the intended copy, and resolve the "
+     "duplicate or mapping before retrying. Bitport never chooses one by order.", False),
     ("run.held_for_drive", None,
      lambda t: "held: this user's Drive did not migrate" in t,
      "Mail or calendar held back for Drive",

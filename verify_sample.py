@@ -2462,7 +2462,7 @@ def retire_chat(db, users) -> None:
         for u in users:
             conn.execute("DELETE FROM user_verification WHERE source_user=? AND service='chat'", (u,))
             rows = conn.execute("SELECT source_user,service,finding_key,item_id,issue FROM verification_repair_queue "
-                                "WHERE source_user=? AND service='chat' AND state!='RESOLVED'", (u,)).fetchall()
+                                "WHERE source_user=? AND service='chat' AND state NOT IN ('RESOLVED','OUT_OF_SCOPE')", (u,)).fetchall()
             verification_repairs._resolve(conn, rows, utc_now())
 
 

@@ -255,6 +255,7 @@ def test_which_held_mail_the_repair_may_deliver():
     assert ok('Pre-delivery link scan: HTTP 404 (notFound): ...')
     assert ok('Multipart body has no readable parts')
     assert ok('', status='UNMAPPED_SOURCE')
+    assert not ok('Existing destination Message-ID has different content; manual review required')
     # that link's owner is not migrated yet: delivering now would leave it pointing at the source
     assert not ok('Pre-delivery link scan: Unresolved Drive link mapping: abc')
     assert not repair.repairable_mail_item({'type': 'draft', 'id': 'd', 'error': 'Missing Message-ID'})

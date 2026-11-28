@@ -23,6 +23,29 @@ class TestEveryFindingSeenOnTheSandboxHasAKind:
         ("contacts", {"source": "people/c1", "why": "not on the target (Requested entity was not found.)"}, "contacts.missing_on_target"),
         ("chat", {"notCopied": {"error": "Source Chat space has no migration mapping"}}, "chat.not_migrated"),
         ("tasks", "task list 'My Tasks': HTTP 404 (notFound): Task list not found.", "tasks.list_missing"),
+        ("drive", {"notCopied": {"type": "file", "id": "s1",
+                                    "copyResolution": {"contentScope": "Size and MD5 matched; the file was not downloaded"}}},
+         "drive.copy_unrecorded"),
+        ("drive", {"notCopied": {"type": "external_access", "id": "s1",
+                                    "copyResolution": {"contentScope": "Size and MD5 matched; the file was not downloaded"}}},
+         "drive.external_copy"),
+        ("drive", "Repair remains incomplete: file-1: external original shortcut missing or placement differs",
+         "drive.external_copy"),
+        ("drive", "Repair remains incomplete: file-1: Retained fallback has other grants; review is required before accepting original-reference mode",
+         "drive.external_copy_review"),
+        ("drive", "native Sheet structures differ; sheets[0].protectedRanges[0].editors: extra on target",
+         "drive.native_structure"),
+        ("drive", "Repair remains incomplete: file-1: Non-cell native Sheet features differ; a lossless structure repair is required",
+         "drive.native_structure"),
+        ("drive", "Form title differs", "drive.form_title"),
+        ("gmail", {"notCopied": {"error": "Existing destination Message-ID has different content; manual review required",
+                                   "id": "<hex>", "type": "message"}}, "gmail.reset_leftover"),
+        ("drive", "script project differs: 2 file(s) -> 3, or their code", "drive.script_project"),
+        ("drive", "2 file-upload question(s) not carried: no API can create one", "drive.form_upload_question"),
+        ("drive", "Repair remains incomplete: <id>: Sheet tabs differ; lossless tab repair must preserve existing gid references",
+         "drive.sheet_tabs"),
+        ("drive", "Repair remains incomplete: <id>: Visible source parent has no mapped target folder",
+         "drive.external_copy"),
     ])
     def test_it_is_named(self, service, item, kind):
         assert known_issues.classify(service, item) == kind
@@ -31,6 +54,33 @@ class TestEveryFindingSeenOnTheSandboxHasAKind:
         for issue_id, _svc, _m, _title, _cause, fix, auto in known_issues.ISSUES:
             if auto:
                 assert fix and fix.strip(), issue_id
+
+
+def test_not_copied_run_failure_kind_is_visible_in_finding_summary(db, identity):
+    import verification_repairs
+    item = {"error": "Existing destination Message-ID has different content; manual review required",
+            "id": "<hex>", "type": "message"}
+    verification_repairs.enqueue_findings(db, "alice@tenanta.com", {"gmail": {"notCopied": [item]}})
+
+    row = db.conn.execute("SELECT issue,state FROM verification_repair_queue WHERE item_id='<hex>'").fetchone()
+    kinds = {kind["id"]: kind for kind in known_issues.summary(db.conn)["kinds"]}
+
+    assert row["issue"] == "gmail.reset_leftover" and row["state"] == "QUEUED"
+    assert kinds["gmail.reset_leftover"]["openByCategory"] == {"notCopied": 1}
+    assert "other content" in known_issues.user_reason(db.conn, "alice@tenanta.com")
+
+
+def test_not_copied_failure_reclassification_version_covers_existing_rows(db, identity):
+    import verification_repairs
+    item = {"error": "Existing destination Message-ID has different content; manual review required",
+            "id": "<hex>", "type": "message"}
+    verification_repairs.enqueue_findings(db, "alice@tenanta.com", {"gmail": {"notCopied": [item]}})
+    db.conn.execute("UPDATE verification_repair_queue SET issue='unclassified',issue_version=2 WHERE item_id='<hex>'")
+
+    known_issues.ensure(db.conn)
+
+    row = db.conn.execute("SELECT issue,issue_version FROM verification_repair_queue WHERE item_id='<hex>'").fetchone()
+    assert row["issue"] == "gmail.reset_leftover" and row["issue_version"] == known_issues.CLASSIFIER_VERSION
 
 
 def test_a_finding_with_both_a_missing_grant_and_a_moved_time_is_the_grant():

@@ -595,8 +595,14 @@ class GmailMigrator:
     def _split_classify(self, mid):
         from split_mail import classify_payload
         self.scan_limiter.acquire()
-        full = self._retry(lambda: self.src.users().messages().get(
-            userId="me", id=mid, format="full").execute(), label="gmail.split.text")
+        try:
+            full = self._retry(lambda: self.src.users().messages().get(
+                userId="me", id=mid, format="full").execute(), label="gmail.split.text")
+        except Exception as exc:
+            from verification_reads import error_detail, status_of
+            if status_of(exc) == 404:
+                raise RuntimeError(f"Gmail raw read {mid}: {error_detail(exc)}") from exc
+            raise
         self._scan_count("bodiesRead", 1)
         self._scan_count("bytesRead", int(full.get("sizeEstimate") or 0))
         if set(full.get("labelIds") or []) & {"DRAFT", "CHAT"}:
@@ -609,8 +615,14 @@ class GmailMigrator:
         def raw():
             self.scan_limiter.acquire()
             self._scan_count("rawReads", 1)
-            got = self._retry(lambda: self.src.users().messages().get(
-                userId="me", id=mid, format="raw").execute(), label="gmail.split.raw")
+            try:
+                got = self._retry(lambda: self.src.users().messages().get(
+                    userId="me", id=mid, format="raw").execute(), label="gmail.split.raw")
+            except Exception as exc:
+                from verification_reads import error_detail, status_of
+                if status_of(exc) == 404:
+                    raise RuntimeError(f"Gmail raw read {mid}: {error_detail(exc)}") from exc
+                raise
             data = got.get("raw", "")
             return base64.urlsafe_b64decode(data + "=" * (-len(data) % 4))
         return full, classify_payload(full, self._drive_link_target, text_attachment, self._split_unknown_link, raw)
@@ -663,16 +675,22 @@ class GmailMigrator:
                     self._bump("skipped")
                     return
             except Exception as exc:
-                self.db.log_audit(self.source_user, mid, "message", "FAILED_SPLIT" if self.settings.mail_only_with_links else "FAILED",
-                                  "Split classification incomplete: " + str(exc)[:300])
-                self._bump("failed")
+                if self._source_message_gone(exc):
+                    self._record_source_gone(mid, exc)
+                else:
+                    self.db.log_audit(self.source_user, mid, "message", "FAILED_SPLIT" if self.settings.mail_only_with_links else "FAILED",
+                                      "Split classification incomplete: " + str(exc)[:300])
+                    self._bump("failed")
                 return
         try:
             from verification_reads import gmail_raw
             _, full = gmail_raw(self.src, mid, lambda fn: self._retry(fn, label="gmail.messages.get"))
         except (PermanentAPIError, RuntimeError) as exc:
-            self.db.log_audit(self.source_user, mid, "message", "FAILED_SPLIT" if self.settings.mail_only_with_links else "FAILED", str(exc))
-            self._bump("failed")
+            if self._source_message_gone(exc):
+                self._record_source_gone(mid, exc)
+            else:
+                self.db.log_audit(self.source_user, mid, "message", "FAILED_SPLIT" if self.settings.mail_only_with_links else "FAILED", str(exc))
+                self._bump("failed")
             return
         label_ids = full.get("labelIds") or []
         if "CHAT" in label_ids:
@@ -795,6 +813,18 @@ class GmailMigrator:
         src_thread = full.get("threadId")
         with self._conversation_lock(src_thread):
             self._deliver(mid, raw, mapped_labels, approx_bytes, already, src_thread)
+
+    @staticmethod
+    def _source_message_gone(exc) -> bool:
+        """A listed source message that disappears before its raw read is a recorded skip, not a failure."""
+        from verification_reads import status_of
+
+        return status_of(exc) == 404 and "gmail raw read" in str(exc).lower()
+
+    def _record_source_gone(self, mid, exc) -> None:
+        self.db.log_audit(self.source_user, mid, "message", "SOURCE_GONE",
+                          "Source message returned HTTP 404 after listing; recorded as gone. " + str(exc)[:300])
+        self._bump("skipped")
 
     def _conversation_lock(self, src_thread: str | None):
         if not src_thread:

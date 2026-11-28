@@ -90,7 +90,15 @@ _ERRORS = {
                     "run.held_for_drive": "a user's Drive has to FAIL in an ordered run; a healthy cohort never does (F-scope is the failures group's)",
                     "drive.form_relinked": "Google links a Form to a responses Sheet only in the Forms UI (linkedSheetId is read-only): no API makes one",
                     "drive.forms_response_sheet": "same cause: no seeded Form has a responses Sheet, and no API links one",
-                    "run.comment_missing": "two copies of one Doc sharing a comment id comes from Drive's UI copy; files.copy copies no comments"},
+                    "run.comment_missing": "two copies of one Doc sharing a comment id comes from Drive's UI copy; files.copy copies no comments",
+                    "drive.copy_unrecorded": "a crafted ledger row with one exact-content target copy; covered by the isolated finding repair test",
+                    "drive.external_copy_review": "a crafted fallback with extra target grants; covered by the isolated external-access repair test",
+                    "drive.form_title": "a crafted Form title difference; covered by the isolated target-only Forms repair test",
+                    "drive.script_project": "a crafted Apps Script difference that needs a person; covered by the Drive finding repair test",
+                    "drive.form_upload_question": "a crafted file-upload question that needs a person; covered by the Drive finding repair test",
+                    "drive.sheet_tabs": "a crafted Sheet tab and gid conflict that needs a person; covered by the Drive finding repair test",
+                    "gmail.source_gone": "a crafted source message returning 404 after listing; covered by the run failure repair test",
+                    "gmail.destination_ambiguous": "a crafted duplicate destination Message-ID; covered by the run failure repair test"},
                    "likely unseedable"),
     # not_migrated first: it needs c07's Chat still unmigrated, the rest migrate it.
     "chat": ({"chat.not_migrated": "c07", "chat.attributed": "c07", "chat.space_type": "c07", "chat.members": "c07",
@@ -114,6 +122,14 @@ UNIT_TESTS = {
     "drive.form_relinked": "tests/test_form_relink.py",
     "drive.forms_response_sheet": "tests/test_form_relink.py",
     "run.comment_missing": "tests/test_resource_keys.py",                 # two files, one comment id, both comments copied
+    "drive.copy_unrecorded": "tests/test_government_finding_repairs.py",
+    "drive.external_copy_review": "tests/test_government_finding_repairs.py",
+    "drive.form_title": "tests/test_government_finding_repairs.py",
+    "drive.script_project": "tests/test_government_finding_repairs.py",
+    "drive.form_upload_question": "tests/test_government_finding_repairs.py",
+    "drive.sheet_tabs": "tests/test_government_finding_repairs.py",
+    "gmail.source_gone": "tests/test_government_run_failure_repairs.py",
+    "gmail.destination_ambiguous": "tests/test_government_run_failure_repairs.py",
 }
 
 
