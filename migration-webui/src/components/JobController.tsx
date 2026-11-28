@@ -236,6 +236,7 @@ const JobController: React.FC<Props> = ({ users, nodes, onChanged }) => {
               <TableRow key={u.source_email} hover selected={selected.has(u.source_email)}>
                 <TableCell padding="checkbox">
                   <Checkbox size="small" data-testid="scope-user"
+                            inputProps={{ 'aria-label': `Include ${u.source_email}` }}
                             checked={selected.has(u.source_email)}
                             onChange={() => toggle(u.source_email)} />
                 </TableCell>

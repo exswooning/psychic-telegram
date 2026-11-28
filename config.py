@@ -54,6 +54,19 @@ FOLDER_MIME = "application/vnd.google-apps.folder"
 # skipped total, the migrations page -- must treat this one apart, or a split
 # run that never reached the DMS reports mail parity as perfect.
 DEFERRED_TO_DMS = "SKIPPED_NO_DRIVE_LINK"
+# Link mail the engine can never deliver rewritten -- a Message-ID the target already holds more than once,
+# or a link to a file with no copy on the target. The operator's choice (8 Nov 2026): the DMS carries it like
+# the rest, links unrewritten, rather than the engine. Owed to the DMS, not a failure that blocks it.
+DMS_OWED_FAILURES = ("Ambiguous destination Message-ID", "Unresolved Drive link mapping")
+
+# These reasons are saved on FAILED message rows. A generic retry must leave
+# them to the recovery path that requires a unique, matching destination copy.
+GMAIL_RECOVERY_AMBIGUOUS = "Ambiguous unclaimed destination Message-ID; recovery blocked"
+GMAIL_RECOVERY_DIFFERENT = "Existing destination Message-ID has different content; manual review required"
+
+
+def owed_to_dms(item_type: str, error: str) -> bool:
+    return item_type in ("message", "draft") and any(m in (error or "") for m in DMS_OWED_FAILURES)
 # Deferred mail becomes delivered only after fresh destination content/label
 # checks with an exact mapped receipt. DMS completion counters alone never
 # establish per-item delivery.
@@ -242,16 +255,18 @@ CHAT_MEMBERSHIP_READONLY_SCOPE = (
 CHAT_IMPORT_SCOPE = "https://www.googleapis.com/auth/chat.import"
 
 
-def exact_copy_flag(account_id) -> str:
+def read_only_flag(account_id) -> str:
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "accounts",
-                        str(account_id), "government-exact-copy")
+                        str(account_id), "government-read-only")
 
 
 def government_exact_copy(account_id) -> bool:
-    """Has the operator switched on server-side (exact) copies from this migration's
-    government source? Live, dharan.gov.np: download_upload rebuilt a Slides deck through
-    .pptx and Google dropped its one soft line break. Off unless the file is there."""
-    return account_id is not None and os.path.isfile(exact_copy_flag(account_id))
+    """May this migration's government source be copied server-side (exact copies)? On
+    unless the operator switched it off (operator, 22 Nov 2026: do not force
+    download_upload; the default route is the fastest). Live, dharan.gov.np:
+    download_upload rebuilt a Slides deck through .pptx and Google dropped its one soft
+    line break. A launch that asks for download_upload still gets it, read-only."""
+    return account_id is None or not os.path.isfile(read_only_flag(account_id))
 
 
 def source_scopes(settings: "Settings") -> list[str]:
@@ -336,6 +351,11 @@ def target_scopes(settings: "Settings") -> list[str]:
     if settings.migrate_forms:
         scopes.append(FORMS_WRITE_SCOPE)
     return scopes
+
+
+def chat_by_default() -> bool:
+    """Whether `all` means Chat too (MIGRATE_CHAT, default off)."""
+    return _env_bool("MIGRATE_CHAT", False)
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -771,6 +791,18 @@ class Settings:
     # cost more API calls than the migration did. It writes nothing to either tenant.
     verify_on_complete: bool = field(default_factory=lambda: _env_bool("VERIFY_ON_COMPLETE", True))
     migration_checks_enabled: bool = field(default_factory=lambda: _env_bool("MIGRATION_CHECKS", True))
+    # Routine mail completion is cheap accounting; full body/label verification
+    # is an explicit option, never implied by matching counts.
+    mail_completion_check: str = field(default_factory=lambda: os.getenv("MAIL_COMPLETION_CHECK", "counts").strip().lower())
+    # Split mail: "search" reads only the bodies Gmail's own search names as link
+    # candidates; "exhaustive" reads every message. Search is not proof of coverage.
+    # Measured 2026-10-30 (audit@s., 758 messages): Gmail search found 0 of 9 known link messages (best
+    # sender query 5 of 9), so exhaustive is the default; "search" is an explicit, lossy choice.
+    mail_link_scan: str = field(default_factory=lambda: os.getenv("MAIL_LINK_SCAN", "exhaustive").strip().lower())
+    # The scan only reads. It was held to per_user_qps (3/s) and took 257 s; 10/s took 79 s, 25/s 33 s,
+    # 40/s 23 s (messages.get is 5 of Gmail's 250 quota units per user per second).
+    mail_scan_qps: float = field(default_factory=lambda: float(os.getenv("MAIL_SCAN_QPS", "30")))
+    mail_scan_workers: int = field(default_factory=lambda: max(1, int(os.getenv("MAIL_SCAN_WORKERS", "36"))))
     first_pass_acceptance: bool = field(default_factory=lambda: _env_bool("FIRST_PASS_ACCEPTANCE", True))
     acceptance_repair_rounds: int = field(default_factory=lambda: min(2, max(0, int(os.getenv("ACCEPTANCE_REPAIR_ROUNDS", "1")))))
     verification_cache_enabled: bool = field(default_factory=lambda: _env_bool("VERIFICATION_CACHE", True))
@@ -834,6 +866,10 @@ class Settings:
     migrate_comments: bool = field(
         default_factory=lambda: _env_bool("MIGRATE_COMMENTS", True)
     )
+    # Post each migrated comment as its author's target account (domain-wide delegation), not as the file's
+    # owner with the author named in the text. The original date is not carried: no API can set it.
+    comments_as_author: bool = field(
+        default_factory=lambda: _env_bool("COMMENTS_AS_AUTHOR", True))
     # When a file is shared through its parent folder, Drive reports the grant
     # as inherited. Preserving the folder hierarchy already preserves that
     # access -- but it survives only so long as the file stays in that folder.
@@ -854,8 +890,10 @@ class Settings:
     # Chat service switched on for each organisation and a Chat app configured
     # in the Cloud console. Original message timestamps cannot be preserved --
     # see chat_engine.py -- so this is a deliberate, documented trade.
+    # OFF by default since 2026-10-31 (operator): `all` no longer includes Chat. MIGRATE_CHAT=true
+    # brings it back, and naming `--services chat` still selects it for one run.
     migrate_chat: bool = field(
-        default_factory=lambda: _env_bool("MIGRATE_CHAT", True)
+        default_factory=lambda: _env_bool("MIGRATE_CHAT", False)
     )
     chat_space_mode: str = field(
         default_factory=lambda: os.getenv("CHAT_SPACE_MODE", "import").strip().lower()
@@ -962,22 +1000,30 @@ class Settings:
     def __post_init__(self) -> None:
         if self.account_id is not None:
             self._load_account_tenant_config()
+        # One process's own copy of the ledger, for ab_transfer's side-by-side arms: a ledger is
+        # per account, so without this every arm of one account would share (and clear) one.
+        # Set only in an arm's child processes, never in a shared one.
+        if os.getenv("BITPORT_LEDGER"):
+            self.db_path = os.environ["BITPORT_LEDGER"]
         if self.transfer_mode == "adaptive" and self.adaptive_sandbox_only and (
                 self.source_domain.lower(), self.target_domain.lower()) != ("s.sarafgloabalexim.com", "t.sarafgloabalexim.com"):
             raise ValueError("Adaptive transfer is restricted to the explicit s. to t. sandbox pair")
-        # A government source is only ever READ, and Google enforces it: no Drive write
-        # scope is asked for (server-side copy needs one), so every file goes by
-        # download_upload whatever a launch asked for. Bitport's own guard
+        # A government source is only ever READ. A server-side copy (the default since
+        # 22 Nov 2026) asks for `drive` and auth.ReadOnlyDrive holds the source to reads
+        # plus files.copy into staging; a launch that asks for download_upload asks for no
+        # Drive write scope at all, and Google enforces it. Bitport's own guard
         # (auth.ReadOnlyDrive) stays, but no longer has to be the thing that holds.
         # The one exception is the operator's own switch (government_exact_copy): a
         # server-side copy, so the grant holds `drive` and auth.ReadOnlyDrive is what
         # holds the source to reads plus that one copy. Only server_side: move and
         # link_flip still fall to download_upload.
         import domain_guard
-        if domain_guard.is_government(self.source_domain or "") and not (
-                self.transfer_mode == "server_side" and government_exact_copy(self.account_id)):
-            self.source_read_only = True
-            self.transfer_mode = "download_upload"
+        if domain_guard.is_government(self.source_domain or ""):
+            if self.transfer_mode in ("move", "link_flip") and government_exact_copy(self.account_id):
+                self.transfer_mode = "server_side"     # both write to the source; a copy does not
+            if not (self.transfer_mode == "server_side" and government_exact_copy(self.account_id)):
+                self.source_read_only = True
+                self.transfer_mode = "download_upload"
         # An unrecognised transfer mode used to be accepted and silently behave
         # as download_upload, because every check was `== "server_side"`. So a
         # typo, or a mode that is documented but not yet wired, quietly

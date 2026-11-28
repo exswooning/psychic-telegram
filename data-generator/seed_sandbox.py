@@ -84,7 +84,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import Settings  # noqa: E402
 from resilience import retry_on_google_error, AdaptiveRateLimiter  # noqa: E402
-from corpus import ORG, SCALES, CorpusBuilder  # noqa: E402
+from corpus import ORG, SCALES, CorpusBuilder, stable_seed  # noqa: E402
 
 # The labels seed_gmail() creates. Reset removes exactly these -- deleting
 # every user label would take labels the account's owner made themselves.
@@ -123,6 +123,16 @@ SEED_LABELS = ["Clients", "Clients/Acme", "Clients/Acme/2024",
 # resources.MB_PER_SEED_WORKER now budgets against.
 MAIL_CAL_WORKERS = max(1, int(os.getenv("SEED_MAIL_WORKERS", "4")))
 
+
+
+def _http(timeout: int) -> "httplib2.Http":
+    """An httplib2 connection that does not take 308 for a redirect. Google answers every chunk of a resumable upload
+    but the last with 308 "Resume Incomplete" and no Location, which httplib2 raises as RedirectMissingLocation:
+    the 300-user seed died on its first large pool file (VM, 28 Nov 2026). auth._http has done this since 10 Oct."""
+    import httplib2
+    http = httplib2.Http(timeout=timeout)
+    http.redirect_codes = http.redirect_codes - {308}
+    return http
 
 def _run_parallel(plans: list, fn, workers: int) -> None:
     """Apply `fn` to pre-planned items on a bounded pool.
@@ -376,8 +386,16 @@ def _save_seed_metrics(settings: Settings) -> None:
             _SEED_RUN.update(kind="seed", pid=os.getpid(),
                              started_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                              source_domain=settings.source_domain, target_domain=None)
+        snap["pid"] = os.getpid()
+        snap["run_kind"] = "seed"
+        snap["run_started_at"] = _SEED_RUN["started_at"]
+        snap["elapsed_sec"] = max(0.0, time.time() - _SEED_RUN.get("started_epoch", time.time()))
         db = MigrationDB(settings.db_path)
         try:
+            # Keep the same bounded snapshot series the migration flusher
+            # writes. The per-run summary is useful after the hour of samples
+            # rolls over, but it cannot explain a phase's changing limits.
+            db.record_metrics(snap)
             db.record_run_summary(_SEED_RUN, snap)
         finally:
             db.close()
@@ -928,11 +946,33 @@ SUBJECTS = [
 ]
 
 
+def insert_message(gmail, retry, raw: bytes, labels: list[str]):
+    """One seeded message into a mailbox, by the cheapest route Google accepts.
+
+    The message goes up as its own bytes (message/rfc822), not as base64 inside JSON: a third fewer bytes on a
+    line whose upload is the limit (0.9 MB/s on the box, 16 Nov 2026). The engine does the same above 5 MB.
+    googleapiclient's non-resumable multipart upload cannot carry a message with non-ASCII bytes ("'ascii'
+    codec can't encode", seen live 17 Nov on the first raw-upload seed): such a message goes up as before,
+    base64 inside the JSON body. Only the plain-ASCII ones save the third."""
+    if not raw.isascii():
+        return retry(lambda: gmail.users().messages().insert(
+            userId="me",
+            body={"raw": base64.urlsafe_b64encode(raw).decode(), "labelIds": labels},
+            internalDateSource="dateHeader",
+        ).execute())()
+    return retry(lambda: gmail.users().messages().insert(
+        userId="me",
+        body={"labelIds": labels},
+        media_body=_media(raw, "message/rfc822"),
+        internalDateSource="dateHeader",
+    ).execute())()
+
+
 def seed_gmail(gmail, settings: Settings, user: str, peers: list[str],
                external: str, count: int, drive_items: dict | None = None) -> dict:
     """Seed a mailbox with mail from the other four users, in every state."""
     retry = _retry_factory(settings)
-    rng = random.Random(hash(user) & 0xFFFF)
+    rng = random.Random(stable_seed(user))
     m = {"messages": 0, "unread": 0, "starred": 0, "in_spam": 0, "in_trash": 0,
          "with_attachment": 0, "labels": [], "thread_size": 3,
          "with_drive_link": 0}
@@ -949,12 +989,7 @@ def seed_gmail(gmail, settings: Settings, user: str, peers: list[str],
         ).execute())()
 
     def insert(raw: bytes, labels: list[str]):
-        return retry(lambda: gmail.users().messages().insert(
-            userId="me",
-            body={"raw": base64.urlsafe_b64encode(raw).decode(),
-                  "labelIds": labels},
-            internalDateSource="dateHeader",
-        ).execute())()
+        return insert_message(gmail, retry, raw, labels)
 
     # Look the labels up before creating any, exactly as seed_contacts does
     # for its contact groups -- and for a consequence that is much worse
@@ -1123,7 +1158,7 @@ def seed_drafts(gmail, settings: Settings, user: str, peers: list[str],
     a user had half-written, and nobody notices until they go looking for it.
     """
     retry = _retry_factory(settings)
-    rng = random.Random((hash(user) & 0xFFFF) + 7)
+    rng = random.Random(stable_seed(user, 7))
     m = {"drafts": 0}
     subjects = ["Re: budget question (WIP)", "Draft — team update",
                 "Notes for Monday", "Reply to vendor — needs review",
@@ -1133,10 +1168,13 @@ def seed_drafts(gmail, settings: Settings, user: str, peers: list[str],
                       rng.randint(1, 400),
                       body="Still drafting this. Not sent yet.\n")
         try:
-            retry(lambda r=raw: gmail.users().drafts().create(
+            retry(lambda r=raw: (gmail.users().drafts().create(
                 userId="me",
-                body={"message": {"raw": base64.urlsafe_b64encode(r).decode()}},
-            ).execute())()
+                media_body=_media(r, "message/rfc822"),       # raw bytes, not base64 in JSON
+            ) if r.isascii() else gmail.users().drafts().create(
+                userId="me",
+                body={"message": {"raw": base64.urlsafe_b64encode(r).decode()}},   # non-ASCII: see insert()
+            )).execute())()
             m["drafts"] += 1
         except Exception as exc:  # noqa: BLE001
             print(f"  ! draft {i}: {exc}")
@@ -1168,7 +1206,7 @@ def seed_gmail_settings(gmail, settings: Settings, user: str,
     _migrate_forwarding that copies without needing verification.
     """
     m = {"vacation": 0, "pop": 0, "imap": 0, "forwarding_addresses": 0,
-         "delegates": 0, "note": ""}
+         "delegates": 0, "found_present": 0, "note": ""}
     if gmail is None:
         m["note"] = ("gmail.settings.basic/sharing not granted to the seed "
                      "service account -- skipped")
@@ -1208,10 +1246,15 @@ def seed_gmail_settings(gmail, settings: Settings, user: str,
     fwd_to = peers[0] if peers else None
     if fwd_to:
         try:
-            retry(lambda: gmail.users().settings().forwardingAddresses()
-                  .create(userId="me",
-                          body={"forwardingEmail": fwd_to}).execute())()
-            m["forwarding_addresses"] = 1
+            addresses = retry(lambda: gmail.users().settings().forwardingAddresses()
+                               .list(userId="me").execute())().get("forwardingAddresses", [])
+            if any((a.get("forwardingEmail") or "").lower() == fwd_to.lower() for a in addresses):
+                m["found_present"] += 1
+            else:
+                retry(lambda: gmail.users().settings().forwardingAddresses()
+                      .create(userId="me",
+                              body={"forwardingEmail": fwd_to}).execute())()
+                m["forwarding_addresses"] = 1
         except Exception as exc:  # noqa: BLE001
             notes.append(f"forwarding: {str(exc)[:80]}")
 
@@ -1221,9 +1264,14 @@ def seed_gmail_settings(gmail, settings: Settings, user: str,
     delegate = peers[1] if len(peers) > 1 else (peers[0] if peers else None)
     if delegate:
         try:
-            retry(lambda: gmail.users().settings().delegates().create(
-                userId="me", body={"delegateEmail": delegate}).execute())()
-            m["delegates"] = 1
+            existing = retry(lambda: gmail.users().settings().delegates()
+                             .list(userId="me").execute())().get("delegates", [])
+            if any((d.get("delegateEmail") or "").lower() == delegate.lower() for d in existing):
+                m["found_present"] += 1
+            else:
+                retry(lambda: gmail.users().settings().delegates().create(
+                    userId="me", body={"delegateEmail": delegate}).execute())()
+                m["delegates"] = 1
         except Exception as exc:  # noqa: BLE001
             notes.append(f"delegate: {str(exc)[:80]}")
 
@@ -1275,20 +1323,34 @@ def seed_chat(chat, settings: Settings, user: str, peers: list[str],
         lines.insert(1, f"Doc is here: {_drive_link(linkable[0], 0)}")
         lines.append(f"Folder for this: {_drive_link(linkable[-1], 3)}")
     try:
+        existing_spaces = {
+            (row.get("displayName") or ""): row["name"]
+            for row in retry(lambda: chat.spaces().list(pageSize=100).execute())().get("spaces", [])
+            if row.get("displayName") and row.get("name")
+        }
         for name in _chat_names(local):
-            created = retry(lambda n=name: chat.spaces().create(
-                body={"spaceType": "SPACE", "displayName": n}
-            ).execute())()
-            space = created["name"]
-            m["spaces"] += 1
+            space = existing_spaces.get(name)
+            if space is None:
+                created = retry(lambda n=name: chat.spaces().create(
+                    body={"spaceType": "SPACE", "displayName": n}
+                ).execute())()
+                space = created["name"]
+                existing_spaces[name] = space
+                m["spaces"] += 1
+            existing_messages = retry(lambda s=space: chat.spaces().messages()
+                                       .list(parent=s).execute())().get("messages", [])
+            have_text = {row.get("text") for row in existing_messages}
             # Five without links, six with -- so a corpus seeded before
             # Drive existed keeps the count it always had.
             for text in lines[:6 if linkable else 5]:
+                if text in have_text:
+                    continue
                 body = {"text": text}
                 retry(lambda s=space, b=body: chat.spaces().messages()
                       .create(parent=s, body=b).execute())()
                 m["messages"] += 1
                 m["with_drive_link"] += "google.com" in text
+                have_text.add(text)
     except Exception as exc:  # noqa: BLE001
         m["note"] = f"chat failed (Chat switched on? scopes granted?): {exc}"
         print(f"  ! chat for {user}: {exc}")
@@ -1363,8 +1425,9 @@ _SEED_MARKER = {"key": "seed_sandbox", "value": "true"}
 
 
 def seed_groups(directory, settings: Settings, users: list[str],
-                external: str, prefix: str = "") -> dict:
-    """Create the tenant's groups, their members, and one nested group.
+                external: str, prefix: str = "", shapes: list | None = None) -> dict:
+    """Create the tenant's groups, their members, and one nested group. `shapes` (a list of (local, name, members, role)
+    like `plan` below) replaces the four standard groups: the profile seeder's department groups.
 
     Tenant-level, not per-user: a group belongs to the domain, so this runs
     once per seed rather than inside seed_one_user().
@@ -1392,7 +1455,7 @@ def seed_groups(directory, settings: Settings, users: list[str],
     # Shapes worth having, not just count: a wide all-hands, a small team
     # with an owner and a manager, one carrying an external member, and one
     # that contains another group.
-    plan = [
+    plan = shapes or [
         (f"{prefix}all-staff", "All Staff", users, "MEMBER"),
         (f"{prefix}engineering", "Engineering", users[:max(1, len(users) // 3)], "MEMBER"),
         (f"{prefix}leads", "Leads", users[:2], "OWNER"),
@@ -1463,9 +1526,9 @@ def seed_groups(directory, settings: Settings, users: list[str],
 
 
 def seed_contacts(people, settings: Settings, user: str, peers: list[str],
-                  external: str, count: int = 25) -> dict:
+                  external: str, count: int = 25, *, idempotent: bool = False) -> dict:
     retry = _retry_factory(settings)
-    m = {"contacts": 0, "groups": 0, "note": ""}
+    m = {"contacts": 0, "groups": 0, "found_present": 0, "failed": 0, "note": ""}
     first_names = ("Priya", "Jordan", "Wei", "Fatima", "Sam", "Elena", "Kwame",
                   "Noor", "Diego", "Aisling", "Ravi", "Chloe")
     last_names = ("Nakamura", "Silva", "Okafor", "Kowalski", "Haddad",
@@ -1492,8 +1555,32 @@ def seed_contacts(people, settings: Settings, user: str, peers: list[str],
             group_ids.append(get_or_create_group(name))
             m["groups"] += 1
 
-        rng = random.Random(hash(user) & 0xFFFFFFFF)
+        existing_by_index = {}
+        if idempotent:
+            resp = retry(lambda: people.people().connections().list(
+                resourceName="people/me", pageSize=1000,
+                personFields="userDefined,memberships").execute())()
+            for person in resp.get("connections", []):
+                item = next((f.get("value") for f in person.get("userDefined", [])
+                             if f.get("key") == "seed_sandbox_index"), None)
+                if item and item.startswith(user.lower() + ":"):
+                    existing_by_index[item.rsplit(":", 1)[-1]] = person
+
+        rng = random.Random(stable_seed(user, 3))
         for i in range(count):
+            item_marker = {"key": "seed_sandbox_index", "value": f"{user.lower()}:{i}"}
+            existing = existing_by_index.get(str(i))
+            group = group_ids[i % len(group_ids)]
+            if existing:
+                m["found_present"] += 1
+                contact_memberships = {x.get("contactGroupMembership", {}).get("contactGroupResourceName")
+                                       for x in existing.get("memberships", [])}
+                fake_members = set(getattr(people, "group_members", {}).get(group, []))
+                if group not in contact_memberships and existing.get("resourceName") not in fake_members:
+                    retry(lambda rn=existing["resourceName"], g=group:
+                          people.contactGroups().members().modify(
+                              resourceName=g, body={"resourceNamesToAdd": [rn]}).execute())()
+                continue
             given, family = rng.choice(first_names), rng.choice(last_names)
             email = f"{given.lower()}.{family.lower()}{i}@{rng.choice(domains)}"
             body = {
@@ -1503,17 +1590,18 @@ def seed_contacts(people, settings: Settings, user: str, peers: list[str],
                                           f"{rng.randint(1000,9999)}"}],
                 "organizations": [{"name": rng.choice(
                     ["Acme Logistics", "Northwind Traders", "Globex", "Initech"])}],
-                "userDefined": [_SEED_MARKER],
+                "userDefined": [_SEED_MARKER, item_marker] if idempotent else [_SEED_MARKER],
             }
             created = retry(lambda b=body: people.people().createContact(
                 body=b).execute())()
             m["contacts"] += 1
-            group = group_ids[i % len(group_ids)]
+            existing_by_index[str(i)] = created
             retry(lambda rn=created["resourceName"], g=group:
                  people.contactGroups().members().modify(
                      resourceName=g,
                      body={"resourceNamesToAdd": [rn]}).execute())()
     except Exception as exc:  # noqa: BLE001
+        m["failed"] += 1
         m["note"] = f"contacts failed (People API enabled? scopes granted?): {exc}"
         print(f"  ! contacts for {user}: {exc}")
     return m
@@ -1565,33 +1653,56 @@ def reset_contacts(people, settings: Settings) -> int:
 _TASK_LIST_NAME = "MIGRATION-TEST Tasks"
 
 
-def seed_tasks(tasks, settings: Settings, count: int = 20) -> dict:
+def seed_tasks(tasks, settings: Settings, count: int = 20, *, idempotent: bool = False) -> dict:
     retry = _retry_factory(settings)
-    m = {"lists": 0, "tasks": 0, "note": ""}
+    m = {"lists": 0, "tasks": 0, "found_present": 0, "failed": 0, "note": ""}
     verbs = ("Follow up on", "Review", "Draft", "Approve", "Schedule",
             "Close out", "Escalate", "File")
     subjects = ("the Q3 budget", "vendor contract", "onboarding checklist",
                "security review", "the migration runbook", "client renewal",
                "the roadmap doc", "expense report")
     try:
-        created = retry(lambda: tasks.tasklists().insert(
-            body={"title": _TASK_LIST_NAME}).execute())()
-        list_id = created["id"]
-        m["lists"] += 1
+        list_id = None
+        existing_task_markers = set()
+        if idempotent:
+            existing_lists = retry(lambda: tasks.tasklists().list(maxResults=100).execute())().get("items", [])
+            list_id = next((x["id"] for x in existing_lists if x.get("title") == _TASK_LIST_NAME), None)
+            if list_id:
+                token = None
+                while True:
+                    resp = retry(lambda t=token, lid=list_id: tasks.tasks().list(
+                        tasklist=lid, maxResults=100, pageToken=t, showCompleted=True).execute())()
+                    for task in resp.get("items", []):
+                        match = re.search(r"\[seed_sandbox_profile_task:(\d+)\]", task.get("notes", ""))
+                        if match:
+                            existing_task_markers.add(int(match.group(1)))
+                    token = resp.get("nextPageToken")
+                    if not token:
+                        break
+        if list_id is None:
+            created = retry(lambda: tasks.tasklists().insert(
+                body={"title": _TASK_LIST_NAME}).execute())()
+            list_id = created["id"]
+            m["lists"] += 1
         rng = random.Random(count)
         for i in range(count):
+            if idempotent and i in existing_task_markers:
+                m["found_present"] += 1
+                continue
             body = {
                 "title": f"{rng.choice(verbs)} {rng.choice(subjects)}",
-                "notes": "Seeded test data.",
+                "notes": (f"Seeded test data. [seed_sandbox_profile_task:{i}]" if idempotent
+                          else "Seeded test data."),
             }
             if i % 3 == 0:
                 body["status"] = "completed"
             if i % 4 == 0:
                 body["due"] = _iso(rng.randint(1, 30))
-            retry(lambda b=body: tasks.tasks().insert(
-                tasklist=list_id, body=b).execute())()
+            retry(lambda b=body, lid=list_id: tasks.tasks().insert(
+                tasklist=lid, body=b).execute())()
             m["tasks"] += 1
     except Exception as exc:  # noqa: BLE001
+        m["failed"] += 1
         m["note"] = f"tasks failed (Tasks API enabled? scopes granted?): {exc}"
         print(f"  ! tasks: {exc}")
     return m
@@ -1622,12 +1733,25 @@ def reset_tasks(tasks, settings: Settings) -> int:
 # ======================================================================
 def seed_calendar(cal, settings: Settings, user: str, peers: list[str],
                   external: str, count: int,
-                  drive_items: dict | None = None) -> dict:
+                  drive_items: dict | None = None, *, idempotent: bool = False) -> dict:
     """Seed events using import (not insert), so seeding is itself silent."""
     retry = _retry_factory(settings)
-    rng = random.Random(hash(user) & 0xFFFF)
+    rng = random.Random(stable_seed(user, 5))
     m = {"events": 0, "recurring": 0, "with_external": 0, "all_day": 0,
-         "with_drive_link": 0, "with_attachment": 0}
+         "with_drive_link": 0, "with_attachment": 0, "failed": 0, "skipped": 0}
+    existing_uids: set[str] = set()
+    if idempotent:
+        token = None
+        while True:
+            resp = retry(lambda t=token: cal.events().list(
+                calendarId="primary", maxResults=2500, pageToken=t,
+                singleEvents=False, showDeleted=True,
+                fields="nextPageToken,items(iCalUID)").execute())()
+            existing_uids.update(e["iCalUID"] for e in resp.get("items", []) if e.get("iCalUID"))
+            token = resp.get("nextPageToken")
+            if not token:
+                break
+    uid_lock = threading.Lock()
     # A meeting whose description says "agenda is in <drive link>" rots
     # exactly like the same link in an email, and until recently nothing
     # rewrote it. Without seeded examples the calendar repair had nothing to
@@ -1636,9 +1760,19 @@ def seed_calendar(cal, settings: Settings, user: str, peers: list[str],
     linkable = [v for v in (drive_items or {}).values() if isinstance(v, str)]
 
     def imp(body):
-        return retry(lambda: cal.events().import_(
+        uid = body.get("iCalUID")
+        if idempotent and uid:
+            with uid_lock:
+                if uid in existing_uids:
+                    m["skipped"] += 1
+                    return False
+        result = retry(lambda: cal.events().import_(
             calendarId="primary", body=body, conferenceDataVersion=0
         ).execute())()
+        if idempotent and uid:
+            with uid_lock:
+                existing_uids.add(uid)
+        return bool(result)
 
     def window(days_ago: int, hour: int):
         d = (datetime.now(timezone.utc) - timedelta(days=days_ago)).replace(
@@ -1701,9 +1835,12 @@ def seed_calendar(cal, settings: Settings, user: str, peers: list[str],
     def _import_one(pl) -> None:
         idx, body, ext_flag, link_flag, att_flag = pl
         try:
-            imp(body)
+            if not imp(body):
+                return
         except Exception as exc:  # noqa: BLE001
             print(f"  ! event {idx}: {exc}")
+            with mlock:
+                m["failed"] += 1
             return
         with mlock:
             m["events"] += 1
@@ -1716,7 +1853,7 @@ def seed_calendar(cal, settings: Settings, user: str, peers: list[str],
     # One recurring series with a stable UID, for the hand-edited exception.
     start, end = window(30, 10)
     try:
-        imp({
+        if imp({
             "iCalUID": f"weekly-team-sync-{user.split('@')[0]}@seed.test",
             "summary": "Weekly team sync",
             "start": {"dateTime": start, "timeZone": "UTC"},
@@ -1725,25 +1862,27 @@ def seed_calendar(cal, settings: Settings, user: str, peers: list[str],
             "attendees": [{"email": p, "responseStatus": "accepted"}
                           for p in peers],
             "recurrence": ["RRULE:FREQ=WEEKLY;BYDAY=MO;COUNT=20"],
-        })
-        m["events"] += 1
-        m["recurring"] += 1
+        }):
+            m["events"] += 1
+            m["recurring"] += 1
     except Exception as exc:  # noqa: BLE001
         print(f"  ! weekly series: {exc}")
+        m["failed"] += 1
 
     day = (datetime.now(timezone.utc) - timedelta(days=45)).strftime("%Y-%m-%d")
     nxt = (datetime.now(timezone.utc) - timedelta(days=44)).strftime("%Y-%m-%d")
     try:
-        imp({
+        if imp({
             "iCalUID": f"offsite-{user.split('@')[0]}@seed.test",
             "summary": "All-day offsite",
             "start": {"date": day}, "end": {"date": nxt},
             "organizer": {"email": user, "self": True},
-        })
-        m["events"] += 1
-        m["all_day"] += 1
+        }):
+            m["events"] += 1
+            m["all_day"] += 1
     except Exception as exc:  # noqa: BLE001
         print(f"  ! all-day event: {exc}")
+        m["failed"] += 1
 
     return m
 
@@ -1764,34 +1903,58 @@ def seed_secondary_calendars(cal, settings: Settings, user: str,
     meeting, which is exactly the fidelity loss this corpus exists to catch.
     """
     retry = _retry_factory(settings)
-    rng = random.Random((hash(user) & 0xFFFF) + 13)
-    m = {"calendars": 0, "calendar_events": 0}
+    m = {"calendars": 0, "calendar_events": 0, "failed": 0, "skipped": 0}
     names = ["Team Roadmap", "On-Call Rota", "Recruiting Pipeline",
              "Release Schedule", "Budget Reviews"]
+    listed = retry(lambda: cal.calendarList().list(maxResults=250).execute())().get("items", [])
+    existing_calendars = {c.get("summary"): c["id"] for c in listed
+                          if c.get("summary") and c.get("id") != "primary"}
 
     for i in range(count):
+        # Restart-safe per-calendar randomness: skips on a resumed pass must
+        # not change the later calendar names or event UIDs.
+        rng = random.Random(stable_seed(user, 13 + i))
         name = f"{rng.choice(names)} ({user.split('@')[0]})"
         try:
-            cal_id = retry(lambda n=name: cal.calendars().insert(
-                body={"summary": n, "timeZone": "UTC"},
-            ).execute())()["id"]
-            m["calendars"] += 1
+            cal_id = existing_calendars.get(name)
+            if cal_id is None:
+                cal_id = retry(lambda n=name: cal.calendars().insert(
+                    body={"summary": n, "timeZone": "UTC"},
+                ).execute())()["id"]
+                existing_calendars[name] = cal_id
+                m["calendars"] += 1
         except Exception as exc:  # noqa: BLE001
             print(f"  ! secondary calendar {i}: {exc}")
             continue
 
         # A sharing rule, so calendar-ACL translation has something to chew on.
         try:
-            retry(lambda c=cal_id: cal.acl().insert(
-                calendarId=c, sendNotifications=False,
-                body={"scope": {"type": "user",
-                                "value": _a_peer(rng, peers, user)},
-                      "role": "reader"},
-            ).execute())()
+            acl_rows = retry(lambda c=cal_id: cal.acl().list(calendarId=c).execute())().get("items", [])
+            peer = _a_peer(rng, peers, user)
+            if not any((row.get("scope") or {}).get("value", "").lower() == peer.lower()
+                       for row in acl_rows):
+                retry(lambda c=cal_id, p=peer: cal.acl().insert(
+                    calendarId=c, sendNotifications=False,
+                    body={"scope": {"type": "user", "value": p}, "role": "reader"},
+                ).execute())()
         except Exception:  # noqa: BLE001
             pass
 
+        existing_uids: set[str] = set()
+        token = None
+        while True:
+            resp = retry(lambda t=token, c=cal_id: cal.events().list(
+                calendarId=c, maxResults=2500, pageToken=t, singleEvents=False,
+                showDeleted=True, fields="nextPageToken,items(iCalUID)").execute())()
+            existing_uids.update(e["iCalUID"] for e in resp.get("items", []) if e.get("iCalUID"))
+            token = resp.get("nextPageToken")
+            if not token:
+                break
         for j in range(3):
+            uid = f"sec-{user.split('@')[0]}-{i}-{j}@seed.test"
+            if uid in existing_uids:
+                m["skipped"] += 1
+                continue
             days = rng.randint(1, 500)
             start, end = _cal_window(days, rng.randint(9, 16))
             try:
@@ -1808,8 +1971,10 @@ def seed_secondary_calendars(cal, settings: Settings, user: str,
                     },
                 ).execute())()
                 m["calendar_events"] += 1
+                existing_uids.add(uid)
             except Exception as exc:  # noqa: BLE001
                 print(f"  ! secondary event {i}/{j}: {exc}")
+                m["failed"] += 1
     return m
 
 
@@ -1931,8 +2096,10 @@ def reset_gmail(gmail, settings: Settings, _purge_client=None) -> int:
         #
         # includeSpamTrash stays: seeded mail that landed in Spam still has
         # to be found, and the q filter excludes only the trash half.
+        # With a purge client the Trash is purged too: a copy left there is revived by Google's import and by the
+        # engine's own Message-ID lookups (P3.5, 19 Nov 2026: 705 messages ended with two live copies).
         resp = retry(lambda t=token: gmail.users().messages().list(
-            userId="me", maxResults=500, pageToken=t, q="-in:trash",
+            userId="me", maxResults=500, pageToken=t, q="" if purge is not None else "-in:trash",
             includeSpamTrash=True).execute())()
         msgs = resp.get("messages", [])
         for m in msgs:
@@ -2134,6 +2301,27 @@ class _PerThreadService:
         return getattr(svc, name)
 
 
+def _subject(user: str) -> str:
+    """Every client the seeder builds names its user here: another account's protected user
+    (d-*@a., account 8's real users) is never seeded, reset, filled or trimmed, by anyone."""
+    import domain_guard
+    why = domain_guard.protected_subject(user)
+    if why:
+        raise PermissionError("REFUSING: " + why)
+    return user
+
+
+def _unprotected(emails) -> set:
+    """A directory listing without protected users (--all-users, fit-to-licences, the default discovery)."""
+    import domain_guard
+    return {e for e in emails if not domain_guard.protected_subject(e)}
+
+
+def _protected_reason(email: str) -> str:
+    import domain_guard
+    return domain_guard.protected_subject(email)
+
+
 def build_services(settings: Settings, user: str):
     """Delegated clients with WRITE scopes against the sandbox source tenant."""
     import google_auth_httplib2
@@ -2144,11 +2332,11 @@ def build_services(settings: Settings, user: str):
     key = _resolve_key_path(settings)
     creds = service_account.Credentials.from_service_account_file(
         key, scopes=seed_scopes(settings)
-    ).with_subject(user)
+    ).with_subject(_subject(user))
 
     def svc(api, version):
         http = google_auth_httplib2.AuthorizedHttp(
-            creds, http=httplib2.Http(timeout=300)
+            creds, http=_http(300)
         )
         return build(api, version, http=http, cache_discovery=False)
 
@@ -2168,9 +2356,9 @@ def build_chat(settings: Settings, user: str):
 
     creds = service_account.Credentials.from_service_account_file(
         _resolve_key_path(settings), scopes=seed_scopes(settings)
-    ).with_subject(user)
+    ).with_subject(_subject(user))
     http = google_auth_httplib2.AuthorizedHttp(
-        creds, http=httplib2.Http(timeout=300)
+        creds, http=_http(300)
     )
     return build("chat", "v1", http=http, cache_discovery=False)
 
@@ -2200,11 +2388,11 @@ def build_people_tasks(settings: Settings, user: str):
     creds = service_account.Credentials.from_service_account_file(
         _resolve_key_path(settings),
         scopes=[CONTACTS_WRITE_SCOPE, TASKS_WRITE_SCOPE],
-    ).with_subject(user)
+    ).with_subject(_subject(user))
 
     def svc(api, version):
         http = google_auth_httplib2.AuthorizedHttp(
-            creds, http=httplib2.Http(timeout=300)
+            creds, http=_http(300)
         )
         return build(api, version, http=http, cache_discovery=False)
 
@@ -2225,9 +2413,9 @@ def build_reports(settings: Settings, user: str):
 
     creds = service_account.Credentials.from_service_account_file(
         _resolve_key_path(settings), scopes=SEED_SCOPES + [REPORTS_SCOPE]
-    ).with_subject(user)
+    ).with_subject(_subject(user))
     http = google_auth_httplib2.AuthorizedHttp(
-        creds, http=httplib2.Http(timeout=120)
+        creds, http=_http(120)
     )
     return build("admin", "reports_v1", http=http, cache_discovery=False)
 
@@ -2246,9 +2434,9 @@ def build_directory_readonly(settings: Settings, user: str):
 
     creds = service_account.Credentials.from_service_account_file(
         _resolve_key_path(settings), scopes=[DIRECTORY_READONLY_SCOPE]
-    ).with_subject(user)
+    ).with_subject(_subject(user))
     http = google_auth_httplib2.AuthorizedHttp(
-        creds, http=httplib2.Http(timeout=120)
+        creds, http=_http(120)
     )
     return build("admin", "directory_v1", http=http, cache_discovery=False)
 
@@ -2268,9 +2456,9 @@ def build_directory_groups(settings: Settings, user: str):
 
     creds = service_account.Credentials.from_service_account_file(
         _resolve_key_path(settings), scopes=[GROUP_WRITE_SCOPE]
-    ).with_subject(user)
+    ).with_subject(_subject(user))
     http = google_auth_httplib2.AuthorizedHttp(
-        creds, http=httplib2.Http(timeout=120)
+        creds, http=_http(120)
     )
     return build("admin", "directory_v1", http=http, cache_discovery=False)
 
@@ -2291,9 +2479,9 @@ def build_gmail_purge(settings: Settings, user: str):
     try:
         creds = service_account.Credentials.from_service_account_file(
             _resolve_key_path(settings), scopes=[GMAIL_PURGE_SCOPE]
-        ).with_subject(user)
+        ).with_subject(_subject(user))
         http = google_auth_httplib2.AuthorizedHttp(
-            creds, http=httplib2.Http(timeout=120))
+            creds, http=_http(120))
         return build("gmail", "v1", http=http, cache_discovery=False)
     except Exception:      # noqa: BLE001 - absence is an answer, not an error
         return None
@@ -2316,9 +2504,9 @@ def build_gmail_settings(settings: Settings, user: str):
         creds = service_account.Credentials.from_service_account_file(
             _resolve_key_path(settings),
             scopes=[GMAIL_SETTINGS_SCOPE, GMAIL_SHARING_SCOPE]
-        ).with_subject(user)
+        ).with_subject(_subject(user))
         http = google_auth_httplib2.AuthorizedHttp(
-            creds, http=httplib2.Http(timeout=120))
+            creds, http=_http(120))
         return build("gmail", "v1", http=http, cache_discovery=False)
     except Exception:      # noqa: BLE001 - absence is an answer, not an error
         return None
@@ -2339,9 +2527,9 @@ def _build_directory_readwrite(settings: Settings, user: str):
     creds = service_account.Credentials.from_service_account_file(
         _resolve_key_path(settings),
         scopes=SEED_SCOPES + [provision.DIRECTORY_WRITE_SCOPE],
-    ).with_subject(user)
+    ).with_subject(_subject(user))
     http = google_auth_httplib2.AuthorizedHttp(
-        creds, http=httplib2.Http(timeout=120)
+        creds, http=_http(120)
     )
     return build("admin", "directory_v1", http=http, cache_discovery=False)
 
@@ -2408,7 +2596,7 @@ def _list_users(directory) -> set[str]:
         token = resp.get("nextPageToken")
         if not token:
             break
-    return emails
+    return _unprotected(emails)
 
 
 def entries_from_existing_users(existing_emails: set[str], domain: str) -> list[dict]:
@@ -2535,6 +2723,10 @@ def fit_entries(entries: list[dict], available: int,
 # The per-user services this seeder writes, in the order it writes them.
 # Named here so --only can be validated against the real list rather than a
 # second copy of it that drifts.
+# --fixtures-only: run each cohort user's named fixtures and nothing else, on users already seeded too
+# (every fixture is idempotent). How a fixture added after the cohort's seed reaches it.
+FIXTURES_ONLY = False
+
 SEEDABLE = ("drive", "gmail", "calendar", "chat", "contacts", "tasks",
            "gmail_settings")
 
@@ -2625,6 +2817,11 @@ def seed_one_user(settings: Settings, entry: dict, all_users: list[str],
                   fill_percent: float = 100.0,
                   account_limit_bytes: int | None = None) -> dict:
     user = entry["email"]
+    # A cohort entry (fableplan2 P2.4) carries its own size, edge cases and fixtures; every key is optional.
+    scale = entry.get("scale", scale)
+    mail_count = entry.get("mail", mail_count)
+    event_count = entry.get("events", event_count)
+    edge_cases = entry.get("edge_cases", edge_cases)
     peers = [] if getattr(settings, "seed_solo", False) else [u for u in all_users if u != user]
     t0 = time.time()
     print(f"  [{user}] starting ({entry['dept']}, {entry['project']})")
@@ -2636,7 +2833,7 @@ def seed_one_user(settings: Settings, entry: dict, all_users: list[str],
     # `only` narrows the run to one or more services -- everything not named
     # is skipped and reports zeroes, so a partial pass is visibly partial
     # rather than looking like a service that produced nothing.
-    base_want = (lambda svc: only is None or svc in only)
+    base_want = (lambda svc: not FIXTURES_ONLY and (only is None or svc in only))
     empty = {"note": "not requested"}
 
     # Corpus-building services duplicate on a second pass (see
@@ -2646,15 +2843,34 @@ def seed_one_user(settings: Settings, entry: dict, all_users: list[str],
     # Only these six are worth the one extra Drive lookup to guard.
     corpus_services = frozenset({"drive", "gmail", "calendar", "chat",
                                 "contacts", "tasks"})
-    already = (base_want("drive") and not force_reseed
+    # A planned (--profile) user is made of marked items, so it resumes by itself; its finished services are
+    # recorded on its root folder (profile_seed.done_services), which is what a rerun skips.
+    plan = entry.get("plan")
+    S = sys.modules[__name__]
+    if plan:
+        import profile_seed
+    done = profile_seed.done_services(drive, retry) if plan and not force_reseed else set()
+    already = (base_want("drive") and not force_reseed and not plan
               and _already_seeded(drive, settings))
     if already:
         print(f"  [{user}] already seeded (MIGRATION-TEST exists) -- "
               f"skipping corpus, re-run with --reseed to force a second one")
     want = (lambda svc: base_want(svc)
-           and not (already and svc in corpus_services))
+           and not (already and svc in corpus_services) and svc not in done)
 
-    if want("drive"):
+    litems = {}
+    if plan:
+        drive_m = profile_seed.build_drive(S, drive, user, plan, entry["pool"], retry) if want("drive") else dict(empty)
+        if want("drive"):
+            profile_seed.mark_done(drive, retry, "drive")
+        if want("gmail") or want("calendar") or want("chat"):
+            litems = profile_seed.link_items(S, drive, plan, entry["pool"], retry,
+                                             entry.get("share"), user=user)
+        if base_want("drive") and "sharing" not in done and (entry.get("share") or {}).get("outside"):
+            profile_seed.share_outside(S, settings, drive, user, plan, entry["share"]["outside"], external, retry)
+            profile_seed.mark_done(drive, retry, "sharing")
+        items = {f"own-{i}": f for i, f in enumerate(litems.get("own", [])[:6])} or None
+    elif want("drive"):
         builder = CorpusBuilder(drive, settings, user, peers, external, scale,
                                 _media, retry, groups=groups)
         drive_m = builder.build(entry["dept"], entry["project"], edge_cases)
@@ -2666,7 +2882,12 @@ def seed_one_user(settings: Settings, entry: dict, all_users: list[str],
             if (want("gmail") or want("calendar") or want("chat")) else None
     _content_step(user, base_want("drive"))
 
-    if want("gmail"):
+    if want("gmail") and plan:
+        gmail_m = profile_seed.seed_mail(S, gmail, drive, user, peers, external, plan, litems, entry["msg_bytes"],
+                                         _retry_factory(settings))
+        if not gmail_m["failed"]:        # a message that failed is sent on the rerun (the chunk was not recorded)
+            profile_seed.mark_done(drive, retry, "gmail")
+    elif want("gmail"):
         gmail_m = seed_gmail(gmail, settings, user, peers, external, mail_count,
                              drive_items=items)
         gmail_m.update(seed_drafts(gmail, settings, user, peers))
@@ -2680,9 +2901,19 @@ def seed_one_user(settings: Settings, entry: dict, all_users: list[str],
     _content_step(user, base_want("gmail_settings"))
 
     if want("calendar"):
-        cal_m = seed_calendar(cal, settings, user, peers, external, event_count,
-                              drive_items=items)
-        cal_m.update(seed_secondary_calendars(cal, settings, user, peers))
+        cal_m = seed_calendar(cal, settings, user, peers, external,
+                              plan["calendar_base_events"] if plan else event_count,
+                              drive_items=items, idempotent=bool(plan))
+        secondary_m = seed_secondary_calendars(
+            cal, settings, user, peers,
+            count=plan["secondary_calendars"] if plan else 2)
+        cal_m.update({"calendars": secondary_m.get("calendars", 0),
+                      "calendar_events": secondary_m.get("calendar_events", 0),
+                      "secondary_failed": secondary_m.get("failed", 0),
+                      "secondary_skipped": secondary_m.get("skipped", 0)})
+        cal_m["failed"] = cal_m.get("failed", 0) + secondary_m.get("failed", 0)
+        if plan and not cal_m["failed"]:
+            profile_seed.mark_done(drive, retry, "calendar")
     else:
         cal_m = dict(empty)
     _content_step(user, base_want("calendar"))
@@ -2690,6 +2921,8 @@ def seed_one_user(settings: Settings, entry: dict, all_users: list[str],
     chat_m = seed_chat(chat, settings, user, peers, external,
                        user.split("@")[0], drive_items=items) \
         if want("chat") else dict(empty)
+    if plan and want("chat"):
+        profile_seed.mark_done(drive, retry, "chat")
     _content_step(user, base_want("chat"))
 
     # Separate credential (build_people_tasks, not build_services): contacts
@@ -2698,13 +2931,31 @@ def seed_one_user(settings: Settings, entry: dict, all_users: list[str],
     # anything already seeded successfully above.
     if want("contacts") or want("tasks"):
         people, tasks = build_people_tasks(settings, user)
-        contacts_m = seed_contacts(people, settings, user, peers, external) \
+        contacts_m = seed_contacts(people, settings, user, peers, external,
+                                   count=plan["contacts"] if plan else 25,
+                                   idempotent=bool(plan)) \
             if want("contacts") else dict(empty)
-        tasks_m = seed_tasks(tasks, settings) if want("tasks") else dict(empty)
+        tasks_m = seed_tasks(tasks, settings, count=plan["tasks"] if plan else 20,
+                             idempotent=bool(plan)) if want("tasks") else dict(empty)
     else:
         contacts_m = tasks_m = dict(empty)
+    for svc in ("contacts", "tasks"):
+        result = contacts_m if svc == "contacts" else tasks_m
+        if plan and want(svc) and not result.get("failed") and not result.get("note"):
+            profile_seed.mark_done(drive, retry, svc)
     _content_step(user, base_want("contacts"))
     _content_step(user, base_want("tasks"))
+
+    # The cohort's named fixtures (data-generator/fixtures.py), after the standard content so they can link to it.
+    fixture_m = {}
+    if entry.get("fixtures") and (FIXTURES_ONLY or not already):
+        import fixtures
+        fixture_m = fixtures.run_all(entry["fixtures"], fixtures.Ctx(
+            seed=sys.modules[__name__], settings=settings, user=user, peers=peers, external=external,
+            drive=drive, gmail=gmail, cal=cal, retry=retry, items=items, params=entry.get("params") or {},
+            build_people_tasks=lambda: build_people_tasks(settings, user)))
+        print(f"  [{user}] fixtures: " + ", ".join(f"{k}={v.get('made', 0)}" + (f" ({len(v['notes'])} note(s))" if v.get("notes") else "")
+                                                   for k, v in fixture_m.items()))
 
     # Last: every other pass has to finish first so storageQuota.usage
     # reflects everything they wrote, not just some of it.
@@ -2763,7 +3014,7 @@ def seed_one_user(settings: Settings, entry: dict, all_users: list[str],
     return {"user": user, "dept": entry["dept"], "project": entry["project"],
             "drive": drive_m, "gmail": gmail_m, "calendar": cal_m,
             "chat": chat_m, "contacts": contacts_m, "tasks": tasks_m,
-            "storage": fill_m, "elapsed_sec": elapsed}
+            "storage": fill_m, "fixtures": fixture_m, "elapsed_sec": elapsed}
 
 
 def account_shares(settings: Settings, users: list[str]) -> dict[str, int]:
@@ -2842,19 +3093,169 @@ def reset_one_user(settings: Settings, user: str) -> dict:
 
 
 # ======================================================================
+# --profile: a synthetic organisation drawn from a real one's shape (profile_plan.py, profile_seed.py)
+# ======================================================================
+def _profile_step(args, settings, total_users: int):
+    """Plan, price and (live) probe, before anything is written. Returns (exit code or None, plans, context)."""
+    import profile_plan as pp
+    import profile_seed
+    import resources
+    profile = pp.load(args.profile)
+    n_cohort = 0
+    if args.cohort:
+        import fixtures
+        n_cohort = len(fixtures.load_cohort(args.cohort)["users"])
+    # Reserve the administrator's seat as well as every existing cohort
+    # account. The campaign cohort does not contain the source admin, so this
+    # remains conservative if SOURCE_ADMIN is unavailable to an offline plan.
+    fixed_users = n_cohort + 1
+    if total_users > args.seat_limit:
+        sys.exit(f"--users {total_users} exceeds --seat-limit {args.seat_limit} (Business Starter ceiling includes the admin)")
+    n = total_users - fixed_users
+    if n < 1:
+        sys.exit(f"--users {total_users} leaves no room for profile users beside admin 1 + cohort {n_cohort}")
+    try:
+        link_split = pp.validate_link_kind_split(args.link_kind_split)
+    except (TypeError, ValueError) as exc:
+        sys.exit(f"--link-kind-split: {exc}")
+    plans = pp.plan(profile, n, args.seed, link_kind_split=link_split)
+    if args.mail_share < 1:
+        # The profile's mail is ~1 MB a message through the box's upload: 648 GB, 200 h for 214 users (23 Nov 2026).
+        plans = pp.scale_messages(plans, args.mail_share)
+    mix = pp.file_mix(profile)
+    largest = profile["summary"]["largest_bytes"]["max"]
+    if args.pool_gb <= 0 or args.pool_max_file_mb <= 0:
+        sys.exit("--pool-gb and --pool-max-file-mb must be positive")
+    cap = min(largest, int(args.pool_max_file_mb * 2**20))
+    sizes = pp.pool_sizes(mix, int(args.pool_gb * 1e9), cap)
+    pool_bytes = sum(sum(v) for v in sizes.values())
+    rate = args.upload_mb_per_sec
+    rate_source = "explicit --upload-mb-per-sec"
+    if rate is None:
+        if args.plan_only:
+            rate = pp.RECORDED_PLAN_UPLOAD_MB_PER_SEC
+            rate_source = "offline assumption: 23 Nov 2026 5-user profile-seed upload probe"
+        else:
+            who = args.pool_user or os.getenv("SOURCE_ADMIN") or settings.source_admin
+            print(f"\nProbing the upload rate for {args.probe_seconds:g}s as {who} ...", flush=True)
+            rate = profile_seed.probe_upload(sys.modules[__name__], settings, who, args.probe_seconds) / 1e6
+            rate_source = f"live {args.probe_seconds:g}s upload probe"
+    workers = args.workers
+    if not workers:
+        try:
+            workers = resources.recommend()["seed_workers"]
+        except Exception:      # noqa: BLE001
+            workers = 3
+    drive_rate = args.drive_per_sec or resources.DRIVE_WRITES_PER_SEC
+    mail_rate = args.mail_per_sec or float(os.getenv("SEED_WRITES_PER_SEC_PER_USER", "2.0"))
+    per_user_rate = float(os.getenv("SEED_WRITES_PER_SEC_PER_USER", "2.0"))
+    sharing = pp.sharing(plans, args.seed)
+    pool_files = profile_seed.pool_file_count(mix, int(args.pool_gb * 1e9), cap)
+    directory_rate = (args.directory_per_sec if args.directory_per_sec is not None
+                      else pp.DEFAULT_DIRECTORY_REQUESTS_PER_SEC)
+    b = pp.budget(plans, upload_bps=rate * 1e6, drive_per_sec=drive_rate, mail_per_sec=mail_rate,
+                  directory_per_sec=directory_rate, workers=workers,
+                  pool_bytes=pool_bytes, pool_files=pool_files, max_hours=args.max_hours,
+                  seed=args.seed, per_user_per_sec=per_user_rate, new_accounts=n,
+                  fixed_users=fixed_users)
+    planned_seats = b["users"] + n_cohort + 1
+    print(f"\nProfile plan: {planned_seats} of {args.seat_limit} tenant seats = admin 1 + existing cohort {n_cohort} "
+          f"(including twins) + {b['users']} new profile users; seed {args.seed}")
+    print(f"  new accounts to create: {b['new_accounts']:,} (assuming generated pNNN addresses are unused)")
+    print(f"  total planned service items: {b['items']:,}; cohort fixture content is already present and excluded from work totals")
+    c = b["items_by_service"]
+    print(f"  Drive     : {c['drive_files']:,} files ({b['files']:,} user files + {c['department_files']:,} department + "
+          f"{c['drive_files'] - b['files'] - c['department_files']:,} pool/shared-drive), "
+          f"{c['drive_folders']:,} folders, {c['shared_drives']:,} shared drives, {c['drive_permissions']:,} ACL writes")
+    print(f"  Gmail     : {c['gmail_messages']:,} messages, {c['gmail_labels']:,} labels, {c['gmail_delegates']:,} mailbox delegates")
+    print(f"  Gmail settings: {c['gmail_settings_writes']:,} writes + {c['gmail_settings_reads']:,} existence reads "
+          f"({c['gmail_settings_requests']:,} API calls) across {c['gmail_settings_users']:,} mailboxes "
+          f"(vacation {c['gmail_vacation_settings']:,}, POP {c['gmail_pop_settings']:,}, "
+          f"IMAP {c['gmail_imap_settings']:,}, forwarding {c['gmail_forwarding_addresses']:,}, "
+          f"personal delegates {c['gmail_user_delegates']:,})")
+    print(f"  Calendar  : {c['calendar_events']:,} events, {c['secondary_calendars']:,} secondary calendars")
+    print(f"  Contacts  : {c['contacts']:,} contacts, {c['contact_groups']:,} contact groups")
+    print(f"  Tasks     : {c['tasks']:,} tasks, {c['task_lists']:,} lists")
+    print(f"  Directory : {c['directory_users_created']:,} new accounts, {c['directory_user_lookups']:,} account lookups, "
+          f"{c['directory_groups']:,} department groups, {c['directory_members']:,} group memberships")
+    print(f"  Upload payloads across this box: {b['bytes_crossing_box'] / 1e9:,.1f} GB = pool "
+          f"{b['pool_bytes'] / 1e9:,.2f} GB + mail {b['mail_bytes'] / 1e9:,.1f} GB "
+          f"({b['msg_bytes'] / 1e3:,.1f} KB/message; API metadata excluded)")
+    print(f"  Drive content copied inside the tenant: {b['drive_bytes_planned'] / 1e9:,.0f} GB planned; "
+          f"largest pool file {max(max(v) for v in sizes.values()) / 2**20:,.0f} MiB "
+          f"(cap {args.pool_max_file_mb:g} MiB; profile maximum {largest / 2**30:,.2f} GiB)")
+    if args.pool_max_file_mb > 128:
+        print(f"  large pool uploads are resumable and streamed from scratch storage; peak temporary disk is one pool file, "
+              f"up to {max(max(v) for v in sizes.values()) / 2**30:,.2f} GiB")
+    if b["count_factor"] < 1:
+        print(f"  MAIL COUNT FACTOR {b['count_factor']:.3f}: {b['messages_planned']:,} planned messages cut to {b['messages']:,}")
+    phases = b["phase_hours"]
+    print(f"  phase hours : account creation {phases['account_creation']:.2f}, pool upload {phases['pool_upload']:.2f}, "
+          f"directory sharing {phases['directory_sharing']:.2f}, Drive {phases['drive']:.2f}, Gmail {phases['gmail']:.2f}, "
+          f"Gmail settings {phases['gmail_settings']:.2f}, Calendar {phases['calendar']:.2f}, "
+          f"Contacts {phases['contacts']:.2f}, Tasks {phases['tasks']:.2f}, "
+          f"mail upload {b['upload_hours'] - phases['pool_upload']:.2f}; total sequential estimate {b['hours']:.1f} h")
+    print(f"  rates       : upload {rate:.2f} MB/s ({rate_source}); {drive_rate:g} Drive writes/s tenant-wide "
+          f"(resources.DRIVE_WRITES_PER_SEC); Gmail {mail_rate:g} messages/s per active user; "
+          f"Calendar/People/Tasks and Gmail settings/Directory sharing {per_user_rate:g} API calls/s per active user "
+          f"(SEED_WRITES_PER_SEC_PER_USER historical assumption); "
+          f"Directory {directory_rate:g} sequential requests/s; workers {min(workers, max(1, b['users']))}; "
+          f"limit --max-hours {args.max_hours:g}")
+    split_text = ", ".join(f"{k}={v:.0%}" for k, v in link_split.items())
+    print(f"  link mail   : {split_text} (" + ("DEFAULT_LINK_KIND_SPLIT assumption" if args.link_kind_split is None else "--link-kind-split") + ")")
+    if b["refuse"]:
+        print(f"REFUSED: {b['refuse']}. Nothing was written. Raise --max-hours, measure a faster rate, or seed fewer users.")
+        return 1, plans, {}
+    if b["count_factor"] < 1:
+        plans = pp.scale_messages(plans, b["count_factor"])
+    return (0 if args.plan_only else None), plans, {"mix": mix, "pool_bytes": pool_bytes, "cap": cap,
+                                                       "msg_bytes": b["msg_bytes"], "sharing": sharing}
+
+
+def _profile_entries(plans: list, domain: str, sharing: dict | None = None) -> list[dict]:
+    width = max(3, len(str(len(plans))))
+    out = []
+    for i, p in enumerate(plans):
+        local = f"{GENERATED_PREFIX}p{i + 1:0{width}d}"
+        template = ORG[i % len(ORG)]
+        out.append({"local": local, "email": f"{local}@{domain}", "dept": sharing["dept"][i] if sharing else template["dept"],
+                    "project": template["project"], "plan": p})
+    return out
+
+
+def _narrow_cohort_entries(entries: list[dict], cohort: str | None,
+                           users: str | None, profile_mode: bool = False) -> list[dict]:
+    """--users names cohort localparts only; profile mode uses it as a seat count."""
+    if not cohort or not users or profile_mode:
+        return entries
+    keep = {u.strip().lower() for u in users.split(",") if u.strip()}
+    return [entry for entry in entries if entry["local"] in keep]
+
+
+# ======================================================================
 # CLI
 # ======================================================================
 def main(argv: list[str] | None = None) -> int:
+    global _SEED_RUN
     ap = argparse.ArgumentParser(
         description="Seed or reset a sandbox organisation."
     )
-    ap.add_argument("--confirm-domain", required=True)
+    ap.add_argument("--confirm-domain", help="must match SOURCE_DOMAIN for any tenant write; not needed for --plan-only")
     ap.add_argument("--users", help="comma-separated localparts. Default: "
                                     "every user the tenant already has (live "
                                     "Directory lookup), falling back to "
                                     "alice,bob,carol,dave,erin if that "
                                     "lookup cannot run.")
     ap.add_argument("--scale", default="medium", choices=list(SCALES))
+    ap.add_argument("--seed", type=int, default=0,
+                    help="the campaign seed: the same seed makes the same content in every process "
+                         "(default 0)")
+    ap.add_argument("--cohort", metavar="FILE",
+                    help="a cohort file (data-generator/cohorts/*.json): each user's name, size, content key and "
+                         "named fixtures; replaces --users")
+    ap.add_argument("--content-key", default="",
+                    help="users seeded with the same key get the same content (twins). Default: each "
+                         "user's own address, so every user differs but a re-run repeats")
     ap.add_argument("--external-email", default="external.tester@example.com")
     ap.add_argument("--mail", type=int, help="messages per user "
                                              "(default scales with --scale)")
@@ -2960,6 +3361,38 @@ def main(argv: list[str] | None = None) -> int:
                          "skipped and reports zero. For topping up one "
                          "service on an existing corpus -- e.g. chat, once "
                          "the Chat app is configured and the 404s stop.")
+    ap.add_argument("--profile", metavar="FILE",
+                    help="a profile (data-generator/profiles/*.json: numbers only): seed users whose files, folders, "
+                         "file types, mail, threads and labels follow its shape. With it --users is the total tenant seat "
+                         "count (admin and cohort included) and --seed makes the same plan. Prints items, bytes across this box and "
+                         "hours first, and refuses past --max-hours")
+    ap.add_argument("--plan-only", action="store_true", help="with --profile: print the plan and its cost, write nothing; "
+                                                              "uses the recorded upload rate unless overridden")
+    ap.add_argument("--mail-share", type=float, default=1.0,
+                    help="with --profile: seed this share of the profile's messages in every mailbox (0.15 = 15%%)")
+    ap.add_argument("--link-kind-split", type=json.loads, default=None, metavar="JSON",
+                    help="with --profile: JSON weights for own, colleague, shared_drive, folder, deleted and outside link mail; "
+                         "default is profile_plan.DEFAULT_LINK_KIND_SPLIT (40/25/10/10/5/10 percent)")
+    ap.add_argument("--max-hours", type=float, default=12.0, help="with --profile: refuse a plan that takes longer (default 12)")
+    ap.add_argument("--upload-mb-per-sec", type=float, default=None,
+                    help="with --profile: this box's upload rate in MB/s. Live default: a --probe-seconds upload; offline --plan-only default: the recorded 1.84 MB/s probe")
+    ap.add_argument("--probe-seconds", type=float, default=60.0)
+    ap.add_argument("--drive-per-sec", type=float, default=None,
+                    help="with --profile: tenant-wide Drive writes a second (default resources.DRIVE_WRITES_PER_SEC)")
+    ap.add_argument("--mail-per-sec", type=float, default=None,
+                    help="with --profile: messages a second per mailbox (default env SEED_WRITES_PER_SEC_PER_USER, 2)")
+    ap.add_argument("--directory-per-sec", type=float, default=None,
+                    help="with --profile: sequential Directory API requests/s for account lookups and creates "
+                         "(default profile_plan.DEFAULT_DIRECTORY_REQUESTS_PER_SEC)")
+    ap.add_argument("--seat-limit", type=int, default=300,
+                    help="with --profile: tenant account ceiling including administrator and existing cohort (default Business Starter 300)")
+    ap.add_argument("--pool-gb", type=float, default=5.0,
+                    help="with --profile: the unique files uploaded once, from which every file is a server-side copy")
+    ap.add_argument("--pool-max-file-mb", type=float, default=_FILLER_CHUNK_BYTES / 2**20,
+                    help="with --profile: the largest pool file (it sits in memory twice while it uploads)")
+    ap.add_argument("--pool-user", default="", help="with --profile: whose Drive holds the pool (default SOURCE_ADMIN)")
+    ap.add_argument("--fixtures-only", action="store_true",
+                    help="with --cohort: run each user's named fixtures only (idempotent), nothing else")
     ap.add_argument("--top-up-only", action="store_true",
                     help="skip every seeding step and only check/top up "
                          "storage toward --target-gb-per-user or "
@@ -2992,6 +3425,39 @@ def main(argv: list[str] | None = None) -> int:
                          "--fill-until-full.")
     args = ap.parse_args(argv)
 
+    if not args.plan_only and not args.confirm_domain:
+        ap.error("--confirm-domain is required for any tenant write")
+
+    profile_users = 0
+    if args.plan_only and not args.profile:
+        sys.exit("--plan-only needs --profile")
+    if args.profile:
+        if not args.cohort:
+            # Profile content is added beside the existing fixture cohort.
+            # All 30 cohort accounts, including the twins, occupy seats even
+            # though their fixture content is already on the source.
+            args.cohort = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                      "cohorts", "fableplan2.json")
+        try:
+            profile_users = int(args.users or "")
+        except ValueError:
+            sys.exit("--profile: --users is a number (how many users in all), not a list of names")
+        if profile_users < 1:
+            sys.exit("--profile: --users must be at least 1")
+        if args.seat_limit < 1:
+            sys.exit("--seat-limit must be at least 1")
+        if (args.reset or args.top_up_only or args.trim_filler or args.fill_until_full or args.create_until_full
+                or args.all_users or args.fit_to_licenses):
+            sys.exit("--profile seeds new users; it cannot be combined with --reset, --top-up-only, --trim-filler, "
+                     "--fill-until-full, --create-until-full, --all-users or --fit-to-licenses")
+        args.users = None
+        # P0.6: the one address outside the tenant that is ever shared with (files, groups, the guest of an event)
+        import profile_plan
+        if args.external_email not in (ap.get_default("external_email"), profile_plan.OUTSIDE_ADDRESS):
+            sys.exit(f"--profile: --external-email may only be {profile_plan.OUTSIDE_ADDRESS} (the operator's P0.6 address)")
+        args.external_email = profile_plan.OUTSIDE_ADDRESS
+        args.shared_drives = 0      # the profile's own shared drives are made before the users (profile_seed.seed_sharing)
+
     only = None
     if args.only:
         only = frozenset(x.strip().lower() for x in args.only.split(",") if x.strip())
@@ -3023,6 +3489,12 @@ def main(argv: list[str] | None = None) -> int:
     # opt-in extra is more edit than the extra is worth.
     if args.big_file_mb:
         os.environ["SEED_BIG_FILE_MB"] = str(args.big_file_mb)
+    # Same channel for the randomness (corpus.stable_seed reads both).
+    os.environ["SEED_CAMPAIGN"] = str(args.seed)
+    if args.content_key:
+        os.environ["SEED_CONTENT_KEY"] = args.content_key
+    else:
+        os.environ.pop("SEED_CONTENT_KEY", None)
     # Same channel, for the same reason, read by resources.seed_payload_mb()
     # when it sizes the pool below: _media() copies its buffer into a
     # BytesIO, so a filler chunk is resident once per user in flight. Left
@@ -3040,12 +3512,24 @@ def main(argv: list[str] | None = None) -> int:
                  "--reset, --top-up-only, --fill-until-full, --create-users or "
                  "--target-gb-per-user.")
 
+    global FIXTURES_ONLY
+    if args.fixtures_only:
+        if not args.cohort:
+            sys.exit("--fixtures-only needs --cohort")
+        FIXTURES_ONLY = True
+        args.groups, args.shared_drives = False, 0
     settings = Settings()
-    assert_sandbox(settings, args.confirm_domain)
-    _use_own_key(settings)
+    if not args.plan_only:      # a dry plan touches no tenant
+        assert_sandbox(settings, args.confirm_domain)
+        _use_own_key(settings)
     settings.seed_solo = args.solo
     if args.solo:
         args.groups, args.shared_drives = False, 0
+    profile_plans, profile_ctx = None, {}
+    if args.profile:
+        rc, profile_plans, profile_ctx = _profile_step(args, settings, profile_users)
+        if rc is not None:
+            return rc
 
     if args.fit_to_licenses and not args.create_users:
         sys.exit("--fit-to-licenses requires --create-users: it decides how "
@@ -3127,6 +3611,12 @@ def main(argv: list[str] | None = None) -> int:
         # -- same wait the shared --create-users block below uses.
         print("\nWaiting 20s for new accounts to become usable ...")
         time.sleep(20)
+    elif args.cohort:
+        import fixtures
+        entries = fixtures.entries_from_cohort(fixtures.load_cohort(args.cohort), settings.source_domain)
+        print(f"\nCohort {args.cohort}: {len(entries)} user(s).")
+    elif args.profile:
+        entries = []
     elif args.users:
         locals_ = [u.strip() for u in args.users.split(",")]
         entries = []
@@ -3171,7 +3661,21 @@ def main(argv: list[str] | None = None) -> int:
         else:
             print(f"\nFound {len(entries)} existing user(s) in "
                   f"{settings.source_domain}; seeding all of them.")
+    if profile_plans is not None:
+        import profile_plan
+        profile_ctx["sharing"] = profile_plan.sharing(profile_plans, args.seed)
+        entries = entries + _profile_entries(profile_plans, settings.source_domain, profile_ctx["sharing"])
     all_users = [e["email"] for e in entries]
+    if args.cohort and args.users:
+        # --users narrows a cohort to these members; their peers stay the whole cohort.
+        entries = _narrow_cohort_entries(entries, args.cohort, args.users,
+                                         profile_mode=bool(args.profile))
+        if not args.profile:
+            print(f"  narrowed to {len(entries)} of the cohort: {', '.join(e['local'] for e in entries)}")
+    # Named, not skipped: a protected user (another account's real data) is never a seed's user or peer.
+    named = sorted(set(all_users) - _unprotected(all_users))
+    if named:
+        sys.exit(f"REFUSING: {', '.join(named)}: " + _protected_reason(named[0]))
 
     # --- Optionally create the accounts first ----------------------------
     # --create-until-full already created its accounts (and built `entries`
@@ -3482,7 +3986,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  estimated ~{est_calls:,} API writes, roughly {pretty} "
           f"at {args.workers} parallel users "
           f"({writes_per_sec:g} writes/sec/user)\n")
-    if est_min > 5 and not args.yes:
+    if est_min > 5 and not args.yes and profile_plans is None:     # a profile run printed its own, from rates
         if input("This is a long run. Continue? [y/N] ").strip().lower() != "y":
             print("Aborted.")
             return 1
@@ -3515,7 +4019,37 @@ def main(argv: list[str] | None = None) -> int:
             except Exception as exc:  # noqa: BLE001 - never fatal to a seed
                 print(f"  ! groups: {str(exc)[:140]}")
 
+    if profile_plans is not None:
+        import profile_seed
+        pool_user = args.pool_user or os.getenv("SOURCE_ADMIN") or settings.source_admin
+        print(f"\nPool: uploading unique files once as {pool_user} (the only Drive bytes that cross this box) ...", flush=True)
+        pool = profile_seed.build_pool(sys.modules[__name__], settings, pool_user, profile_ctx["mix"],
+                                       int(args.pool_gb * 1e9), profile_ctx["cap"], share_domain=not args.solo)
+        print(f"  pool: {len(pool['ids'])} files, {pool['bytes'] / 1e6:,.0f} MB, {pool['uploaded'] / 1e6:,.0f} MB sent now, "
+              f"largest {pool['largest'] / 1e6:,.0f} MB", flush=True)
+        for e in entries:
+            if e.get("plan"):
+                e["pool"], e["msg_bytes"] = pool, profile_ctx["msg_bytes"]
+        if not args.solo:     # before any user's mail, so link mail names real colleagues' and shared-drive files
+            print("\nSharing: department groups and folders, shared drives, the shared mailbox ...", flush=True)
+            sharing = profile_seed.seed_sharing(sys.modules[__name__], settings, entries, pool, args.external_email,
+                                                profile_ctx["sharing"], os.getenv("SOURCE_ADMIN") or settings.source_admin)
+            print(f"  {sharing['groups']} department group(s) ({sharing['group_members']} members), {sharing['dept_files']} "
+                  f"department file(s) ({sharing['dept_grants']} group grant(s)), {sharing['drives']} shared drive(s) "
+                  f"({sharing['drive_members']} members), shared mailbox {sharing['mailbox'] or '-'} "
+                  f"({sharing['readers']} reader(s) added)")
+            for note in sharing["notes"]:
+                print(f"    ! {note}")
+            for e in entries:
+                if e.get("plan"):
+                    e["share"] = sharing["per_user"].get(e["email"], {})
+
     t0 = time.time()
+    _SEED_RUN = {
+        "kind": "seed", "pid": os.getpid(),
+        "started_at": datetime.fromtimestamp(t0, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "started_epoch": t0, "source_domain": settings.source_domain, "target_domain": None,
+    }
     results = []
     # The same silence the reset path already fixed, in the half that runs
     # far longer. Seeding one user at scale 'huge' takes about an hour
@@ -3551,22 +4085,28 @@ def main(argv: list[str] | None = None) -> int:
     _steps["users"] = len(entries)
     if args.target_gb_per_user or args.fill_until_full:
         _fill_totals["users_total"] = len(entries)
-    with futures.ThreadPoolExecutor(max_workers=args.workers) as pool:
-        jobs = {
-            pool.submit(
-                seed_one_user, settings, e, all_users, args.external_email,
+    def _seed_tracked(entry, index):
+        import metrics
+        metrics.METRICS.worker_started(args.workers)
+        try:
+            return seed_one_user(
+                settings, entry, all_users, args.external_email,
                 args.scale, mail_count, event_count,
-                args.edge_cases == "all" or (args.edge_cases == "first" and i == 0),
+                args.edge_cases == "all" or (args.edge_cases == "first" and index == 0),
                 args.target_gb_per_user,
                 group_emails,
                 only,
                 args.reseed,
                 args.fill_until_full,
                 args.fill_percent,
-                shares.get(e["email"].lower()),
-            ): e["email"]
-            for i, e in enumerate(entries)
-        }
+                shares.get(entry["email"].lower()),
+            )
+        finally:
+            metrics.METRICS.worker_finished()
+
+    with futures.ThreadPoolExecutor(max_workers=args.workers) as pool:
+        jobs = {pool.submit(_seed_tracked, e, i): e["email"]
+                for i, e in enumerate(entries)}
         for fut in futures.as_completed(jobs):
             beat_done += 1
             _content_settle(jobs[fut])

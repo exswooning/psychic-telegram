@@ -121,8 +121,9 @@ class TestTheSeederActuallySetsIt:
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         src = open(os.path.join(root, "data-generator", "seed_sandbox.py"),
                    encoding="utf-8").read()
-        assert src.index('os.environ["SEED_FILLER_MB"]') \
-            < src.index("resources.recommend()")
+        main = src[src.index("\ndef main("):]          # the --profile planner sizes its own pool, before main
+        assert main.index('os.environ["SEED_FILLER_MB"]') \
+            < main.index("resources.recommend()")
 
     def test_the_published_size_matches_the_chunk_actually_uploaded(self):
         """A hardcoded 50 here and a changed _FILLER_CHUNK_BYTES there is

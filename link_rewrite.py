@@ -397,6 +397,44 @@ def doc_requests(doc: dict, lookup: Callable[[str], str | None]) -> list[dict]:
     return out + _replace_all(text_ids, lookup)
 
 
+def doc_restyle_requests(doc: dict, inserted: set[str]) -> list[dict]:
+    """Give the text replaceAllText just wrote the style of the run before it.
+
+    replaceAllText writes its replacement with an empty textStyle, so "...spreadsheets/d/<id>/edit" in one
+    Arial 11 run came back as three runs, the id unstyled (a. -> b., 17 Nov 2026): the copy no longer matched
+    its source. Only a run that is exactly one of the ids Bitport inserted, empty-styled, whose neighbours
+    share a style, is touched. It matters when that style is not the paragraph's default (a bold link): Docs
+    keeps a style equal to the default as unset, so for plain text the runs stay split and the check reads
+    them merged (native_fidelity._merge_runs)."""
+    out: list[dict] = []
+
+    def paragraphs(node):
+        if isinstance(node, dict):
+            if "paragraph" in node:
+                yield node["paragraph"].get("elements") or []
+            for v in node.values():
+                yield from paragraphs(v)
+        elif isinstance(node, list):
+            for v in node:
+                yield from paragraphs(v)
+
+    def style(el):
+        return {k: v for k, v in ((el.get("textRun") or {}).get("textStyle") or {}).items() if k != "link"}
+
+    for elements in paragraphs(doc.get("body")):
+        for i, el in enumerate(elements):
+            run = el.get("textRun")
+            if run is None or style(el) or run.get("content") not in inserted or i == 0:
+                continue
+            before = style(elements[i - 1])
+            after = style(elements[i + 1]) if i + 1 < len(elements) else before
+            if before and before == after:
+                out.append({"updateTextStyle": {
+                    "range": {"startIndex": el.get("startIndex", 0), "endIndex": el["endIndex"]},
+                    "textStyle": before, "fields": ",".join(sorted(before))}})
+    return out
+
+
 def slides_requests(pres: dict, lookup: Callable[[str], str | None]) -> list[dict]:
     """Slides batchUpdate requests repointing every mapped link in `pres` (presentations.get)."""
     out: list[dict] = []
@@ -448,6 +486,52 @@ def sheet_requests(value_ranges: list[dict], lookup: Callable[[str], str | None]
             for s in sorted(ids) if (t := lookup(s))]
 
 
+def sheet_link_requests(doc: dict, lookup: Callable[[str], str | None]) -> list[dict]:
+    """updateCells requests repointing the links findReplace cannot reach: a cell's own hyperlink
+    (userEnteredFormat.textFormat.link -- Sheets attaches one to every URL typed into a cell) and links
+    inside rich-text runs. `doc` is spreadsheets.get with grid data. findReplace rewrote only the
+    text, so on account 3 (15 Nov 2026) the text named the target copy and a click opened the SOURCE."""
+    out: list[dict] = []
+    for sheet in doc.get("sheets") or []:
+        sid = (sheet.get("properties") or {}).get("sheetId")
+        for grid in sheet.get("data") or []:
+            r0, c0 = grid.get("startRow", 0), grid.get("startColumn", 0)
+            for ri, row in enumerate(grid.get("rowData") or []):
+                for ci, cell in enumerate(row.get("values") or []):
+                    rng = {"sheetId": sid, "startRowIndex": r0 + ri, "endRowIndex": r0 + ri + 1,
+                           "startColumnIndex": c0 + ci, "endColumnIndex": c0 + ci + 1}
+                    uri = (((cell.get("userEnteredFormat") or {}).get("textFormat") or {}).get("link") or {}).get("uri")
+                    new, n = rewrite_text(uri, lookup) if uri else (uri, 0)
+                    if n:
+                        out.append({"updateCells": {"range": rng, "fields": "userEnteredFormat.textFormat.link",
+                                    "rows": [{"values": [{"userEnteredFormat": {"textFormat": {"link": {"uri": new}}}}]}]}})
+                    text = (cell.get("userEnteredValue") or {}).get("stringValue")
+                    runs = cell.get("textFormatRuns") or []
+                    if text is None or not any(((r.get("format") or {}).get("link") or {}).get("uri") for r in runs):
+                        continue
+                    # Rewrite run by run, so each run's start moves with the text before it (ids differ in length).
+                    # ponytail: indexes counted in code points; Sheets counts UTF-16 units, so text with emoji
+                    # before a link would shift. Count surrogate pairs if that is ever seen.
+                    starts = [r.get("startIndex", 0) for r in runs] + [len(text)]
+                    pieces, new_runs, changed, pos = [], [], False, 0
+                    for i, run in enumerate(runs):
+                        seg, k1 = rewrite_text(text[starts[i]:starts[i + 1]], lookup)
+                        fmt = dict(run.get("format") or {})
+                        u = (fmt.get("link") or {}).get("uri")
+                        nu, k2 = rewrite_text(u, lookup) if u else (u, 0)
+                        if k2:
+                            fmt["link"] = {"uri": nu}
+                        changed |= bool(k1 or k2)
+                        new_runs.append({**run, "startIndex": pos, "format": fmt})
+                        pieces.append(seg)
+                        pos += len(seg)
+                    if changed:
+                        out.append({"updateCells": {"range": rng, "fields": "userEnteredValue,textFormatRuns",
+                                    "rows": [{"values": [{"userEnteredValue": {"stringValue": text[:starts[0]] + "".join(pieces)},
+                                                          "textFormatRuns": new_runs}]}]}})
+    return out
+
+
 def rewrite_native(kind: str, svc, file_id: str, lookup: Callable[[str], str | None],
                    pace: Callable[[str], None] | None = None, apply: bool = True) -> int:
     """Repoint the links in one native TARGET copy. kind: docs | sheets | slides; svc is
@@ -462,6 +546,13 @@ def rewrite_native(kind: str, svc, file_id: str, lookup: Callable[[str], str | N
         if reqs and apply:
             go("write")
             svc.documents().batchUpdate(documentId=file_id, body={"requests": reqs}).execute()
+            inserted = {r["replaceAllText"]["replaceText"] for r in reqs if "replaceAllText" in r}
+            if inserted:
+                go("read")
+                restyle = doc_restyle_requests(svc.documents().get(documentId=file_id).execute(), inserted)
+                if restyle:
+                    go("write")
+                    svc.documents().batchUpdate(documentId=file_id, body={"requests": restyle}).execute()
     elif kind == "slides":
         go("read")
         reqs = slides_requests(svc.presentations().get(presentationId=file_id).execute(), lookup)
@@ -481,6 +572,11 @@ def rewrite_native(kind: str, svc, file_id: str, lookup: Callable[[str], str | N
                     request["findReplace"].pop("allSheets", None)
                     request["findReplace"]["sheetId"] = vr["sheetId"]
             reqs.extend(part)
+        go("read")
+        grid = svc.spreadsheets().get(spreadsheetId=file_id, includeGridData=True, fields=(
+            "sheets(properties.sheetId,data(startRow,startColumn,rowData(values("
+            "userEnteredValue,userEnteredFormat.textFormat.link,textFormatRuns))))")).execute()
+        reqs.extend(sheet_link_requests(grid, lookup))       # after findReplace: these set the final text
         if reqs and apply:
             go("write")
             svc.spreadsheets().batchUpdate(spreadsheetId=file_id, body={"requests": reqs}).execute()

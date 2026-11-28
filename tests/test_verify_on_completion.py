@@ -142,12 +142,12 @@ class TestVerifyUserRecordsWhatItFound:
         row = next(r for r in db.user_verifications() if r["service"] == "gmail")
         assert row["missing"] and "not on the target" in row["missing"][0]["why"]
 
-    def test_a_source_read_and_found_empty_is_identical_empty(self, auth, db, settings, identity):
+    def test_a_source_read_and_found_empty_is_empty_not_identical(self, auth, db, settings, identity):
         """Nothing to compare is a pass only when the source was READ and is empty (a
         never-read one is INCOMPLETE: test_verify_sample's empty-migration test)."""
         V.verify_user(auth, db, settings, SRC_USER, ("calendar",), 5)
         row = next(r for r in db.user_verifications())
-        assert row["verdict"] == "IDENTICAL" and row["checked"] == 0
+        assert row["verdict"] == "EMPTY" and row["checked"] == 0      # a pass, but never "identical"
 
     def test_a_service_that_cannot_be_read_is_incomplete_and_says_why(self, db, settings, identity):
         assert V.verify_user(object(), db, settings, SRC_USER, ("gmail",), 5) == "INCOMPLETE"    # no usable auth

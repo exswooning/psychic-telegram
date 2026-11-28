@@ -72,7 +72,7 @@ class TestTheTargetResetIsScoped:
         assert "*scoped" in reset_call
 
     def test_the_migration_arm_is_scoped_as_well(self):
-        mig = AB.split('"migrate", "--services", "drive"', 1)[1][:80]
+        mig = AB.split('"migrate", "--services", services', 1)[1][:80]
         assert "*scoped" in mig
 
 

@@ -273,10 +273,23 @@ def main(argv: list[str] | None = None) -> int:
     # --side source is for reseeding under different usernames: the old
     # accounts have to be gone, not merely emptied, or the new identity map
     # points at users that still exist with the old corpus attached.
-    auth = AuthManager(settings)
-    directory = auth.directory(args.side, writable=True)
     admin = (settings.source_admin if args.side == "source"
              else settings.target_admin)
+    if args.side == "source":
+        # The source's migrate key is read-only and the seed key holds no read-only migrate scope, so one token
+        # for both (auth.directory) is refused on every source since separate_credentials (22 Nov 2026, a.).
+        import separate_credentials
+        from google.oauth2 import service_account
+        from googleapiclient.discovery import build
+        from config import DIRECTORY_WRITE_SCOPE
+        key = separate_credentials.seed_key_path(settings)
+        if not key:
+            raise SystemExit("no seed key for this source: deleting its users needs one (run a seed setup first)")
+        creds = service_account.Credentials.from_service_account_file(
+            key, scopes=[DIRECTORY_WRITE_SCOPE], subject=admin)
+        directory = build("admin", "directory_v1", credentials=creds, cache_discovery=False)
+    else:
+        directory = AuthManager(settings).directory(args.side, writable=True)
     domain = (settings.source_domain if args.side == "source"
               else settings.target_domain)
     kept: list[str] = []

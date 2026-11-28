@@ -32,6 +32,14 @@ def test_equal_counts_with_a_lost_item_is_short_not_complete():
     assert _rollup({"mail": {**ok, "extraOnTarget": 1}}) == "DIFFERS"
 
 
+def test_unreadable_draft_inventory_cannot_roll_up_as_complete():
+    users = [{"source_email": "a@s", "target_email": "a@t", "status": "DONE"}]
+    tally_row = {"user": "a@s", "countParity": 1.0,
+                 "services": {"mail": {"expected": 3, "target": 3}},
+                 "items": {"drafts": {"incomplete": True, "errors": {"source": "403"}}}}
+    assert dbm.tally_rollup(users, [tally_row])["users"][0]["verdict"] == "UNKNOWN"
+
+
 def test_files_carried_in_from_outside_are_expected_on_the_target():
     """Live, dharan.gov.np pilot: 9 copies of files shared in by Gmail accounts read as
     'more on the target than the source'."""

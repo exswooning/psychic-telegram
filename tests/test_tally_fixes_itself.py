@@ -17,7 +17,7 @@ def wired(tmp_path, monkeypatch):
     db.set_services_done("short@src", {"drive", "gmail", "calendar"})
     view = {"users": [
         {"user": "short@src", "verdict": "SHORT", "services": {
-            "mail": {"expected": 100, "target": 97}, "drive_files": {"expected": 5, "target": 5}}},
+            "mail": {"expected": 100, "target": 97}, "calendar": {"expected": 5, "target": 4}}},
         {"user": "differs@src", "verdict": "DIFFERS", "services": {}},
         {"user": "fine@src", "verdict": "COMPLETE", "services": {}},
         {"user": "owed@src", "verdict": "OWED_TO_DMS", "services": {}},
@@ -25,6 +25,7 @@ def wired(tmp_path, monkeypatch):
     seen = {"run": [], "repair": [], "tally": []}
     monkeypatch.setattr(api_server, "_tally_view", lambda a: view)
     monkeypatch.setattr(api_server, "_ledger_path", lambda a: path)
+    monkeypatch.setattr(api_server, "_repair_policy", lambda a: True)
     monkeypatch.setattr(api_server, "_run_admitted",
                         lambda argv, a, name, **k: seen["run"].append((argv, name, k.get("then"))) or (True, "started"))
     monkeypatch.setattr(api_server, "_start_repair", lambda a, why, **k: seen["repair"].append(why) or (True, ""))
@@ -33,14 +34,15 @@ def wired(tmp_path, monkeypatch):
     return db, seen
 
 
-def test_short_is_migrated_again_for_only_what_is_short(wired):
+def test_short_is_migrated_again_for_only_what_is_short_never_mail(wired):
+    """Mail is never re-moved by the engine (operator, 10 Nov 2026): short mail is reported, the DMS owns it."""
     db, seen = wired
     api_server._fix_after_tally(3)
     (argv, name, then), = seen["run"]
-    assert name == "migrate" and argv[argv.index("--services") + 1] == "gmail"
+    assert name == "migrate" and argv[argv.index("--services") + 1] == "calendar"
     assert argv[argv.index("--user") + 1] == "short@src" and "fine@src" not in argv
-    assert then == ["repair", "tally@short@src"]
-    assert db.services_done("short@src") == {"drive", "calendar"}      # gmail reopened, nothing else
+    assert then == "tally@short@src"
+    assert db.services_done("short@src") == {"drive", "gmail"}      # calendar reopened, nothing else
 
 
 def test_differs_is_repaired_and_tallied_again(wired):
@@ -62,6 +64,13 @@ def test_only_the_named_users_are_looked_at(wired):
     db, seen = wired
     api_server._fix_after_tally(3, ["differs@src"])
     assert seen["run"] == [] and len(seen["repair"]) == 1
+
+
+def test_empty_scoped_autofix_never_widens_to_the_account(wired):
+    db, seen = wired
+    assert api_server._fix_after_tally(3, []) == (False, "no selected users to fix")
+    assert seen == {"run": [], "repair": [], "tally": []}
+    assert db.services_done("short@src") == {"drive", "gmail", "calendar"}
 
 
 def test_a_user_with_no_target_account_is_never_migrated_by_a_fix(wired, monkeypatch):

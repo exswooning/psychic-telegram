@@ -11,6 +11,9 @@ slot to whoever is next.
 from __future__ import annotations
 
 import os
+import sys
+import threading
+from types import SimpleNamespace
 
 import pytest
 
@@ -42,11 +45,11 @@ class FakeJob:
         self.calls = []
         self.refuse = ""
 
-    def start(self, name, argv, env=None, cwd=None, on_finish=None, retry=None):
+    def start(self, name, argv, env=None, cwd=None, on_finish=None, retry=None, reset_request_id=None):
         if self.refuse:
             return False, self.refuse
         self.calls.append({"name": name, "argv": argv, "env": env, "cwd": cwd,
-                           "on_finish": on_finish, "retry": retry})
+                           "on_finish": on_finish, "retry": retry, "reset_request_id": reset_request_id})
         return True, "started"
 
 
@@ -110,6 +113,55 @@ class TestTheQueuedJobRunsTheSameWayItWouldHave:
             payload = json.loads(conn.execute(
                 "SELECT payload FROM job_queue").fetchone()["payload"])
         assert payload["env"] == {"SOURCE_DOMAIN": "a.example"}
+
+
+@pytest.mark.parametrize("endpoint, label", [
+    ("reset_target", "reset target"),
+    ("reset_drive_ledger", "reset drive ledger"),
+])
+@pytest.mark.parametrize("queued", [False, True])
+def test_reset_request_has_its_own_terminal_receipt(db, tmp_path, monkeypatch, endpoint, label, queued):
+    """Exercise the handler, admissions, queue and result writer without a tenant."""
+    job = webui.Job(account_id=1)
+    monkeypatch.setattr(webui, "get_job", lambda aid: job)
+    monkeypatch.setattr(webui, "job_result_path", lambda aid, name: str(tmp_path / f"{aid}-{name}.json"))
+    monkeypatch.setattr(webui, "resolve_target_account", lambda aid, asked: (asked, ""))
+    monkeypatch.setattr(webui, "_subscription_ok", lambda aid: True)
+    monkeypatch.setattr(webui, "_not_ready", lambda aid, side: "")
+    monkeypatch.setattr(webui, f"{endpoint}_argv", lambda body, aid: ([sys.executable, "-c", "pass"], {}, ""))
+    complete = threading.Event()
+    finish = webui._job_finished
+
+    def finished(aid, name):
+        try:
+            finish(aid, name)
+        finally:
+            complete.set()
+
+    monkeypatch.setattr(webui, "_job_finished", finished)
+    if queued:
+        monkeypatch.setattr(job_admission, "MAX_CONCURRENT_TENANT_JOBS", 1)
+        assert job_admission.try_admit(99, "migrate", pid=os.getpid())[0]
+    replies = []
+    handler = SimpleNamespace(_account_id=lambda: 1, _json=replies.append)
+    request_id = "a" * 32
+    getattr(webui.Handler, f"_post_{endpoint}")(handler, {"account_id": 1, "reset_request_id": request_id})
+    assert replies[0]["ok"] and replies[0]["queued"] is queued
+    if queued:
+        assert not complete.is_set()
+        job_admission.release(99, "migrate")
+        assert Q.dispatch_one(webui._queue_starter, Q.RUNNER_WEBUI)["started"]
+    assert complete.wait(5), "the fixture process did not finish"
+    result = webui.load_job_result(1, label)
+    assert result["name"] == label and result["rc"] == 0
+    assert result["reset_request_id"] == request_id and result["finished"] > 0
+    assert result["retry"] is None
+
+
+def test_invalid_reset_request_id_is_refused_before_launch(db, job):
+    state, message = webui.launch_or_queue(1, "reset target", ["x"], reset_request_id="../invalid")
+    assert (state, message) == ("error", "invalid reset request ID")
+    assert not job.calls and job_admission.list_active() == [] and Q.waiting() == []
 
 
 class TestFinishingHandsOnTheSlot:
@@ -191,3 +243,15 @@ class TestTheTwoLaunchersDoNotStealEachOthersWork:
             + inspect.getsource(webui._job_finished)
         assert src.count("job_queue.RUNNER_WEBUI") == 2
         assert '"webui"' not in src, "hardcoded runner name"
+
+
+class TestTheQueueIsAboutTheAccountBeingViewed:
+    def test_the_route_resolves_the_account_like_api_job_does(self):
+        """A superadmin viewing account 3 saw that account's own verify labelled "another
+        account": 'mine' was relative to the login. /api/queue takes ?account= through the same
+        resolve_target_account gate as /api/job, so only an operator can look at another's."""
+        import inspect
+        src = inspect.getsource(webui.Handler._do_GET)
+        route = src.split('"/api/queue"', 1)[1].split('"/api/job"', 1)[0]
+        assert "resolve_target_account" in route and 'query.get("account"' in route
+        assert "queue_payload(viewing)" in route

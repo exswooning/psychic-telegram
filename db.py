@@ -24,12 +24,18 @@ import logging
 import os
 import sqlite3
 import threading
+import time
 from collections import OrderedDict
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Iterable, Iterator, Optional
 
 log = logging.getLogger(__name__)
+
+# How long a writer waits for another's transaction before "database is locked". Seven processes (a run's
+# shards, its verify threads, the API) share one ledger; 30 s was outlasted on 21 Nov 2026.
+BUSY_MS = int(os.getenv("BITPORT_DB_BUSY_MS", "120000"))
+SLOW_HOLD_SEC = float(os.getenv("BITPORT_DB_SLOW_HOLD_SEC", "5"))
 
 # preload_mappings() caches a user's WHOLE id_mapping in RAM the first time
 # their engine touches them, and until this existed nothing ever evicted a
@@ -173,6 +179,30 @@ CREATE TABLE IF NOT EXISTS repair_runs (
     error       TEXT
 );
 
+-- One record per migrate run, listing its phases in order (run_phases.py): the passes, then the
+-- follow-ons the launch asked for. A phase is DONE only when it finished cleanly; a start after a
+-- stop or a kill reuses the record and resumes at the first phase not DONE (the per-user ledger
+-- evidence still decides what a pass actually does).
+CREATE TABLE IF NOT EXISTS run_records (
+    run          INTEGER PRIMARY KEY AUTOINCREMENT,
+    started_at   TEXT NOT NULL,
+    pid          INTEGER,
+    resumes      INTEGER NOT NULL DEFAULT 0,
+    resumed_from TEXT
+);
+CREATE TABLE IF NOT EXISTS run_phases (
+    run         INTEGER NOT NULL,
+    seq         INTEGER NOT NULL,
+    name        TEXT NOT NULL,
+    kind        TEXT NOT NULL,         -- 'pass' or 'follow_on'
+    state       TEXT NOT NULL DEFAULT 'PENDING',  -- PENDING RUNNING DONE STOPPED FAILED
+    attempts    INTEGER NOT NULL DEFAULT 0,
+    started_at  TEXT,
+    ended_at    TEXT,
+    note        TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (run, seq)
+);
+
 -- When repair.fix_modified_times last checked each user's copied Drive items. Per user, not
 -- per repair: "moved since the last repair" counted a user that repair skipped -- every user
 -- a stopped run left part-way -- as checked, so their drifted times were never looked at
@@ -247,6 +277,25 @@ CREATE TABLE IF NOT EXISTS run_fidelity (
 -- verify_sample.py: what the one-to-one verifier last found for a user, one row
 -- per (user, service), newest wins. `payload` holds the counts and the first few
 -- of each kind of finding; the full report is the verifier's own file.
+-- Objects the verifier could not compare (verify_resilience): kept apart from user_verification
+-- so an item that is merely unread is never confused with one that was read and differs. A row
+-- is deleted when a later pass compares the object; one still here means "not verified".
+CREATE TABLE IF NOT EXISTS verification_unverified (
+  source_user TEXT NOT NULL,
+  service TEXT NOT NULL,
+  source_id TEXT NOT NULL,
+  target_id TEXT NOT NULL DEFAULT '',
+  mime TEXT,
+  state TEXT NOT NULL,
+  http_status INTEGER,
+  endpoint TEXT,
+  error TEXT,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  first_seen TEXT NOT NULL,
+  last_attempt TEXT NOT NULL,
+  next_retry_at TEXT,
+  PRIMARY KEY (source_user, service, source_id)
+);
 CREATE TABLE IF NOT EXISTS user_verification (
     source_user TEXT NOT NULL,
     service     TEXT NOT NULL,
@@ -542,6 +591,14 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
+# What a Drive link can name: a shortcut has its own id and URL too, and a mail link to one was left
+# unresolved (c01, control run a. -> b., 18 Nov 2026).
+DRIVE_ITEM_TYPES = ("file", "folder", "shortcut")
+
+_MAPPED_FAILPOINT = {"file": "drive.mapped", "folder": "drive.mapped", "shortcut": "drive.mapped",
+                     "message": "gmail.mapped"}
+
+
 class MigrationDB:
     """Thread-safe façade over migration.db."""
 
@@ -588,7 +645,7 @@ class MigrationDB:
         """One connection per thread, created lazily."""
         c = getattr(self._local, "conn", None)
         if c is None:
-            c = sqlite3.connect(self.path, timeout=30.0, isolation_level=None)
+            c = sqlite3.connect(self.path, timeout=BUSY_MS / 1000, isolation_level=None)
             c.row_factory = sqlite3.Row
             # journal_mode is persisted in the database file; the other two are
             # NOT. `synchronous` and `foreign_keys` are per-connection, so
@@ -605,7 +662,7 @@ class MigrationDB:
             c.execute("PRAGMA journal_mode=WAL;")
             c.execute("PRAGMA synchronous=NORMAL;")
             c.execute("PRAGMA foreign_keys=ON;")
-            c.execute("PRAGMA busy_timeout=30000;")
+            c.execute(f"PRAGMA busy_timeout={BUSY_MS};")
             self._local.conn = c
         return c
 
@@ -615,9 +672,16 @@ class MigrationDB:
         with self._write_lock:
             conn = self.conn
             conn.execute("BEGIN IMMEDIATE")
+            held = time.monotonic()
             try:
                 yield conn
                 conn.execute("COMMIT")
+                if time.monotonic() - held > SLOW_HOLD_SEC:
+                    # Name whoever holds the ledger: a hold past every writer's wait failed six items and two
+                    # users' Drive passes at once (a. -> b., 21 Nov 2026) and nothing said who held it.
+                    import traceback
+                    log.warning("ledger write lock held %.1fs by:\n%s", time.monotonic() - held,
+                                "".join(traceback.format_stack(limit=8)[:-2]))
             except Exception:
                 # SQLite may have rolled back already (a full disk does): a second ROLLBACK
                 # then raised "no transaction is active" and hid the real error -- live,
@@ -698,6 +762,7 @@ class MigrationDB:
                 if not src or not tgt:
                     continue
                 rows.append((src, tgt, (r.get("entity_type") or "user").strip()))
+        rows = _own_pairs(self, rows)
 
         with self.write() as conn:
             conn.executemany(
@@ -765,7 +830,7 @@ class MigrationDB:
             q += " WHERE status=?"
             args = (status,)
         q += " ORDER BY source_email"
-        return self.conn.execute(q, args).fetchall()
+        return _visible(self, self.conn.execute(q, args).fetchall())
 
     def mark_services_done(self, source_email: str, services) -> None:
         """Union the given services into this user's completed set."""
@@ -801,10 +866,10 @@ class MigrationDB:
 
     def identity_pairs(self):
         """Every mapped (source, target) pair, in a stable order."""
-        return self.conn.execute(
+        return _visible(self, self.conn.execute(
             """SELECT source_email, target_email FROM identity_map
                 WHERE target_email IS NOT NULL AND target_email != ''
-                ORDER BY source_email""").fetchall()
+                ORDER BY source_email""").fetchall())
 
     def set_identity_status(self, source_email: str, status: str,
                             notes: str = "") -> None:
@@ -949,7 +1014,7 @@ class MigrationDB:
             f"AND type IN ({marks})", (source_user, *types))}
 
     def target_for_source_id(self, source_id: str,
-                             types: tuple[str, ...] = ("file", "folder")) -> Optional[str]:
+                             types: tuple[str, ...] = DRIVE_ITEM_TYPES) -> Optional[str]:
         """The target id for a source file/folder, whoever owned it.
 
         Deliberately ignores the source_user half of the primary key.
@@ -967,7 +1032,7 @@ class MigrationDB:
         return row["target_id"] if row else None
 
     def targets_for_source_id(self, source_id: str,
-                              types: tuple[str, ...] = ("file", "folder")) -> list[str]:
+                              types: tuple[str, ...] = DRIVE_ITEM_TYPES) -> list[str]:
         """Every target copy of one source file. A file owned outside the migration and
         shared with many users is copied once per user (live: one file, 19 ward
         copies), so `target_for_source_id`'s one pick is not the only right answer."""
@@ -1079,7 +1144,9 @@ class MigrationDB:
                                (key,)).fetchone()
             prev = _json.loads(row[0]) if row else {}
             out = {k: sample.get(k) for k in ("calls", "retries", "failures", "p50", "p95",
-                                              "elapsed_sec", "workers", "rss_mb")}
+                                              "elapsed_sec", "workers", "rss_mb",
+                                              "worker_slots_configured", "worker_slots_busy",
+                                              "idle_workers_share")}
             out["requests_per_sec"] = sample.get("requests_per_sec")
             for k, src in (("peak_requests_per_sec", "requests_per_sec"),
                            ("peak_rss_mb", "rss_mb"), ("peak_workers", "workers")):
@@ -1177,7 +1244,7 @@ class MigrationDB:
         for the shared logic (also used by api_server._verification_view against a
         read-only connection, and by the run report)."""
         users = [r for r in self.all_identities() if r["entity_type"] == "user"]
-        return verification_rollup(users, self.user_verifications())
+        return verification_rollup(users, self.user_verifications(), pending_items=pending_mail_checks(self.conn), expected_services=expected_verification_services(self.conn), pending_diagnostics=pending_mail_diagnostics(self.conn))
 
     def save_user_tally(self, source_user: str, target_user: str,
                         count_parity: Optional[float], payload: dict) -> None:
@@ -1240,6 +1307,21 @@ class MigrationDB:
             out.append(payload)
         return out
 
+    def lost_drive_mappings(self, users) -> list:
+        """(user, n) for DONE users with Drive items the audit calls copied but no mapping names.
+        finished_but_unmapped sees only users with NO mappings left; a partial loss slipped past."""
+        if not users:
+            return []
+        marks = ",".join("?" * len(users))
+        return [tuple(r) for r in self.conn.execute(
+            f"""SELECT a.source_user, COUNT(*) FROM audit_log a
+                 JOIN identity_map i ON i.source_email = a.source_user AND i.status = 'DONE'
+                WHERE a.source_user IN ({marks}) AND a.item_type IN ('file','folder')
+                  AND a.status = 'SUCCESS'
+                  AND NOT EXISTS (SELECT 1 FROM id_mapping m WHERE m.source_user = a.source_user
+                                  AND m.source_id = a.item_id AND m.type = a.item_type)
+                GROUP BY a.source_user ORDER BY 2 DESC""", list(users))]
+
     def finished_but_unmapped(self):
         """Users whose status says DONE while nothing maps to the target.
 
@@ -1292,13 +1374,30 @@ class MigrationDB:
                 "SET ceiling=excluded.ceiling, updated_at=excluded.updated_at",
                 (tenant, ceiling, utc_now()))
 
-    def load_rate_ceiling(self, tenant: str) -> float | None:
+    def load_rate_ceiling(self, tenant: str, max_age_hours: float | None = None) -> float | None:
         """The last proven ceiling for this tenant, or None if nothing has ever
-        been measured (a fresh account, or a ledger from before this existed)."""
+        been measured (a fresh account, or a ledger from before this existed) --
+        or, with `max_age_hours`, if it was proven longer ago than that. Google
+        meters per minute: a refusal from days ago is not evidence of today's
+        limit, and a stale low value only ever went down (account 3: 6.49/s
+        saved 1 Nov by the compounding-penalise bug held a whole 45-user run
+        to it on 9 Nov)."""
         row = self.conn.execute(
-            "SELECT ceiling FROM rate_limiter_ceiling WHERE tenant=?",
+            "SELECT ceiling, updated_at FROM rate_limiter_ceiling WHERE tenant=?",
             (tenant,)).fetchone()
-        return row["ceiling"] if row else None
+        if not row:
+            return None
+        if max_age_hours is not None and row["updated_at"]:
+            from datetime import datetime, timedelta, timezone
+            try:
+                when = datetime.fromisoformat(row["updated_at"].replace("Z", "+00:00"))
+                if when.tzinfo is None:
+                    when = when.replace(tzinfo=timezone.utc)
+                if datetime.now(timezone.utc) - when > timedelta(hours=max_age_hours):
+                    return None
+            except ValueError:
+                return None      # unreadable age: not evidence either
+        return row["ceiling"]
 
     def mark_dms_delivered(self, verified_items=()) -> int:
         """Only exact items freshly checked by reconciliation may become delivered.
@@ -1377,6 +1476,8 @@ class MigrationDB:
                 (source_user, source_id, target_id, item_type,
                  parent_target_id, source_name, utc_now()),
             )
+        import failpoints
+        failpoints.hit(_MAPPED_FAILPOINT.get(item_type, ""), user=source_user)
         # Write through, after the transaction commits. Ordering matters: a
         # cache updated before the commit would answer "already migrated" for
         # work that a crash then rolled back.
@@ -1389,6 +1490,19 @@ class MigrationDB:
                 # list rather than let a long-idle preload from earlier
                 # outlive someone genuinely in flight right now.
                 self._mapping_cache.move_to_end(source_user)
+
+    def adopt_message_mapping(self, user: str, sid: str, tid: str, shares_with: str | None = None) -> None:
+        """Adopt a proven identity atomically, preserving existing mappings and collisions. `shares_with`: the one
+        other source message the caller proved is this same email (split_mail.same_source_email) -- the source
+        holds it twice and Gmail keeps one copy -- may hold the same target."""
+        with self.write() as conn:
+            old = conn.execute("SELECT target_id FROM id_mapping WHERE source_user=? AND source_id=? AND type='message'", (user,sid)).fetchone()
+            collision = conn.execute("SELECT 1 FROM id_mapping WHERE source_user=? AND type='message' AND target_id=? AND source_id NOT IN (?,?) LIMIT 1", (user,tid,sid,shares_with or sid)).fetchone()
+            if collision or (old and old[0] != tid):
+                raise RuntimeError("DMS destination identity is absent, changed or ambiguous")
+            conn.execute("INSERT OR IGNORE INTO id_mapping(source_user,source_id,target_id,type,created_at) VALUES(?,?,?,'message',?)", (user,sid,tid,utc_now()))
+        with self._cache_lock:
+            self._mapping_cache.pop(user, None)
 
     # -- audit_log -----------------------------------------------------------
     def log_audit(self, source_user: str, item_id: str, item_type: str,
@@ -1682,6 +1796,26 @@ class MigrationDB:
             )
 
 
+def _visible(db: MigrationDB, rows: list) -> list:
+    """identity_map rows without another account's protected users (domain_guard.protected_subject)."""
+    import domain_guard
+    return domain_guard.visible(rows, domain_guard.ledger_account(db.path))
+
+
+def _own_pairs(db: MigrationDB, pairs: list) -> list:
+    """Pairs (source, target, ...) this ledger may hold: another account's protected user never
+    enters it, so no raw read of identity_map can find one either."""
+    import domain_guard
+    keep = domain_guard.visible([{"source_email": p[0], "target_email": p[1]} for p in pairs],
+                                domain_guard.ledger_account(db.path))
+    ok = {(k["source_email"], k["target_email"]) for k in keep}
+    dropped = [p[0] for p in pairs if (p[0], p[1]) not in ok]
+    if dropped:
+        log.warning("identity map: %d protected user(s) of another account left out, e.g. %s",
+                    len(dropped), dropped[0])
+    return [p for p in pairs if (p[0], p[1]) in ok]
+
+
 def bulk_seed_identities(db: MigrationDB, pairs: Iterable[tuple[str, str]]) -> None:
     """Convenience helper for tests and small manual runs."""
     with db.write() as conn:
@@ -1690,14 +1824,17 @@ def bulk_seed_identities(db: MigrationDB, pairs: Iterable[tuple[str, str]]) -> N
                VALUES (?,?)
                ON CONFLICT(source_email) DO UPDATE SET
                    target_email=excluded.target_email""",
-            [(a.lower(), b.lower()) for a, b in pairs],
+            _own_pairs(db, [(a.lower(), b.lower()) for a, b in pairs]),
         )
     db._identity_cache = None            # membership changed
 
 
 # Worst verdict wins a user's rollup: one DIFFERENCES service means the user is not
 # clean, however many others came back IDENTICAL.
-_VERDICT_RANK = {"DIFFERENCES": 3, "INCOMPLETE": 2, "NOT_VERIFIED": 2, "IDENTICAL": 1}
+# EMPTY: the source was read live and holds nothing, so zero items were compared. It is a
+# pass, but never "identical" -- no item was matched -- and a user is EMPTY only when
+# every service is.
+_VERDICT_RANK = {"DIFFERENCES": 3, "INCOMPLETE": 2, "NOT_VERIFIED": 2, "IDENTICAL": 1, "EMPTY": 0}
 
 
 def parse_user_verification_rows(rows) -> list[dict]:
@@ -1717,15 +1854,64 @@ def parse_user_verification_rows(rows) -> list[dict]:
             payload["coverageComplete"] = False
             payload["coverageNote"] = "Historical item checks; feature/access coverage was not recorded. Recheck required."
         effective = r["verdict"]
-        if effective == "IDENTICAL" and payload.get("coverageComplete") is False:
+        if effective in ("IDENTICAL", "EMPTY") and any((payload.get("counts") or {}).get(k, 0) for k in ("differences", "missing", "duplicates", "extras", "notCopied")):
+            effective = "DIFFERENCES"
+        if effective == "IDENTICAL" and (payload.get("coverageComplete") is False or (payload.get("counts") or {}).get("errors", 0)):
             effective = "INCOMPLETE"
+        if effective == "IDENTICAL" and not r["checked"]:
+            effective = "EMPTY"
         out.append({"user": r["source_user"], "service": r["service"], "verifiedAt": r["verified_at"],
                     "verdict": effective, "itemVerdict": r["verdict"], "checked": r["checked"], "identical": r["identical"],
                     "sampledOf": r["sampled_of"], **payload})
     return out
 
 
-def verification_rollup(users, verifications: list[dict]) -> dict:
+def pending_mail_checks(conn):
+    """Read-only receipt blockers; no schema writes while the UI polls."""
+    try:
+        return dict(conn.execute("SELECT source_user,COUNT(*) FROM migration_item_receipts "
+                                 "WHERE service='gmail' AND status='NEEDS_RECHECK' GROUP BY source_user"))
+    except sqlite3.OperationalError:
+        return {}
+
+
+def pending_mail_diagnostics(conn):
+    """Bounded recent advisory evidence for the UI; never mail content."""
+    import json
+    out = {}
+    try:
+        rows = conn.execute("SELECT source_user,evidence FROM migration_item_receipts "
+                            "WHERE service='gmail' AND status='NEEDS_RECHECK' ORDER BY verified_at DESC LIMIT 150")
+        for user, evidence in rows:
+            try:
+                diagnostics = json.loads(evidence).get("diagnostics", [])
+            except (TypeError, ValueError, AttributeError):
+                continue
+            known = {d.get("code") for d in out.setdefault(user, [])}
+            for diagnostic in diagnostics:
+                if isinstance(diagnostic, dict) and diagnostic.get("code") not in known and len(out[user]) < 8:
+                    out[user].append(diagnostic)
+                    known.add(diagnostic.get("code"))
+    except sqlite3.OperationalError:
+        pass
+    return out
+
+
+def expected_verification_services(conn):
+    """An attempted service cannot disappear from parity just because it failed."""
+    mapping = {"file": "drive", "folder": "drive", "shortcut": "drive", "message": "gmail",
+               "draft": "gmail", "event": "calendar", "contact": "contacts", "task": "tasks"}
+    out = {}
+    try:
+        for user, kind in conn.execute("SELECT DISTINCT source_user,item_type FROM audit_log"):
+            if kind in mapping:
+                out.setdefault(user, set()).add(mapping[kind])
+    except sqlite3.OperationalError:
+        pass
+    return out
+
+
+def verification_rollup(users, verifications: list[dict], pending_items=None, expected_services=None, pending_diagnostics=None) -> dict:
     """Every user rolled up to one verdict: the worst across their checked services, or
     NOT_VERIFIED if nobody has checked any of them yet -- never a blank, which would read
     as a pass. `users` is identity_map rows (or anything indexable the same way) already
@@ -1739,9 +1925,24 @@ def verification_rollup(users, verifications: list[dict]) -> dict:
     totals = {"IDENTICAL": 0, "DIFFERENCES": 0, "INCOMPLETE": 0, "NOT_VERIFIED": 0}
     out_users = []
     for u in users:
-        svcs = list(by_user.get(u["source_email"], []))
+        svcs = [dict(row) for row in by_user.get(u["source_email"], [])]
+        pending = (pending_items or {}).get(u["source_email"], 0)
+        if pending:
+            mail = next((row for row in svcs if row["service"] == "gmail"), None)
+            if mail is None:
+                mail = {"user": u["source_email"], "service": "gmail", "verifiedAt": None,
+                        "verdict": "INCOMPLETE", "checked": 0, "identical": 0, "sampledOf": None}
+                svcs.append(mail)
+            mail["itemChecksPending"] = pending
+            diagnoses = list(mail.get("diagnostics") or []) + list((pending_diagnostics or {}).get(u["source_email"], []))
+            mail["diagnostics"] = list({d["code"]: d for d in diagnoses if isinstance(d, dict) and d.get("code")}.values())
+            mail["coverageComplete"] = False
+            if mail["verdict"] in ("IDENTICAL", "EMPTY", "NOT_VERIFIED"):
+                mail["verdict"] = "INCOMPLETE"
+            mail["notes"] = list(mail.get("notes") or []) + [f"{pending} item check(s) need recheck; saved mailbox result retained."]
         keys = u.keys() if hasattr(u, "keys") else []
         expected = set(filter(None, (u["services_done"] or "").split(","))) if "services_done" in keys else set()
+        expected.update((expected_services or {}).get(u["source_email"], ()))
         present = {row["service"] for row in svcs}
         for missing in sorted(expected - present):
             svcs.append({"user": u["source_email"], "service": missing, "verdict": "NOT_VERIFIED",
@@ -1751,7 +1952,13 @@ def verification_rollup(users, verifications: list[dict]) -> dict:
         verdict = (max((x["verdict"] for x in svcs), key=lambda v: _VERDICT_RANK.get(v, 0))
                   if svcs else "NOT_VERIFIED")
         totals[verdict] = totals.get(verdict, 0) + 1
+        declared = {service for row in svcs for service in (row.get("provenance") or {}).get("services", [])}
+        full_coverage = bool(declared) and declared <= {row["service"] for row in svcs} and all(
+            row.get("coverageComplete") is True and row.get("completion") == "COMPLETE"
+            and row.get("provenance") and not row.get("itemChecksPending")
+            and not (row.get("sampledOf") and row["sampledOf"] > row.get("checked", 0)) for row in svcs)
         out_users.append({"user": u["source_email"], "target": u["target_email"], "status": u["status"],
+                          "fullCoverageConfirmed": full_coverage,
                           "verdict": verdict, "verifiedAt": max((x["verifiedAt"] for x in svcs if x.get("verifiedAt")), default=None),
                           "services": svcs})
     return {"users": out_users, "totals": totals}
@@ -1830,9 +2037,14 @@ def tally_rollup(users, tallies: list[dict], deferred: dict[str, int] | None = N
         items = (t or {}).get("driveItems") or {}
         # Every other service, item by item (tally.compare_services): a copy missing or
         # never made is short, whatever the counts say; an extra on the target differs.
-        each = ((t or {}).get("items") or {}).values()
+        item_checks = (t or {}).get("items") or {}
+        each = item_checks.values()
         lost = any(x.get("notMigrated") or x.get("missingOnTarget") for x in each)
-        extra = any(x.get("extraOnTarget") for x in ((t or {}).get("items") or {}).values())
+        extra = any(x.get("extraOnTarget") for x in item_checks.values())
+        item_checks_incomplete = any(isinstance(item, dict) and item.get("incomplete")
+                                     for item in item_checks.values())
+        service_count_unknown = any(isinstance(service, dict) and service.get("usersUnknown", 0)
+                                    for service in ((t or {}).get("services") or {}).values())
         if t is None:
             verdict = "NOT_TALLIED"
         elif t.get("countParity") is None:
@@ -1846,6 +2058,10 @@ def tally_rollup(users, tallies: list[dict], deferred: dict[str, int] | None = N
             # copy that is there but not the same (name, size, checksum,
             # modifiedTime), a mapped item no longer there, or MORE on the target.
             verdict = "DIFFERS"
+        elif item_checks_incomplete or service_count_unknown:
+            # An unavailable service count or per-item inventory (currently draft IDs)
+            # makes exact parity unknown even when other aggregate counts happen to match.
+            verdict = "UNKNOWN"
         else:
             verdict = "COMPLETE"
         totals[verdict] += 1

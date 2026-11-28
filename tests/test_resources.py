@@ -30,6 +30,13 @@ class TestProbe:
         assert r.cpu_logical >= 1
         assert r.ram_total_gb > 0
 
+    def test_macos_probe_uses_sysconf_when_sysctl_is_unavailable(self, monkeypatch):
+        monkeypatch.setattr(resources, "_run", lambda _cmd: "")
+        r = resources.SystemResources(platform="darwin")
+        resources._probe_macos(r)
+        assert r.cpu_logical >= 1
+        assert r.ram_total_gb > 0
+
     def test_recommendation_is_always_at_least_one_worker(self):
         assert resources.recommend()["user_workers"] >= 1
 

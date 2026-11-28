@@ -1,0 +1,318 @@
+"""Which Drive links in a user's mail cannot be repointed, and what the source answers for each file.
+
+The engine rewrites a link only when its file has a copy on the target. Every other link stays exactly
+as it was, and until now it was only COUNTED ("N links to source files that answer 404"). This lists them:
+one row per (user, file) in `mail_dead_links`, with the status the source gives for it, how many emails
+mention it, and one example email -- so a person can see what the links are and judge them.
+
+Read-only on both tenants: Gmail `full` reads of the text parts (never attachments' bytes) and one
+`files.get` per distinct file on the source. Writes only its own table in the account's ledger.
+
+    python mail_dead_links.py [--account-id N] [--user a@src ...] [--workers 8]
+
+Status: NOT_FOUND (404, deleted or never visible), NO_ACCESS (403), NOT_MIGRATED (the file exists on the
+source and has no target copy -- the owner is named), OTHER (anything else, text kept).
+"""
+from __future__ import annotations
+
+import argparse
+import base64
+import collections
+import concurrent.futures as futures
+from itertools import islice
+import os
+import sqlite3
+import sys
+import time
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+STATUSES = ("NOT_FOUND", "NO_ACCESS", "OUTSIDE", "NOT_MIGRATED", "OTHER")
+LABEL = {"NOT_FOUND": "Source file answers 404", "NO_ACCESS": "No access to the source file",
+         "OUTSIDE": "Owned outside the organisation (not migrated, by design)",
+         "NOT_MIGRATED": "Owned inside the organisation, no copy on the target", "OTHER": "Could not be checked"}
+
+LINK_SCHEMA = """CREATE TABLE IF NOT EXISTS mail_link_messages (
+    source_user TEXT NOT NULL, message_id TEXT NOT NULL, file_ids TEXT NOT NULL, by_search INTEGER NOT NULL,
+    checked_at TEXT NOT NULL, PRIMARY KEY (source_user, message_id))"""
+
+# Every message the inventory examined, with what the mail pass needs to know without reading it again:
+# 0 proven free of Drive links, 1 must be read (a link, encrypted, or not judged), 2 a draft, 3 a chat.
+# A row in mail_link_inventories says the user's whole mailbox was examined (the read-once plan item).
+SEEN_SCHEMA = """CREATE TABLE IF NOT EXISTS mail_link_seen (
+    source_user TEXT NOT NULL, message_id TEXT NOT NULL, kind INTEGER NOT NULL,
+    PRIMARY KEY (source_user, message_id))"""
+INVENTORIES_SCHEMA = """CREATE TABLE IF NOT EXISTS mail_link_inventories (
+    source_user TEXT PRIMARY KEY, completed_at TEXT NOT NULL, examined INTEGER NOT NULL)"""
+FREE, READ, DRAFT, CHAT = 0, 1, 2, 3
+
+
+def proven(db, source_user: str) -> dict | None:
+    """{message id: kind} from the user's last COMPLETE inventory, or None when there is none."""
+    try:
+        if not db.conn.execute("SELECT 1 FROM mail_link_inventories WHERE source_user=?", (source_user,)).fetchone():
+            return None
+        return dict(db.conn.execute("SELECT message_id, kind FROM mail_link_seen WHERE source_user=?",
+                                    (source_user,)).fetchall())
+    except Exception:      # no tables yet
+        return None
+
+
+def inventory_complete(db, source_user: str) -> bool:
+    """Whether a finished mailbox inventory exists, without loading its rows."""
+    try:
+        return bool(db.conn.execute(
+            "SELECT 1 FROM mail_link_inventories WHERE source_user=?", (source_user,)
+        ).fetchone())
+    except sqlite3.OperationalError as exc:
+        if "no such table" in str(exc).lower():
+            return False
+        raise
+
+
+def proven_kind(db, source_user: str, message_id: str) -> int | None:
+    """Look up one message's kind from the latest finished inventory."""
+    try:
+        row = db.conn.execute(
+            "SELECT kind FROM mail_link_seen WHERE source_user=? AND message_id=?",
+            (source_user, message_id),
+        ).fetchone()
+        return int(row[0]) if row else None
+    except sqlite3.OperationalError as exc:
+        if "no such table" in str(exc).lower():
+            return None
+        raise
+
+
+def proven_count(db, source_user: str, kind: int) -> int | None:
+    """Count one kind in a finished inventory without materializing message IDs."""
+    if not inventory_complete(db, source_user):
+        return None
+    row = db.conn.execute(
+        "SELECT COUNT(*) FROM mail_link_seen WHERE source_user=? AND kind=?",
+        (source_user, kind),
+    ).fetchone()
+    return int(row[0])
+
+
+SCHEMA = """CREATE TABLE IF NOT EXISTS mail_dead_links (
+    source_user TEXT NOT NULL, file_id TEXT NOT NULL, status TEXT NOT NULL, detail TEXT NOT NULL DEFAULT '',
+    emails INTEGER NOT NULL, example_message TEXT NOT NULL DEFAULT '', checked_at TEXT NOT NULL,
+    PRIMARY KEY (source_user, file_id))"""
+
+
+def text_ids(payload: dict) -> set:
+    """Drive ids in the text parts of a Gmail `full` message payload. Attachments are not read."""
+    from link_rewrite import DRIVE_ID
+    ids: set = set()
+
+    def walk(part: dict, depth: int = 0) -> None:
+        if depth > 60:
+            return
+        if (part.get("mimeType") or "").lower().startswith("text/"):
+            data = (part.get("body") or {}).get("data")
+            if data:
+                raw = base64.urlsafe_b64decode(data + "=" * (-len(data) % 4))
+                ids.update(m.group(1).decode("ascii") for m in DRIVE_ID.finditer(raw))
+        for child in part.get("parts") or []:
+            walk(child, depth + 1)
+    walk(payload or {})
+    return ids
+
+
+def classify(error_text: str | None, owners: list | None, own_domain: str) -> tuple[str, str]:
+    """(status, detail) for what the source answered. `error_text` None = the file exists."""
+    if error_text is None:
+        domains = sorted({(o or "").rsplit("@", 1)[-1].lower() for o in owners or [] if o})
+        who = ", ".join(domains) or "a shared drive this organisation does not hold"
+        # 9 Nov 2026: all 181 of account 3's "exists, no copy" links were outsiders' files (gmail.com,
+        # other organisations' shared drives) -- not a gap, Bitport does not copy what it does not own.
+        inside = own_domain and own_domain.lower() in domains
+        return ("NOT_MIGRATED" if inside else "OUTSIDE"), f"owned by {who}"
+    if "404" in error_text:
+        return "NOT_FOUND", ""
+    if "403" in error_text:
+        return "NO_ACCESS", ""
+    return "OTHER", error_text[:160]
+
+
+def inventory_user(gm, workers: int = 8, say=print) -> dict:
+    """Every unmapped Drive link in one user's mail, checked against the source, recorded."""
+    from db import utc_now
+    from resilience import shutdown_requested
+
+    def checkpoint():
+        if shutdown_requested():
+            raise futures.CancelledError('Link inventory stopped; previous complete evidence retained')
+    checkpoint()
+    src = gm.src
+    ids, token = [], None
+    while True:
+        checkpoint()
+        r = gm._retry(lambda t=token: src.users().messages().list(
+            userId="me", maxResults=500, pageToken=t, includeSpamTrash=True).execute(), label="gmail.dead_links.list")
+        ids += [m["id"] for m in r.get("messages", [])]
+        token = r.get("nextPageToken")
+        if not token:
+            break
+    mentions: collections.Counter = collections.Counter()
+    example: dict = {}
+    linked: dict = {}                      # message id -> every Drive id in its text
+    # What Gmail's own search names as carrying a Drive link -- compared with what the full read
+    # finds, it is the search's miss rate (the split scan's search-first mode relies on it).
+    from gmail_engine import LINK_SEARCHES
+    by_search: set = set()
+    for term in LINK_SEARCHES:
+        checkpoint()
+        by_search |= gm._list_ids(term)
+
+    kinds: dict = {}                       # message id -> FREE / READ / DRAFT / CHAT (mail_link_seen)
+    if not hasattr(gm, "_link_scan"):
+        gm._link_scan = {}                 # _split_classify counts its reads into it
+
+    def read(mid: str) -> tuple[str, set]:
+        checkpoint()
+        # The mail pass's own classifier (_split_classify: text parts, text attachments, attached messages,
+        # encrypted mail), so what this proves link-free the pass may skip. The plain text-part read used
+        # before missed 7 link emails the pass found (account 3, 15 Nov 2026). It paces itself (scan_limiter).
+        # gm.src inside it: AuthManager builds one client per thread (httplib2 is not thread-safe).
+        from split_mail import ClassificationIncomplete
+        try:
+            full, plan = gm._split_classify(mid)
+        except ClassificationIncomplete:
+            kinds[mid] = READ                                   # not judged: the pass reads it
+            return mid, set()
+        checkpoint()
+        labels = set(full.get("labelIds") or [])
+        if plan is None:
+            kinds[mid] = DRAFT if "DRAFT" in labels else CHAT
+            return mid, set()
+        ids = set(plan.get("linkIds") or [])
+        kinds[mid] = READ if ids or plan.get("encrypted") else FREE
+        return mid, ids
+    with futures.ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+        remaining = iter(ids)
+        pending = {pool.submit(read, mid) for mid in islice(remaining, max(1, workers) * 2)}
+        try:
+            while pending:
+                checkpoint()
+                done, pending = futures.wait(pending, timeout=0.25, return_when=futures.FIRST_COMPLETED)
+                for future in done:
+                    checkpoint()
+                    mid, found = future.result()
+                    if found:
+                        linked[mid] = found
+                    for fid in found:
+                        checkpoint()
+                        if not gm._drive_link_target(fid):          # a copy exists: the engine rewrites it
+                            mentions[fid] += 1
+                            example.setdefault(fid, mid)
+                    checkpoint()
+                    next_mid = next(remaining, None)
+                    if next_mid is not None:
+                        pending.add(pool.submit(read, next_mid))
+        finally:
+            for future in pending:
+                future.cancel()
+    own = (gm.settings.source_domain or "").lower()
+    rows = []
+    for fid in sorted(mentions):
+        checkpoint()
+        try:
+            meta = gm._retry(lambda f=fid: gm.auth.source_drive(gm.source_user).files().get(
+                fileId=f, fields="id,owners(emailAddress)", supportsAllDrives=True).execute(),
+                label="gmail.dead_links.file")
+            status, detail = classify(None, [o.get("emailAddress") for o in meta.get("owners", [])], own)
+        except Exception as exc:      # noqa: BLE001 - the answer is the finding
+            status, detail = classify(str(exc), None, own)
+        rows.append((gm.source_user, fid, status, detail, mentions[fid], example[fid], utc_now()))
+    now = utc_now()
+    checkpoint()
+    with gm.db.write() as c:
+        checkpoint()
+        c.execute(SCHEMA)
+        c.execute(LINK_SCHEMA)
+        c.execute("DELETE FROM mail_dead_links WHERE source_user=?", (gm.source_user,))
+        c.executemany("INSERT INTO mail_dead_links VALUES (?,?,?,?,?,?,?)", rows)
+        c.execute("DELETE FROM mail_link_messages WHERE source_user=?", (gm.source_user,))
+        c.executemany("INSERT INTO mail_link_messages VALUES (?,?,?,?,?)",
+                      [(gm.source_user, m, ",".join(sorted(f)), int(m in by_search), now) for m, f in linked.items()])
+        c.execute(SEEN_SCHEMA)
+        c.execute(INVENTORIES_SCHEMA)
+        c.execute("DELETE FROM mail_link_seen WHERE source_user=?", (gm.source_user,))
+        c.executemany("INSERT INTO mail_link_seen VALUES (?,?,?)", [(gm.source_user, m, k) for m, k in kinds.items()])
+        # Complete only when every listed message was judged: a stop or a failed read leaves it incomplete.
+        if len(kinds) == len(ids):
+            c.execute("INSERT OR REPLACE INTO mail_link_inventories VALUES (?,?,?)", (gm.source_user, now, len(ids)))
+        else:
+            c.execute("DELETE FROM mail_link_inventories WHERE source_user=?", (gm.source_user,))
+    by = collections.Counter(r[2] for r in rows)
+    missed = sum(1 for m in linked if m not in by_search)
+    files = set().union(*linked.values()) if linked else set()
+    say(f"{gm.source_user}: {len(ids)} emails read, {len(linked)} carry a Drive link ({len(files)} files); "
+        f"search named {len(by_search)}, missed {missed}; {len(rows)} links with no target copy "
+        + ", ".join(f"{n} {s}" for s, n in sorted(by.items())))
+    return {"emails": len(ids), "links": len(rows), "byStatus": dict(by), "linkMessages": len(linked),
+            "searchMissed": missed, "searchNamed": len(by_search), "linkedFiles": len(files)}
+
+
+def report(conn, status: str | None = None, q: str = "", limit: int = 200, offset: int = 0) -> dict:
+    """Totals by status plus one page of links -- what the UI and the CSV show."""
+    if not conn.execute("SELECT 1 FROM sqlite_master WHERE name='mail_dead_links'").fetchone():
+        return {"totals": {}, "matched": 0, "links": [], "offset": offset, "limit": limit}
+    totals = {s: {"label": LABEL[s], "links": 0, "emails": 0} for s in STATUSES}
+    q = (q or "").strip().lower()
+    page, matched = [], 0
+    for user, fid, st, detail, emails, example, when in conn.execute(
+            "SELECT source_user, file_id, status, detail, emails, example_message, checked_at "
+            "FROM mail_dead_links ORDER BY emails DESC, source_user, file_id"):
+        t = totals[st if st in totals else "OTHER"]
+        t["links"] += 1
+        t["emails"] += emails
+        if (status and st != status) or (q and q not in fid.lower() and q not in user.lower() and q not in detail.lower()):
+            continue
+        matched += 1
+        if offset < matched <= offset + limit:
+            page.append({"user": user, "fileId": fid, "status": st, "detail": detail, "emails": emails,
+                         "exampleMessage": example, "checkedAt": when,
+                         "sourceUrl": f"https://drive.google.com/open?id={fid}"})
+    return {"totals": totals, "matched": matched, "links": page, "offset": offset, "limit": limit}
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--account-id", type=int)
+    ap.add_argument("--user", action="append", help="source user (repeat); default every mapped user")
+    ap.add_argument("--workers", type=int, default=24, help="reads in flight per mailbox")
+    ap.add_argument("--parallel-users", type=int, default=4, help="mailboxes read at once")
+    args = ap.parse_args(argv)
+    from auth import AuthManager
+    from config import Settings
+    from db import MigrationDB
+    from gmail_engine import GmailMigrator
+    st = Settings(account_id=args.account_id)
+    db, auth = MigrationDB(st.db_path), AuthManager(st)
+    ledger = {r["source_email"].lower(): r["target_email"] for r in db.all_identities() if r["entity_type"] == "user"}
+    users = args.user or sorted(ledger)
+    bad = [u for u in users if u.lower() not in ledger]
+    if bad:
+        print(f"REFUSED: not users of this account: {bad}")
+        return 2
+    t0, total, agg = time.time(), collections.Counter(), collections.Counter()
+    # Each read waits ~4 s on Google while the line sits idle (9 Nov 2026: 8 workers, one mailbox at a
+    # time = 1.7 emails/s), so it is latency-bound: more reads in flight, and mailboxes side by side.
+    # Gmail allows ~50 full reads a second per mailbox (5 units of 250).
+    def one(u):
+        return inventory_user(GmailMigrator(auth, db, st, u, ledger[u.lower()]), workers=args.workers)
+    with futures.ThreadPoolExecutor(max_workers=max(1, args.parallel_users)) as pool:
+        for r in pool.map(one, users):
+            total.update(r["byStatus"])
+            agg.update({k: r[k] for k in ("emails", "linkMessages", "searchMissed", "linkedFiles")})
+    rate = agg["searchMissed"] / agg["linkMessages"] if agg["linkMessages"] else 0
+    print(f"done in {time.time() - t0:.0f}s: {agg['emails']} emails, {agg['linkMessages']} with a Drive link "
+          f"({agg['linkedFiles']} file mentions); Gmail search missed {agg['searchMissed']} ({rate:.1%}); dead links: "
+          + (", ".join(f"{n} {s}" for s, n in sorted(total.items())) or "none"))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

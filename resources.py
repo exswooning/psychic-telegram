@@ -449,14 +449,14 @@ MB_PER_SEED_WORKER = mb_per_seed_worker()
 
 # Above this fraction of swap in use, the machine is already trading disk for
 # memory and more concurrency makes it strictly worse.
-SWAP_DISTRESS = 0.60
+SWAP_DISTRESS = float(os.getenv("SWAP_DISTRESS", "0.60"))      # campaign F-memory sets 0: any swap in use is distress
 
 # Drain trigger for the memory-pause watchdog (main.py). A hard floor (128 MB)
 # plus a fraction of TOTAL RAM -- never of *usable* RAM, which shrinks as
 # memory drains and would eventually sit below anything the machine can reach.
 # That self-referential threshold is what made an earlier admission-gate design
 # dead code on any host above ~2.5 GB.
-PRESSURE_FLOOR_MB = 128
+PRESSURE_FLOOR_MB = float(os.getenv("PRESSURE_FLOOR_MB", "128"))      # campaign F-memory sets it above total RAM
 PRESSURE_FLOOR_FRACTION = 0.05
 
 # Ceiling on the per-USER worker pool -- the threads that each own one
@@ -781,9 +781,22 @@ def _run(cmd: list[str]) -> str:
 
 
 def _probe_macos(r: SystemResources) -> None:
-    r.cpu_physical = int(_run(["sysctl", "-n", "hw.physicalcpu"]).strip() or 1)
-    r.cpu_logical = int(_run(["sysctl", "-n", "hw.logicalcpu"]).strip() or 1)
+    logical = int(_run(["sysctl", "-n", "hw.logicalcpu"]).strip() or 0)
+    if not logical:
+        # `sysctl` is unavailable in some sandboxed macOS processes even
+        # though sysconf can read the same host facts without spawning a
+        # child. Keeping the fallback here also prevents a false one-core
+        # admission cap when the probe itself is otherwise usable.
+        logical = os.cpu_count() or 1
+    r.cpu_logical = max(1, logical)
+    physical = int(_run(["sysctl", "-n", "hw.physicalcpu"]).strip() or 0)
+    r.cpu_physical = max(1, physical or min(r.cpu_logical, (r.cpu_logical + 1) // 2))
     total = int(_run(["sysctl", "-n", "hw.memsize"]).strip() or 0)
+    if not total:
+        try:
+            total = int(os.sysconf("SC_PHYS_PAGES")) * int(os.sysconf("SC_PAGE_SIZE"))
+        except (OSError, ValueError, AttributeError):
+            total = 0
     r.ram_total_gb = total / 1024**3
 
     # `Pages free` alone is misleading on macOS -- it keeps very little truly

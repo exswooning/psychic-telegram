@@ -1,0 +1,409 @@
+# Bitport to 10/10: plan and progress
+
+**Superseded, 16 Nov 2026.** Account 3's tenants lapsed. The meaning of 10/10 and the open code
+items below continue in [synthetic-10-plan.md](synthetic-10-plan.md), on the fresh tenants a. and
+b. This file is kept as the record of the account 3 runs.
+
+Operator's goal (13 Nov 2026): parity at every run; the most efficient, fast and reliable migration tool.
+Work one item at a time: code, a test, commit, push. Deploy to l3novo only when no migration, DMS,
+reconcile or verify job is live. Update the checkboxes here in the same commit. Audit behind this plan:
+the 13 Nov session (score 6/10: Drive 8, mail 5, verification 6, orchestration 4, operations 4, security 3,
+tests 6).
+
+Operator, 13 Nov 2026: both tenants of account 3 (s. and t.sarafgloabalexim.com) may be used for live
+tests and verification, including test writes to the source. Still ask first: an SSH key on the box
+(the permission check refused it on the general grant), a wipe, a git history rewrite, password rotation.
+
+## What 10/10 means (the acceptance test)
+
+A run scores 10 when all hold with nobody involved between Start and the final report:
+- Parity: every migratable item is on the target and verified identical, every user, every service.
+- Explained remainder: anything not migrated is named with its reason (Sites, Chat, unfetchable Form
+  images, orphaned grants); nothing unexplained.
+- Repeatable: three consecutive wipe-and-migrate runs on the sandbox (account 3) reach the same result.
+- Recoverable: a kill at any point or a network drop, then a restart, ends in the same result.
+- Fast: run time is bound by Google's quotas, not Bitport. Baseline 13 Nov: Drive 1 h 43 min
+  (38,513 files), mail pass 34 min, DMS ~23 h, reconcile ~20 h projected.
+
+## Phase 1: safe and correct
+- [x] Lint green on HEAD (repair.py unused target read, split_mail/verify_sample dead names).
+- [x] Link inventory stops with the run (Codex's change, committed).
+- [x] A later pass no longer overwrites an earlier pass's failure or a mail hand-off still owed
+      (`main._standing_failures`; tested on its own and end to end through `migrate_user`).
+- [x] SSH password entries removed from `.claude/settings.json`. OPERATOR: rotate the SSH/sudo password,
+      the Bitport admin password and the source admin password; decide on rewriting git history
+      (the password is in pushed history); remove the temporary key from root's authorized_keys.
+- [x] Key login for deploys: the operator installed `~/.ssh/bitport_lenovo.pub` for l3novo and root
+      (13 Nov); `ssh -i ~/.ssh/bitport_lenovo root@100.79.158.38` works, so
+      `./sync_vps.sh root@100.79.158.38 /opt/bitport ~/.ssh/bitport_lenovo` can be used again.
+      OPERATOR, still open: password login is still enabled (switch it off after rotating the password);
+      root's authorized_keys also holds l3novo's older key and the temporary key `bitport-5fa-qualified-20261112`.
+- [x] Label race: Gmail re-files inserted sent mail moments after the insert. The inline check now waits,
+      aligns once more and looks again (`LABEL_SETTLE_SEC`, 2 tries); labels still settling are recorded
+      `LABELS_PENDING` and queued for the full verify, and no longer fail the user. Not yet proven live.
+
+## Phase 2: one orchestrator
+- [ ] Box scripts become admitted jobs with `--account-id` (autopilot.py, parity_loop.py,
+      dms_user_verify.py, dms_delta_loop.py: hard-coded account 3 and /opt/bitport). The post-migration
+      chain (/var/lib/bitport-sched/post_migration_chain2.py on the box, a copy in the 13 Nov scratchpad)
+      is superseded by `dms_pipeline.py` + the `verify-after-dms` follow-on (deployed b0adcb8, not yet
+      proven live): prove it on the next run, then delete the box script.
+- [~] One run record with phases (wipe, drive, mail, dms, reconcile, verify, review); a restart resumes
+      from the recorded phase; nothing else can start the same phase twice.
+      Done 15 Nov (c9b05e6): the chain survives an API restart -- jobs record their own exit (job_exit), admission
+      rows keep their follow-ons, the API reattaches at startup and runs them only on a recorded exit 0. Still open:
+      one record per run listing its phases for the UI.
+- [x] Upgrades never restart Bitport units. The 06:54 UTC restart on 13 Nov was needrestart after an
+      unattended upgrade: it restarted every bitport-* unit (the API too) and the DMS import died.
+      `systemd/needrestart-bitport.conf`, installed on l3novo and by every deploy.
+- [x] Console navigation retries on DNS/connection errors with backoff (`dwd_helper.retry_navigation`;
+      one ERR_NAME_NOT_RESOLVED ended the DMS job). Not yet deployed.
+- [x] Explained: the verify with repair that ran beside the DMS from 07:02 UTC on 13 Nov was a
+      One-to-one run pressed in the web UI (`POST /api/v2/one-to-one/run` from 192.168.1.5), not a bug.
+      Open question for the run record: should the UI refuse a full verify while the DMS is importing?
+
+## Phase 3: speed (measure before and after)
+- [x] Read each mailbox once (b7febc9, not yet measured live): the mail pass takes candidates from the link inventory
+      (`mail_link_messages`) and reads only messages newer than it (129,800 reads were repeated).
+      MEASURED 15 Nov (account 3 ledger): NOT safe as the inventory stands. It missed 7 link emails the mail pass
+      rewrote (buildingpermit 2, info 2, it.department 1, mayor 1, ward14 1) and covers 35 of 45 users. Next: the
+      inventory must use the mail pass's own detector (_split_classify) and record a complete mailbox; only then may
+      the pass skip what it proved link-free. DONE b7febc9: mail_link_seen + mail_link_inventories; measure on the
+      next run (bodies read by the mail pass, against 129,800).
+- [ ] Bulk DMS reconciliation: list the target once with Message-ID headers, match in memory, read content
+      only for link mail and mismatches (today ~3 calls per message).
+- [~] One target write per file. The move out of staging already carries modifiedTime (one call); the extra
+      write left is the restore after sharing grants. PROBED LIVE 15 Nov on t. (throwaway drive, cleaned up): a grant
+      made while the file is still in the staging drive survives the move to My Drive, and the move's modifiedTime
+      holds. Design: comments, then grants, in staging, then the move -- comments must stay before grants (Drive mails
+      a file's collaborators about new comments) and a grant the staging drive refuses falls back to after the move.
+      Not built: it changes the core copy path, so it needs a sandbox A/B run first.
+- [ ] Mail verify reuses the bulk index for the extras check (ward14@: 45 min for 53 mapped messages).
+
+## Phase 4: operations
+- [x] `sync_vps.sh` builds the frontend when its source changed (production build, localhost check) and refuses a
+      tree `./gate.sh` did not pass (22fa9ba). The `/next` bundle question is still open.
+- [ ] One log file per run; DMS console readings appended to a history, never overwritten.
+- [x] Every verdict carries an "as of" time: the parity gate reads a check older than the user's last change to
+      that service as STALE, never a pass, and stamps its own verdict (asOf). Cutover procedure: docs/CUTOVER.md
+      (freeze, final delta without mail, MX, DMS delta, verify, gate).
+
+## Beyond the fixes (8 -> 10)
+- [x] Parity gate: `parity_gate.py --account-id N` (41758cc..82cb6f9): PARITY / NOT_PARITY / UNVERIFIED, every
+      difference named (auto repair or a person), accepted kinds and known_differences.json, the explained remainder.
+      Runs on its own after verify-after-dms (verdict in logs/reports/<id>/, an incident until PARITY). The
+      follow-on needs an API restart to take effect (next idle deploy).
+- [x] Fault-injection tests: kill after a write the ledger never recorded, then rerun (Drive and mail, 64965f6 --
+      mail inserted duplicates, fixed with an insert-intent row); DNS drop and rate limits were already covered
+      (test_network_outage_is_ridden_out, test_rate_limit_gets_time). Full disk (955ff86): a download that dies
+      on ENOSPC falls back to Drive's server-side copy -- no file lost, the rerun copies nothing twice.
+- [ ] Nightly end-to-end run on the sandbox with a morning report.
+- [~] Each known difference fixed or formally accepted. Fixed 15 Nov: Sheet cell hyperlinks (7bafe56), comment
+      quotes escaped twice (a499435), Apps Script comments 404, the LINKED display noise, files that ran out of
+      verify time (retry with more time). Accepted: Form image, orphaned grants (the gate's remainder). Open: why
+      the DMS imported its own copy of 4 engine link mails.
+- [x] Quick test gate: `./gate.sh` runs the files in `tests/gate.txt` (lint, status, split mail, DMS,
+      verify, Drive, deploy, safety guards) in about 5 minutes. Run it before every deploy.
+      TODO: have `sync_vps.sh` refuse without a passing gate; the full suite (~21,000 tests, ~2 h) nightly.
+- [ ] Split api_server.py (9,700 lines) and webui.py (6,900 lines) by concern.
+- [ ] Confirm throughput is at Google's quota ceiling; wired network or a hosted box if the box is the limit.
+
+## State of the live run (13 Nov, 09:20 UTC)
+- Engine run finished 06:07 UTC: Drive 38,513/38,513, 0 failed items. DMS relaunched 09:00 UTC by the box
+  chain for all 45 users (decision in logs/jobs/3/dms_decision.json); then delta, deep check, review file
+  logs/jobs/3/REVIEW-post-migration.md. Repairs paused. Check `grep chain2: logs/jobs/3/scheduled.log`.
+- Not deployed yet: the Phase 1 commit after b0adcb8 (deploy when the box is idle).
+
+## Priority order from 13 Nov evening (operator: faster, parity first time, failures handled)
+Work these first, one or two per usage window, each with a test and a before/after measurement on one
+sandbox mailbox or user. Stop a session at about 60% of the usage window.
+1. Bulk DMS reconciliation by a Message-ID index (Phase 3). Biggest saving: ~20 h projected today.
+2. Verify streams results to the ledger instead of holding them (the 11 GB growth), reuses the index for
+   extras, and re-verifies only what changed since its last "as of".
+3. Read each mailbox once (shared classifier between the link inventory and the mail pass).
+4. End-of-pass retry of failed items by class: transient (retry), quota (wait for the reset), explained
+   (accepted list), unexplained (hold that user, continue the rest, incident). Two rounds with no
+   progress stops and reports.
+5. Preflight gate before Start: both tenants ready, quota, network, DMS login and authorisation, disk,
+   no pending upgrade. Refuse with the reason.
+6. One target write per Drive file; DMS started per user as its mail pass ends clean.
+7. Run record with phases; fault-injection tests; UI refuses a full verify while the DMS imports.
+
+## Usage log (operator's Claude Pro limits; keep each session small)
+Weekly limits reset Fri 20 Nov, 9:45 AM Nepal. The Fable weekly limit is the binding one.
+| When (Nepal) | Session (5 h) | Weekly | Weekly Fable | Note |
+|---|---|---|---|---|
+| 13 Nov ~3:00 PM | 72% | 23% | 16% | before the audit fixes |
+| 13 Nov ~9:00 PM | 92% | - | - | plan written, stopped |
+| 14 Nov 12:40 AM | 0% | 41% | 45% | one evening of Fable cost about 29% of the week |
+Rule from 14 Nov: about 55% of the Fable week is left for 6 days, so spend at most about 8% a session:
+one or two plan items, targeted reads, the gate, then stop and schedule the next run. Claude cannot read
+the meter itself; the operator's screenshots are the only measurements.
+
+## State, 14 Nov 00:55 Nepal (13 Nov 19:10 UTC)
+- Deployed a84d9fd through `sync_vps.sh` (first gated deploy with the key). The deploy first failed its
+  compile check on 739 macOS `._*` files an earlier hand deploy (tar) had left on the box; removed.
+- Priority item 1, first half done: the DMS reconciliation has its own 8 threads and 20 reads/s per
+  mailbox (was 2 threads at 4/s). Not yet measured live. Second half (a Message-ID index instead of one
+  search per message) is still open.
+- The box chain is retired: it read the watcher's death (DNS, 18:32 UTC) as "DMS finished" and started
+  the deep check early. Incident #72 (`dms_not_started`) is open so the API's hourly retry starts the
+  default pipeline (`dms_pipeline.py`, then `verify-after-dms` with repair). First live proof of that path.
+- One-to-one verify from the UI (finished 15:00 UTC, mid-DMS): 44,505 of 44,576 identical, 0 missing;
+  60 Gmail label differences (the label race), 6 Sheet cell differences, 4 comment differences, the
+  accepted Form; 100,990 target-only messages are DMS mail awaiting reconciliation; 6 read errors.
+- Google's import at 18:30 UTC: 133,743 of 133,760 imported, 17 failed, 44 of 45 users; info@ (to
+  nest@t) had 34,964 of 40,193.
+
+## State, 14 Nov 06:30 Nepal (00:40 UTC)
+- The default DMS pipeline worked live: the API started it for incident #72 at 20:05 UTC, decided
+  45 ready / 0 held, attached to the running import; the incident closed itself. Google's import is
+  COMPLETE: 141,960 of 141,977 imported, 17 failed, 45 users.
+- MEASURED: the reconciliation is bound by the box's line, not by threads. 8 threads at 20 reads/s gave
+  no gain (about 0.5 to 2 messages a second, as before): the Wi-Fi was saturated at 3.03 MB/s down, and
+  each message is downloaded in full twice (source and target). 18,800 of ~141,000 done in about 4 hours;
+  about a day more at this rate. Threads and the search are not the lever; fewer bytes or a faster line are.
+- FINDING: 37% of reconciled DMS mail (7,133 of 19,080) has proven-identical content and label drift only:
+  INBOX missing on the target (3,446), CATEGORY_PERSONAL / CATEGORY_UPDATES / IMPORTANT added by Gmail.
+  administration@ alone: 6,012.
+- [x] `dms_label_alignment.py`: aligns those labels from the reconciliation's own content proof with no
+  body read; wired into `dms_pipeline` after the deltas. Dry run on cao@: 685 of 685 alignable. Running
+  live on account 3 as unit `bitport-dms-labels` (log logs/jobs/3/dms_labels.log); the file was copied to
+  the box alone (the API-started pipeline is live, so no deploy/restart). Not deployed: 7d... (HEAD).
+- [x] `dms_pipeline`: a finished import whose failed remainder a delta no longer lowers still hands over
+  to the verify (incident names the remainder); an unknown result still does not.
+- DECISION FOR THE OPERATOR (blocks the real speed-up): proving every DMS message byte for byte costs two
+  full downloads per message, about a day per run on this line, and the every-item verify after it costs
+  about as much again. Options: (a) wired network on the box (enp1s0 has no link) or a hosted box: same
+  proof, roughly 10x faster; (b) prove DMS mail by identity, headers, size and labels (no body), with a
+  full-content sample per mailbox (say 50) and full proof kept for link mail the engine wrote: minutes
+  instead of a day, at a weaker (statistical) proof for DMS-delivered bodies. Recommended: (a) now if a
+  cable can be fixed, and (b) as a setting, default off until the operator says.
+- Next: item 2 (verify streams results), then the engine fallback for the 17 emails the DMS will not import.
+
+| 14 Nov 06:30 AM | not read | not read | not read | Claude cannot read the meter: please send a screenshot |
+- Label alignment, first 250 of administration@: about half aligned, half still "differs". A sample of 40
+  of those: every one is `CATEGORY_PERSONAL` on the target only (36 on SENT mail, 4 on INBOX mail). Gmail
+  puts that label back; it cannot be removed. It is also invisible: CATEGORY_PERSONAL is the Primary tab,
+  where mail with no category label shows anyway, and tabs apply to the Inbox only. Claude's earlier
+  statement that it "moves the message to the Personal tab" was wrong. PROPOSED (operator to confirm):
+  the comparer treats "no category on the source" and "CATEGORY_PERSONAL on the target" as equal.
+
+## State, 14 Nov afternoon
+- Label alignment finished on account 3 (7 users with content-proven label drift): 4,295 aligned, 0 errors;
+  2,857 left "differs" -- by the earlier sample, CATEGORY_PERSONAL that Gmail puts back. Waiting on the
+  operator's decision to treat CATEGORY_PERSONAL as "no category" (the Primary tab).
+- DMS reconciliation still running inside the default pipeline (nothing deployed: an API restart would
+  kill it). 19,325 checked at 00:36 UTC, 33,875 at 06:23 UTC: about 0.7 messages a second on the Wi-Fi.
+- Priority item 2 (verifier memory): the run keeps every user's full results and one evidence record per
+  checked item until it ends, but the whole report is 47 MB on disk, too small to explain 11 GB. Measuring
+  before changing: unit `bitport-memprobe` verifies info@'s Drive alone (read-only, one worker) and writes
+  RSS every 15 s beside the item and document in hand to logs/jobs/3/memprobe/rss.log. Next session: find
+  the step where RSS climbs, fix that, re-run the probe to show the fix.
+| 14 Nov afternoon | not read | not read | not read | Claude cannot read the meter: please send a screenshot |
+
+## Operator's answers, 14 Nov evening
+1. CATEGORY_PERSONAL: "if the user can find no differences, yes". Done: `verify_sample.compare_labels`
+   treats the Primary category alone as no category, both ways; any other category (Updates,
+   Promotions...) still counts, and so does a missing INBOX. Every check uses this one function
+   (inline mail check, DMS label alignment, verify). Not deployed (the DMS pipeline is live).
+2. Lighter proof for DMS mail: explained to the operator; awaiting a yes or no.
+3. Passwords: the operator will not rotate them now. Leave the item open; do not ask again this week.
+- [x] Light proof for DMS mail (operator said yes, 14 Nov): `dms_light_proof.py`, used by the DMS
+      reconciliation when `DMS_PROOF=light` (default `full`). Per DMS message: Message-ID match, Date,
+      Subject, From, To, Cc equal, target size within 16 KB of the source, labels compared; no body read.
+      A per-mailbox sample (DMS_LIGHT_SAMPLE, 50) is proven in full FIRST; one failed sample sends the whole
+      mailbox to full proof. Engine link mail is always proven in full; anything light proof cannot judge
+      falls back to full proof. Receipts say `"proof": "light"`. Tested; not deployed; not yet measured.
+      To use it on a run: set DMS_PROOF=light in the API's environment (a per-run switch in the UI is TODO).
+
+## State, 14 Nov evening -- verifier memory (priority item 2)
+- MEASURED (probe 1, info@'s Drive alone, one worker, read-only): RSS climbs in steps at single large
+  comparisons -- a Sheet to ~1 GB, a HEIF photo to ~2 GB -- peaks at 2.4 GB and stays at 2.1 GB after the
+  walk: freed memory is not handed back. Content reads are already one at a time across all users and
+  binaries are capped at 25 MB, so the cause is glibc's per-thread pools keeping each pool's peak; a verify
+  runs dozens of threads, which explains 11 GB with four users (10 Nov).
+- [x] Fix: `verify_sample.limit_arenas()` (2 pools, as main.py does for shards) at startup and
+  `give_back_memory()` (malloc_trim) after every content read. Tested; not deployed.
+- Probe 2 is running with MALLOC_ARENA_MAX=2 (same user, same scope) to measure the pool limit alone:
+  compare logs/jobs/3/memprobe/rss.log with logs/jobs/3/memprobe-before/rss.log. The trim part is
+  measured after the next deploy.
+| 14 Nov evening | not read | not read | not read | Claude cannot read the meter: please send a screenshot |
+- MEASURED (probe 2, MALLOC_ARENA_MAX=2, same user and scope): 540 MB at file 349 of 1,403 where probe 1
+  held 1,981 MB at the same file -- about a quarter. Probe 3 re-runs on the deployed code (pools limited
+  and malloc_trim built in, no environment setting): compare logs/jobs/3/memprobe/rss.log with
+  memprobe-before/ and memprobe-arena2/.
+- FAILURE, fixed: the DMS pipeline died at 12:29 UTC (incident #74). The Wi-Fi dropped at 12:19 and the
+  reconciliation's label read gave up after six quick retries on "Unable to find the server". Its
+  reconciliation had covered 13 of 45 mailboxes. `resilience.retry_on_google_error` now rides out the box
+  being offline (DNS or no route) for up to NETWORK_DOWN_BUDGET_SEC (600 s) with 5-60 s waits; an ordinary
+  reset still gives up after its retries. Applies to every engine call.
+- [x] Verifier memory (priority item 2): fixed and measured (probe 2); probe 3 confirms the deployed code.
+- Operator chose light proof for this run's remaining reconciliation (14 Nov evening). Set as a systemd
+  drop-in on the box: /etc/systemd/system/bitport-api.service.d/dms-proof.conf (DMS_PROOF=light); API
+  restarted; incident #76-style retry opened so the API restarts the DMS from its checkpoints. Remove the
+  drop-in to return to full proof.
+| 14 Nov 7:51 PM | 37% | 78% | 100% | Fable week used up; Claude now runs one short check-in a day until the Fri 20 Nov reset |
+- Operator, 14 Nov: a wired cable is NOT possible; the box stays on Wi-Fi (about 3 MB/s, drops). So speed
+  must come from moving fewer bytes, not a faster line: light proof for DMS mail (matched full proof on
+  2,429 of 2,429), read each mailbox once, server-side work wherever Google offers it. Reliability rests on
+  the outage ride-out (10 min) and resuming from checkpoints. Hosting elsewhere stays an open option.
+
+## Beginner install test, 14-15 Nov (operator: Bitport fixes what a first-time user meets, never the user)
+
+Method: a QEMU VM on the box (Ubuntu 24.04, capped so the live run is undisturbed), following only what the
+repo says, as a user who knows nothing. Found and fixed in Bitport (ddfb6e6, 72f2947), each with a test in
+`tests/test_install_for_a_beginner.py` / `tests/test_tui.py`:
+- No entry point: README now points to `INSTALL.md` (plain steps, question table, what to do when stuck).
+- Generated admin password was never shown: now printed at the end and saved (root-only) in `/root/bitport-admin-password.txt`.
+- `<server-ip>` placeholder in the end screen: now the real address; three next steps printed.
+- Caddy's own port 80 counted as "in use": `port_free` ignores Caddy.
+- SSH hardening reported success while passwords stayed on: now truthful.
+- Silent pip (up to 75 min on a slow line): a "still working" line every 30 s; pip retries like apt; a failed step says where.
+- Installer died silently under `set -e` (heartbeat): fixed; any unexpected stop prints the step and "safe to repeat".
+- Install ran detached with no screen output: progress now follows on screen.
+- No simple command: `bitport ui|url|status|logs|help` (works as non-root, finds the install dir).
+- TUI on a fresh box showed a blank dashboard: now a welcome screen with the next steps; launching actions refused with a reason.
+Verified in the VM: install end-to-end, `bitport` as a non-root user, TUI welcome and quit, login with the generated password.
+Not a Bitport defect: the VM's PyPI download ran at 0.05 MB/s (user-mode networking).
+Fresh-disk interactive install (15 Nov, pressing Enter at every prompt) found three more, fixed in 8e30f92:
+the generated-password flag was reset by the background run (end screen said "the one you chose", no password file);
+"The install stopped before it finished" printed after success (watched for the wrong words); harden_ssh's
+"password login left on" wording. Re-run on the same VM: password shown and saved, login 200, no false alarm.
+Remaining: judge the Setup Wizard's first screen in a browser; the VM's first (pre-fix) install ran ~75 min, almost all PyPI at 0.05 MB/s.
+Superseded: a full fresh-disk acceptance install; judge the Setup Wizard's first screen in a browser (BrowserOS was offline).
+
+## Check-in, 15 Nov 10:00 Nepal (04:14 UTC)
+- DMS pipeline alive, running 12.5 h, no restart by the API ("DMS retry" 0 in 14 h). Reconciliation started with light
+  proof on all 13 mailboxes so far; 12 of 45 done, info@ (40,260) at 16,833. 58,475 checked, 51,794 verified, 6,681
+  unresolved (info@: almost all labels Gmail added on the target -- INBOX, IMPORTANT, CATEGORY_UPDATES -- for the label alignment).
+- Rate 0.76 msg/s (03:01 -> 04:14 UTC), Wi-Fi saturated at 3.0 MB/s: light proof turned itself off from ecodev@ on, so
+  mailboxes 7-13 run the full check (bodies from both tenants).
+  Cause: any failed sampled message (a label difference, a network error) degraded the whole mailbox. Fixed in 0c3796b
+  (only a content difference degrades); not deployed -- a code change invalidates the reconciliation checkpoints.
+- MEASURED on Google (read-only probe, administration@, msg/s): light 0.6 / 6.0 / 11.0 / 22.6 at 1 / 8 / 16 / 32 workers,
+  no errors; full check 0.1 / 0.6 / 0.5 at 1 / 8 / 16 (line-bound: more workers is slower). The open-findings lookup
+  per verified message scans 67k rows, 83 ms inside the write lock; an index makes it 0.02 ms (not yet added).
+- Options put to the operator (awaiting a choice): keep going (~20 h); B = deploy the fix + 16 workers/40 qps, re-check
+  all 141,977 lightly with the 50-message samples (~5-11 h); A' = env only, DMS_LIGHT_SAMPLE=0 + 16 workers (~3-7 h,
+  drops the per-mailbox full sample for mailboxes 13-45).
+- Label alignment and verify-after-dms: not run yet (they follow the reconciliation).
+- Memory probe 3 (deployed code: 2 pools + trim): peak 1,630 MB, end 476 MB; probe 1 (before) peak 2,536 MB, end
+  2,230 MB; probe 2 (pools only) peak 548 MB. Memory is now handed back; probe 3's higher peak is one large document.
+| 15 Nov 10:00 AM | not read | not read | not read | Claude cannot read the meter: please send a screenshot |
+
+## Deep check, 15 Nov 05:30 UTC (after deploying 0c3796b + 2fb7af3 and relaunching the DMS, 16 workers / 40 qps)
+- DMS relaunched 04:25 UTC as admitted job `dms` (unit bitport-dms-relaunch; verify-after-dms chained on a clean exit).
+  Google delta import in progress: 41/45 users, 104,118 skipped (already there), 1 imported, 16 failed. Reconciliation next.
+- Box runtime code = HEAD except bitport-cli.sh, harden_ssh.sh, tui.py, install.sh (beginner install; no service loads them).
+- Users: 42 DONE; administration@, suchanaadhikari@ AWAITING_DMS; info@ FAILED (one INTERRUPTED mail item, one
+  encrypted message in the link scan).
+- Drive verify: 35 identical, 8 differences, 2 incomplete. Differences: Form-response Sheets "cell content/style differs"
+  (buildingpermit x2, it.department, mayor, info, ward14 -- not yet classified); suchanaadhikari Form 15/16 items (accepted:
+  unfetchable image); comments (health quotedFileContent, ward4 threads, it.department 404). Incomplete: a file's time
+  budget ran out (ward18, ward19, suchanaadhikari); info@ one Sheet answered 503.
+- Gmail verify: all 45 DIFFERENCES until reconciliation + label alignment finish. Open findings: 29,822 unclassified
+  (mostly the Wi-Fi drop's read errors, re-checked by this pass), 20,823 labels added, 3,355 labels missing, 5 duplicates.
+- 53 Drive items FALLBACK (download-and-upload); the operator expects only Apps Script there -- types not yet checked.
+- Open incidents: #76 box busy (expected), #74 dms crash 14 Nov (closes on a clean exit), #70, #8, #9 (older runs).
+
+## Every open difference explained (15 Nov, read on both tenants)
+- REAL DEFECT, fixed in 7bafe56 (not deployed): native Sheet link rewrite used findReplace only, which rewrites cell
+  text/formulas but not the cell's own hyperlink (userEnteredFormat.textFormat.link) or rich-text run links. Five target
+  Sheets show the target id but open the SOURCE on a click: buildingpermit x2 and it.department (Form file-upload
+  answers), mayor and info (a self-link). Repair after deploy: re-run the native link rewrite on those five.
+- REAL, small: 4 SENT messages exist twice on the target (legal 1, health 2, procurement 1): the engine's link-mail copy
+  plus a DMS copy (the extra carries CATEGORY_PERSONAL). info@ 192c2b06 (CAHQ-HAwO...) is on the source and missing on
+  the target -- likely one of the 16 DMS failures. Removing the 4 extras is a target delete: operator's word first.
+- Verifier noise (no data wrong): ward14 Sheet now identical (stale finding); ward4 comments: same 30 threads and 40
+  replies, matched ambiguously (two threads with identical text; "resolve" actions are kept as the resolved flag, not a
+  reply); health comments: 15/15 threads, the quoted text of a PDF differs; it.department comments 404 on an Apps Script
+  project (no comments API).
+- Unverified, re-check needed: three large Sheets ran out of their time budget (ward18/ward19 "Sunsari-1" 3.6 MB,
+  suchanaadhikari 50 KB); info@ "रातो किताब" Doc answered 503.
+- Accepted: suchanaadhikari Form 15/16 items (unfetchable image); 2 orphaned grants (deleted accounts, no email).
+- 53 FALLBACK rows are all Forms rebuilt through the Forms API (download_upload -> native_api), as designed; no binary fell back.
+- info@ FAILED is a stale 12 Nov "link scan interrupted" row; a later scan finished (13 Nov) and the DMS took the user.
+- DONE 15 Nov (operator: "yes to both"): deployed link_rewrite.py (7bafe56) and native_repair.py (72cd3e7) by hash-checked
+  copy, no restart. Re-ran the native link rewrite on the five Sheets: 11 + 6 + 7 + 2 + 2 requests, 0 links left naming the
+  source, modifiedTime restored. Trashed the 4 duplicate DMS copies (kept each mapped engine copy; recoverable 30 days).
+  The verifier now treats LINKED and unset link display as one state (Sheets sets LINKED itself).
+- Defaults (operator, 15 Nov: "make the current progress as default"), commit after a344f49: light proof is on by default
+  (DMS_PROOF=full turns it off) and the reconciliation runs 16 threads at 40 reads a second per mailbox (47e1f4d).
+  Swapped onto the box 06:23 UTC (operator: "swap"), hash-checked, while the relaunched job was still in Google's delta
+  import: split_mail is imported only when the reconciliation starts, and this run had no checkpoints yet to lose.
+| 15 Nov ~noon | 47% | 92% | 100% | read from the operator's screenshot; the day's speed-up, difference hunt and fixes cost ~14% of the week. 8% left until Fri 20 Nov 9:44 AM: check-ins only (one ssh read each), no code unless the run is blocked |
+
+## 15 Nov afternoon: 10/10 work (operator: "run whatever needs to run to get 10/10")
+- DMS reconciliation after the fix: 830 messages a minute (13.8/s) against 0.76/s before -- 18x; ~3 h for 141,978.
+- Committed, tested, not yet on the box (next idle deploy, which now needs ./gate.sh): api_server.py (gate follow-on),
+  gmail_engine.py (insert intent). On the box already: parity_gate.py, migration_comments.py, verification_coverage.py,
+  known_issues.py, verify_sample.py, link_rewrite.py, native_repair.py, split_mail.py, dms_light_proof.py.
+- Pre-existing failing test, not caused by this work: tests/test_missing_mail_recovery.py::
+  test_orphaned_verification_is_interrupted_only_when_disabled_and_owner_dead (fails at 2fb7af3~1 too).
+- The acceptance test (three wipe-and-migrate runs on account 3) needs the operator's typed wipe confirmation.
+
+## Check-in, 16 Nov 04:35 UTC (10:20 AM Nepal)
+- The relaunched DMS pipeline (light proof fixed, 16 workers / 40 qps) checked 139,980 messages at 830/min (~13.8/s,
+  18x the 0.76/s before) and finished 15 Nov ~10:40 UTC: 126,073 verified, 13,907 "blocked" -- nearly all labels
+  Gmail added on the target. That count made dms_migrate exit 2, so the pipeline never reached the label alignment,
+  the verify or the gate. Fixed (f2e74ed): content-proven label differences are labelsOnly, the alignment's work,
+  not a block. DMS console: complete, 141,978 discovered, 17 failed (Google's refusals, unchanged).
+- Deployed to the idle box 04:45 UTC with the guarded sync (gate passed, frontend built): everything since bbfc942
+  incl. the parity gate (+ card, + follow-on), follow-ons surviving API restarts, read-once, Run the DMS again,
+  the insert-intent fix, the comment-quote fix. Two files the deploy must not ship (the box's dms_metrics.json,
+  the local .gate-passed) are excluded from now on (878300e).
+- Finishing the chain where it stopped (unit bitport-dms-finish, log logs/campaigns/fresh-20261112/finish.log):
+  label alignment (0 errors in the first 5 mailboxes), then the verify with repair over every user (admitted job
+  `verify`), then the parity gate. No new incidents. The speed-up choice was answered (deploy the fix) and done.
+| 16 Nov 10:20 AM | not read | not read | not read | operator said limits reset ("I have resets") on 15 Nov |
+
+## Acceptance runs: started 16 Nov (operator: "t.sarafgloabalexim.com RESET")
+- Finishing chain of the previous run stopped (audited #178) after its label alignment: 11,249 aligned, 1,467
+  still differ, 1,149 errors -- to compare against the acceptance runs.
+- Keep-the-better-copy (6ec46d6) and everything before it deployed with the guarded sync (gate passed).
+- Reset = wipe_tenant.py --side target (the "Wipe data" button): every user's data emptied, the 45 accounts,
+  Cloud project and delegation kept, the ledger reset per emptied service. Claude Code's permission guard
+  refused to run it from the terminal; the operator presses "Wipe data" for t. in the UI (or allows the command).
+- Each run after the wipe: POST /api/v2/migrate/start for account 3 (full, split, DMS after) -- then repair, DMS,
+  mail check, label alignment, verify with repair and the parity gate run on their own. Record per run: Drive and
+  mail pass times, DMS check rate, mail-pass bodies read (read-once), verdict and failing kinds.
+
+## Acceptance run 1 (16 Nov): blocked -- both tenants lost Drive and Calendar; the wipe ran half (rechecked)
+CORRECTION of the first note: the wipe DID delete data on t. -- 72,132 Gmail messages (40 users), 3 contacts, 2 groups --
+and forgot them in the ledger (gmail for 40 users, contacts for 45, groups). Drive, Calendar, Tasks, Chat and shared
+drives were not touched and keep their ledger; Gmail kept for 5 users (administration, education, finance, info, ward12).
+The target is half-wiped. The source was not touched by the wipe.
+
+Evidence (all read-only, 16 Nov ~06:20 UTC):
+- Root cause is Google-side, on BOTH tenants, not Bitport: Drive 401 "Active session is invalid. Error code: 4",
+  Calendar 403 notACalendarUser ("must be signed up for Google Calendar"), Tasks 404, Gmail "Mail service not enabled"
+  for some users (nest@t., info@s., ...), and isMailboxSetup=false for EVERY user on s. and t. Same answers through the
+  engine's own clients (AuthManager) and Bitport's readiness check (source and target: Not ready). Likely the
+  Workspace subscriptions/licences of the two sandbox tenants (accounts created 17 Oct - 2 Nov) lapsed: a trial that
+  ended or a billing problem. Only Billing -> Subscriptions in each Admin console can confirm. Window: target writes
+  worked 15 Nov ~09:30 UTC; incidents opened 16 Nov 05:11 UTC.
+- Bitport noticed: incidents #77 (source) and #78 (target) "not ready any more" opened at 05:11 UTC by oversight's
+  watch_tenant_ready -- an hour BEFORE the wipe. The wipe does not consult readiness or open incidents.
+- The wipe's own preflight (wipe_tenant.granted) only mints a token as the admin; it passes while the service itself
+  refuses. So it started, Gmail succeeded for most users, everything else failed: a half-wipe.
+- Its summary "Ledger reset for drive, gmail, calendar, contacts, tasks, chat on 45 user(s)" lists the services TRIED;
+  the truth is in the KEPT clauses that follow. Read as "nothing reset", it led to the wrong first note.
+- Not blockers: 44 BLOCKED + 1 FAILED identity statuses (a run re-migrates any user not DONE with recorded services);
+  the 16 Nov label alignment's 1,149 errors / 1,467 differs (moot after the wipe; likely the same lapse starting).
+
+Fix plan:
+A. Operator (blocks everything): restore both tenants -- Admin console of s.sarafgloabalexim.com AND
+   t.sarafgloabalexim.com -> Billing -> Subscriptions (trial ended / suspended / payment) and Users (a licence on
+   every user; t. also has 34 leftover A/B accounts that may hold licences). Done when Setup "Check again" (or
+   readiness.py --account-id 3 --side source|target) reads Ready on both; incidents #77/#78 then close on their own.
+B. Code, now, no tenant needed (each with a test, ./gate.sh, deploy on an idle box):
+   B1. wipe_tenant refuses to start unless readiness reads Ready for that side AND a real read per requested service
+       succeeds as the admin and as every user it will touch -- all or nothing, nothing deleted otherwise, each refusal
+       named; --allow-partial for a deliberate partial wipe. Replaces granted() (token mint only).
+   B2. The wipe's summary says what was removed and what was not, per service with user counts, and what the ledger
+       forgot vs kept -- no list of services merely tried.
+   B3. Every destructive launcher (wipe, reset, seed, "Run the DMS again") refuses while a watch_tenant_ready
+       incident is open for that side, naming it. Migrations are already gated (readiness.gate).
+C. After A: readiness Ready on both (read-only) -> re-run the wipe (with B deployed) to finish emptying t. -> check t.
+   is empty by counts -> acceptance run 1 via the API -> parity gate -> runs 2 and 3.

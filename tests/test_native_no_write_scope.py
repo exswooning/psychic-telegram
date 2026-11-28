@@ -110,6 +110,11 @@ class TestTheApiRebuild:
         assert "self.src.files().create" not in src
         assert "self.src.files().update" not in src
 
+    def test_a_rebuilt_file_always_gets_the_source_time_back(self):
+        """A rebuild is a new file stamped with today; esc.mrc@'s two unshared Forms kept it (9 Nov)."""
+        src = _code(drive_engine.DriveMigrator._sync_native_api)
+        assert "force_mtime_restore=True" in src
+
     def test_the_scopes_it_needs_are_readonly(self):
         for scope in na.SOURCE_SCOPES:
             assert scope.endswith(".readonly"), scope
@@ -214,3 +219,4 @@ class TestTheBugsFoundByReadingItBack:
                     if not s.endswith(".readonly")
                     and not s.endswith("directory.group.readonly")]
         assert writable == [], writable
+

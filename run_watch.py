@@ -67,6 +67,9 @@ RC_GRACE_SEC = 120
 # A tally is deliberately absent: it measures the tenants for a report, it is not
 # a run to be judged (it moves nothing, so it would score as "migrated nothing").
 MIGRATION_JOBS = {"migrate": "migration", "delta": "migration"}
+# A job that measures the tenants after the run: when it ends cleanly the latest migration's report is built
+# again, so its fidelity benchmarks read the new numbers (19 Nov 2026: a whole-tenant tally left six of them UNKNOWN).
+REGRADE_AFTER = {"user-tally", "tally", "dms"}
 
 
 def report_kind(job_name: str) -> str | None:
@@ -174,7 +177,8 @@ def list_runs(account_id, limit: int = 200) -> list[dict]:
                 "startedAt": started["started_at"] or started["at"],
                 "finishedAt": None, "rc": None, "detail": "", "running": True,
             })
-    runs.sort(key=lambda x: x["startedAt"] or "", reverse=True)
+    runs.sort(key=lambda run: started if (started := _epoch(run["startedAt"])) is not None
+              else float("-inf"), reverse=True)
     return runs[:limit]
 
 
@@ -276,7 +280,8 @@ def set_status(incident_id: int, status: str, note: str = "") -> bool:
         return cur.rowcount > 0
 
 
-STOP_ACTIONS = ("job.stop", "job.force-stop", "stop job", "stop job (force)", "source-guard.auto-stop")
+STOP_ACTIONS = ("job.stop", "job.force-stop", "stop job", "stop job (force)", "source-guard.auto-stop",
+                "domain-rename.stop")
 
 
 def stopped_by(pid, since: str | None) -> str | None:
@@ -334,6 +339,33 @@ def _later_run(inc: dict, event: str, clean: bool) -> str | None:
     return r["at"] if r else None
 
 
+DMS_SETTLE_SEC = 1800
+
+
+def _dms_under_way(inc: dict) -> str | None:
+    """The DMS is really going, not merely launched: it finished cleanly, it is still running half an hour on,
+    or a person stopped it (a decision). One stopped a minute after launch, while it was still signing in,
+    closed this as "started" and so the hourly retry never asked again (account 3, 8 Nov 2026). A run that
+    died on its own leaves it open, and the retry asks again."""
+    with cpdb.ro() as c:
+        start = c.execute("SELECT at, pid FROM run_events WHERE event='started' AND job_name=? AND "
+                          "COALESCE(account_id,-1)=COALESCE(?,-1) AND at > ? ORDER BY id DESC LIMIT 1",
+                          (inc["job_name"], inc["account_id"], inc["last_seen_at"])).fetchone()
+        if not start:
+            return None
+        end = c.execute("SELECT at, rc FROM run_events WHERE event='finished' AND job_name=? AND "
+                        "COALESCE(account_id,-1)=COALESCE(?,-1) AND COALESCE(pid,-1)=COALESCE(?,-1) AND at >= ? "
+                        "ORDER BY id LIMIT 1", (inc["job_name"], inc["account_id"], start["pid"], start["at"])).fetchone()
+    if end is None:
+        began = _epoch(start["at"])
+        return (f"the DMS has been running since {start['at']}"
+                if began and time.time() - began >= DMS_SETTLE_SEC else None)
+    if end["rc"] == 0:
+        return f"the DMS ran and finished at {end['at']}"
+    who = stopped_by(start["pid"], start["at"])
+    return f"the DMS started at {start['at']} was stopped by {who}" if who else None
+
+
 def _cleared(inc: dict, ledger_path_for) -> str | None:
     """Why this incident's condition no longer holds, or None while it still does.
     Only evidence closes one: a later run, the ledger, the mirror's or lifecycle's own
@@ -361,17 +393,26 @@ def _cleared(inc: dict, ledger_path_for) -> str | None:
                 return f"a later report ({rep['id']}) passes {', '.join(sorted(failed))}"
         return None
     if kind == "dms_not_started":
-        at = _later_run(inc, "started", clean=False)
-        return f"the DMS was started at {at}" if at else None
+        return _dms_under_way(inc)
     if kind == "teardown":
         import lifecycle
         st = lifecycle.state(aid) if aid is not None else {}
         if st.get("torn_down_at"):
             return f"teardown completed at {st['torn_down_at']}"
         return None if st.get("approved_at") else "the approval was undone"
+    if kind == "disk_full":
+        import housekeeping
+        from config import Settings
+        pct = housekeeping.worst_disk(Settings().scratch_dir)["pct"]
+        return None if pct >= housekeeping.WARN_AT_PCT else f"the disk is {pct}% full again, under {housekeeping.WARN_AT_PCT}%"
     path = ledger_path_for(aid)
     if not path or not os.path.isfile(path):
         return None
+    if kind == "source_changed" and str(inc["fingerprint"] or "").startswith("source-guard"):
+        with cpdb.ro(path) as c:
+            last = c.execute("SELECT checked_at, verdict FROM source_guard_checks ORDER BY id DESC LIMIT 1").fetchone()
+        if last and last["verdict"] == "CLEAN" and last["checked_at"] > inc["last_seen_at"]:
+            return f"the source guard's check at {last['checked_at']} found the source clean"
     if kind == "failing":
         # failing:{account}:{job}:{normalised message}, from _watch_migration
         family = inc["fingerprint"].split(":", 3)[-1]
@@ -521,6 +562,18 @@ class Watcher:
         self._offset: dict = {}          # (account, job) -> bytes of log already scanned
         self._swept_at = 0.0             # when sweep_cleared last ran
         self._gone: dict = {}            # run key -> when it was first seen gone with no exit code
+        self._error_maintenance_at = 0.0
+
+    def _collect_errors(self, account_id, job_name):
+        try:
+            import error_resolution
+            path = self.log_path_for(account_id, job_name)
+            if path and os.path.isfile(path):
+                stamp = os.path.join(HERE, 'DEPLOYED_COMMIT')
+                version = open(stamp, encoding='utf-8').read().strip() if os.path.isfile(stamp) else 'unknown'
+                error_resolution.ingest_file(path, account_id, job_name, version)
+        except Exception as exc:
+            log.warning('structured error collection failed; legacy watcher continues: %s', exc)
 
     # -- who is running -------------------------------------------------
     def _observe(self) -> None:
@@ -631,7 +684,7 @@ class Watcher:
         counted anything, so it reads UNVERIFIED. When that tally finishes, the latest
         migration's report is built again -- now graded against the users it ran
         (run_report._run_users_fidelity) -- and replaces the ungraded one."""
-        last = next((r for r in list_runs(aid, limit=50)
+        last = next((r for r in list_runs(aid, limit=5000)
                      if r["jobName"] in MIGRATION_JOBS and r.get("finishedAt")), None)
         if not last:
             return
@@ -644,7 +697,7 @@ class Watcher:
 
     def _handle_finished(self, ev: dict) -> None:
         name, aid, rc = ev["job_name"], ev["account_id"], ev["rc"]
-        if name == "user-tally" and rc == 0 and aid is not None:
+        if name in REGRADE_AFTER and rc == 0 and aid is not None:
             self._regrade_last_migration(aid)
         kind = report_kind(name)
         run = {"returnCode": rc, "startedAt": ev.get("started_at"), "finishedAt": ev["at"], "name": name}
@@ -705,6 +758,7 @@ class Watcher:
         watched = 0
         for (aid, name, _pid) in list(self._live):
             try:
+                self._collect_errors(aid, name)
                 if name in ("migrate", "delta"):
                     self._watch_migration(aid, name); watched += 1
                 elif name.startswith("seed"):
@@ -714,6 +768,7 @@ class Watcher:
         finished = unhandled_finished()
         for ev in finished:
             try:
+                self._collect_errors(ev['account_id'], ev['job_name'])
                 self._handle_finished(ev)
             except Exception as exc:      # noqa: BLE001
                 log.warning("handling finished run %s failed: %s", ev.get("id"), exc)
@@ -721,5 +776,16 @@ class Watcher:
         if self.now() - self._swept_at >= SWEEP_SEC:
             self._swept_at = self.now()
             closed = sweep_cleared(self.ledger_path_for)
+        try:
+            import error_resolution
+            stamp = os.path.join(HERE, 'DEPLOYED_COMMIT')
+            version = open(stamp, encoding='utf-8').read().strip() if os.path.isfile(stamp) else 'unknown'
+            error_resolution.drain_sources(version)
+            error_resolution.sweep_verified(self.ledger_path_for)
+            if self.now()-self._error_maintenance_at >= 3600:
+                error_resolution.prune_events()
+                self._error_maintenance_at=self.now()
+        except Exception as exc:
+            log.warning('error resolution observer failed: %s', exc)
         return {"live": len(self._live), "watched": watched, "finished": len(finished),
                 "closed": len(closed)}

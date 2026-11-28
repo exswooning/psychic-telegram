@@ -81,20 +81,24 @@ class TestAfterASplitRun:
         ok, _ = A._start_dms(3, require_clean=True, why="after the split")
         assert ok and len(wired["jobs"]) == 1
         job = wired["jobs"][0]
-        assert job["name"] == "dms" and job["argv"][1] == "dms_migrate.py"
-        for flag in ("--apply", "--watch", "--identities"):
+        # The pipeline drives dms_migrate --apply itself: decision first, a confirmed start, deltas to zero.
+        assert job["name"] == "dms" and job["argv"][1] == "dms_pipeline.py"
+        assert job["argv"][job["argv"].index("--account-id") + 1] == "3"
+        for flag in ("--watch", "--until-done", "--identities"):
             assert flag in job["argv"]
+        assert job["then"] == ["verify-after-dms"], "the verify of every item follows the DMS on its own"
         assert job["argv"][job["argv"].index("--source-domain") + 1] == "a.com"
         assert job["argv"][job["argv"].index("--target-admin") + 1] == "admin@b.com"
         assert job["env"] == {"DISPLAY": ":99", "DWD_PASSWORD": "x"}, \
             "the account's own DMS environment, with the admin login"
 
-    @pytest.mark.parametrize("field", ["failed", "running", "blocked"])
-    def test_it_does_not_start_over_a_user_who_failed_is_running_or_is_blocked(self, wired, field):
+    @pytest.mark.parametrize("field", ["failed", "running", "blocked", "mailBlockingDms"])
+    def test_one_users_trouble_no_longer_holds_every_mailbox(self, wired, field):
+        # Per user now (operator, 13 Nov 2026): dms_pipeline holds back only the users whose mail the DMS
+        # could carry unrewritten (tests/test_dms_pipeline.py) and starts the rest.
         wired["progress"][field] = 2
-        ok, why = A._start_dms(3, require_clean=True, why="x")
-        assert not ok and not wired["jobs"] and field in why
-        assert wired["incidents"][0]["kind"] == "dms_not_started" and wired["incidents"][0]["account_id"] == 3
+        ok, _ = A._start_dms(3, require_clean=True, why="x")
+        assert ok and [j["name"] for j in wired["jobs"]] == ["dms"] and not wired["incidents"]
 
     def test_it_does_not_start_when_nobody_finished(self, wired):
         wired["progress"]["done"] = 0
@@ -122,8 +126,7 @@ class TestTheEndpointHandsItOn:
         r = self._go(cp, wired, monkeypatch, mail_mode="split")
         assert r.status_code == 200
         migrate = next(j for j in wired["jobs"] if j["name"] == "migrate")
-        # repair always rides along on a real run (see TestRepairRidesAlong below); dms is
-        # the part that is conditional here, and it must wait for the run, not start with it.
+        # Both follow-ons wait for the run to finish.
         assert migrate["then"] == ["repair", "dms"] and len(wired["jobs"]) == 1
 
     @pytest.mark.parametrize("body", [{"dms_after": False}, {"users": ["u0@a.com"]}])
@@ -132,7 +135,7 @@ class TestTheEndpointHandsItOn:
         # A whole-tenant run with no DMS after it tallies every user once it ends;
         # a run of a chosen few tallies just those users -- never the whole account.
         users = body.get("users")
-        assert wired["jobs"][0]["then"] == (["repair", "tally@" + ",".join(users)] if users
+        assert wired["jobs"][0]["then"] == (["tally@" + ",".join(users)] if users
                                             else ["repair", "tally"])
 
     def test_and_neither_follow_on_for_a_dry_run(self, cp, wired, monkeypatch):
@@ -204,7 +207,7 @@ class TestTheIdentitiesFile:
 
 
 class TestTheWaiterRunsItOnlyAfterACleanExit:
-    def _run(self, monkeypatch, tmp_path, rc, then="dms"):
+    def _run(self, monkeypatch, tmp_path, rc, then="dms", argv=None):
         import threading
 
         import job_admission
@@ -224,7 +227,7 @@ class TestTheWaiterRunsItOnlyAfterACleanExit:
         import run_watch
         monkeypatch.setattr(run_watch, "record_finished", lambda *a, **k: None)
         monkeypatch.setattr(A, "_follow_on", lambda kind, aid: (asked.append((kind, aid)), done.set()))
-        A._start_admitted(["x"], 3, "migrate", None, then)
+        A._start_admitted(argv or ["x"], 3, "migrate", None, then)
         done.wait(2)
         return asked
 
@@ -240,6 +243,12 @@ class TestTheWaiterRunsItOnlyAfterACleanExit:
 
     def test_several_follow_ons_run_in_the_order_given(self, monkeypatch, tmp_path):
         assert self._run(monkeypatch, tmp_path, 0, then=["repair", "dms"]) == [("repair", 3), ("dms", 3)]
+
+    @pytest.mark.parametrize("user_args", [["--user", "u0@a.com"], ["--user=u0@a.com"]])
+    def test_an_old_selected_launch_cannot_replay_account_wide_follow_ons(self, monkeypatch, tmp_path, user_args):
+        argv = ["python", "main.py", "migrate", *user_args]
+        follow_ons = ["repair", "tally", "tally@", "tally@wrong@a.com", "tally@u0@a.com"]
+        assert self._run(monkeypatch, tmp_path, 0, then=follow_ons, argv=argv) == [("tally@u0@a.com", 3)]
 
     def test_one_follow_on_failing_does_not_block_the_next(self, monkeypatch, tmp_path):
         import threading
@@ -359,3 +368,17 @@ class TestNoAdminLoginMeansAHumanNotACrash:
         monkeypatch.setattr(webui, "DWD_ENV_FILE", str(f))
         monkeypatch.setattr(webui, "_account_env", lambda aid: {"TARGET_ADMIN": "a@b.com"})
         assert webui._dms_env(3)["DWD_PASSWORD"] == "secret"
+
+
+class TestADeclinedDmsIsAskedAgain:
+    """The gate was decided once, at the end of the split run: repairs cut account 3's blockers from 188 to 9
+    and nothing ever asked again (8 Nov 2026). Every open dms_not_started incident is asked again, hourly."""
+
+    def test_an_open_decline_is_retried_and_starts_once_the_gate_passes(self, wired, monkeypatch):
+        import run_watch
+        monkeypatch.setattr(run_watch, "list_incidents", lambda status, limit=200: (
+            [{"kind": "dms_not_started", "account_id": 3}, {"kind": "crashed", "account_id": 3}] if status == "open" else []))
+        wired["progress"]["done"] = 0
+        assert A._retry_declined_dms() == [] and not wired["jobs"]          # nobody finished yet: not started
+        wired["progress"]["done"] = 3
+        assert A._retry_declined_dms() == [3] and [j["name"] for j in wired["jobs"]] == ["dms"]

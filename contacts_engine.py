@@ -28,8 +28,10 @@ What does not
 from __future__ import annotations
 
 import logging
+import failpoints
 
 from sample_budget import Budget
+from pagination import next_page_token
 
 from resilience import (PermanentAPIError, RateLimiter, retry_on_google_error,
                         shutdown_requested)
@@ -137,6 +139,25 @@ def _contact_write_body(person: dict) -> tuple[dict, int]:
     return body, added
 
 
+# Every contact Bitport creates names its source in clientData, so a second copy (a create whose reply was lost and
+# was retried, F-lost 27 Nov 2026) is provably Bitport's own and can be adopted or removed; a contact the user made
+# carries no marker and is never touched.
+MARKER_KEY = "bitport.source"
+
+
+def _marker(person: dict) -> str | None:
+    return next((d.get("value") for d in person.get("clientData") or [] if d.get("key") == MARKER_KEY), None)
+
+
+def _identity(person: dict):
+    """Name and email addresses: how a target contact a killed run created, but never recorded, is told apart
+    from the user's own. None for a contact with neither: nothing safe to match on."""
+    name = ((person.get("names") or [{}])[0].get("displayName") or "").strip()
+    mails = tuple(sorted({(e.get("value") or "").strip().lower()
+                          for e in person.get("emailAddresses") or [] if e.get("value")}))
+    return (name, mails) if name or mails else None
+
+
 def _update_time(person: dict) -> str | None:
     """When People last changed this contact.
 
@@ -178,38 +199,118 @@ class ContactsMigrator:
 
     # -- reading -------------------------------------------------------------
     def _iter_contacts(self):
-        token = None
+        token, seen = None, set()
         while True:
             self.limiter.acquire()
             resp = self._retry(lambda t=token: self.src.people().connections()
                                .list(resourceName="people/me", pageSize=200,
                                      pageToken=t,
                                      personFields=PERSON_FIELDS).execute())
+            token = next_page_token(resp, token, seen, "Contacts inventory")
             for p in resp.get("connections", []):
                 if not self.budget.take():
                     return
                 yield p
-            token = resp.get("nextPageToken")
             if not token:
                 return
 
     def _iter_groups(self):
-        token = None
+        token, seen = None, set()
         while True:
             self.limiter.acquire()
             resp = self._retry(lambda t=token: self.src.contactGroups()
                                .list(pageSize=100, pageToken=t).execute())
+            token = next_page_token(resp, token, seen, "Contact group inventory")
             for g in resp.get("contactGroups", []):
                 # SYSTEM_CONTACT_GROUP covers starred/myContacts etc, which
                 # exist on the target already and cannot be created.
                 if g.get("groupType") == "USER_CONTACT_GROUP":
                     yield g
-            token = resp.get("nextPageToken")
             if not token:
                 return
 
     # -- entry point ---------------------------------------------------------
+    def _forget_gone_contacts(self) -> None:
+        """A mapped contact deleted on the target (a mailbox emptied after the ledger was written) is
+        copied again, not skipped as migrated. Only a 404 for that very contact counts as gone."""
+        rows = list(self.db.conn.execute(
+            "SELECT source_id, target_id FROM id_mapping WHERE source_user=? AND type='contact'",
+            (self.source_user,)))
+        self._strays = {}
+        if self.settings.dry_run:
+            return
+        live = self._list_target()
+        if live is None:
+            # No inventory, no evidence of what an interrupted run already made: stop rather than create
+            # duplicates (the sweep's rule, 27 Nov).
+            raise RuntimeError("Target Contacts inventory could not be read; no contact is created without it: "
+                               f"{getattr(self, '_list_error', '')}")
+        # An unmapped target contact is kept by identity: a run killed between createContact and
+        # record_mapping left it, and the next run adopts it instead of making a second (F-kill, 27 Nov 2026:
+        # contacts.created@2 left two "Jordan Petrov" on b.).
+        mapped = {t for _, t in rows}
+        for rn, p in live.items():
+            if rn not in mapped and _identity(p):
+                self._strays.setdefault(_identity(p), []).append(rn)
+        for source_id, target_id in rows:
+            if target_id in live:
+                continue
+            try:
+                self.limiter.acquire()
+                self._retry(lambda t=target_id: self.tgt.people().get(
+                    resourceName=t, personFields="names").execute())
+            except Exception as exc:      # noqa: BLE001
+                if "404" in str(exc) or "not found" in str(exc).lower():
+                    self.db.forget_mapping(self.source_user, source_id, "contact")
+                    self.stats["recopied_missing"] = self.stats.get("recopied_missing", 0) + 1
+
+    def _list_target(self) -> dict | None:
+        """Every target contact by resource name (names, addresses, Bitport's marker); None when it cannot be read."""
+        live, token, seen = {}, None, set()
+        try:
+            while True:
+                self.limiter.acquire()
+                r = self._retry(lambda t=token: self.tgt.people().connections().list(
+                    resourceName="people/me", personFields="names,emailAddresses,clientData", pageSize=1000,
+                    pageToken=t).execute())
+                live.update({p["resourceName"]: p for p in r.get("connections", [])})
+                token = next_page_token(r, token, seen, "Target Contacts inventory")
+                if not token:
+                    return live
+        except Exception as exc:      # noqa: BLE001
+            log.warning("[%s] could not list the target's contacts: %s", self.source_user, exc)
+            self._list_error = exc
+            return None
+
+    def _landed_copy(self, rid: str, person: dict) -> str | None:
+        """Before a create is retried: the copy an earlier attempt already made (its reply was lost), by Bitport's
+        marker first, then by identity -- unmapped either way."""
+        live = self._list_target() or {}
+        mapped = {r[0] for r in self.db.conn.execute(
+            "SELECT target_id FROM id_mapping WHERE source_user=? AND type='contact'", (self.source_user,))}
+        free = {rn: p for rn, p in live.items() if rn not in mapped}
+        return (next((rn for rn, p in free.items() if _marker(p) == rid), None)
+                or next((rn for rn, p in free.items() if _identity(person) and _identity(p) == _identity(person)), None))
+
+    def _drop_marked_duplicates(self) -> None:
+        """A second copy carrying the marker of a contact already mapped to another target contact is Bitport's own
+        leftover (a lost reply whose copy was not yet listed when the retry ran): removed. Unmarked contacts stay."""
+        if self.settings.dry_run:
+            return
+        mapped = dict(self.db.conn.execute(
+            "SELECT source_id, target_id FROM id_mapping WHERE source_user=? AND type='contact'", (self.source_user,)))
+        for rn, p in (self._list_target() or {}).items():
+            src = _marker(p)
+            if src and src in mapped and mapped[src] != rn:
+                try:
+                    self.limiter.acquire()
+                    self._retry(lambda r=rn: self.tgt.people().deleteContact(resourceName=r).execute())
+                    self.stats["duplicates_removed"] = self.stats.get("duplicates_removed", 0) + 1
+                except (PermanentAPIError, RuntimeError) as exc:
+                    log.warning("[%s] Bitport's second copy %s of %s not removed: %s", self.source_user, rn, src, exc)
+
     def run(self) -> dict:
+        self._forget_gone_contacts()
         group_map = self._migrate_groups()
         # migrate_user() only checks SHUTDOWN between whole services, so a
         # large contact list would otherwise run to the end regardless of
@@ -221,17 +322,13 @@ class ContactsMigrator:
                            "signal received", self.source_user)
                 break
             self._migrate_contact(person, group_map)
+        self._drop_marked_duplicates()
         return dict(self.stats)
 
     def _migrate_groups(self) -> dict:
         """Contact groups first: a contact's membership references them."""
         mapping: dict[str, str] = {}
-        try:
-            groups = list(self._iter_groups())
-        except (PermanentAPIError, RuntimeError) as exc:
-            log.warning("[%s] contact groups unavailable: %s",
-                        self.source_user, exc)
-            return mapping
+        groups = list(self._iter_groups())
 
         for g in groups:
             name = g.get("name") or "Imported group"
@@ -249,6 +346,8 @@ class ContactsMigrator:
                 created = self._retry(
                     lambda n=name: self.tgt.contactGroups().create(
                         body={"contactGroup": {"name": n}}).execute())
+                created = failpoints.hit("contacts.group.created", created,
+                                         user=self.source_user)
             except (PermanentAPIError, RuntimeError) as exc:
                 # A group of this name already exists on the target, so the
                 # work is done and only the mapping is missing. People
@@ -291,15 +390,15 @@ class ContactsMigrator:
         reject the create in the first place -- anything else would answer a
         different question than the one that failed.
         """
-        token = None
+        token, seen = None, set()
         try:
             while True:
                 resp = self._retry(lambda t=token: self.tgt.contactGroups()
                                    .list(pageSize=200, pageToken=t).execute())
+                token = next_page_token(resp, token, seen, "Target contact group inventory")
                 for g in resp.get("contactGroups", []):
                     if (g.get("name") or "") == name:
                         return g.get("resourceName")
-                token = resp.get("nextPageToken")
                 if not token:
                     return None
         except (PermanentAPIError, RuntimeError) as exc:
@@ -378,15 +477,31 @@ class ContactsMigrator:
                               "SKIPPED_EMPTY", "no writable fields")
             self.stats["skipped"] += 1
             return
-        try:
-            self.limiter.acquire()
-            created = self._retry(lambda b=body: self.tgt.people().createContact(
-                body=b).execute())
-        except (PermanentAPIError, RuntimeError) as exc:
-            self.db.log_audit(self.source_user, rid, "contact", "FAILED",
-                              str(exc))
-            self.stats["failed"] += 1
-            return
+        strays = getattr(self, "_strays", {}).get(_identity(person))
+        if strays:
+            created = {"resourceName": strays.pop()}
+            self.stats["adopted"] = self.stats.get("adopted", 0) + 1
+        else:
+            body["clientData"] = [*(body.get("clientData") or []), {"key": MARKER_KEY, "value": rid}]
+            attempts = []
+
+            def create(b=body):
+                attempts.append(1)
+                if len(attempts) > 1:      # a retry: an earlier attempt may have landed with its reply lost
+                    landed = self._landed_copy(rid, person)
+                    if landed:
+                        self.stats["adopted"] = self.stats.get("adopted", 0) + 1
+                        return {"resourceName": landed}
+                return failpoints.hit("contacts.created", self.tgt.people().createContact(body=b).execute(),
+                                      user=self.source_user)
+            try:
+                self.limiter.acquire()
+                created = self._retry(create)
+            except (PermanentAPIError, RuntimeError) as exc:
+                self.db.log_audit(self.source_user, rid, "contact", "FAILED",
+                                  str(exc))
+                self.stats["failed"] += 1
+                return
 
         self.db.record_mapping(self.source_user, rid, created["resourceName"],
                                "contact")

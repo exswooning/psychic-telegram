@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
-from collections import Counter
+import html
+import failpoints
+import re
+import threading
 from link_rewrite import rewrite_text
 from db import utc_now
 
-FIELDS = "id,content,anchor,quotedFileContent,createdTime,resolved,author(displayName),replies(id,content,createdTime,action,author(displayName))"
+FIELDS = ("id,content,anchor,quotedFileContent,createdTime,resolved,author(displayName,me),"
+          "replies(id,content,createdTime,action,author(displayName,me))")
 
 
 def list_threads(svc, fid, execute=lambda fn: fn()):
@@ -33,6 +37,63 @@ def list_threads(svc, fid, execute=lambda fn: fn()):
         seen.add(token)
 
 
+# "+name@x" (or "@name@x") in a comment mentions that person, and writing it can make Google email
+# them -- from dharan.gov.np, a new message in a SOURCE mailbox. A copy names them as plain text and
+# mails nobody (operator, 16 Nov 2026: the source must not change at all). "a+b@x" is an address.
+_MENTION = re.compile(r"(?<![\w.+-])[+@](?=[\w.%+'-]+@[\w-]+(?:\.[\w-]+)+)")
+
+
+def _unmention(text):
+    return _MENTION.sub("", text)
+
+
+def _text(value):
+    # Drive keeps a comment's text without the trailing space the engine writes after the
+    # "[Author, date]" prefix, so an exact comparison called every action-only reply
+    # (empty body) "differs" and refused it. Trailing whitespace is not a difference.
+    # Only text is trimmed: quotedFileContent is an object ({"mimeType", "value"}), and trimming it
+    # failed health@, ward15@ and ward4@ with "'dict' object has no attribute 'rstrip'" (7 Nov 2026).
+    # Nor is a mention's "+": a copy made before 16 Nov kept it and is the same comment.
+    if isinstance(value, str):
+        return _unmention(value).rstrip()
+    return "" if value is None else value
+
+
+def _quote(q):
+    """A quote as (mimeType, value); an empty one and none at all are the same (Drive drops an empty quote)."""
+    value = q.get("value") if isinstance(q, dict) else None
+    return (q.get("mimeType"), value) if value else None
+
+
+def quote_match(source, target) -> str:
+    """'same', 'escaped' or 'differs'. Drive HTML-escapes a quote when a comment is written, and the engine
+    used to post the value as read (already escaped), so every copy made before 15 Nov 2026 carries one more
+    level ('&amp;' -> '&amp;amp;'; health@, ward4@ on account 3). 'escaped' names exactly that and nothing else."""
+    a, b = _quote(source), _quote(target)
+    if a == b:
+        return "same"
+    if a and b and a[0] == b[0] and html.escape(a[1], quote=False) == b[1]:
+        return "escaped"
+    return "differs"
+
+
+def for_writing(quoted):
+    """The quote as it must be sent so Drive stores what the source shows: one level un-escaped."""
+    return {**quoted, "value": html.unescape(quoted["value"])} if _quote(quoted) else quoted
+
+
+def _body_matches(found, body):
+    # Only comment text has Drive's trailing-whitespace normalization. A quote matches exactly or with the one
+    # extra escaping level of an older copy of ours; any other change is a target edit and is preserved.
+    def same(key, value):
+        if key == "content":
+            return _text(found.get(key)) == _text(value)
+        if key == "quotedFileContent":
+            return quote_match(value, found.get(key)) != "differs"
+        return found.get(key) == value
+    return all(same(key, value) for key, value in body.items())
+
+
 def content(row, lookup):
     author = (row.get("author") or {}).get("displayName") or "unknown"
     return (
@@ -41,21 +102,36 @@ def content(row, lookup):
         + ", "
         + (row.get("createdTime") or "")[:10]
         + "] "
-        + rewrite_text(row.get("content", ""), lookup)[0]
+        + _unmention(rewrite_text(row.get("content", ""), lookup)[0])
     )
+
+
+def authored(row, lookup):
+    """A comment posted as its own author: their words alone. Its date cannot be carried (createdTime is read-only
+    everywhere, the Docs UI included) and the operator chose no note for it (21 Nov 2026)."""
+    return _unmention(rewrite_text(row.get("content", ""), lookup)[0])
+
+
+def _forms(row, lookup):
+    """Every text a faithful copy of this comment may carry: posted as its author, by the owner with the author
+    named (when the author has no account or no access), or as an old copy wrote it."""
+    return (_text(authored(row, lookup)), _text(content(row, lookup)), _text(rewrite_text(row.get("content", ""), lookup)[0]))
 
 
 def differences(source, target, lookup):
     remaining = list(target)
     diffs = []
     for comment in source:
-        wanted = content(comment, lookup)
         candidates = [
             c
             for c in remaining
-            if c.get("content", "")
-            in (wanted, rewrite_text(comment.get("content", ""), lookup)[0])
+            if _text(c.get("content")) in _forms(comment, lookup)
         ]
+        if len(candidates) > 1:
+            # Two threads with the same words on different spots (live, finance@s.: one PDF,
+            # "[FINANCE, 2023-01-13]" twice): the anchor tells them apart, as delivery does.
+            candidates = [c for c in candidates if c.get("anchor") == comment.get("anchor")
+                          and quote_match(comment.get("quotedFileContent"), c.get("quotedFileContent")) != "differs"]
         if len(candidates) != 1:
             diffs.append("comment thread missing or ambiguous")
             continue
@@ -63,23 +139,25 @@ def differences(source, target, lookup):
         remaining.remove(found)
         if bool(comment.get("resolved")) != bool(found.get("resolved")):
             diffs.append("comment resolution differs")
-        for field in ("anchor", "quotedFileContent"):
-            if comment.get(field) != found.get(field):
-                diffs.append("comment " + field + " differs")
-        want = Counter(
-            (content(r, lookup), r.get("action", ""))
-            for r in comment.get("replies", [])
-        )
-        actual = Counter(
-            (r.get("content", ""), r.get("action", ""))
-            for r in found.get("replies", [])
-        )
-        raw = Counter(
-            (rewrite_text(r.get("content", ""), lookup)[0], r.get("action", ""))
-            for r in comment.get("replies", [])
-        )
-        if actual not in (want, raw):
-            diffs.append("comment replies differ")
+        if comment.get("anchor") != found.get("anchor"):
+            diffs.append("comment anchor differs")
+        quoted = quote_match(comment.get("quotedFileContent"), found.get("quotedFileContent"))
+        if quoted == "escaped":
+            diffs.append("comment quote escaped twice (Drive escapes on write; copy made before the fix)")
+        elif quoted == "differs":
+            diffs.append("comment quotedFileContent differs")
+        actual = [(_text(r.get("content")), r.get("action", "")) for r in found.get("replies", [])]
+        pending = list(actual)
+        for r in comment.get("replies", []):
+            forms = {(f, r.get("action", "")) for f in _forms(r, lookup)}
+            hit = next((a for a in pending if a in forms), None)
+            if hit is None:
+                diffs.append("comment replies differ")
+                break
+            pending.remove(hit)
+        else:
+            if pending:
+                diffs.append("comment replies differ")
     if remaining:
         diffs.append("extra target comment threads")
     return diffs
@@ -106,7 +184,9 @@ def reconcile(migrator, sid, tid):
             source_user TEXT,item_key TEXT,target_file TEXT,state TEXT,updated_at TEXT,
             PRIMARY KEY(source_user,item_key))""")
 
-    def deliver(key, kind, body, candidates, call):
+    def deliver(key, kind, options, candidates):
+        """options: (body, call) pairs, best first. A later one is tried only when Google definitely refused
+        the one before (nothing was created), so a copy is never made twice."""
         nonlocal written
         # Keyed by file: a comment id is unique within one file only -- live, ss@'s two
         # copies of one Doc both carried AAABghWPKe8, the second found the first's mapping
@@ -120,25 +200,38 @@ def reconcile(migrator, sid, tid):
         if mapped:
             found = next((r for r in candidates if r["id"] == mapped), None)
             if not found:
-                raise RuntimeError(
-                    "Mapped comment/reply is missing; do not create another blindly"
-                )
-            if any(found.get(k, "") != v for k, v in body.items()):
-                raise RuntimeError(
-                    "Existing target comment/reply differs; preserve possible target edits"
-                )
-            return mapped
+                # A proven receipt for another target copy is not evidence
+                # about this freshly mapped file. Missing replies on the SAME
+                # copy, or without that receipt, remain a target-edit hold.
+                receipt = migrator.db.conn.execute(
+                    "SELECT target_file FROM comment_delivery_attempts WHERE source_user=? AND item_key=?",
+                    (migrator.source_user, key)).fetchone()
+                if not receipt or not str(receipt[0] or "").strip() or receipt[0] == tid:
+                    raise RuntimeError(
+                        "Mapped comment/reply is missing; do not create another blindly"
+                    )
+            else:
+                if not any(_body_matches(found, b) for b, _ in options):
+                    raise RuntimeError(
+                        "Existing target comment/reply differs; preserve possible target edits"
+                    )
+                return mapped
         matches = [
-            r for r in candidates if all(r.get(k, "") == v for k, v in body.items())
+            r for r in candidates if any(_body_matches(r, b) for b, _ in options)
         ]
         if len(matches) > 1:
             raise RuntimeError("Ambiguous comment/reply copies")
         if matches:
             target_id = matches[0]["id"]
         else:
+            # Only an attempt against THIS target file says anything about it. A file re-copied to a new
+            # target (repair, quarantine) clears its comments' mappings but not their attempt rows, and the
+            # old copy's rows then blocked the new copy's comments for good (finance@, it.department@:
+            # "needs reconciliation", live 7 Nov 2026) -- the user's comments never reached the new file.
             prior = migrator.db.conn.execute(
-                "SELECT state FROM comment_delivery_attempts WHERE source_user=? AND item_key=?",
-                (migrator.source_user, key),
+                "SELECT state FROM comment_delivery_attempts WHERE source_user=? AND item_key=? "
+                "AND target_file=?",
+                (migrator.source_user, key, tid),
             ).fetchone()
             if prior:
                 raise RuntimeError(
@@ -146,14 +239,20 @@ def reconcile(migrator, sid, tid):
                 )
             with migrator.db.write() as c:
                 c.execute(
-                    "INSERT INTO comment_delivery_attempts VALUES(?,?,?,'UNCERTAIN',?)",
+                    "INSERT OR REPLACE INTO comment_delivery_attempts VALUES(?,?,?,'UNCERTAIN',?)",
                     (migrator.source_user, key, tid, utc_now()),
                 )
             # No automatic request retry after an ambiguous create response.
             for limiter_name in ("_tgt_write_limiter", "_project_limiter"):
                 limiter=getattr(migrator,limiter_name,None)
                 if limiter is not None:limiter.acquire()
-            created = call().execute()
+            for i, (_body, call) in enumerate(options):
+                try:
+                    created = failpoints.hit("drive.comment.created", call().execute(), user=migrator.source_user)
+                    break
+                except Exception as exc:      # noqa: BLE001 - only a definite refusal moves to the next way
+                    if i == len(options) - 1 or not _refused(exc):
+                        raise
             target_id = created["id"]
             written += 1
         migrator.db.record_mapping(migrator.source_user, key, target_id, kind)
@@ -164,32 +263,110 @@ def reconcile(migrator, sid, tid):
             )
         return target_id
 
+    writers = _Writers(migrator, sid)
+
+    def ways(row, extra, create):
+        """(body, call) for each way to post this row: as its author's target account, then by the owner with
+        the author named in the text."""
+        out = []
+        who = writers.account(row)
+        if who:
+            body = {"content": authored(row, lookup), **extra}
+            out.append((body, lambda b=body, w=who: create(writers.client(w), b)))
+        body = {"content": content(row, lookup), **extra}
+        out.append((body, lambda b=body: create(migrator.tgt, b)))
+        return out
+
     for comment in source:
-        body = {"content": content(comment, lookup)}
-        for field in ("anchor", "quotedFileContent"):
-            if comment.get(field):
-                body[field] = comment[field]
+        extra = {f: comment[f] for f in ("anchor", "quotedFileContent") if comment.get(f)}
         cid = deliver(
             comment["id"],
             "comment",
-            body,
+            ways(comment, extra, lambda svc, b: svc.comments().create(
+                fileId=tid, fields=FIELDS,
+                body={**b, **({"quotedFileContent": for_writing(b["quotedFileContent"])}
+                              if "quotedFileContent" in b else {})})),
             target,
-            lambda: migrator.tgt.comments().create(
-                fileId=tid, body=body, fields=FIELDS
-            ),
         )
         found = next((c for c in target if c["id"] == cid), {})
         for reply in comment.get("replies", []):
-            rb = {"content": content(reply, lookup)}
-            if reply.get("action"):
-                rb["action"] = reply["action"]
+            extra = {"action": reply["action"]} if reply.get("action") else {}
             deliver(
                 comment["id"] + "::" + reply["id"],
                 "comment_reply",
-                rb,
+                ways(reply, extra, lambda svc, b, c=cid: svc.replies().create(
+                    fileId=tid, commentId=c, body=b, fields="id,content,action")),
                 found.get("replies", []),
-                lambda: migrator.tgt.replies().create(
-                    fileId=tid, commentId=cid, body=rb, fields="id,content,action"
-                ),
             )
+    # A thread an earlier pass left FAILED (a lost reply, a dropped connection) is whole now: say so, so the fix is
+    # on record (item_retries) -- t08's comment was reconciled and CONFIRMED while its row still read FAILED
+    # (fp2-live run.reply_lost, 24 Nov 2026).
+    if migrator.db.conn.execute(
+            "SELECT 1 FROM audit_log WHERE source_user=? AND item_id=? AND item_type='comment' AND status='FAILED'",
+            (migrator.source_user, sid)).fetchone():
+        migrator.db.log_audit(migrator.source_user, sid, "comment", "SUCCESS",
+                              "comment thread reconciled on a later pass")
     return written
+
+
+def _refused(exc) -> bool:
+    """Google said no and created nothing: no access to the file (403/404), or no such account to act as."""
+    status = getattr(getattr(exc, "resp", None), "status", None)
+    return status in (403, 404) or type(exc).__name__ == "RefreshError"
+
+
+_NAMES: dict = {}
+_NAMES_LOCK = threading.Lock()
+
+
+def _source_names(migrator) -> dict:
+    """Full name -> source addresses, from the source directory, once per process. A comment names its author
+    only by display name: Drive returns no address, no permission id (requested, never sent), and a photo link
+    that differs from the sharing list's (measured on b., 21 Nov 2026). A listing that fails is not kept."""
+    domain = (getattr(migrator.settings, "source_domain", "") or "").lower()
+    with _NAMES_LOCK:
+        if domain in _NAMES:
+            return _NAMES[domain]
+        names: dict = {}
+        try:
+            svc, token = migrator.auth.source_directory(), None
+            while True:
+                r = migrator._retry(lambda t=token: svc.users().list(
+                    domain=domain, maxResults=500, pageToken=t,
+                    fields="nextPageToken,users(primaryEmail,name(fullName))").execute(), write=False, tenant="source")
+                for u in r.get("users", []):
+                    full = ((u.get("name") or {}).get("fullName") or "").strip().lower()
+                    if full:
+                        names.setdefault(full, []).append(u["primaryEmail"].lower())
+                token = r.get("nextPageToken")
+                if not token:
+                    break
+        except Exception:      # noqa: BLE001 - unknown authors are posted by the owner, named in the text
+            return {}
+        _NAMES[domain] = names
+        return names
+
+
+class _Writers:
+    """Who wrote each source comment, as a target account Bitport can act as (domain-wide delegation: no password).
+    Matched by full name in the source directory, and only when exactly one person has it: two people of one name,
+    an outsider or a deleted account are posted by the owner, naming the author -- never guessed."""
+
+    def __init__(self, migrator, sid):
+        self.m, self.sid, self._clients = migrator, sid, {}
+
+    def account(self, row):
+        if not getattr(self.m.settings, "comments_as_author", True):
+            return None
+        author = row.get("author") or {}
+        if author.get("me"):
+            return self.m.target_user
+        emails = _source_names(self.m).get((author.get("displayName") or "").strip().lower(), [])
+        return self.m.db.resolve_identity(emails[0]) if len(emails) == 1 else None
+
+    def client(self, account):
+        if account == self.m.target_user:
+            return self.m.tgt
+        if account not in self._clients:
+            self._clients[account] = self.m.auth.target_drive(account)
+        return self._clients[account]

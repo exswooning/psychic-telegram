@@ -14,7 +14,7 @@ CONF=/etc/ssh/sshd_config.d/00-bitport-keys-only.conf
 JAIL=/etc/fail2ban/jail.d/bitport-sshd.conf
 
 if ! grep -qE '^(ssh-|ecdsa-|sk-)' "$KEYS" 2>/dev/null; then
-  echo "harden_ssh: no key in $KEYS -- password login left on, it is the only way in" >&2
+  echo "harden_ssh: no key in $KEYS -- not turning password login off (it may be the only way in)" >&2
   exit 0
 fi
 if ! grep -qE '^\s*Include\s+/etc/ssh/sshd_config\.d/\*\.conf' /etc/ssh/sshd_config; then

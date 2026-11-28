@@ -64,8 +64,8 @@ def runner(monkeypatch, settings, db, capsys):
     monkeypatch.setattr(main, "_registered", fake_registered)
     monkeypatch.setattr(main, "run_batch", fake_batch)
     monkeypatch.setattr(main, "_gate_on_delegation", lambda s: None)
-    monkeypatch.setattr(main, "demote_stale_running", lambda d: 0)
-    monkeypatch.setattr(main, "reconcile_service_markers", lambda d: [])
+    monkeypatch.setattr(main, "demote_stale_running", lambda d, only=None: 0)
+    monkeypatch.setattr(main, "reconcile_service_markers", lambda d, only=None: [])
     monkeypatch.setattr(main.memtrace, "start", lambda: None)
     monkeypatch.setattr(main, "_memory_watchdog", lambda stop, *a, **k: stop.wait(0.01))
     monkeypatch.setattr(main, "_metrics_flusher", lambda stop, *a, **k: stop.wait(0.01))
@@ -94,6 +94,15 @@ class TestTheSharedRunner:
         results = runner(self.ALL, main.ordered_passes(self.ALL))
         assert runner.passes == [{"drive"}, {"gmail"}, {"calendar", "contacts", "tasks", "chat"}]
         assert [r["source"] for r in results] == ["u1", "u2", "u3"]
+
+    def test_every_pass_ends_with_its_failures_sorted_by_class(self, runner, monkeypatch):
+        import pass_retry
+        seen = []
+        monkeypatch.setattr(pass_retry, "end_of_pass",
+                            lambda db, auth, st, services, results, migrate_user, **kw: seen.append((set(services), results)))
+        runner(self.ALL, main.ordered_passes(self.ALL))
+        assert [s for s, _ in seen] == [{"drive"}, {"gmail"}, {"calendar", "contacts", "tasks", "chat"}]
+        assert seen[0][1] == [{"source": "u1", "services": {}}]
 
     def test_the_whole_run_registers_once_not_once_per_pass(self, runner):
         """A pass registering and releasing would drop the run out of the admission
@@ -144,7 +153,7 @@ class TestTheCommand:
         monkeypatch.setattr(main, "_print_batch_summary", lambda *a, **k: None)
         monkeypatch.setattr(main, "_auto_repair", lambda *a, **k: None)
         main.cmd_migrate(argparse.Namespace(services="all", user=None, ordered=True), settings, db, None)
-        assert seen["passes"] == [{"drive"}, {"gmail"}, {"calendar", "contacts", "tasks", "chat"}]
+        assert seen["passes"] == [{"drive"}, {"gmail"}, {"calendar", "contacts", "tasks"}]      # no Chat since 2026-10-31
 
     def test_unordered_hands_it_none(self, monkeypatch, settings, db):
         seen = {}
@@ -224,6 +233,16 @@ class TestTheCheckAfterTheRun:
         monkeypatch.setattr(main, "_auto_repair", lambda *a, **k: order.append("repair"))
         main.cmd_migrate(argparse.Namespace(services="drive", user=None, ordered=False), settings, db, None)
         assert order == ["run", "repair", "left"]
+
+    def test_a_selected_user_migration_does_not_run_account_wide_repair(self, monkeypatch, settings, db):
+        repairs = []
+        monkeypatch.setattr(main, "_run_with_memory_pause", lambda *a, **kw: kw["after"]([]) or [])
+        monkeypatch.setattr(main, "_print_batch_summary", lambda *a, **kw: None)
+        monkeypatch.setattr(main, "_auto_repair", lambda *a: repairs.append(1))
+
+        main.cmd_migrate(argparse.Namespace(services="gmail", user=["a@src"], ordered=False), settings, db, None)
+
+        assert repairs == []
 
 
 class TestRepairBetweenPasses:
@@ -306,6 +325,13 @@ class TestRepairRidesBetweenDriveAndWhateverComesNext:
         calls = self._stub(monkeypatch)
         runner(self.ALL, main.ordered_passes(self.ALL))
         assert calls == [1]   # after drive (pass 1) only -- not after gmail or the rest
+
+    def test_it_does_not_repair_the_account_between_selected_user_passes(self, runner, monkeypatch):
+        calls = self._stub(monkeypatch)
+
+        runner(self.ALL, main.ordered_passes(self.ALL), only=["a@src"])
+
+        assert calls == []
 
     def test_it_does_not_run_after_the_final_pass(self, runner, monkeypatch):
         calls = self._stub(monkeypatch)

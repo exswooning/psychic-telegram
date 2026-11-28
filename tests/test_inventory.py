@@ -12,6 +12,7 @@ misclassification here is worse than a missing count.
 from __future__ import annotations
 
 import inventory
+import pytest
 from config import Settings
 
 
@@ -95,6 +96,53 @@ class TestShareClassification:
 
 
 class TestScanDrive:
+    def test_repeated_inventory_page_token_is_an_error(self):
+        class RepeatedDrive(FakeDrive):
+            def execute(self):
+                self.i += 1
+                if self.i > 3:
+                    raise AssertionError("pagination did not stop")
+                return {"files": [], "nextPageToken": "same"}
+
+        drive = RepeatedDrive([])
+        with pytest.raises(RuntimeError, match="repeated.*page token"):
+            inventory.scan_drive(drive, settings(), "a@c.example.com")
+        assert drive.i == 2
+
+    def test_calendar_inventory_follows_every_calendar_page(self):
+        class CalendarList:
+            def __init__(self):
+                self.calls = 0
+
+            def list(self, **kwargs):
+                self.token = kwargs.get("pageToken")
+                return self
+
+            def execute(self):
+                self.calls += 1
+                if self.token is None:
+                    return {"items": [{"id": "one", "accessRole": "owner"}],
+                            "nextPageToken": "next"}
+                return {"items": [{"id": "two", "accessRole": "owner"}]}
+
+        class Events:
+            def list(self, **kwargs):
+                self.calendar_id = kwargs["calendarId"]
+                return self
+
+            def execute(self):
+                return {"items": [{"id": self.calendar_id}]}
+
+        calendar_list = CalendarList()
+
+        class Calendar:
+            def calendarList(self): return calendar_list
+            def events(self): return Events()
+
+        result = inventory.scan_calendar(Calendar())
+        assert result == {"calendars": 2, "events": 2, "followed": 0}
+        assert calendar_list.calls == 2
+
     def test_pagination_is_followed(self):
         pages = [
             {"files": [{"id": "1", "mimeType": "application/vnd.google-apps.document"}],
@@ -222,6 +270,19 @@ class TestDraftCounting:
             {"drafts": [{"id": "3"}]},
         ])
         assert inventory.count_drafts(gmail) == 3
+
+    def test_repeated_draft_page_token_is_an_error(self):
+        class RepeatedGmail(self.FakeGmail):
+            def execute(self):
+                self.i += 1
+                if self.i > 3:
+                    raise AssertionError("pagination did not stop")
+                return {"drafts": [{"id": "one"}], "nextPageToken": "same"}
+
+        gmail = RepeatedGmail([])
+        with pytest.raises(RuntimeError, match="repeated.*page token"):
+            inventory.count_drafts(gmail)
+        assert gmail.i == 2
 
     def test_an_empty_mailbox_reports_zero(self):
         assert inventory.count_drafts(self.FakeGmail([{}])) == 0

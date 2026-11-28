@@ -19,6 +19,8 @@ from __future__ import annotations
 import os
 import sys
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import benchmark_run as _br      # noqa: E402
@@ -158,3 +160,104 @@ class TestStatsAreScopedToTheRun:
         conn.commit()
         conn.close()
         return path
+
+
+class TestSelectedAccount:
+    @staticmethod
+    def _configured_pair(tmp_path, monkeypatch):
+        import control_plane_db as cpdb
+
+        control = str(tmp_path / "control.db")
+        ledger = tmp_path / "data" / "accounts" / "3" / "migration.db"
+        ledger.parent.mkdir(parents=True)
+        monkeypatch.setenv("CONTROL_PLANE_DB", control)
+        monkeypatch.setenv("MIGRATION_DB", str(tmp_path / "other-tenant.db"))
+        monkeypatch.setenv("SOURCE_DOMAIN", "other-source.test")
+        monkeypatch.setenv("TARGET_DOMAIN", "other-target.test")
+        monkeypatch.setenv("SOURCE_SA_KEY", str(tmp_path / "other-source.json"))
+        monkeypatch.setenv("TARGET_SA_KEY", str(tmp_path / "other-target.json"))
+        cpdb.apply_migrations()
+        with cpdb.rw() as conn:
+            conn.execute("INSERT INTO accounts (id,email,password_hash,name) VALUES (3,?,?,?)",
+                         ("operator@example.test", "unused", "Benchmark operator"))
+            for side, domain in (("source", "source.test"), ("target", "target.test")):
+                key = tmp_path / "keys" / "3" / f"{side}-sa.json"
+                conn.execute("INSERT INTO tenant_configs (account_id,side,domain,admin_email,sa_key_path,db_path) "
+                             "VALUES (?,?,?,?,?,?)",
+                             (3, side, domain, f"admin@{domain}", str(key), str(ledger)))
+        MigrationDB(os.environ["MIGRATION_DB"]).close()
+        db = MigrationDB(str(ledger))
+        with db.write() as conn:
+            conn.execute("INSERT INTO audit_log (source_user,item_id,item_type,status,timestamp) "
+                         "VALUES ('user@source.test','artifact','file','SUCCESS','2099-01-01T00:00:00Z')")
+        db.close()
+        monkeypatch.setattr(_br, "OUT_DIR", str(tmp_path / "benchmarks"))
+        return ledger
+
+    def test_valid_selected_pair_binds_every_child_and_report(self, tmp_path, monkeypatch):
+        import json
+        import subprocess
+        from pathlib import Path
+
+        from config import Settings
+
+        ledger = self._configured_pair(tmp_path, monkeypatch)
+        calls = []
+
+        def run(argv, **kwargs):
+            if argv[0] in ("ps", "git"):
+                return subprocess.CompletedProcess(argv, 0, "", "")
+            script = argv[1]
+            account = int(argv[argv.index("--account-id") + 1]) if "--account-id" in argv else None
+            calls.append((script, account))
+            # Every benchmark subprocess is faked. Resolve its actual Settings
+            # constructor under the environment handed to it by the runner.
+            with monkeypatch.context() as child_env:
+                for name, value in kwargs["env"].items():
+                    child_env.setenv(name, value)
+                effective = Settings(account_id=account)
+                assert (effective.source_domain, effective.target_domain) == ("source.test", "target.test")
+                assert (effective.source_admin, effective.target_admin) == ("admin@source.test", "admin@target.test")
+                assert Path(effective.source_sa_key).parent == tmp_path / "keys" / "3"
+                assert Path(effective.target_sa_key).parent == tmp_path / "keys" / "3"
+                assert Path(effective.db_path) == ledger
+                if script == "reset_target.py":
+                    assert argv[argv.index("--confirm-domain") + 1] == effective.target_domain
+                if script == "reset_drive_ledger.py":
+                    assert argv[argv.index("--confirm-domain") + 1] == effective.source_domain
+            if script == "acl_audit.py":
+                Path(argv[-1]).write_text(json.dumps({"totals": {"grants_source": 1, "grants_matched": 1}}))
+            return subprocess.CompletedProcess(argv, 0, "", "")
+
+        monkeypatch.setattr(_br, "sh", run)
+        rc = _br.main(["--account-id", "3", "--label", "T1", "--yes", "--confirm-domain", "target.test"])
+
+        assert rc == 0
+        assert calls == [("reset_target.py", None), ("reset_drive_ledger.py", None),
+                         ("main.py", 3), ("acl_audit.py", None)]
+        report = next((tmp_path / "benchmarks").glob("T1-*[0-9]Z.json"))
+        assert set(json.loads(report.read_text())["users"]) == {"user@source.test"}
+
+    def test_skip_wipe_still_checks_selected_typed_target_first(self, tmp_path, monkeypatch, capsys):
+        self._configured_pair(tmp_path, monkeypatch)
+        def unexpected(*args, **kwargs):
+            raise AssertionError("the runner called a subprocess before validating the target")
+        monkeypatch.setattr(_br, "sh", unexpected)
+
+        rc = _br.main(["--account-id", "3", "--label", "T1", "--yes", "--skip-wipe",
+                       "--confirm-domain", "other-target.test"])
+
+        assert rc == 2
+        assert "does not match the target domain" in capsys.readouterr().err
+
+    @pytest.mark.parametrize("mode", ["oauth", "impersonate"])
+    def test_selected_benchmark_rejects_process_wide_credentials(self, tmp_path, monkeypatch, capsys, mode):
+        self._configured_pair(tmp_path, monkeypatch)
+        monkeypatch.setenv("AUTH_MODE", mode)
+        monkeypatch.setattr(_br, "sh", lambda *args, **kwargs: pytest.fail("benchmark launched a child"))
+
+        rc = _br.main(["--account-id", "3", "--label", "T1", "--yes", "--skip-wipe",
+                       "--confirm-domain", "target.test"])
+
+        assert rc == 2
+        assert "selected account's service account keys" in capsys.readouterr().err

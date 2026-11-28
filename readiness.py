@@ -114,7 +114,7 @@ def check(settings, side: str, purpose: str, *, gate: bool = False) -> dict:
     except (OSError, ValueError) as exc:
         rows.append(_row("key", False, f"unreadable: {exc}"))
         return _done(side, purpose, domain, admin, rows)
-    rows.append(_own_project(k.get("project_id"), domain))
+    rows.append(_own_project(k.get("project_id"), domain, getattr(settings, "account_id", None)))
 
     # delegation
     if seed:
@@ -225,7 +225,7 @@ def gate(settings) -> None:
     print("READINESS: both tenants ready for this migration", flush=True)
 
 
-def _own_project(project: str | None, domain: str) -> dict:
+def _own_project(project: str | None, domain: str, account_id: int | None = None) -> dict:
     """A Cloud project serves one domain. Live: gorkhatweed.com sat on wsmig-src-50758,
     made for source.sarafgloabalexim.com -- one project's delegation cannot be told apart
     per tenant, and tearing one pair down would take the other's key with it."""
@@ -233,8 +233,13 @@ def _own_project(project: str | None, domain: str) -> dict:
     others = set()
     try:
         with cpdb.ro() as c:
-            for r in c.execute("SELECT domain, sa_key_path FROM tenant_configs "
+            for r in c.execute("SELECT account_id, domain, sa_key_path FROM tenant_configs "
                                "WHERE domain != '' AND sa_key_path != ''"):
+                # The other side of this same migration may share it: one pair, torn down together (dharan.gov.np ->
+                # new.mdharan.com, 23 Nov 2026: dharan's admin cannot use Google Cloud without 2SV, so its key lives in
+                # the target's project). Another account on the project still fails.
+                if account_id is not None and r["account_id"] == account_id:
+                    continue
                 try:
                     with open(r["sa_key_path"], encoding="utf-8") as fh:
                         if json.load(fh).get("project_id") == project and r["domain"].lower() != domain:

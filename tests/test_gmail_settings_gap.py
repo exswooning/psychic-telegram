@@ -229,5 +229,8 @@ class TestNothingInARunMailsAnyone:
         """Drive emails whoever can see a file about a new comment; written after the
         sharing, that included a client's outside collaborators."""
         import drive_engine
-        src = _code(drive_engine.DriveMigrator._finish_item)
+        # Both the usual finish and finish-in-staging write through this one helper.
+        src = _code(drive_engine.DriveMigrator._write_comments_and_grants)
         assert src.index("_sync_comments(") < src.index("_sync_acls(")
+        assert "_write_comments_and_grants(" in _code(drive_engine.DriveMigrator._finish_item)
+        assert "_write_comments_and_grants(" in _code(drive_engine.DriveMigrator._finish_in_staging)

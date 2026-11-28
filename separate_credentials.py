@@ -27,13 +27,14 @@ before Authorize and the row read back after. Logins come from the root-only
 from __future__ import annotations
 
 import argparse
-import dataclasses
+import copy
 import glob
 import json
 import os
 import subprocess
 import sys
 import time
+from seed_loader import load_seed_sandbox
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PY = sys.executable
@@ -57,14 +58,20 @@ def migrate_scopes(settings) -> list[str]:
 def seed_scopes() -> list[str]:
     """Exactly what the seeder and its source reset request: its corpus writes, plus
     account creation, headcount, groups, licence usage, purging mail and chat."""
-    sys.path.insert(0, os.path.join(HERE, "data-generator"))
-    from seed_sandbox import (SEED_SCOPES, GROUP_WRITE_SCOPE, REPORTS_SCOPE, GMAIL_PURGE_SCOPE,
-                              DIRECTORY_READONLY_SCOPE, GMAIL_SETTINGS_SCOPE)
+    seeder = load_seed_sandbox()
     from provision import DIRECTORY_WRITE_SCOPE
+    SEED_SCOPES = seeder.SEED_SCOPES
+    GROUP_WRITE_SCOPE = seeder.GROUP_WRITE_SCOPE
+    REPORTS_SCOPE = seeder.REPORTS_SCOPE
+    GMAIL_PURGE_SCOPE = seeder.GMAIL_PURGE_SCOPE
+    DIRECTORY_READONLY_SCOPE = seeder.DIRECTORY_READONLY_SCOPE
+    GMAIL_SETTINGS_SCOPE = seeder.GMAIL_SETTINGS_SCOPE
     extra = {GROUP_WRITE_SCOPE, REPORTS_SCOPE, GMAIL_PURGE_SCOPE, DIRECTORY_READONLY_SCOPE,
              GMAIL_SETTINGS_SCOPE, DIRECTORY_WRITE_SCOPE,
              "https://www.googleapis.com/auth/gmail.settings.sharing",
-             "https://www.googleapis.com/auth/chat.delete"}
+             "https://www.googleapis.com/auth/chat.delete",
+             # A meeting room for the calendar_extras fixture (fableplan2 P2.5).
+             "https://www.googleapis.com/auth/admin.directory.resource.calendar"}
     return sorted(set(SEED_SCOPES) | extra)
 
 
@@ -96,7 +103,25 @@ def _create_seed_key(settings, dest: str, login: dict) -> tuple[bool, str]:
     import gcloud_browser_auth
     import provision_gcp
     project = _key(settings.source_sa_key)["project_id"]
-    ok, detail, cfg = gcloud_browser_auth.login(login["DWD_EMAIL_SOURCE"], login["DWD_PASSWORD_SOURCE"])
+    # Google shows its first-use notices (Cloud SDK access, Cloud Platform terms) on every gcloud sign-in. With
+    # no channel the sign-in refused them outright ("Use the setup UI") and no seed key could be made (17 Nov
+    # 2026). Publish them where approve_setup_notices.py (or a person) can answer, one run at a time.
+    import re
+    # The seeder's Settings carry no account id (live: the file landed in logs/0/); its ledger path names it.
+    acct = getattr(settings, "account_id", None) or (re.search(r"/accounts/(\d+)/", str(getattr(settings, "db_path", "")) or "")
+                                                       or [None, 0])[1]
+    progress = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs", str(acct), "seed-key.json.progress")
+    saved = (gcloud_browser_auth.HANDOFF, gcloud_browser_auth.NOTICE_FILE)
+
+    def _publish(handoff):
+        os.makedirs(os.path.dirname(progress), exist_ok=True)
+        with open(progress, "w", encoding="utf-8") as fh:
+            json.dump({"pct": 5, "label": "seed key: sign-in", "handoff": handoff}, fh)
+    gcloud_browser_auth.HANDOFF, gcloud_browser_auth.NOTICE_FILE = _publish, progress + ".notice-response"
+    try:
+        ok, detail, cfg = gcloud_browser_auth.login(login["DWD_EMAIL_SOURCE"], login["DWD_PASSWORD_SOURCE"])
+    finally:
+        gcloud_browser_auth.HANDOFF, gcloud_browser_auth.NOTICE_FILE = saved
     if not ok:
         return False, f"gcloud sign-in as the source admin failed: {detail}"
     try:
@@ -125,7 +150,11 @@ def _grant(account_id, client_id: str, scopes: list[str], key: str, login: dict)
 
 def _probe(settings, key: str, scopes: list[str]) -> dict[str, bool]:
     import verify_scopes
-    st = dataclasses.replace(settings, source_sa_key=key)
+    # A copy, never dataclasses.replace: replace re-runs __post_init__, which reloads the account's
+    # tenant_configs and puts the MIGRATE key back -- so the seed entry was probed with the migrate key,
+    # read "not delegated" for every write scope, and was overwritten on every run (18 Nov 2026).
+    st = copy.copy(settings)
+    st.source_sa_key = key
     return {r["scope"]: bool(r["ok"]) for r in verify_scopes.verify(st, "source", scopes)}
 
 

@@ -20,6 +20,7 @@ import inspect
 import os
 import re
 import sys
+import time
 
 import pytest
 
@@ -794,7 +795,8 @@ class TestResetIsActuallyComplete:
         import seed_sandbox
 
         src = inspect.getsource(seed_sandbox.reset_gmail)
-        assert 'q="-in:trash"' in src
+        # Without a purge client the Trash is still skipped; with one it is purged too (19 Nov 2026).
+        assert 'q="" if purge is not None else "-in:trash"' in src
 
     def test_it_still_looks_in_spam(self):
         """The filter must exclude only the trash half -- seeded mail that
@@ -845,6 +847,18 @@ def test_fit_keeps_existing_users_first():
     assert [e["email"] for e in fitted] == [
         "alice@tenanta.com", "bob@tenanta.com", "carol@tenanta.com",
         "dave@tenanta.com"]
+
+
+def test_profile_user_count_does_not_narrow_the_existing_cohort():
+    import seed_sandbox as s
+
+    cohort = _entries(["c01", "t01", "t02"])
+    profile = _entries(["p001", "p002"])
+    all_entries = cohort + profile
+    assert s._narrow_cohort_entries(all_entries, "fableplan2.json", "300",
+                                    profile_mode=True) == all_entries
+    assert [e["local"] for e in s._narrow_cohort_entries(
+        cohort, "fableplan2.json", "t01", profile_mode=False)] == ["t01"]
 
 
 def test_fit_pads_unused_seats_with_generated_users():
@@ -1252,6 +1266,37 @@ class TestThrottleNote:
             raise RuntimeError("x")
         monkeypatch.setattr(metrics.METRICS, "snapshot", boom)
         assert s._throttle_note() == ""
+
+
+def test_seed_metrics_persist_the_sample_series_and_worker_slots(settings, monkeypatch, tmp_path):
+    import metrics
+    import seed_sandbox as s
+    from db import MigrationDB
+
+    old_run = dict(s._SEED_RUN)
+    try:
+        started = time.time() - 12
+        s._SEED_RUN.clear()
+        s._SEED_RUN.update(kind="seed", pid=919, started_at="2026-11-27T00:00:00Z",
+                           started_epoch=started, source_domain="source.example", target_domain=None)
+        settings.db_path = str(tmp_path / "seed-ledger.db")
+        monkeypatch.setattr(metrics.METRICS, "snapshot", lambda: {
+            "calls": 8, "elapsed_sec": 99, "worker_slots_configured": 4,
+            "worker_slots_busy": 3, "idle_workers_share": 0.25,
+        })
+        s._save_seed_metrics(settings)
+        db = MigrationDB(settings.db_path)
+        try:
+            [sample] = db.latest_metrics(1)
+            [summary] = db.run_summaries(1)
+            assert sample["run_kind"] == "seed" and sample["run_started_at"] == s._SEED_RUN["started_at"]
+            assert sample["worker_slots_busy"] == 3 and sample["idle_workers_share"] == 0.25
+            assert summary["worker_slots_configured"] == 4 and summary["elapsed_sec"] >= 12
+        finally:
+            db.close()
+    finally:
+        s._SEED_RUN.clear()
+        s._SEED_RUN.update(old_run)
 
 
 class TestFillProgressIsReal:
@@ -2046,3 +2091,9 @@ def test_a_reset_of_named_users_keeps_the_tenants_groups_and_manifest():
     src = inspect.getsource(seed_sandbox.main)
     guard = src.index("if args.users:\n            print(\"  groups and the seed manifest kept")
     assert guard < src.index("reset_groups(build_directory_groups") < src.index("os.remove(f)")
+
+
+def test_the_seeders_connections_never_take_308_for_a_redirect():
+    """28 Nov 2026: the 300-user seed died on its first resumable pool upload (RedirectMissingLocation)."""
+    import seed_sandbox
+    assert 308 not in seed_sandbox._http(30).redirect_codes

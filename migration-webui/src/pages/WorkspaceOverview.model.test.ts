@@ -20,4 +20,13 @@ describe('overview progress and evidence', () => {
     expect(s.attention).toBe(true)
     expect(s.status).toBe('Needs review')
   })
+  it('says why a service with matching counts is still only partly copied', () => {
+    const d = (status: string) => ({ drive: { status, progress: 50, itemsCompleted: 155, itemsTotal: 155 } }) as User['details']
+    const done = user({ email: 'a@x', details: d('completed') })
+    const pending = user({ email: 'b@x', status: 'waiting', details: d('waiting') })
+    const s = summarizeService([done, pending], 'drive', [])
+    expect(s.status).toBe('Partly copied')
+    expect(s.reason).toBe('1 of 2 people finished')
+    expect(summarizeService([done], 'drive', []).reason).toBe('')      // nothing to explain when complete
+  })
 })

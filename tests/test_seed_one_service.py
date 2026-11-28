@@ -72,6 +72,13 @@ class TestTheEndpointChecksTheName:
         argv, _env, err = self._argv(monkeypatch)
         assert not err and "--only" not in argv
 
+    def test_campaign_fixture_seed_is_narrow_and_uses_the_cohort(self, monkeypatch):
+        argv, _env, err = self._argv(monkeypatch, cohort="fableplan2", users="c07", fixtures_only=True)
+        assert not err, err
+        assert "--cohort" in argv and argv[argv.index("--cohort") + 1].endswith("cohorts/fableplan2.json")
+        assert "--users" in argv and argv[argv.index("--users") + 1] == "c07"
+        assert "--fixtures-only" in argv
+
 
 class TestTheSeederHonoursIt:
     """seed_one_user is the thing that must actually skip. These drive it
@@ -186,3 +193,19 @@ class TestThePartialRunLooksPartial:
         called: list[str] = []
         TestTheSeederHonoursIt()._run(monkeypatch, None, called)
         assert "[only:" not in capsys.readouterr().out
+
+
+
+class TestACohortIsNamedNotPathed:
+    """fableplan2 P2.4: the seed request names a cohort file; only a bare name from data-generator/cohorts/ reaches argv."""
+    _argv = TestTheEndpointChecksTheName._argv
+
+    def test_a_path_or_odd_name_is_refused(self, monkeypatch):
+        for bad in ("../etc/passwd", "a b", "x/y", "A.json"):
+            assert "cohort must be a file name" in self._argv(monkeypatch, cohort=bad)[2]
+
+    def test_an_unknown_cohort_is_named_and_users_narrow_a_real_one(self, monkeypatch):
+        assert "no cohort file" in self._argv(monkeypatch, cohort="nosuch")[2]
+        argv, _, err = self._argv(monkeypatch, cohort="fableplan2", users="alice,bob")
+        assert not err and "--cohort" in argv and argv[argv.index("--cohort") + 1].endswith("cohorts/fableplan2.json")
+        assert argv[argv.index("--users") + 1] == "alice,bob"      # narrows the cohort: fixtures are not all idempotent

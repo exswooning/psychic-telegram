@@ -29,6 +29,7 @@ from datetime import datetime, timezone
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 log = logging.getLogger("tenant_verify")
+from pagination import next_page_token
 
 RANK = {"IDENTICAL": 1, "INCOMPLETE": 2, "DIFFERENCES": 3}
 KEEP = 200          # differences kept per section; the count is always the real one
@@ -46,11 +47,11 @@ def _section(compared: int, diffs: list[dict], notes: list[str] | None = None,
 
 
 def _pages(call, key: str) -> list[dict]:
-    out, token = [], None
+    out, token, seen = [], None, set()
     while True:
         resp = call(token).execute()
+        token = next_page_token(resp, token, seen, f"Tenant {key} inventory")
         out += resp.get(key, [])
-        token = resp.get("nextPageToken")
         if not token:
             return out
 
@@ -76,6 +77,7 @@ class TenantCheck:
         src, tgt = self._users("source"), self._users("target")
         pairs = {r["source_email"].lower(): r for r in self.db.all_identities()
                  if r["entity_type"] == "user"}
+        mapping = {email: (r["target_email"] or "").lower() for email, r in pairs.items()}
         diffs = []
         for email, u in sorted(src.items()):
             r = pairs.get(email)
@@ -90,7 +92,6 @@ class TenantCheck:
             if r["status"] != "DONE":
                 d.append(f"not migrated yet ({r['status']})")
             import user_profiles
-            mapping = {email: (r["target_email"] or "").lower() for email, r in pairs.items()}
             wanted = user_profiles.profile_body(u, t["primaryEmail"], mapping)
             d += [f"Directory profile differs: {field}" for field in user_profiles.differences(wanted, t)]
             if bool(u.get("suspended")) != bool(t.get("suspended")):

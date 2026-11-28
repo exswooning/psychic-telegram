@@ -22,6 +22,15 @@ from db import MigrationDB
 @pytest.fixture
 def cp(monkeypatch):
     path = tempfile.mktemp(suffix=".db")
+    # This fixture tests account selection and status scoping, never a live
+    # process. A deterministic empty process table avoids depending on `ps`
+    # being launchable in restricted macOS test environments.
+    ps_bin = tempfile.mkdtemp(prefix="migration-login-test-bin-")
+    ps = os.path.join(ps_bin, "ps")
+    with open(ps, "w", encoding="utf-8") as fh:
+        fh.write("#!/bin/sh\nexit 0\n")
+    os.chmod(ps, 0o755)
+    monkeypatch.setenv("PATH", ps_bin + os.pathsep + os.environ.get("PATH", ""))
     monkeypatch.setenv("MIGRATION_DB", path)
     MigrationDB(path)
     cpdb.apply_migrations()

@@ -57,6 +57,57 @@ def test_mapping_loss_adopts_existing_copy_without_duplicate(auth, db, settings,
     assert len(auth.target_gmail(TGT_USER).messages) == 1
 
 
+def test_draft_recovery_stops_before_repeated_destination_scan(auth, db, settings, identity, monkeypatch):
+    import draft_recovery
+
+    settings.source_read_only = True
+    monkeypatch.setattr(draft_recovery, "MAX_DUPLICATE_READS", 2)
+    src, tgt = auth.source_gmail(SRC_USER), auth.target_gmail(TGT_USER)
+    ids = [src.add_draft(f"Subject: {i}\r\n\r\nsource draft".encode()) for i in range(2)]
+    existing = tgt.add_draft(b"Subject: Existing\r\n\r\nkeep this draft")
+    before_source, before_existing = copy.deepcopy(src.drafts), copy.deepcopy(tgt.drafts[existing])
+    result = {"notCopied": [{"type": "draft", "status": "UNMAPPED_SOURCE", "id": i} for i in ids]}
+    log = []
+
+    got = draft_recovery.recover(auth, db, settings, SRC_USER, result, log.append)
+
+    assert got["duplicateReads"] == 1 and got["mapped"] == 1
+    assert got["errors"] and "2-read limit" in got["errors"][0]
+    assert any("require review" in line for line in log)
+    assert db.get_target_id(SRC_USER, ids[0], "draft")
+    assert not db.get_target_id(SRC_USER, ids[1], "draft")
+    assert src.drafts == before_source and tgt.drafts[existing] == before_existing
+    assert len(tgt.drafts) == 2
+
+
+def test_draft_recovery_never_creates_after_duplicate_scan_takes_too_long(
+        auth, db, settings, identity, monkeypatch):
+    from types import SimpleNamespace
+    import draft_recovery
+    from tests.fakes import _GmailDrafts
+
+    settings.source_read_only = True
+    src, tgt = auth.source_gmail(SRC_USER), auth.target_gmail(TGT_USER)
+    sid = src.add_draft(b"Subject: Source\r\n\r\nsource draft")
+    tgt.add_draft(b"Subject: Existing\r\n\r\nkeep this draft")
+    before = copy.deepcopy(tgt.drafts)
+    now = [0]
+    monkeypatch.setattr(draft_recovery, "time", SimpleNamespace(monotonic=lambda: now[0]))
+    original = _GmailDrafts._get
+
+    def slow_get(self, **kwargs):
+        if self.s is tgt:
+            now[0] += draft_recovery.DUPLICATE_SCAN_SECONDS
+        return original(self, **kwargs)
+
+    monkeypatch.setattr(_GmailDrafts, "_get", slow_get)
+    result = {"notCopied": [{"type": "draft", "status": "UNMAPPED_SOURCE", "id": sid}]}
+    got = draft_recovery.recover(auth, db, settings, SRC_USER, result, lambda _: None)
+    assert got["mapped"] == 0 and "time limit" in got["errors"][0]
+    assert not db.get_target_id(SRC_USER, sid, "draft")
+    assert tgt.drafts == before and not tgt.calls_to("drafts.create")
+
+
 @pytest.mark.parametrize("unsafe", ["domain", "writable-source", "dry-run"])
 def test_recovery_refuses_unsafe_configuration(auth, db, settings, identity, monkeypatch, unsafe):
     import domain_guard
@@ -85,14 +136,20 @@ def test_source_inventory_failure_cannot_pass(auth, db, settings, identity, monk
 
 def test_existing_message_id_with_different_content_is_not_adopted_or_duplicated(auth, db, settings, identity, monkeypatch):
     import domain_guard
+    import retry_failed
     monkeypatch.setattr(domain_guard, "source_domains", lambda: {settings.source_domain})
     settings.source_read_only = True
     sid = auth.source_gmail(SRC_USER).add_message(b"Message-ID: <collision@test>\r\n\r\nsource")
-    auth.target_gmail(TGT_USER).add_message(b"Message-ID: <collision@test>\r\n\r\nDIFFERENT")
+    target = auth.target_gmail(TGT_USER)
+    target.add_message(b"Message-ID: <collision@test>\r\n\r\nDIFFERENT")
+    before = copy.deepcopy(target.messages)
     got = repair.repair_verified_missing_mail(auth, db, settings, report(auth, db, settings), apply=True)
     assert got["errors"] and got["mapped"] == 0
+    retried = retry_failed.retry(auth, db, settings, apply=True, users={SRC_USER}, item_types=("message",))
+    assert retried["retried"] == 0
+    assert db.get_audit(SRC_USER, sid, "message")["status"] == "FAILED"
     assert not db.get_target_id(SRC_USER, sid, "message")
-    assert len(auth.target_gmail(TGT_USER).messages) == 1
+    assert target.messages == before
 
 
 def test_stopped_mail_run_returns_interrupted_without_draft_or_settings_writes(auth, db, settings, identity, monkeypatch):
@@ -152,17 +209,30 @@ def test_source_protection_refuses_cross_account_target_unless_declared_a_sandbo
 
 def test_orphaned_verification_is_interrupted_only_when_disabled_and_owner_dead(db, monkeypatch):
     import verification_repairs as R
-    R.pause(db)
+    R.enable(db, operator=True)          # a claim needs the policy on (an operator's pause holds, 11 Nov)
     assert R._claim(db, SRC_USER, "finding")
     run = db.repair_started()
     # Align timestamps as in the observed abandoned callback.
     with db.write() as c:
         c.execute("UPDATE repair_runs SET started_at=(SELECT started_at FROM verification_repairs)")
+    R.pause(db)                          # the operator stops verification while the repair runs
     assert R.reconcile_stopped_verification(db) == 0  # current process lives
     monkeypatch.setattr(R, "_alive", lambda pid: False)
-    R.enable(db)
+    R.enable(db, operator=True)          # an explicit resume; an automatic one leaves the pause
     assert R.reconcile_stopped_verification(db) == 0
     R.pause(db)
     assert R.reconcile_stopped_verification(db) == 1
     assert db.conn.execute("SELECT state FROM verification_repairs").fetchone()[0] == "INTERRUPTED"
     assert db.conn.execute("SELECT finished_at FROM repair_runs WHERE id=?", (run,)).fetchone()[0]
+
+
+def test_link_mail_held_by_a_fixed_check_is_recovered_but_owner_waiting_mail_is_not(auth, db, settings, identity):
+    """info@s. held 819 messages behind the old 404 link check (fixed in e1a935f) and the
+    repair never took them. Mail whose link's OWNER is not migrated yet must keep waiting:
+    delivering it would leave the link pointing at the source."""
+    held = [{"id": "m404", "type": "message", "error": "Pre-delivery link scan: HTTP 404 (notFound): ..."},
+            {"id": "mbounce", "type": "message", "error": "Pre-delivery link scan: Multipart body has no readable parts"},
+            {"id": "mowner", "type": "message", "error": "Pre-delivery link scan: Unresolved Drive link mapping: 1abc"}]
+    r = {"users": {SRC_USER: {"gmail": {"notCopied": held}}}}
+    got = repair.repair_verified_missing_mail(auth, db, settings, r, apply=False)
+    assert got["candidates"] == 2

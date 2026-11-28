@@ -1,6 +1,7 @@
-"""A government source is only ever read -- and Google, not Bitport's own guard, is what
-enforces it: no Drive write scope is requested, so nothing could write there even by a
-bug. Live: dharan.gov.np's grant held `drive` (write) for server-side copy."""
+"""A government source is only ever read. Since 22 Nov 2026 (operator: do not force
+download_upload; the default route is the fastest) it is copied server-side unless the
+operator switches exact copies off; a launch that asks for download_upload, or the switch
+off, requests no Drive write scope at all, so Google enforces the read."""
 import dataclasses
 
 from config import DRIVE_WRITE_SCOPE, Settings, source_scopes
@@ -12,17 +13,30 @@ def _settings(monkeypatch, domain, mode="server_side"):
     return Settings()
 
 
-def test_a_government_source_asks_for_no_write_scope_whatever_the_launch_asks(monkeypatch):
+def _read_only(monkeypatch):
+    import config
+    monkeypatch.setattr(config, "government_exact_copy", lambda aid: False)
+
+
+def test_a_government_source_is_copied_server_side_by_default(monkeypatch):
     s = _settings(monkeypatch, "dharan.gov.np", "server_side")
+    assert not s.source_read_only and s.transfer_mode == "server_side"
+    assert DRIVE_WRITE_SCOPE in source_scopes(s)
+
+
+def test_download_upload_on_a_government_source_asks_for_no_write_scope(monkeypatch):
+    s = _settings(monkeypatch, "dharan.gov.np", "download_upload")
     assert s.source_read_only and s.transfer_mode == "download_upload"
     assert DRIVE_WRITE_SCOPE not in source_scopes(s)
+
+
+def test_with_exact_copies_off_nothing_asks_for_a_write_scope(monkeypatch):
+    import verify_scopes
+    _read_only(monkeypatch)
+    s = _settings(monkeypatch, "dharan.gov.np", "server_side")
+    assert s.source_read_only and s.transfer_mode == "download_upload"
     again = dataclasses.replace(s, transfer_mode="server_side")
     assert again.transfer_mode == "download_upload" and DRIVE_WRITE_SCOPE not in source_scopes(again)
-
-
-def test_its_grant_holds_no_write_scope(monkeypatch):
-    import verify_scopes
-    s = _settings(monkeypatch, "dharan.gov.np")
     assert DRIVE_WRITE_SCOPE not in verify_scopes.migrate_source_scopes(s)
 
 
@@ -38,25 +52,21 @@ def test_the_engine_never_attempts_a_copy_as_a_government_source_user(migrator):
         assert "server_side" not in names and "download_upload" in names
 
 
-def test_the_operators_exact_copy_switch_allows_a_server_side_copy_only(monkeypatch):
-    """Live, dharan.gov.np: a Slides deck rebuilt through .pptx lost its soft line break."""
-    import config
-    import verify_scopes
-    monkeypatch.setattr(config, "government_exact_copy", lambda aid: True)
-    s = _settings(monkeypatch, "dharan.gov.np", "server_side")
-    assert not s.source_read_only and s.transfer_mode == "server_side"
-    assert DRIVE_WRITE_SCOPE in verify_scopes.migrate_source_scopes(s)
+def test_a_mode_that_writes_to_the_source_becomes_a_copy(monkeypatch):
+    """move empties the source and link_flip publishes its file: never on a government one."""
+    for mode in ("move", "link_flip"):
+        assert _settings(monkeypatch, "dharan.gov.np", mode).transfer_mode == "server_side"
+    _read_only(monkeypatch)
     for mode in ("move", "link_flip"):
         assert _settings(monkeypatch, "dharan.gov.np", mode).transfer_mode == "download_upload"
 
 
-def test_the_switch_is_a_file_beside_the_ledger(tmp_path, monkeypatch):
+def test_the_off_switch_is_a_file_beside_the_ledger(tmp_path, monkeypatch):
     import config
-    monkeypatch.setattr(config, "exact_copy_flag", lambda aid: str(tmp_path / f"{aid}"))
-    assert not config.government_exact_copy(5) and not config.government_exact_copy(None)
+    monkeypatch.setattr(config, "read_only_flag", lambda aid: str(tmp_path / f"{aid}"))
+    assert config.government_exact_copy(5) and config.government_exact_copy(None)
     (tmp_path / "5").write_text("x")
-    assert config.government_exact_copy(5) and not config.government_exact_copy(6)
-
+    assert not config.government_exact_copy(5) and config.government_exact_copy(6)
 
 
 def test_readiness_never_shadows_domain_guard():
@@ -114,6 +124,7 @@ def test_a_file_every_route_declines_stays_a_skip_for_a_person_not_a_failure(mig
 
 def test_a_protected_sources_grant_can_read_its_audit_log_and_still_write_nothing(monkeypatch):
     import verify_scopes
+    _read_only(monkeypatch)
     s = _settings(monkeypatch, "dharan.gov.np")
     g = verify_scopes.grant_scopes(s, "source")
     assert verify_scopes.SOURCE_AUDIT_SCOPE in g and DRIVE_WRITE_SCOPE not in g
@@ -159,3 +170,12 @@ def test_a_file_google_flags_as_harmful_is_copied_with_the_warning_acknowledged(
     import pytest
     with pytest.raises(PermanentAPIError):
         migrator._download_flagged_too(item)
+
+
+def test_an_apps_script_never_goes_server_side_even_from_a_sandbox(migrator, monkeypatch):
+    """Live, a. -> b. (18 Nov 2026): the script copied into staging, then Drive refused to move it into the
+    target's My Drive (403 insufficientFilePermissions) and the copy was stranded with no fallback."""
+    monkeypatch.setattr(type(migrator), "_protected_source", property(lambda self: False))
+    migrator.settings.transfer_mode = "server_side"
+    names = [n for n, _ in migrator._strategies_for({"mimeType": "application/vnd.google-apps.script"}, True)]
+    assert "server_side" not in names and names

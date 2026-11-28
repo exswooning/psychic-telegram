@@ -21,6 +21,11 @@ import {
 import { Refresh as RefreshIcon } from '@mui/icons-material'
 import { fetchFailures, FailureRow } from '@/api/controlPlane'
 import ForensicModal from '@/components/ForensicModal'
+import { Link as RouterLink } from 'react-router-dom'
+import { itemTypeLabel } from '@/utils/itemTypeLabel'
+
+/** Rows drawn at once: a failed run can leave thousands, and drawing them all made the page heavy. */
+const PAGE = 200
 
 /**
  * A dedicated, filterable failures triage view -- distinct from Mission
@@ -34,6 +39,7 @@ const ErrorHandling: React.FC = () => {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [filter, setFilter] = useState('')
+  const [shown, setShown] = useState(PAGE)
   const [forensic, setForensic] = useState<{ user: string; item: string } | null>(null)
 
   const refresh = useCallback(() => {
@@ -73,9 +79,10 @@ const ErrorHandling: React.FC = () => {
     <Box>
       <Stack direction="row" alignItems="center" sx={{ mb: 0.5 }}>
         <Typography variant="h4" sx={{ fontWeight: 700, flexGrow: 1 }}>Failures</Typography>
+        <Button component={RouterLink} to="/error-resolution">Error resolution</Button>
         <Tooltip title="Re-check">
           <span>
-            <IconButton size="small" onClick={refresh} disabled={loading}>
+            <IconButton size="small" onClick={refresh} disabled={loading} aria-label="Re-check">
               <RefreshIcon fontSize="small" />
             </IconButton>
           </span>
@@ -110,7 +117,7 @@ const ErrorHandling: React.FC = () => {
           {byType.size > 0 ? (
             <Stack direction="row" spacing={1} sx={{ flexWrap: 'wrap', gap: 1 }}>
               {[...byType.entries()].sort((a, b) => b[1] - a[1]).map(([type, count]) => (
-                <Chip key={type} label={`${type} · ${count}`} size="small"
+                <Chip key={type} label={`${itemTypeLabel(type)} · ${count}`} size="small"
                       color="error" variant="outlined"
                       onClick={() => setFilter(type)} />
               ))}
@@ -130,7 +137,8 @@ const ErrorHandling: React.FC = () => {
               All failures {needle && `(${visible.length} matching)`}
             </Typography>
             <TextField size="small" placeholder="Filter by user, type, or message"
-                       value={filter} onChange={(e) => setFilter(e.target.value)}
+                       value={filter} onChange={(e) => { setFilter(e.target.value); setShown(PAGE) }}
+                       inputProps={{ 'aria-label': 'Filter failures by user, type or message' }}
                        sx={{ width: 320 }} />
             {filter && <Button size="small" onClick={() => setFilter('')}>Clear</Button>}
           </Stack>
@@ -145,9 +153,13 @@ const ErrorHandling: React.FC = () => {
                 </TableRow>
               </TableHead>
               <TableBody>
-                {visible.map((f) => (
+                {visible.slice(0, shown).map((f) => (
                   <TableRow key={f.id} hover sx={{ cursor: 'pointer' }}
-                            onClick={() => setForensic({ user: f.source_user, item: f.item_id })}>
+                            tabIndex={0} aria-label={`Open the record for ${itemTypeLabel(f.item_type)} of ${f.source_user}`}
+                            onClick={() => setForensic({ user: f.source_user, item: f.item_id })}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setForensic({ user: f.source_user, item: f.item_id }) }
+                            }}>
                     <TableCell sx={{ whiteSpace: 'nowrap' }}>
                       {new Date(f.timestamp).toLocaleString()}
                     </TableCell>
@@ -156,7 +168,7 @@ const ErrorHandling: React.FC = () => {
                       <Stack direction="row" spacing={0.5} alignItems="center">
                         <Chip size="small" variant="outlined"
                               color={f.status === 'BLOCKED' ? 'warning' : 'error'}
-                              label={f.item_type} />
+                              label={itemTypeLabel(f.item_type)} />
                         {f.status === 'BLOCKED' && (
                           <Chip size="small" color="warning" variant="filled"
                                 data-testid={`blocked-${f.id}`}
@@ -174,6 +186,13 @@ const ErrorHandling: React.FC = () => {
               </TableBody>
             </Table>
           </TableContainer>
+          {visible.length > shown && (
+            <Box sx={{ textAlign: 'center', py: 1.5 }}>
+              <Button size="small" onClick={() => setShown((n) => n + PAGE)} data-testid="show-more-failures">
+                Showing {shown.toLocaleString()} of {visible.length.toLocaleString()} — show {Math.min(PAGE, visible.length - shown).toLocaleString()} more
+              </Button>
+            </Box>
+          )}
           {!loading && visible.length === 0 && (
             <Typography variant="body2" color="text.secondary" sx={{ py: 3, textAlign: 'center' }}>
               {failures.length === 0 ? 'No failures recorded.' : `Nothing matches "${filter}".`}

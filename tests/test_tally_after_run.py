@@ -28,6 +28,7 @@ def test_the_tally_waits_for_the_repair_then_runs_as_one_job(monkeypatch):
     def admitted(argv, account, name, **kw):
         order.append(name)
         assert argv[1] == "tally.py" and name == "user-tally"
+        assert kw["then"] == "tally_fix"
         ran.set()
         return True, "started"
 
@@ -43,6 +44,28 @@ def test_the_follow_on_is_wired(monkeypatch):
     monkeypatch.setattr(A, "_start_tally_after_repair", lambda aid, users=None: seen.append(aid))
     A._follow_on("tally", 7)
     assert seen == [7]
+
+
+def test_the_selected_users_follow_on_tallies_without_autofix(monkeypatch):
+    launched, ran = [], threading.Event()
+
+    def admitted(argv, account, name, **kw):
+        launched.append((argv, account, name, kw.get("then")))
+        ran.set()
+        return True, "started"
+
+    monkeypatch.setattr(A, "_run_admitted", admitted)
+    A._follow_on("tally@a@x.com,b@x.com", 7)
+    assert ran.wait(5)
+    assert launched == [([A.PY, "tally.py", "--account-id", "7", "--user", "a@x.com", "--user", "b@x.com"],
+                         7, "user-tally", None)]
+
+
+def test_empty_selection_cannot_become_a_full_account_tally(monkeypatch):
+    started = []
+    monkeypatch.setattr(A.threading, "Thread", lambda **kw: started.append(kw))
+    A._follow_on("tally@", 7)
+    assert started == []
 
 
 def test_the_tally_counts_users_side_by_side(monkeypatch, tmp_path):

@@ -5,6 +5,7 @@ import Metrics from './Metrics'
 const fetchMetrics = vi.fn()
 const fetchMyMetrics = vi.fn()
 
+vi.mock('@/components/DeadLinksPanel', () => ({ default: () => null, DeadLinksPanel: () => null }))
 vi.mock('@/api/controlPlane', () => ({
   fetchMetrics: (...a: unknown[]) => fetchMetrics(...a),
   fetchMyMetrics: (...a: unknown[]) => fetchMyMetrics(...a),

@@ -45,7 +45,7 @@ class FakeDB:
         self.marked_done: list[str] = []
         self.conn = types.SimpleNamespace(
             execute=lambda *a: types.SimpleNamespace(
-                fetchone=lambda: {"status": self.prior}))
+                fetchone=lambda: {"status": self.prior}, fetchall=lambda: []))
 
     def set_identity_status(self, u, s, note=""): self.statuses.append((s, note))
     def mark_services_done(self, u, svcs): self.marked_done = list(svcs)
@@ -61,6 +61,7 @@ class FakeSettings:
     migrate_contacts = migrate_tasks = True
     mail_only_with_links = False
     migration_checks_enabled = False
+    mail_completion_check = "full"    # counts would read both tenants; not the subject
     def effective_upload_cap(self): return 10 ** 12
 
 

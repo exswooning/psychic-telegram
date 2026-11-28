@@ -90,6 +90,12 @@ class Metrics:
         self._retries: dict[str, int] = defaultdict(int)
         self._refused: dict[str, int] = defaultdict(int)
         self._failures: dict[str, int] = defaultdict(int)
+        # Pool occupancy is separate from Python's live thread count. A
+        # ThreadPoolExecutor can have twelve live threads with only two
+        # carrying work; `active_count()` cannot tell those apart. Callers
+        # that own a phase's worker pool report task entry/exit here.
+        self._worker_slots: int | None = None
+        self._busy_worker_slots = 0
         self._started = time.monotonic()
         self.enabled = True
 
@@ -122,6 +128,19 @@ class Metrics:
         with self._lock:
             self._failures[label] += 1
 
+    def worker_started(self, configured: int) -> None:
+        """Record one task occupying a configured worker slot."""
+        if not self.enabled:
+            return
+        with self._lock:
+            self._worker_slots = max(1, int(configured))
+            self._busy_worker_slots += 1
+
+    def worker_finished(self) -> None:
+        """Release a worker slot; duplicate cleanup cannot make busy negative."""
+        with self._lock:
+            self._busy_worker_slots = max(0, self._busy_worker_slots - 1)
+
     def recent(self, label: str | None = None) -> dict:
         """
         Latency over the last RECENT samples -- the controller's steering
@@ -153,6 +172,8 @@ class Metrics:
             self._retries.clear()
             self._refused.clear()
             self._failures.clear()
+            self._worker_slots = None
+            self._busy_worker_slots = 0
             self._started = time.monotonic()
 
     # -- reading -------------------------------------------------------------
@@ -186,6 +207,8 @@ class Metrics:
             raw = {label: (list(res.samples), self._calls[label],
                            self._retries[label], self._failures[label])
                    for label, res in self._lat.items()}
+            worker_slots = self._worker_slots
+            busy_worker_slots = self._busy_worker_slots
 
         all_lat = [v for samples, *_ in raw.values() for v in samples]
         per_label = {}
@@ -204,6 +227,12 @@ class Metrics:
             "requests_per_sec": total / elapsed,
             # The metric this analysis kept quoting without collecting.
             "requests_per_sec_per_worker": total / elapsed / workers,
+            # These are task slots reported by the phase's executor wrapper,
+            # not Python threads. Null means no caller instrumented a pool.
+            "worker_slots_configured": worker_slots,
+            "worker_slots_busy": busy_worker_slots if worker_slots is not None else None,
+            "idle_workers_share": (max(0, worker_slots - busy_worker_slots) / worker_slots
+                                   if worker_slots else None),
             "p50": self._pct(all_lat, 50),
             "p95": self._pct(all_lat, 95),
             "p99": self._pct(all_lat, 99),

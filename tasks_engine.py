@@ -25,8 +25,10 @@ and a flattened checklist looks complete while having lost its structure.
 from __future__ import annotations
 
 import logging
+import failpoints
 
 from sample_budget import Budget
+from pagination import next_page_token
 
 from resilience import (PermanentAPIError, RateLimiter, retry_on_google_error,
                         shutdown_requested)
@@ -37,6 +39,11 @@ log = logging.getLogger(__name__)
 # owned; sending them is rejected or ignored.
 TASK_FIELDS = ["title", "notes", "due", "status", "completed", "deleted"]
 
+
+
+def _task_key(task: dict, parent: str | None) -> tuple:
+    """What a copy shares with its source: title, notes, due day, and its parent on the target."""
+    return (task.get("title") or "", task.get("notes") or "", (task.get("due") or "")[:10], parent or "")
 
 class TasksMigrator:
     # Unlimited by default, and shared: an unlimited Budget never changes, so this is
@@ -67,39 +74,34 @@ class TasksMigrator:
 
     # -- reading -------------------------------------------------------------
     def _iter_lists(self):
-        token = None
+        token, seen = None, set()
         while True:
             self.limiter.acquire()
             resp = self._retry(lambda t=token: self.src.tasklists().list(
                 maxResults=100, pageToken=t).execute())
+            token = next_page_token(resp, token, seen, "Task-list inventory")
             for tl in resp.get("items", []):
                 yield tl
-            token = resp.get("nextPageToken")
             if not token:
                 return
 
-    def _iter_tasks(self, list_id: str):
-        token = None
+    def _iter_tasks(self, list_id: str, client=None):
+        token, seen = None, set()
         while True:
             self.limiter.acquire()
-            resp = self._retry(lambda t=token: self.src.tasks().list(
+            resp = self._retry(lambda t=token: (client or self.src).tasks().list(
                 tasklist=list_id, maxResults=100, pageToken=t,
                 showCompleted=True, showHidden=True, showDeleted=False,
             ).execute())
+            token = next_page_token(resp, token, seen, "Task inventory")
             for t in resp.get("items", []):
                 yield t
-            token = resp.get("nextPageToken")
             if not token:
                 return
 
     # -- entry point ---------------------------------------------------------
     def run(self) -> dict:
-        try:
-            lists = list(self._iter_lists())
-        except (PermanentAPIError, RuntimeError) as exc:
-            log.warning("[%s] Tasks unavailable, not migrated: %s",
-                        self.source_user, exc)
-            return dict(self.stats)
+        lists = list(self._iter_lists())
 
         # Probe the target once, before writing anything.
         #
@@ -121,6 +123,11 @@ class TasksMigrator:
                     "Google Tasks is not enabled on the target account")
             self.stats["skipped"] += len(lists)
             return dict(self.stats)
+
+        # A task-list has no client-supplied idempotency key. Keep the target
+        # inventory once so a list created just before a process kill can be
+        # paired back to its source by title on the next run.
+        self._stray_lists = self._unmapped_target_lists()
 
         # migrate_user() only checks SHUTDOWN between whole services, so
         # someone with many lists would otherwise run to the end of them
@@ -149,9 +156,63 @@ class TasksMigrator:
             # about provisioning, so do not turn it into a permanent skip.
             return True
 
+    def _unmapped_target_lists(self) -> dict[str, list[str]]:
+        if self.settings.dry_run:
+            return {}
+        mapped = {r[0] for r in self.db.conn.execute(
+            "SELECT target_id FROM id_mapping WHERE source_user=? AND type='task_list'",
+            (self.source_user,))}
+        rows, token, first = [], None, True
+        default_id = None
+        try:
+            while True:
+                page = self._retry(lambda t=token: self.tgt.tasklists().list(
+                    maxResults=100, pageToken=t).execute())
+                items = page.get("items", [])
+                if first and items:
+                    # Google Tasks' first list (also returned by get('@default'))
+                    # is a permanent system list, never a recovery candidate.
+                    default_id = items[0].get("id")
+                    first = False
+                rows.extend(items)
+                token = page.get("nextPageToken")
+                if not token:
+                    break
+        except (PermanentAPIError, RuntimeError) as exc:
+            log.warning("[%s] could not list target task lists for recovery: %s",
+                        self.source_user, exc)
+            return {}
+        stray: dict[str, list[str]] = {}
+        for row in rows:
+            if row.get("id") not in mapped and row.get("id") not in (default_id, "@default"):
+                stray.setdefault(row.get("title") or "", []).append(row["id"])
+        return stray
+
+    def _list_is_gone(self, tgt_list: str) -> bool:
+        try:
+            self.limiter.acquire()
+            self._retry(lambda: self.tgt.tasks().list(tasklist=tgt_list, maxResults=1).execute())
+        except Exception as exc:      # noqa: BLE001 - unsure is not gone
+            return "404" in str(exc) or "notFound" in str(exc)
+        return False
+
     def _migrate_list(self, tl: dict) -> None:
         src_id, title = tl["id"], tl.get("title") or "Imported list"
         existing = self.db.get_target_id(self.source_user, src_id, "task_list")
+        if existing and not self.settings.dry_run and self._list_is_gone(existing):
+            # Deleted on the target (a mailbox emptied after the ledger was written): the list and
+            # the tasks it held are made again, not skipped as migrated. Only a 404 counts as gone.
+            try:
+                for t in self._iter_tasks(src_id):
+                    self.db.forget_mapping(self.source_user, t["id"], "task")
+            except (PermanentAPIError, RuntimeError) as exc:
+                self.db.log_audit(self.source_user, src_id, "task_list", "FAILED",
+                                  f"could not inspect source tasks before recopy: {exc}")
+                self.stats["failed"] += 1
+                return
+            self.db.forget_mapping(self.source_user, src_id, "task_list")
+            self.stats["recopied_missing"] = self.stats.get("recopied_missing", 0) + 1
+            existing = None
         if existing:
             tgt_id = existing
             self.stats["skipped"] += 1
@@ -159,16 +220,23 @@ class TasksMigrator:
             self.stats["lists"] += 1
             return
         else:
-            try:
-                self.limiter.acquire()
-                created = self._retry(lambda: self.tgt.tasklists().insert(
-                    body={"title": title}).execute())
-            except (PermanentAPIError, RuntimeError) as exc:
-                self.db.log_audit(self.source_user, src_id, "task_list",
-                                  "FAILED", str(exc))
-                self.stats["failed"] += 1
-                return
-            tgt_id = created["id"]
+            stray_lists = getattr(self, "_stray_lists", {}).get(title, [])
+            if stray_lists:
+                tgt_id = stray_lists.pop(0)
+                self.stats["adopted_lists"] = self.stats.get("adopted_lists", 0) + 1
+            else:
+                try:
+                    self.limiter.acquire()
+                    created = self._retry(lambda: self.tgt.tasklists().insert(
+                        body={"title": title}).execute())
+                    created = failpoints.hit("tasks.list.created", created,
+                                             user=self.source_user)
+                except (PermanentAPIError, RuntimeError) as exc:
+                    self.db.log_audit(self.source_user, src_id, "task_list",
+                                      "FAILED", str(exc))
+                    self.stats["failed"] += 1
+                    return
+                tgt_id = created["id"]
             self.db.record_mapping(self.source_user, src_id, tgt_id,
                                    "task_list", source_name=title)
             self.stats["lists"] += 1
@@ -191,6 +259,8 @@ class TasksMigrator:
         for t in self.budget.trim(tasks):
             by_parent.setdefault(t.get("parent") or "", []).append(t)
 
+        self._strays = self._unmapped_targets(tgt_list)
+
         def emit(parent_src: str, parent_tgt: str | None) -> None:
             for t in by_parent.get(parent_src, []):
                 if shutdown_requested():
@@ -200,6 +270,20 @@ class TasksMigrator:
                     emit(t["id"], new_id)
 
         emit("", None)
+
+    def _unmapped_targets(self, tgt_list: str) -> dict:
+        """The list's target tasks no ledger row names, by content: a run killed between tasks.insert and
+        record_mapping left one, and the next run adopts it instead of inserting a second (F-kill, 27 Nov
+        2026: tasks.created@2 left 21 tasks on b. for 20). A failed target inventory must stop before creates."""
+        if self.settings.dry_run:
+            return {}
+        mapped = {r[0] for r in self.db.conn.execute(
+            "SELECT target_id FROM id_mapping WHERE source_user=? AND type='task'", (self.source_user,))}
+        strays: dict = {}
+        for t in self._iter_tasks(tgt_list, client=self.tgt):
+            if t["id"] not in mapped:
+                strays.setdefault(_task_key(t, t.get("parent")), []).append(t["id"])
+        return strays
 
     def _is_stale(self, src_id: str, task: dict) -> bool:
         """Has the source task changed since it was copied?
@@ -259,14 +343,30 @@ class TasksMigrator:
         kw = {"tasklist": tgt_list, "body": body}
         if parent:
             kw["parent"] = parent
-        try:
-            self.limiter.acquire()
-            created = self._retry(lambda k=kw: self.tgt.tasks().insert(**k).execute())
-        except (PermanentAPIError, RuntimeError) as exc:
-            self.db.log_audit(self.source_user, src_id, "task", "FAILED",
-                              str(exc))
-            self.stats["failed"] += 1
-            return None
+        strays = getattr(self, "_strays", {}).get(_task_key(task, parent))
+        if strays:
+            created = {"id": strays.pop()}
+            self.stats["adopted"] = self.stats.get("adopted", 0) + 1
+        else:
+            attempts = []
+
+            def insert(k=kw):
+                attempts.append(1)
+                if len(attempts) > 1:      # a retry: an earlier insert may have landed with its reply lost (F-lost)
+                    self._strays = self._unmapped_targets(tgt_list)
+                    landed = self._strays.get(_task_key(task, parent))
+                    if landed:
+                        self.stats["adopted"] = self.stats.get("adopted", 0) + 1
+                        return {"id": landed.pop()}
+                return failpoints.hit("tasks.created", self.tgt.tasks().insert(**k).execute(), user=self.source_user)
+            try:
+                self.limiter.acquire()
+                created = self._retry(insert)
+            except (PermanentAPIError, RuntimeError) as exc:
+                self.db.log_audit(self.source_user, src_id, "task", "FAILED",
+                                  str(exc))
+                self.stats["failed"] += 1
+                return None
 
         self.db.record_mapping(self.source_user, src_id, created["id"], "task")
         # The source stamp, so a later pass can tell a changed task from an

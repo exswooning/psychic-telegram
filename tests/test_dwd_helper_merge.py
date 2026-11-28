@@ -212,3 +212,38 @@ class TestTheTargetLoginIsTheTargetsOwn:
         admin_secrets.save_teardown_login(5, "target", "admin@mdharan.example", "own-pw")
         assert scope_guard._console_login(settings, "target") == {
             "DWD_EMAIL": "admin@mdharan.example", "DWD_PASSWORD": "own-pw"}
+
+    def test_a_government_sources_console_is_never_signed_in_to(self, settings, monkeypatch, tmp_path):
+        """Operator, 16 Nov 2026: nothing on dharan.gov.np may change -- no unattended re-grant,
+        narrowing or seed key, even with its admin's login on file."""
+        import admin_secrets
+        import scope_guard
+        settings.source_domain, settings.account_id = "dharan.gov.np", 7
+        monkeypatch.setattr(admin_secrets, "LOGIN_DIR", str(tmp_path))
+        monkeypatch.setenv("DWD_EMAIL_SOURCE", "admin@dharan.gov.np")
+        monkeypatch.setenv("DWD_PASSWORD_SOURCE", "gov-pw")
+        admin_secrets.save_teardown_login(7, "source", "admin@dharan.gov.np", "gov-pw")
+        assert scope_guard._console_login(settings, "source") == {}
+        assert scope_guard.can_repair(settings, "source") is False
+        # Only a government source: a sandbox source still gets its own login.
+        settings.source_domain = "s.sandbox.example"
+        monkeypatch.setenv("DWD_EMAIL_SOURCE", "admin@s.sandbox.example")
+        assert scope_guard._console_login(settings, "source")["DWD_EMAIL_SOURCE"] == "admin@s.sandbox.example"
+
+
+class TestAuthorizeIsReadOnlyOnceItHasAnswered:
+    """Live, 17 Nov 2026: the dialog still read 'Progress indicator' 2.5 s after Authorize, the tool took it
+    for 'Client ID already exists' and refused, though the entry had been written."""
+
+    def test_a_dialog_still_saving_has_not_answered(self):
+        assert not dwd_helper._authorize_settled("Add a new client ID\nClient ID\nOverwrite existing client ID\n"
+                                                 "OAuth scopes\nCANCEL\nAUTHORIZE\nProgress indicator")
+
+    def test_a_duplicate_or_a_finished_dialog_has(self):
+        assert dwd_helper._authorize_settled("Client ID already exists. Check the 'Overwrite existing client ID' box")
+        assert dwd_helper._authorize_settled("Add a new client ID\nCANCEL\nAUTHORIZE")
+
+    def test_the_wait_comes_before_the_overwrite_branch(self):
+        import inspect
+        src = inspect.getsource(dwd_helper.run)
+        assert src.index("_settle_authorize(page, dialog)") < src.index("if _dialog_open(dialog):")

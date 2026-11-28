@@ -170,7 +170,8 @@ class TestCrossReferences:
         finding the cross-references anyway."""
         _, m, _ = self._built()
         assert m["items"].get("xref_doc"), "no cross-references without edge cases"
-        assert m.get("xrefs") == 2
+        assert m.get("xrefs") == 3
+        assert m["items"].get("xref_table_doc"), "no Doc with a table and a hyperlink"
 
 
 class TestMemberFailuresAreNotSwallowed:
@@ -212,6 +213,9 @@ class _FakeSettings:
     def __init__(self, fail=()):
         self.fail = set(fail)
         self.calls = []
+        self.forwarding_addresses = []
+        self.delegate_entries = []
+        self.collection = ""
 
     def _ok_or_raise(self, name, **kw):
         self.calls.append((name, kw))
@@ -222,13 +226,28 @@ class _FakeSettings:
     def updateVacation(self, userId, body): return self._ok_or_raise("vacation", body=body)
     def updatePop(self, userId, body): return self._ok_or_raise("pop", body=body)
     def updateImap(self, userId, body): return self._ok_or_raise("imap", body=body)
-    def forwardingAddresses(self): return self
-    def delegates(self): return self
+    def forwardingAddresses(self):
+        self.collection = "forwarding"
+        return self
+
+    def delegates(self):
+        self.collection = "delegate"
+        return self
+
+    def list(self, userId):
+        rows = (self.forwarding_addresses if self.collection == "forwarding"
+                else self.delegate_entries)
+        response_key = "forwardingAddresses" if self.collection == "forwarding" else "delegates"
+        self.calls.append((self.collection + "_list", {"userId": userId}))
+        return type("R", (), {"execute": lambda s=None: {response_key: list(rows)}})()
+
     def create(self, userId, body):
         # forwardingAddresses().create and delegates().create share this
         # name; the body shape tells them apart.
         name = "forwarding" if "forwardingEmail" in body else "delegate"
-        return self._ok_or_raise(name, body=body)
+        req = self._ok_or_raise(name, body=body)
+        (self.forwarding_addresses if name == "forwarding" else self.delegate_entries).append(dict(body))
+        return req
 
 
 class _FakeGmail:

@@ -91,7 +91,7 @@ export const SeedTopUp: React.FC<{ domain?: string; accountId?: number }> =
       {domain && <DomainSandboxToggle domain={domain} />}
       <Alert severity="info" sx={{ mb: 2 }}>
         Adds more content on top of what {domain || 'this tenant'} already
-        has. Existing users, files and messages are left alone — this only
+        has. Existing users, files and emails are left alone — this only
         creates new ones. Type the domain back to confirm.
       </Alert>
       <Grid container spacing={2} alignItems="center">

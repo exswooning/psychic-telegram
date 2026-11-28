@@ -250,6 +250,10 @@ def apply_deletion(auth, db, d: dict) -> tuple[bool, str]:
     if _moved(d):
         return False, "moved, not copied: the target holds the only copy"
     svc, tid, tu = d["service"], d["target_id"], d["target_user"]
+    import domain_guard
+    why = domain_guard.protected_subject(tu)
+    if why:
+        return False, why
     try:
         if svc == "drive":
             _call(lambda: auth.target_drive(tu).files().update(

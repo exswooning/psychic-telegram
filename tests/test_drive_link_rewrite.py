@@ -136,6 +136,17 @@ class TestTheEngineRunsItAtTheRightTime:
         assert "_pending_link_rewrites.append" in src
         assert "rewrite_zip" not in src
 
+    def test_an_imported_native_is_repointed_in_place(self):
+        """Run 8: Google's RTF export splits a plain-text URL into one run per word,
+        so the export-and-reimport rewrite found nothing in every image-free Doc.
+        An imported native goes to the in-place route a server-side copy uses."""
+        src = self._src("_sync_native")
+        assert "_pending_native.append((item, tgt_id))" in src
+        assert "mark_links_pending" in src
+        # Run 9: has_drive_ref reads the same split export, so it must not gate a native.
+        native = src.index("_pending_native.append((item, tgt_id))")
+        assert "had_ref" not in src[src.rindex("if ", 0, native):native]
+
     def test_it_runs_after_the_pool_and_the_shortcuts(self):
         """Both can still add mappings; a rewrite is only correct when no
         more are coming."""
@@ -176,3 +187,13 @@ class TestCommentsTravelByDefault:
         monkeypatch.setenv("MIGRATE_COMMENTS", "0")
         from config import Settings
         assert Settings().migrate_comments is False
+
+
+def test_a_link_to_a_shortcut_resolves_like_one_to_a_file(tmp_path):
+    """Control run a. -> b., 18 Nov 2026: c01's mail linked to its own Drive shortcut, mapped as type
+    'shortcut', and the split mail pass held the user on an 'unresolved' link."""
+    from db import MigrationDB
+    d = MigrationDB(str(tmp_path / "l.db"))
+    d.record_mapping("u@a.test", "SRC_SHORTCUT", "TGT_SHORTCUT", "shortcut")
+    assert d.target_for_source_id("SRC_SHORTCUT") == "TGT_SHORTCUT"
+    assert d.targets_for_source_id("SRC_SHORTCUT") == ["TGT_SHORTCUT"]

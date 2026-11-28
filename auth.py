@@ -20,7 +20,9 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import threading
+import urllib.parse
 from typing import Any
 
 import google_auth_httplib2
@@ -89,17 +91,151 @@ class SourceWriteRefused(PermanentAPIError):
     """A write to the SOURCE Drive that a migration has no business making."""
 
 
+# The source's last line of defence: every request a SOURCE client built by AuthManager sends goes through
+# SourceReadOnlyHttp, whatever route made it -- a wrapped collection, auth.api(), a collection ReadOnlyDrive does
+# not list, a batch, the raw transport (svc._http), an HttpRequest altered after it was built, an upload. Only
+# reads leave the box (27 Nov 2026: ReadOnlyDrive passed every unlisted attribute through and api("source",
+# "drive") was unwrapped, so on a server-side run, where the source holds the `drive` scope, one such call would
+# have written to it). The deliberate writers of a declared sandbox (source_drive(writable=True), directory(
+# writable=True)) pass domain_guard first and get an unguarded client.
+_READ_METHODS = {"GET", "HEAD"}
+_READ_POSTS = (re.compile(r"/v4/spreadsheets/[^/]+:getByDataFilter$"),
+               re.compile(r"/v4/spreadsheets/[^/]+/values:batchGetByDataFilter$"),
+               re.compile(r"/calendar/v3/freeBusy$"))
+_COPY_PATH = re.compile(r"/drive/v3/files/[^/]+/copy$")
+_FILE_PATH = re.compile(r"/drive/v3/files/[^/]+$")
+_COPY_TARGETS: set = set()      # staging drives on the TARGET a source file may be copied into (allow_copy_into)
+_MOVE_TARGETS: set = set()      # the same, for a move run's single files.update
+
+
+def _json_body(body):
+    if body in (None, b"", ""):
+        return {}
+    try:
+        return json.loads(body.decode("utf-8") if isinstance(body, (bytes, bytearray)) else body)
+    except (ValueError, UnicodeDecodeError, AttributeError):
+        return None
+
+
+def check_source_request(method: str, uri: str, body=None) -> None:
+    """Raise SourceWriteRefused unless this request only reads the source (or is the run's copy/move into its own
+    staging drive on the target)."""
+    m = (method or "GET").upper()
+    parts = urllib.parse.urlsplit(str(uri))
+    path = parts.path
+    if m in _READ_METHODS:
+        return
+    if m == "POST" and any(p.search(path) for p in _READ_POSTS):
+        return
+    if m == "POST" and path.startswith("/batch"):
+        text = body.decode("utf-8", "replace") if isinstance(body, (bytes, bytearray)) else str(body or "")
+        inner = re.findall(r"^([A-Z]+) (\S+) HTTP/1\.1", text, flags=re.M)
+        if inner and all(im in _READ_METHODS for im, _ in inner):
+            return
+        raise SourceWriteRefused(f"source batch refused: it carries {sorted({im for im, _ in inner}) or 'no readable'} "
+                                 "request(s); a batch on the source may only read")
+    if m == "POST" and _COPY_PATH.search(path):
+        parents = (_json_body(body) or {}).get("parents")
+        if isinstance(parents, list) and len(parents) == 1 and parents[0] in _COPY_TARGETS:
+            return
+        raise SourceWriteRefused(f"source Drive copy into {parents} refused: a migration copies only into its own "
+                                 "staging drive on the target")
+    if m == "PATCH" and _FILE_PATH.search(path) and _MOVE_TARGETS:
+        query = urllib.parse.parse_qs(parts.query)
+        added = query.get("addParents", [""])[0]
+        # A complete move only: out of the source parent and into staging (a bare addParents would leave the file
+        # in both, altering the source -- found by the red-team harness, 27 Nov 2026).
+        if added in _MOVE_TARGETS and query.get("removeParents", [""])[0] and _json_body(body) == {} and set(query) <= {
+                "addParents", "removeParents", "supportsAllDrives", "fields", "alt"}:
+            return
+    raise SourceWriteRefused(f"source {m} {path} refused: a migration only reads the source")
+
+
+_PROTECTED_SUBJECT_CACHE: dict = {}
+
+
+def _protected_source_subject(subject: str) -> bool:
+    """Is this impersonated user on a protected source domain (domain_guard's record: a source not declared a
+    sandbox, or any government domain)? Cached a minute. If the protection record cannot be read, uncertainty is
+    protected: a direct AuthorizedHttp client must not gain write access because the registry is unavailable."""
+    import time
+    domain = subject.rsplit("@", 1)[-1].lower()
+    hit = _PROTECTED_SUBJECT_CACHE.get(domain)
+    if hit and time.monotonic() - hit[1] < 60:
+        return hit[0]
+    try:
+        import domain_guard
+        protected = bool(domain_guard.source_refuse_reason(domain))      # includes every government domain
+    except Exception as exc:      # noqa: BLE001 - registry uncertainty must not disable the transport guard
+        try:
+            import domain_guard
+            protected = bool(domain_guard.is_government(domain))
+        except Exception:      # noqa: BLE001
+            protected = domain.endswith(".gov") or ".gov." in domain
+        # Government classification can establish protection, but a negative result does not prove this is not a
+        # configured source. Refuse direct-client writes until the registry is readable again.
+        protected = True
+        logging.getLogger(__name__).warning(
+            "source protection of %s could not be read; refusing writes until it is available (%s)",
+            domain, type(exc).__name__)
+    _PROTECTED_SUBJECT_CACHE[domain] = (protected, time.monotonic())
+    return protected
+
+
+_unguarded_authorized_request = google_auth_httplib2.AuthorizedHttp.request
+
+
+def _guarded_authorized_request(self, uri, method="GET", body=None, headers=None, *args, **kwargs):
+    """Every delegated call any module makes, whoever built the client: a write acting as a user of a protected
+    source domain is checked like a source client's (12 modules load the source key themselves, outside
+    AuthManager). Only an explicitly writable client of a declared sandbox (_bitport_source_writes_ok) skips it."""
+    subject = getattr(getattr(self, "credentials", None), "_subject", None)
+    if (subject and (method or "GET").upper() not in _READ_METHODS
+            and not getattr(self, "_bitport_source_writes_ok", False)
+            and getattr(self, "_bitport_tenant", None) != "target" and _protected_source_subject(subject)):
+        check_source_request(method, uri, body)
+    return _unguarded_authorized_request(self, uri, method, body, headers, *args, **kwargs)
+
+
+google_auth_httplib2.AuthorizedHttp.request = _guarded_authorized_request
+
+
+class SourceReadOnlyHttp:
+    """An http object for a source client: every request is checked by check_source_request before it is sent."""
+
+    def __init__(self, inner):
+        object.__setattr__(self, "_inner", inner)
+
+    def request(self, uri, method="GET", body=None, headers=None, *args, **kwargs):
+        check_source_request(method, uri, body)
+        return self._inner.request(uri, method, body, headers, *args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+    def __setattr__(self, name, value):
+        setattr(self._inner, name, value)
+
+
 # Every Drive v3 collection, and the calls on each that only read. A server-side
 # copy needs the full `drive` scope on the source, so Google itself would allow any
 # write there: this is what refuses them, before Google sees the request. A name that
 # is not a Drive collection (a test fake's helper, the client's own internals) passes
 # through untouched -- the real client exposes nothing else.
-def _http(timeout: int = 300) -> httplib2.Http:
+def _http(timeout: int = 300, service: str | None = None) -> httplib2.Http:
     """An httplib2 connection that does not take 308 for a redirect. Google's resumable
     uploads answer every chunk but the last with 308 "Resume Incomplete" and no Location,
     which httplib2 (0.19 on) raised as RedirectMissingLocation -- so any upload needing a
     second chunk failed: in download_upload, every file over the client's 100 MB chunk
     (found live, 2026-10-10). googleapiclient's own build_http() drops 308 the same way."""
+    # A process may set a shorter bound for every request it makes (the verifier does: a request that
+    # hangs must free its worker long before 300 s); the engines never set it.
+    timeout = int(os.getenv("GOOGLE_HTTP_TIMEOUT_SEC", "") or timeout)
+    # One API can need longer than the rest: a large Doc takes over 90 s to read, so under the verifier's 90 s
+    # bound it timed out on every pass and stayed unverified for ever (info@ 1EsCRIcW..., ward15@, 8 Nov 2026).
+    # GOOGLE_HTTP_TIMEOUT_SEC_DOCS (and _SLIDES, _SHEETS) overrides it for that API alone.
+    if service:
+        timeout = int(os.getenv("GOOGLE_HTTP_TIMEOUT_SEC_" + service.upper(), "") or timeout)
     http = httplib2.Http(timeout=timeout)
     http.redirect_codes = http.redirect_codes - {308}
     return http
@@ -162,13 +298,18 @@ class _ReadOnlyCollection:
             import resource_keys
             return resource_keys.keyed(fn, self._name, method, self._keys_db)
         if self._name == "files" and method == "copy" and self._copy_into:
+            # The copy carries the file's resource key too: an older link-shared file is "not found"
+            # without it (dharan.gov.np, ward6, 23 Nov 2026: key on file, copy refused 404).
+            import resource_keys
+            keyed_copy = resource_keys.keyed(fn, "files", "copy", self._keys_db)
+
             def copy(*a, **kw):
                 parents = (kw.get("body") or {}).get("parents")
                 if parents != [self._copy_into]:
                     raise SourceWriteRefused(
                         f"source Drive files.copy into {parents} refused: a migration "
                         f"copies only into its own staging drive ({self._copy_into})")
-                return fn(*a, **kw)
+                return keyed_copy(*a, **kw)
             return copy
         if self._name == "files" and method == "update" and self._moves and self._copy_into:
             def move(*a, **kw):
@@ -190,6 +331,9 @@ def allow_copy_into(svc, staging: str | None, moves: bool = False):
     """The same source Drive, also allowed to copy into `staging` -- and with `moves`,
     to move a file into it."""
     if isinstance(svc, ReadOnlyDrive) and staging:
+        _COPY_TARGETS.add(staging)
+        if moves:
+            _MOVE_TARGETS.add(staging)
         return ReadOnlyDrive(svc._svc, staging, moves, svc._keys_db)
     return svc
 
@@ -336,6 +480,12 @@ class AuthManager:
                 user = subjects[(tenant, key_user)]
             elif key_user not in {value for (side, _), value in subjects.items() if side == tenant} and key_user != getattr(self.settings, tenant + "_admin", "").lower():
                 raise RuntimeError("Domain-following run refused an unpinned delegated user")
+        import domain_guard
+        # Another account's protected user (d-*@a., account 8's real users): no client at all,
+        # to read or to write. Its owner's migration passes.
+        why = domain_guard.protected_subject(user, domain_guard.acting_account(self.settings), migration=True)
+        if why:
+            raise PermissionError(why)
         key = (tenant, user)
         with self._lock:
             creds = self._creds_cache.get(key)
@@ -359,7 +509,7 @@ class AuthManager:
     # that names the real cause.
     _SERVICE_CACHE_MAX = 12
 
-    def _service(self, tenant: str, api: str, user: str):
+    def _service(self, tenant: str, api: str, user: str, writable: bool = False):
         """
         A cached, per-thread API client.
 
@@ -375,14 +525,20 @@ class AuthManager:
         cache = getattr(self._local, "services", None)
         if cache is None:
             cache = self._local.services = {}
-        key = (tenant, api, user)
+        key = (tenant, api, user, writable)
         svc = cache.get(key)
         if svc is not None:
             cache[key] = cache.pop(key)      # keep it fresh for LRU eviction
             return svc
 
         creds = self._credentials(tenant, user)
-        http = google_auth_httplib2.AuthorizedHttp(creds, http=_http())
+        http = google_auth_httplib2.AuthorizedHttp(creds, http=_http(service=api))
+        if tenant == "source" and not writable:
+            http = SourceReadOnlyHttp(http)
+        elif tenant == "source":
+            http._bitport_source_writes_ok = True      # source_drive(writable=True): domain_guard passed first
+        else:
+            http._bitport_tenant = "target"            # after a rename the target may carry a protected name
         # static_discovery is left at its default: with no discoveryServiceUrl
         # set, the client already resolves that to True and uses the bundled
         # document, so there is no network fetch to avoid here.
@@ -409,6 +565,8 @@ class AuthManager:
         the source, write on the target -- and adding two more pairs of
         shorthands for that would be six methods to say one thing.
         """
+        if tenant == "source" and name == "drive":
+            return self.source_drive(user)
         return self._service(tenant, name, user)
 
     # -- shorthands mirrored by tests/fakes.FakeAuth ------------------------
@@ -419,7 +577,12 @@ class AuthManager:
             import domain_guard
             domain_guard.require_not_source(self.settings.source_domain,
                                             self.settings.source_domain)
-        svc = self._service("source", "drive", user)
+        svc = self._service("source", "drive", user, writable=writable)
+        if writable:
+            # Past the guard above: this source is a declared sandbox. Returning the wrapper here
+            # (as a98ead0 did) left every deliberate writer -- the move check, move back, link flip,
+            # the contract probe -- unable to write a byte, with "a migration only reads the source".
+            return svc
         return ReadOnlyDrive(svc, keys_db=getattr(self.settings, "db_path", None))
 
     def target_drive(self, user: str):
@@ -460,7 +623,7 @@ class AuthManager:
         """
         from config import DIRECTORY_WRITE_SCOPE, GROUP_WRITE_SCOPE
 
-        if writable:
+        if writable or groups:
             import domain_guard
             domain = (self.settings.source_domain if tenant == "source"
                       else self.settings.target_domain)
@@ -482,6 +645,12 @@ class AuthManager:
             self._key_path(tenant), scopes=scopes
         ).with_subject(admin)
         http = google_auth_httplib2.AuthorizedHttp(creds, http=_http())
+        if tenant == "source" and not (writable or groups):
+            http = SourceReadOnlyHttp(http)
+        elif tenant == "source":
+            http._bitport_source_writes_ok = True      # domain_guard.require_not_source passed above
+        else:
+            http._bitport_tenant = "target"
         return build("admin", "directory_v1", http=http, cache_discovery=False)
 
     def source_directory(self):
@@ -493,7 +662,7 @@ class AuthManager:
         id into something `identity_map` can be looked up with.
         """
         creds = self._credentials("source", self.settings.source_admin)
-        http = google_auth_httplib2.AuthorizedHttp(creds, http=_http())
+        http = SourceReadOnlyHttp(google_auth_httplib2.AuthorizedHttp(creds, http=_http()))
         return build("admin", "directory_v1", http=http, cache_discovery=False)
 
     def source_people(self, user: str):
@@ -514,6 +683,7 @@ class AuthManager:
         from the source tenant mean nothing."""
         creds = self._credentials("target", self.settings.target_admin)
         http = google_auth_httplib2.AuthorizedHttp(creds, http=_http())
+        http._bitport_tenant = "target"
         return build("admin", "directory_v1", http=http, cache_discovery=False)
 
     def cloud_identity(self, tenant: str):
@@ -532,6 +702,10 @@ class AuthManager:
                 f"called as a super admin of that domain")
         creds = self._credentials(tenant, admin)
         http = google_auth_httplib2.AuthorizedHttp(creds, http=_http())
+        if tenant == "source":
+            http = SourceReadOnlyHttp(http)
+        else:
+            http._bitport_tenant = "target"
         return build("cloudidentity", "v1", http=http, cache_discovery=False)
 
     def verify_delegation(self, tenant: str, user: str) -> tuple[bool, str]:
@@ -570,6 +744,8 @@ def list_domain_users(auth: AuthManager, tenant: str, domain: str) -> list[str]:
     admin_email = auth.settings.source_admin if tenant == "source" else auth.settings.target_admin
     creds = auth._credentials(tenant, admin_email)
     http = google_auth_httplib2.AuthorizedHttp(creds, http=_http())
+    if tenant == "source":
+        http = SourceReadOnlyHttp(http)
     svc = build("admin", "directory_v1", http=http, cache_discovery=False)
 
     users: list[str] = []
@@ -582,4 +758,6 @@ def list_domain_users(auth: AuthManager, tenant: str, domain: str) -> list[str]:
         users.extend(u["primaryEmail"].lower() for u in resp.get("users", []))
         page_token = resp.get("nextPageToken")
         if not page_token:
-            return users
+            import domain_guard
+            aid = domain_guard.acting_account(auth.settings)
+            return [u for u in users if not domain_guard.hidden(u, aid)]

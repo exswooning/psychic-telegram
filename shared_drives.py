@@ -61,6 +61,7 @@ member is reported and skipped, not fatal.
 
 from __future__ import annotations
 
+import failpoints
 import argparse
 import logging
 import os
@@ -371,8 +372,8 @@ class SharedDriveMigrator:
                 max_retries=self.settings.max_retries,
                 base_delay=self.settings.base_backoff,
                 max_delay=self.settings.max_backoff, label="drive.drives.create",
-            )(lambda: self.tgt.drives().create(
-                requestId=request_id, body={"name": name}).execute())()["id"]
+            )(lambda: failpoints.hit("shareddrive.created", self.tgt.drives().create(
+                requestId=request_id, body={"name": name}).execute()))()["id"]
 
         derived = uuid.uuid5(uuid.NAMESPACE_URL, "bitport-shared-drive:"
                              f"{self.settings.target_domain}:{src_id}").hex

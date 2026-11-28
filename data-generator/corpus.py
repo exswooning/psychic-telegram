@@ -33,6 +33,7 @@ import concurrent.futures as futures
 import os
 import threading
 import random
+import zlib
 from datetime import datetime, timedelta, timezone
 
 from config import FOLDER_MIME
@@ -85,6 +86,22 @@ EXTRA_EXTERNAL_SHARE = "aryan@nestnepal.com.np"
 # ----------------------------------------------------------------------
 # Scale profiles: files per leaf folder, archive depth, etc.
 # ----------------------------------------------------------------------
+# One user's content key, from a cohort file (fixtures.entries_from_cohort): twins share one.
+CONTENT_KEYS: dict[str, str] = {}
+
+
+def stable_seed(user: str, salt: int = 0) -> int:
+    """The same number in every process, for the same campaign seed, content key and salt.
+
+    The seeder seeded its random numbers from the built-in string hash, which Python salts per process
+    (PYTHONHASHSEED): two runs for one user made different mail, so no result could be compared. The
+    campaign seed is SEED_CAMPAIGN (--seed); the content key defaults to the user and is SEED_CONTENT_KEY
+    (--content-key) when users must hold the same content (twins). The salt keeps one user's mail, drafts,
+    calendar and contacts from sharing a stream. (Message-IDs stay uuid4 on purpose: see _rfc822.)"""
+    key = CONTENT_KEYS.get(user.lower()) or os.getenv("SEED_CONTENT_KEY") or user
+    return zlib.crc32(f"{os.getenv('SEED_CAMPAIGN', '0')}\x1f{key}\x1f{salt}".encode("utf-8"))
+
+
 SCALES = {
     "tiny":   {"per_leaf": 2,  "archive_years": 1, "wide": 30,
                "accounts": 2, "deep": 8,  "big_native": False},
@@ -209,7 +226,7 @@ class CorpusBuilder:
         self.cfg = SCALES[scale]
         self._media = media_factory
         self._retry = retry
-        self.rng = random.Random(hash(user) & 0xFFFF if not rng_seed else rng_seed)
+        self.rng = random.Random(stable_seed(user) if not rng_seed else rng_seed)
         # _run_leaves creates files on several threads, and every counter
         # below is a read-modify-write. Guarded rather than trusted to the
         # GIL: `d[k] += 1` is three bytecodes, not one.
@@ -759,8 +776,19 @@ class CorpusBuilder:
             media=self._media(body, "text/plain"))["id"]
         self._bump("docs")
         self.m["items"]["xref_doc"] = doc
+        # A real hyperlink (link text, not a bare URL) and a table: the round-trip
+        # routes keep or lose these differently from plain text, and the cohort
+        # had neither (P3.7 run 7).
+        html = (f"<p>Quarter review: see <a href=\"{link}\">the Q3 numbers</a>.</p>"
+                "<table border=\"1\"><tr><th>Region</th><th>Q3</th></tr>"
+                "<tr><td>East</td><td>1,204</td></tr><tr><td>West</td><td>987</td></tr></table>"
+                ).encode("utf-8")
+        self.m["items"]["xref_table_doc"] = self._create(
+            {"name": "Q3 review (table, hyperlink)", "parents": [folder], "mimeType": DOC_MIME},
+            media=self._media(html, "text/html"))["id"]
+        self._bump("docs")
         self.m.setdefault("xrefs", 0)
-        self.m["xrefs"] = 2
+        self.m["xrefs"] = 3
 
     def _build_personal(self, root: str) -> None:
         p = self.folder("Personal", root, days_ago=100)

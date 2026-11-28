@@ -63,14 +63,70 @@ def sh(argv: list[str], **kw) -> subprocess.CompletedProcess:
     return subprocess.run(argv, cwd=HERE, capture_output=True, text=True, **kw)
 
 
+def benchmark_scope(account_id: int | None, confirm_domain: str):
+    """Bind a benchmark to the selected account before any child is started."""
+    import accounts_auth
+    import account_isolation
+    import control_plane_db as cpdb
+    from config import Settings
+
+    if account_id is not None and os.getenv("BITPORT_LEDGER"):
+        raise ValueError("A selected-account benchmark cannot use a ledger override")
+    settings = Settings(account_id=account_id)
+    source = (settings.source_domain or "").strip().lower()
+    target = (settings.target_domain or "").strip().lower()
+    typed = confirm_domain.strip().lower()
+    if not target:
+        raise ValueError("TARGET_DOMAIN is not configured")
+    if typed != target:
+        extra = " -- that is the SOURCE domain" if typed and typed == source else ""
+        raise ValueError(f"{typed!r} does not match the target domain {target!r}{extra}")
+    if not source or source == target:
+        raise ValueError("The benchmark requires distinct source and target domains")
+    if account_id is None:
+        return settings, None
+
+    account = accounts_auth.get_account(account_id) or {}
+    legacy = account_id == 1 and account.get("plan") == "legacy"
+    if not legacy and settings.auth_mode != "key":
+        # The reset and audit children use bare Settings. OAuth tokens and
+        # impersonation principals come from the process, outside the account registry.
+        raise ValueError("This benchmark requires the selected account's service account keys")
+    control = os.path.realpath(cpdb._db_path())
+    ledger = os.path.realpath(settings.db_path)
+    if not legacy and ledger == control:
+        raise ValueError("The selected account requires a separate migration ledger")
+    for side, domain in (("source", source), ("target", target)):
+        config = accounts_auth.get_tenant_config(account_id, side)
+        if not config or (
+            not legacy and not all(config.get(key) for key in ("domain", "admin_email", "sa_key_path", "db_path"))
+        ):
+            raise ValueError(f"The selected account has no complete {side} configuration")
+        if config.get("db_path") and os.path.realpath(os.path.join(HERE, config["db_path"])) != ledger:
+            raise ValueError("The selected account's source and target do not share one ledger")
+        admin = getattr(settings, f"{side}_admin").strip().lower()
+        if "@" not in admin or admin.rsplit("@", 1)[-1] != domain:
+            raise ValueError(f"The selected account's {side} administrator belongs to another domain")
+
+    env = dict(os.environ)
+    env.update(CONTROL_PLANE_DB=control, MIGRATION_DB=ledger,
+               SOURCE_DOMAIN=settings.source_domain, TARGET_DOMAIN=settings.target_domain,
+               SOURCE_ADMIN=settings.source_admin, TARGET_ADMIN=settings.target_admin,
+               SOURCE_SA_KEY=settings.source_sa_key, TARGET_SA_KEY=settings.target_sa_key)
+    why = account_isolation.refusal(account_id, env)
+    if why:
+        raise ValueError(why)
+    return settings, env
+
+
 def db_path() -> str:
     from config import Settings
 
     return Settings().db_path
 
 
-def query(sql: str, args: tuple = ()) -> list[sqlite3.Row]:
-    conn = sqlite3.connect(f"file:{db_path()}?mode=ro", uri=True, timeout=30)
+def query(sql: str, args: tuple = (), *, ledger_path: str | None = None) -> list[sqlite3.Row]:
+    conn = sqlite3.connect(f"file:{ledger_path or db_path()}?mode=ro", uri=True, timeout=30)
     conn.row_factory = sqlite3.Row
     try:
         return conn.execute(sql, args).fetchall()
@@ -82,10 +138,10 @@ def query(sql: str, args: tuple = ()) -> list[sqlite3.Row]:
 # Config fingerprint -- a benchmark without one cannot be compared to
 # anything, because you cannot prove what it measured.
 # ----------------------------------------------------------------------
-def fingerprint() -> dict:
+def fingerprint(settings=None) -> dict:
     from config import Settings
 
-    s = Settings()
+    s = settings if settings is not None else Settings()
     commit = sh(["git", "rev-parse", "--short", "HEAD"]).stdout.strip()
     dirty = bool(sh(["git", "status", "--porcelain"]).stdout.strip())
     if not commit:
@@ -123,7 +179,7 @@ def fingerprint() -> dict:
 # ----------------------------------------------------------------------
 # Measurement
 # ----------------------------------------------------------------------
-def per_user_stats(since_iso: str | None = None) -> dict:
+def per_user_stats(since_iso: str | None = None, *, ledger_path: str | None = None) -> dict:
     """Per-user totals, scoped to this run.
 
     `reset_drive_ledger.py` clears Drive rows but leaves everything else in
@@ -147,27 +203,27 @@ def per_user_stats(since_iso: str | None = None) -> dict:
                    AND status='SKIPPED_UNMAPPED_IDENTITY') AS acl_unmapped,
                SUM(bytes_moved)                         AS bytes
         FROM audit_log {where} GROUP BY source_user ORDER BY source_user""",
-                 args)
+                 args, ledger_path=ledger_path)
     return {r["source_user"]: dict(r) for r in rows}
 
 
-def checksum_failures() -> int:
+def checksum_failures(*, ledger_path: str | None = None) -> int:
     """MD5 mismatches specifically -- distinct from transport failures. A
     non-zero count here means bytes arrived corrupted, which is the one
     failure mode that must never be traded for speed."""
     return query("SELECT COUNT(*) n FROM audit_log WHERE status='FAILED' "
-                 "AND error_message LIKE '%checksum mismatch%'")[0]["n"]
+                 "AND error_message LIKE '%checksum mismatch%'", ledger_path=ledger_path)[0]["n"]
 
 
-def rate_limit_hits() -> int:
+def rate_limit_hits(*, ledger_path: str | None = None) -> int:
     """429s. The signal that drive_write_qps is not holding -- the whole
     safety argument for raising drive_file_workers rests on this staying 0."""
     return query("SELECT COUNT(*) n FROM audit_log WHERE "
                  "error_message LIKE '%rateLimitExceeded%' OR "
-                 "error_message LIKE '%429%'")[0]["n"]
+                 "error_message LIKE '%429%'", ledger_path=ledger_path)[0]["n"]
 
 
-def run_acl_audit(label: str) -> dict:
+def run_acl_audit(label: str, *, env: dict | None = None) -> dict:
     """
     The gate that B4 needed and did not have.
 
@@ -177,7 +233,7 @@ def run_acl_audit(label: str) -> dict:
     failure here.
     """
     out = os.path.join(OUT_DIR, f"{label}-acl.json")
-    sh([PY, "acl_audit.py", "--json", out], timeout=3600)
+    sh([PY, "acl_audit.py", "--json", out], timeout=3600, env=env)
     if not os.path.isfile(out):
         return {"error": "acl_audit produced no JSON -- fidelity unverified"}
     with open(out, encoding="utf-8") as fh:
@@ -336,7 +392,25 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--yes", action="store_true", help="non-interactive")
     ap.add_argument("--skip-wipe", action="store_true",
                     help="still migrates data; skips the target wipe and ledger reset")
+    ap.add_argument("--account-id", type=int, default=None, help=argparse.SUPPRESS)
     args = ap.parse_args(argv)
+
+    try:
+        settings, env = benchmark_scope(args.account_id, args.confirm_domain)
+        ledger_path = env["MIGRATION_DB"] if env is not None else settings.db_path
+        if env is not None:
+            import control_plane_db as cpdb
+            from db import _ledger_pair_of
+
+            with cpdb.ro(ledger_path) as conn:
+                pair = _ledger_pair_of(conn)
+            source = settings.source_domain.strip().lower()
+            target = settings.target_domain.strip().lower()
+            if pair and (pair[0] != source or pair[1] not in (None, target)):
+                raise ValueError("The selected account's ledger belongs to a different tenant pair")
+    except (ValueError, sqlite3.Error) as exc:
+        print(f"ABORT: {exc}", file=sys.stderr)
+        return 2
 
     os.makedirs(OUT_DIR, exist_ok=True)
     stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
@@ -349,7 +423,7 @@ def main(argv: list[str] | None = None) -> int:
         print("ABORT: a migration is already running.", file=sys.stderr)
         return 2
 
-    fp = fingerprint()
+    fp = fingerprint(settings)
     print(f"== {args.label} == commit {fp['commit']} "
           f"mode={fp['transferMode']} fileWorkers={fp['driveFileWorkers']} "
           f"writeQps={fp['driveWriteQps']}")
@@ -357,13 +431,13 @@ def main(argv: list[str] | None = None) -> int:
         print("   WARNING: working tree is dirty; this run is not reproducible.")
 
     if not args.skip_wipe:
-        backup = f"{db_path()}.bak_{args.label}_{stamp}"
-        shutil.copy2(db_path(), backup)
+        backup = f"{ledger_path}.bak_{args.label}_{stamp}"
+        shutil.copy2(ledger_path, backup)
         print(f"-- ledger backed up to {backup}")
 
         print("-- wiping target (drive only)")
-        r = sh([PY, "reset_target.py", "--confirm-domain", args.confirm_domain,
-                "--yes", "--services", args.services], timeout=7200)
+        r = sh([PY, "reset_target.py", "--confirm-domain", settings.target_domain,
+                "--yes", "--services", args.services], timeout=7200, env=env)
         if r.returncode != 0:
             print(r.stdout[-2000:], r.stderr[-2000:], file=sys.stderr)
             return 2
@@ -372,9 +446,8 @@ def main(argv: list[str] | None = None) -> int:
         # user is marked DONE, migrate skips all of them, and the benchmark
         # measures an empty no-op -- which has already happened once.
         print("-- resetting drive ledger (otherwise every user is skipped)")
-        src_domain = __import__("config").Settings().source_domain
-        r = sh([PY, "reset_drive_ledger.py", "--confirm-domain", src_domain, "--yes"],
-               timeout=600)
+        r = sh([PY, "reset_drive_ledger.py", "--confirm-domain", settings.source_domain, "--yes"],
+               timeout=600, env=env)
         if r.returncode != 0:
             print(r.stdout[-2000:], r.stderr[-2000:], file=sys.stderr)
             return 2
@@ -382,7 +455,10 @@ def main(argv: list[str] | None = None) -> int:
     print(f"-- migrating (services={args.services}) …")
     t0 = time.monotonic()
     started_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-    mig = sh([PY, "main.py", "migrate", "--services", args.services], timeout=86400)
+    migrate = [PY, "main.py"]
+    if args.account_id is not None:
+        migrate += ["--account-id", str(args.account_id)]
+    mig = sh(migrate + ["migrate", "--services", args.services], timeout=86400, env=env)
     elapsed = time.monotonic() - t0
     log_path = os.path.join(OUT_DIR, f"{args.label}-{stamp}-migrate.log")
     with open(log_path, "w", encoding="utf-8") as fh:
@@ -390,11 +466,11 @@ def main(argv: list[str] | None = None) -> int:
     print(f"-- migrate rc={mig.returncode} in {elapsed:.0f}s (log: {log_path})")
 
     print("-- auditing ACLs (the gate B4 did not have) …")
-    acl = run_acl_audit(f"{args.label}-{stamp}")
+    acl = run_acl_audit(f"{args.label}-{stamp}", env=env)
 
     # `started_at` is stamped immediately before migrate runs, so this is
     # exactly this run's window.
-    users = per_user_stats(since_iso=started_at)
+    users = per_user_stats(since_iso=started_at, ledger_path=ledger_path)
     total_files = sum(s["files"] or 0 for s in users.values())
     total_bytes = sum(s["bytes"] or 0 for s in users.values())
     slowest = max(users.items(), key=lambda kv: kv[1]["files"] or 0,
@@ -408,8 +484,8 @@ def main(argv: list[str] | None = None) -> int:
         "secPerFile": round(elapsed / total_files, 3) if total_files else 0,
         "filesPerSec": round(total_files / elapsed, 3) if elapsed else 0,
         "slowestUser": slowest,
-        "checksumFailures": checksum_failures(),
-        "rateLimitHits": rate_limit_hits(),
+        "checksumFailures": checksum_failures(ledger_path=ledger_path),
+        "rateLimitHits": rate_limit_hits(ledger_path=ledger_path),
         "acl": acl, "users": users, "deadAccountsExcluded": sorted(dead),
         "migrateLog": log_path,
     }

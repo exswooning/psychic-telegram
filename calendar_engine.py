@@ -20,6 +20,7 @@ then `events.patch(sendUpdates='none')` it with the modified fields.
 from __future__ import annotations
 
 import logging
+import failpoints
 import re
 import uuid
 
@@ -27,6 +28,7 @@ from google.auth.exceptions import RefreshError
 
 from config import Settings
 from sample_budget import Budget
+from pagination import next_page_token
 from resilience import (PermanentAPIError, RateLimiter, retry_on_google_error,
                         shutdown_requested)
 
@@ -120,17 +122,14 @@ class CalendarMigrator:
         while True:
             self.limiter.acquire()
             response = self._retry(lambda: call(token).execute())
+            token = next_page_token(response, token, seen, "Calendar inventory")
             items.extend(response.get("items", []))
-            token = response.get("nextPageToken")
             if not token:
                 return items
-            if token in seen:
-                raise RuntimeError("Calendar inventory repeated a page token")
-            seen.add(token)
 
     # -- listing ----------------------------------------------------------------
     def _iter_events(self, updated_min: str | None, calendar_id: str = "primary"):
-        token = None
+        token, seen = None, set()
         while True:
             self.limiter.acquire()
             kw = dict(calendarId=calendar_id, maxResults=250, singleEvents=False,
@@ -138,11 +137,11 @@ class CalendarMigrator:
             if updated_min:
                 kw["updatedMin"] = updated_min
             resp = self._retry(lambda kw=kw: self.src.events().list(**kw).execute())
+            token = next_page_token(resp, token, seen, "Calendar event inventory")
             for e in resp.get("items", []):
                 if not self.budget.take():
                     return
                 yield e
-            token = resp.get("nextPageToken")
             if not token:
                 return
 
@@ -348,13 +347,29 @@ class CalendarMigrator:
         unrelated second copy rather than re-subscribing the user to the
         original.
         """
+        entries = self._all_pages(lambda token: self.src.calendarList().list(
+            minAccessRole="owner", showHidden=True, pageToken=token,
+        ))
+
+        # Calendar insert has no requestId and always mints a new calendar id.
+        # Snapshot unmapped target calendars once so a create/record kill can
+        # adopt the matching calendar on the next run.
+        mapped_ids = {r[0] for r in self.db.conn.execute(
+            "SELECT target_id FROM id_mapping WHERE source_user=? AND type='calendar'",
+            (self.source_user,))}
         try:
-            entries = self._all_pages(lambda token: self.src.calendarList().list(
-                minAccessRole="owner", showHidden=True, pageToken=token,
-            ))
+            target_entries = self._all_pages(lambda token: self.tgt.calendarList().list(
+                minAccessRole="owner", showHidden=True, pageToken=token))
         except (PermanentAPIError, RuntimeError) as exc:
-            log.warning("[%s] could not list calendars: %s", self.source_user, exc)
-            return
+            log.warning("[%s] could not list target calendars for recovery: %s",
+                        self.source_user, exc)
+            target_entries = []
+        self._stray_calendars = [e for e in target_entries
+                                 if not e.get("primary") and e.get("id") not in mapped_ids]
+
+        def calendar_key(entry: dict) -> tuple:
+            return (entry.get("summary") or "Untitled", entry.get("description") or "",
+                    entry.get("timeZone") or "")
 
         for entry in entries:
             cal_id = entry.get("id")
@@ -373,16 +388,25 @@ class CalendarMigrator:
                 body = {"summary": entry.get("summary") or "Untitled",
                        "description": entry.get("description"),
                        "timeZone": entry.get("timeZone")}
-                try:
-                    created = self._retry(lambda b=body: self.tgt.calendars().insert(
-                        body={k: v for k, v in b.items() if v is not None}
-                    ).execute())
-                except (PermanentAPIError, RuntimeError) as exc:
-                    self.db.log_audit(self.source_user, cal_id, "calendar",
-                                      "FAILED", str(exc))
-                    self.stats["failed"] += 1
-                    continue
-                target_cal_id = created["id"]
+                candidates = [e for e in self._stray_calendars
+                              if calendar_key(e) == calendar_key(body)]
+                if len(candidates) == 1:
+                    target_cal_id = candidates[0]["id"]
+                    self._stray_calendars.remove(candidates[0])
+                    self.stats["adopted_calendars"] = self.stats.get("adopted_calendars", 0) + 1
+                else:
+                    try:
+                        created = self._retry(lambda b=body: self.tgt.calendars().insert(
+                            body={k: v for k, v in b.items() if v is not None}
+                        ).execute())
+                        created = failpoints.hit("calendar.secondary.created", created,
+                                                 user=self.source_user)
+                    except (PermanentAPIError, RuntimeError) as exc:
+                        self.db.log_audit(self.source_user, cal_id, "calendar",
+                                          "FAILED", str(exc))
+                        self.stats["failed"] += 1
+                        continue
+                    target_cal_id = created["id"]
                 self.db.record_mapping(self.source_user, cal_id, target_cal_id,
                                        "calendar", source_name=entry.get("summary"))
                 self.db.log_audit(self.source_user, cal_id, "calendar", "SUCCESS")
@@ -397,25 +421,14 @@ class CalendarMigrator:
         """Translate a calendar's sharing rules, same identity mapping as
         Drive ACLs. 'default' and 'domain' scopes are rewritten to the target
         domain; unmapped internal users are dropped rather than leaked."""
-        try:
-            rules = self._all_pages(lambda token: self.src.acl().list(
-                calendarId=src_cal_id, pageToken=token
-            ))
-            target_rules = self._all_pages(lambda token: self.tgt.acl().list(
-                calendarId=tgt_cal_id, pageToken=token
-            ))
-        except OPTIONAL_PASS_ERRORS as exc:
-            # Loud, not debug: the usual cause is that the source grant is
-            # still calendar.readonly, which acl.list rejects outright. A
-            # silently skipped ACL pass looks identical to a calendar that
-            # simply had no sharing rules.
-            log.warning(
-                "[%s] could not read sharing rules for %s -- calendar ACLs "
-                "NOT migrated for it. Source delegation needs calendar.acls.readonly; "
-                "calendar.readonly alone does not cover ACL reads. Error: %s",
-                self.source_user, src_cal_id, exc,
-            )
-            return
+        # A failed inventory must fail the service: otherwise a calendar with
+        # unreadable ACLs is indistinguishable from one with no sharing rules.
+        rules = self._all_pages(lambda token: self.src.acl().list(
+            calendarId=src_cal_id, pageToken=token
+        ))
+        target_rules = self._all_pages(lambda token: self.tgt.acl().list(
+            calendarId=tgt_cal_id, pageToken=token
+        ))
 
         existing = {(r.get("scope", {}).get("type"),
                      r.get("scope", {}).get("value", "").lower()): r
@@ -575,7 +588,8 @@ class CalendarMigrator:
         self.stats["events"] += 1
 
     def _write_event(self, item: dict, body: dict, tgt_cal_id: str) -> dict:
-        """events.import -- or, for an out-of-office, focus-time or working-location
+        """events.import -- which updates a matching iCalUID -- or, for an
+        out-of-office, focus-time or working-location
         event on the primary calendar, events.insert as that type, which import
         cannot do. A typed insert Google refuses is imported as an ordinary event,
         as every one of them used to be, rather than lost."""
@@ -586,15 +600,15 @@ class CalendarMigrator:
                                           "colorId") if k in body}
             typed.update(eventType=item["eventType"], **{prop: item[prop]})
             try:
-                return self._retry(lambda: self.tgt.events().insert(
-                    calendarId="primary", body=typed, sendUpdates="none").execute())
+                return self._retry(lambda: failpoints.hit("calendar.imported", self.tgt.events().insert(
+                    calendarId="primary", body=typed, sendUpdates="none").execute(), user=self.source_user))
             except (PermanentAPIError, RuntimeError) as exc:
                 log.warning("[%s] could not create %s event %s as its own type (%s); "
                             "importing it as an ordinary event", self.source_user,
                             item["eventType"], item.get("id"), exc)
-        return self._retry(lambda b=body: self.tgt.events().import_(
+        return self._retry(lambda b=body: failpoints.hit("calendar.imported", self.tgt.events().import_(
             calendarId=tgt_cal_id, body=b, conferenceDataVersion=0,
-        ).execute())
+        ).execute(), user=self.source_user))
 
     def _give_future_meeting_a_meet(self, item: dict, target_id: str,
                                     tgt_cal_id: str) -> None:
@@ -654,18 +668,14 @@ class CalendarMigrator:
         colleague's, a team calendar, a public holiday one -- with the same colour
         and name. Run after every calendar and its sharing have landed, or the
         calendar being followed is not there, or not shared, yet. Idempotent."""
-        entries, token = [], None
-        try:
-            while True:
-                resp = self._retry(lambda t=token: self.src.calendarList().list(
-                    showHidden=True, pageToken=t).execute())
-                entries += resp.get("items", [])
-                token = resp.get("nextPageToken")
-                if not token:
-                    break
-        except OPTIONAL_PASS_ERRORS as exc:
-            log.warning("[%s] could not list followed calendars: %s", self.source_user, exc)
-            return 0
+        entries, token, seen = [], None, set()
+        while True:
+            resp = self._retry(lambda t=token: self.src.calendarList().list(
+                showHidden=True, pageToken=t).execute())
+            token = next_page_token(resp, token, seen, "Calendar subscription inventory")
+            entries += resp.get("items", [])
+            if not token:
+                break
         done = 0
         for entry in entries:
             cal_id = entry.get("id")
@@ -680,8 +690,10 @@ class CalendarMigrator:
             if self.settings.dry_run:
                 continue
             try:
-                self._retry(lambda b={"id": tgt, **settings_body}: self.tgt.calendarList().insert(
+                created = self._retry(lambda b={"id": tgt, **settings_body}: self.tgt.calendarList().insert(
                     body=b, colorRgbFormat=rgb).execute())
+                failpoints.hit("calendar.subscription.created", created,
+                               user=self.source_user)
             except (PermanentAPIError, RuntimeError) as exc:
                 if "duplicate" not in str(exc).lower() and "409" not in str(exc):
                     self.db.log_audit(self.source_user, key, "calendar_subscription",
@@ -727,7 +739,7 @@ class CalendarMigrator:
         original_start = (item.get("originalStartTime") or {}).get("dateTime")
         try:
             inst_resp = self._retry(lambda: self.tgt.events().instances(
-                eventId=target_master_id, originalStart=original_start,
+                calendarId=tgt_cal_id, eventId=target_master_id, originalStart=original_start,
             ).execute())
         except (PermanentAPIError, RuntimeError) as exc:
             self.db.log_audit(self.source_user, eid, "event", "FAILED", str(exc))

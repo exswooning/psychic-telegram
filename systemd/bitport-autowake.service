@@ -1,0 +1,16 @@
+[Unit]
+Description=Switch this always-on box back on 5 minutes after any clean power-off (RTC wake alarm)
+# Two unexplained power-offs on 17 Nov 2026 took the box and its jobs down for hours.
+# Keep it down on purpose: touch /etc/bitport/stay-off before shutting down (removed at next boot).
+DefaultDependencies=no
+After=sysinit.target
+Before=shutdown.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c "rm -f /etc/bitport/stay-off; /usr/sbin/rtcwake -m disable >/dev/null 2>&1 || true"
+ExecStop=/bin/sh -c "if [ -e /etc/bitport/stay-off ]; then echo autowake: stay-off flag, not arming; else /usr/sbin/rtcwake -m no -s 300 && echo autowake: armed for 5 minutes; fi"
+
+[Install]
+WantedBy=multi-user.target

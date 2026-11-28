@@ -87,4 +87,16 @@ def _sandbox_is_unprotected(tmp_path_factory, monkeypatch):
         domain_guard, "REVOCATIONS_PATH",
         str(tmp_path_factory.mktemp("guard") / "unprotected.json"))
     monkeypatch.setattr(domain_guard, "configured_domains", lambda: set())
+    # The source registry is shared across accounts and lives in the control-plane
+    # database. Generator tests use isolated Settings databases, so mirror the
+    # repository suite and keep only this test's declared sandbox source visible.
+    monkeypatch.setattr(
+        domain_guard, "source_domains",
+        lambda: {d for d in {domain_guard._norm(os.getenv("SOURCE_DOMAIN", ""))} if d},
+    )
     yield
+
+
+# The profile seeder's fixture, shared with test_profile_sharing.py without a module-level import there (an imported
+# fixture named as a test parameter reads as a redefinition to the linter).
+from test_profile_seed import profile  # noqa: E402,F401

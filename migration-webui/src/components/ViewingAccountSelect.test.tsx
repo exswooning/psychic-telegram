@@ -22,6 +22,12 @@ describe('Viewing account selector', () => {
     await new Promise((r) => setTimeout(r, 20))
     expect(screen.queryByTestId('viewing-account')).toBeNull()
   })
+  it('says "My own account" when nothing is chosen, not a blank box', async () => {
+    me.superadmin = true
+    view()
+    const box = await screen.findByRole('combobox')
+    expect(box.textContent).toBe('My own account')
+  })
   it('puts the chosen account in ?account=', async () => {
     me.superadmin = true
     view()

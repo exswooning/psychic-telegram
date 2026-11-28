@@ -46,7 +46,9 @@ describe('viewing another account', () => {
     // Re-asking Google changes nothing, so it stays available on another account.
     const before = calls.ready.mock.calls.length
     const again = screen.getByTestId('qts-readonly-recheck')
-    expect(again).not.toBeDisabled()
+    // Capacity and readiness resolve independently. Wait for the readiness
+    // request's finally handler before testing the next user interaction.
+    await waitFor(() => expect(again).not.toBeDisabled())
     fireEvent.click(again)
     await waitFor(() => expect(calls.ready.mock.calls.length).toBeGreaterThan(before))
   })

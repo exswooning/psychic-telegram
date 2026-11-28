@@ -1817,6 +1817,18 @@ class TestResetTargetFromTheUI:
         _, _, err = webui.reset_target_argv({})
         assert "type the target domain" in err
 
+    def test_named_account_without_a_source_is_refused(self, monkeypatch):
+        import config
+
+        def load_target_only(settings):
+            settings.source_domain = ""
+
+        monkeypatch.setattr(config.Settings, "_load_account_tenant_config", load_target_only)
+        argv, env, err = webui.reset_target_argv(
+            {"confirm_domain": "sandbox-tgt.example", "services": "gmail"}, 7)
+        assert not argv and not env
+        assert "set the source domain" in err
+
     def test_a_mismatched_domain_is_refused(self):
         _, _, err = webui.reset_target_argv({"confirm_domain": "something-else.com"})
         assert "does not match the target domain" in err

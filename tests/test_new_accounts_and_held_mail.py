@@ -89,6 +89,19 @@ def test_mail_and_calendar_wait_for_a_user_whose_drive_failed(auth, db, settings
     assert row["status"] == "FAILED" and "held" in (row["error_message"] or "")
 
 
+def test_held_mail_runs_by_itself_at_the_next_run_once_drive_succeeds(auth, db, settings, identity, monkeypatch):
+    """run.held_for_drive ends as its entry says: no step by a person, the next run (no failed Drive) moves the mail."""
+    import known_issues
+    auth.source_gmail(SRC_USER).add_message(RAW, ["INBOX"])
+    monkeypatch.setenv("DRIVE_FAILED_USERS", SRC_USER)
+    main.migrate_user(auth, db, settings, SRC_USER, TGT_USER, {"gmail"}, False, 0)
+    held = db.get_audit(SRC_USER, SRC_USER, "gmail")
+    assert known_issues.classify_failure("gmail", held["error_message"]) == "run.held_for_drive"
+    monkeypatch.delenv("DRIVE_FAILED_USERS")
+    out = main.migrate_user(auth, db, settings, SRC_USER, TGT_USER, {"gmail"}, False, 0)
+    assert "gmail" in out["services"] and auth.target_gmail(TGT_USER).messages
+
+
 def test_everyone_else_is_not_held(auth, db, settings, identity, monkeypatch):
     auth.source_gmail(SRC_USER).add_message(RAW, ["INBOX"])
     monkeypatch.setenv("DRIVE_FAILED_USERS", "someone.else@tenanta.com")

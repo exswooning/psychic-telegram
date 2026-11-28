@@ -308,3 +308,17 @@ class TestGmailSettingsProbes:
         assert cov._none_if_both_unmeasured(
             {"pop_enabled": None, "imap_enabled": None},
             "pop_enabled", "imap_enabled") is None
+
+
+def test_every_supported_scope_row_is_probed_or_named_unseedable():
+    """fableplan2 P2.5: an audit of a seeded tenant can only read 0 UNPROBED if every row has a probe."""
+    import coverage_audit as ca
+    import scope as sc
+    bare = [r.item for r in sc.filter_scope()
+            if r.status != sc.NONE and r.item not in ca.PROBES and r.item not in ca.UNSEEDABLE]
+    assert bare == []
+    rows = ca.assess({"deep": {"calendar": {"rooms": 2}}, "drive": {}, "gmail": {}, "calendar": {}})
+    by = {r["item"]: r for r in rows}
+    assert by["Room and equipment resources"]["verdict"] == ca.COVERED
+    assert by["Meet recordings"]["verdict"] == ca.UNSEEDABLE_V
+    assert by["Filters and rules"]["verdict"] == ca.UNPROBED     # gmail never answered: unmeasured, not absent

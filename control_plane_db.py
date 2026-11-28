@@ -49,7 +49,9 @@ def _db_path() -> str:
     if named:
         return named
     path = Settings().db_path
-    if f"{os.sep}data{os.sep}accounts{os.sep}" in os.path.abspath(path):
+    # An A/B arm's own ledger copy (BITPORT_LEDGER) is no more the control plane than an account's:
+    # it has no tenant_configs, so every arm's migrate died at startup (live, 2026-10-31).
+    if os.getenv("BITPORT_LEDGER") or f"{os.sep}data{os.sep}accounts{os.sep}" in os.path.abspath(path):
         return os.path.join(os.path.dirname(os.path.abspath(__file__)), "migration.db")
     return path
 

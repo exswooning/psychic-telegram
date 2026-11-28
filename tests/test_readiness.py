@@ -38,7 +38,7 @@ def tenant(tmp_path, monkeypatch):
     import googleapiclient.discovery as disc
     monkeypatch.setattr(disc, "build", fake_build)
     monkeypatch.setattr(readiness, "_creds", lambda *a: None)
-    monkeypatch.setattr(readiness, "_own_project", lambda p, d: readiness._row("own project", True))
+    monkeypatch.setattr(readiness, "_own_project", lambda p, d, a=None: readiness._row("own project", True))
     return st, state
 
 
@@ -124,3 +124,6 @@ def test_a_project_on_file_for_another_domain_is_not_ready(tmp_path, monkeypatch
     assert readiness._own_project("wsmig-src-50758", "gorkhatweed.com")["ok"] is False
     assert readiness._own_project("wsmig-src-50758", "source.old.com")["ok"] is True
     assert readiness._own_project("wsmig-src-1", "gorkhatweed.com")["ok"] is True
+    # One migration's two sides may share it (dharan.gov.np -> new.mdharan.com, 23 Nov 2026); another account may not.
+    assert readiness._own_project("wsmig-src-50758", "gorkhatweed.com", account_id=1)["ok"] is True
+    assert readiness._own_project("wsmig-src-50758", "gorkhatweed.com", account_id=2)["ok"] is False

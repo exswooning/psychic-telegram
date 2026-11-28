@@ -214,6 +214,12 @@ def _console_login(settings: Settings | None, tenant: str | None) -> dict:
     pick = lambda k: (os.getenv(k) or filed.get(k) or "").strip()   # noqa: E731
     side = "source" if tenant == "source" else "target"
     domain = ((getattr(settings, f"{side}_domain", "") if settings else "") or "").lower()
+    import domain_guard
+    if side == "source" and domain_guard.is_government(domain):
+        # Nothing signs in to a government source's console on its own -- no re-grant, no
+        # narrowing, no seed key (operator, 16 Nov 2026: dharan.gov.np "should not be
+        # modified at all"). A change there is a person's, made by hand.
+        return {}
     keys = ("DWD_EMAIL_SOURCE", "DWD_PASSWORD_SOURCE") if side == "source" else ("DWD_EMAIL", "DWD_PASSWORD")
 
     def on_domain(email: str) -> bool:

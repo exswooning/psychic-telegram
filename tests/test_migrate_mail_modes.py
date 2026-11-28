@@ -35,14 +35,14 @@ class TestThePlan:
         assert A._mail_plan(["all"], "engine", rewrite=False) == (["all"], None, False)
 
     def test_dms_takes_mail_off_the_engine_however_the_services_were_named(self):
-        every = [s for s in A._ALL_SERVICES if s != "gmail"]
+        every = [s for s in A._ALL_SERVICES if s not in ("gmail", "chat")]    # Chat is opt-in since 2026-10-31
         # Calendar is still moved, so its links still need Drive first.
         assert A._mail_plan(["all"], "dms") == (every, None, True)
         assert A._mail_plan(["drive", "gmail", "chat"], "dms") == (["drive", "chat"], None, False)
 
     def test_split_keeps_mail_on_the_engine_orders_the_passes_and_forces_rewriting(self):
         services, env, ordered = A._mail_plan(["all"], "split")
-        assert services == list(A._ALL_SERVICES) and "gmail" in services
+        assert services == [s for s in A._ALL_SERVICES if s != "chat"] and "gmail" in services
         assert ordered is True
         assert env["MAIL_ONLY_WITH_LINKS"] == "true" and env["REWRITE_DRIVE_LINKS"] == "true"
 
@@ -100,34 +100,48 @@ class TestTheEndpoint:
     def test_dms_leaves_mail_out_of_the_run(self, cp, monkeypatch):
         r, seen = _start(cp, monkeypatch, services=["all"], mail_mode="dms")
         assert "gmail" not in seen["argv"][seen["argv"].index("--services") + 1].split(",")
-        assert seen["env"] is None
+        assert seen["env"] == {**seen["env"], "TRANSFER_MODE": "server_side"}      # the default, nothing else added
         assert "--ordered" in seen["argv"]      # calendar is still moved, and its links need Drive first
 
     def test_the_engine_still_orders_the_passes_because_links_are_being_rewritten(self, cp, monkeypatch):
         r, seen = _start(cp, monkeypatch, services=["all"], mail_mode="engine")
         assert seen["argv"][seen["argv"].index("--services") + 1] == "all"
-        assert "--ordered" in seen["argv"] and seen["env"] is None
+        assert "--ordered" in seen["argv"] and seen["env"]["TRANSFER_MODE"] == "server_side"
 
     def test_but_not_when_the_box_has_rewriting_off(self, cp, monkeypatch):
         monkeypatch.setenv("REWRITE_DRIVE_LINKS", "false")
         r, seen = _start(cp, monkeypatch, services=["all"], mail_mode="engine")
         assert "--ordered" not in seen["argv"]
 
-    def test_naming_no_mode_on_a_whole_tenant_run_uses_the_engine(self, cp, monkeypatch):
+    def test_a_few_users_default_to_split_but_never_start_the_dms(self, cp, monkeypatch):
+        """Batches: their plain mail waits for an import started from Other services."""
+        r, seen = _start(cp, monkeypatch, services=["all"], users=["a@x.com"])
+        assert r.status_code == 200, r.text
+        assert seen["env"]["MAIL_ONLY_WITH_LINKS"] == "true"
+        assert seen["then"] == ["tally@a@x.com"]
+
+    def test_a_selected_mail_migration_tallies_only_the_selected_users(self, cp, monkeypatch):
+        users = ["a@x.com", "b@x.com"]
+        r, seen = _start(cp, monkeypatch, services=["gmail"], users=users, mail_mode="engine")
+        assert r.status_code == 200 and r.json()["ok"] is True, r.text
+        assert [seen["argv"][i + 1] for i, arg in enumerate(seen["argv"]) if arg == "--user"] == users
+        assert seen["then"] == ["tally@a@x.com,b@x.com"]
+
+    def test_naming_no_mode_on_a_whole_tenant_run_uses_split(self, cp, monkeypatch):
+        """The operator's default since 2026-10-30: link mail first, then the DMS."""
         r, seen = _start(cp, monkeypatch, services=["all"])
         assert r.status_code == 200 and r.json()["ok"] is True, r.text
         assert "--ordered" in seen["argv"]
-        assert seen["env"] is None
-        assert "dms" not in seen["then"]
+        assert seen["env"]["MAIL_ONLY_WITH_LINKS"] == "true"
+        assert "dms" in seen["then"]
 
     def test_the_mode_that_was_decided_is_the_one_in_the_audit_record(self, cp, monkeypatch):
         _start(cp, monkeypatch, services=["all"])
         with cpdb.ro() as c:
             row = c.execute("SELECT params_json FROM operator_actions_log WHERE action='migrate.start' ORDER BY id DESC LIMIT 1").fetchone()
-        assert '"mail_mode": "engine"' in row[0]
+        assert '"mail_mode": "split"' in row[0]
 
     @pytest.mark.parametrize("body", [
-        {"services": ["all"], "users": ["a@x.com"]},        # the DMS is never started for a few users
         {"services": ["drive"]},                            # no mail in it
         {"services": ["gmail"]},                            # no Drive to rewrite against
         {"services": ["all"], "sample": 5},                 # compared one to one, so all of it is ours
@@ -135,13 +149,7 @@ class TestTheEndpoint:
     def test_otherwise_it_is_the_engine_as_before(self, cp, monkeypatch, body):
         r, seen = _start(cp, monkeypatch, **body)
         assert r.status_code == 200, r.text
-        # No DMS follow-on, but repair rides along on any real run -- then a tally: of
-        # every user after a whole-tenant run, of just its users after a chosen few,
-        # and none after a sample.
-        users = body.get("users")
-        expect = (["repair"] if body.get("sample") is not None
-                  else ["repair", "tally@" + ",".join(users)] if users else ["repair", "tally"])
-        assert seen["then"] == expect
+        assert seen["then"] == (["repair"] if body.get("sample") is not None else ["repair", "tally"])
         assert "MAIL_ONLY_WITH_LINKS" not in (seen["env"] or {})
 
     def test_an_unknown_mode_is_refused_rather_than_guessed(self, cp, monkeypatch):
@@ -195,9 +203,10 @@ class TestTransferMode:
     account's -- unlike the TRANSFER_MODE the box's own environment sets, this
     is per-launch, passed only to the child this request starts."""
 
-    def test_left_out_the_child_gets_no_override_at_all(self, cp, monkeypatch):
+    def test_left_out_the_child_gets_server_side(self, cp, monkeypatch):
+        """server_side is the default (operator, 2026-11-01): no bytes cross this host."""
         r, seen = _start(cp, monkeypatch, services=["drive"])
-        assert "TRANSFER_MODE" not in (seen["env"] or {})
+        assert seen["env"]["TRANSFER_MODE"] == "server_side"
 
     def test_server_side_is_passed_through_as_an_env_override(self, cp, monkeypatch):
         r, seen = _start(cp, monkeypatch, services=["drive"], transfer_mode="server_side")
@@ -304,6 +313,9 @@ class TestTuningForMeasuredRuns:
     """The perf plan's knobs, per launch, as env vars -- like transfer_mode."""
 
     def test_nothing_named_nothing_added(self, cp, monkeypatch):
+        # main.main() mirrors --workers into os.environ, which an earlier test can leave behind
+        for k in ("USER_WORKERS", "DRIVE_FILE_WORKERS", "MAPPING_CACHE_USER_CAP"):
+            monkeypatch.delenv(k, raising=False)
         r, seen = _start(cp, monkeypatch, services=["drive"])
         env = seen["env"] or {}
         for k in ("USER_WORKERS", "DRIVE_FILE_WORKERS", "MAPPING_CACHE_USER_CAP"):
@@ -348,6 +360,8 @@ class TestTheBenchmarkTakesMoreThanFourFileWorkers:
         monkeypatch.setattr(config, "Settings", lambda account_id=None: types.SimpleNamespace(
             target_domain="b.test", source_domain="a.test") if account_id is not None else real())
         monkeypatch.setattr(A, "HERE", str(tmp_path))
+        import benchmark_run    # the account scope is benchmark_run's own tests' concern; this one is about workers
+        monkeypatch.setattr(benchmark_run, "benchmark_scope", lambda account_id, typed: (None, dict(os.environ)))
         launched = []
         monkeypatch.setattr(A.subprocess, "Popen",
                             lambda argv, **k: launched.append((argv, k.get("env"))) or types.SimpleNamespace(pid=9))
@@ -372,3 +386,31 @@ class TestRedoLinks:
         assert seen["env"]["REDO_UNREWRITTEN_LINKS"] == "true"
         assert seen["env"]["REWRITE_DRIVE_LINKS"] == "true"
         assert seen["env"]["PATH"] == os.environ["PATH"]
+
+
+class TestMailLinkScan:
+    def test_split_carries_the_chosen_scan_to_the_child(self, cp, monkeypatch):
+        r, seen = _start(cp, monkeypatch, services=["all"], mail_mode="split", mail_link_scan="exhaustive")
+        assert r.status_code == 200, r.text
+        assert seen["env"]["MAIL_LINK_SCAN"] == "exhaustive"
+
+    def test_left_out_the_server_default_applies(self, cp, monkeypatch):
+        r, seen = _start(cp, monkeypatch, services=["all"], mail_mode="split")
+        assert "MAIL_LINK_SCAN" not in seen["env"]
+
+    def test_an_engine_run_ignores_it(self, cp, monkeypatch):
+        r, seen = _start(cp, monkeypatch, services=["gmail"], mail_mode="engine", mail_link_scan="search")
+        assert "MAIL_LINK_SCAN" not in (seen["env"] or {})
+
+    def test_an_unknown_scan_is_refused(self, cp, monkeypatch):
+        r, seen = _start(cp, monkeypatch, services=["all"], mail_mode="split", mail_link_scan="fast")
+        assert r.status_code == 422 and not seen
+
+
+def test_a_run_naming_no_mode_is_split_and_server_side_whatever_the_benchmark_won(cp, monkeypatch):
+    monkeypatch.setattr(A, "ab_default", lambda: {"arm": "download_upload + engine", "mode": "download_upload",
+                                                 "mailMode": "engine", "errors": 4, "seconds": 900})
+    r, seen = _start(cp, monkeypatch, services=["all"])
+    assert r.status_code == 200, r.text
+    # Split by default, never bulk mail by the engine (operator, 10 Nov); Drive stays server_side.
+    assert seen["env"]["TRANSFER_MODE"] == "server_side" and seen["env"].get("MAIL_ONLY_WITH_LINKS") == "true"

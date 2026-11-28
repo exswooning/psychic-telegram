@@ -68,6 +68,33 @@ def test_missing_callback_falls_back_to_normal_read(db,settings):
     assert svc.direct==['missing']
 
 
+def test_target_stray_inventory_yields_one_page_at_a_time(db,settings):
+    class Paged:
+        def __init__(self):
+            self.calls = 0
+
+        def files(self): return self
+
+        def list(self, **kwargs):
+            self.token = kwargs.get("pageToken")
+            return self
+
+        def execute(self):
+            self.calls += 1
+            if self.token is None:
+                return {"files": [{"id": "one", "mimeType": "application/pdf"}],
+                        "nextPageToken": "next"}
+            return {"files": [{"id": "two", "mimeType": "application/pdf"}]}
+
+    svc = Paged()
+    v = V.Verifier(None, db, settings, "u@src", "u@tgt")
+    files = v._target_files_iter(svc)      # the full read streams; the incremental cache wraps it
+    assert next(files)["id"] == "one"
+    assert svc.calls == 1
+    assert next(files)["id"] == "two"
+    assert svc.calls == 2
+
+
 def test_drive_windows_are_bounded_and_every_mapping_is_checked(db,settings,monkeypatch):
     src,tgt=object(),object()
     auth=SimpleNamespace(source_drive=lambda u:src,target_drive=lambda u:tgt)
@@ -79,7 +106,7 @@ def test_drive_windows_are_bounded_and_every_mapping_is_checked(db,settings,monk
         calls.append((side,ids))
         return {fid:{'id':fid,'name':fid[1:],'mimeType':'application/pdf','ownedByMe':True} for fid in ids},{}
     monkeypatch.setattr(v,'_drive_meta_many',many)
-    monkeypatch.setattr(v,'_drive_path',lambda svc,fid,cache:'/'+fid[1:])
+    monkeypatch.setattr(v,'_drive_path',lambda svc,fid,cache,**kw:'/'+fid[1:])
     monkeypatch.setattr(v,'_content',lambda *a:[])
     monkeypatch.setattr(v,'_sharing',lambda *a:[])
     monkeypatch.setattr(v,'_target_files',lambda svc:[])

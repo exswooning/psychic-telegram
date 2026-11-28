@@ -4,6 +4,8 @@ import groups_engine
 import shared_drives
 import tenant_verify as T
 from db import bulk_seed_identities
+from types import SimpleNamespace
+import pytest
 
 
 def _check(settings, db, monkeypatch, src_users=None, tgt_users=None):
@@ -16,6 +18,22 @@ def _check(settings, db, monkeypatch, src_users=None, tgt_users=None):
 
 def _u(email, given="A", suspended=False):
     return {"primaryEmail": email, "name": {"givenName": given, "familyName": "B"}, "suspended": suspended}
+
+
+def test_tenant_inventory_stops_on_repeated_page_token():
+    class Pages:
+        calls = 0
+
+        def execute(self):
+            self.calls += 1
+            if self.calls > 3:
+                raise AssertionError("pagination did not stop")
+            return {"items": [{"id": str(self.calls)}], "nextPageToken": "same"}
+
+    pages = Pages()
+    with pytest.raises(RuntimeError, match="repeated.*page token"):
+        T._pages(lambda token: pages, "items")
+    assert pages.calls == 2
 
 
 def test_every_source_user_needs_a_migrated_account_on_the_target(settings, db, monkeypatch):
@@ -34,6 +52,22 @@ def test_every_source_user_needs_a_migrated_account_on_the_target(settings, db, 
     assert why["c@tenanta.com"] == ["Directory profile differs: name"]
     assert why["d@tenanta.com"] == ["not paired with a target account"]
     assert "admin@tenantb.com" in s["notes"][0]          # listed, not counted against the source
+
+
+def test_tenant_user_verification_builds_identity_translation_once(settings, db, monkeypatch):
+    import user_profiles
+
+    bulk_seed_identities(db, [("a@tenanta.com", "a@tenantb.com"),
+                              ("b@tenanta.com", "b@tenantb.com")])
+    c = _check(settings, db, monkeypatch,
+               {"a@tenanta.com": _u("a@tenanta.com"), "b@tenanta.com": _u("b@tenanta.com")},
+               {"a@tenantb.com": _u("a@tenantb.com"), "b@tenantb.com": _u("b@tenantb.com")})
+    mappings = []
+    monkeypatch.setattr(user_profiles, "profile_body",
+                        lambda source, target, mapping: mappings.append(mapping) or {})
+    monkeypatch.setattr(user_profiles, "differences", lambda wanted, actual: [])
+    c.users()
+    assert len(mappings) == 2 and mappings[0] is mappings[1]
 
 
 def test_a_group_compares_its_members_as_translated(settings, db, monkeypatch):

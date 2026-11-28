@@ -144,9 +144,21 @@ class TestGmailDoesNotRoundTripBase64:
 
         sent = auth.target_gmail(TGT_USER).calls_to("messages.insert")
         assert sent, "nothing was inserted"
-        posted = sent[0]["body"]["raw"]
         original = next(iter(src.messages.values()))["raw"]
-        assert posted == original, "raw was re-encoded rather than passed through"
+        import base64
+        # P1.7: an ASCII message under 5 MB goes up as its own bytes, the exact bytes the source holds.
+        assert "raw" not in sent[0]["body"]
+        assert sent[0]["media_body"].read_all() == base64.urlsafe_b64decode(original + "=" * (-len(original) % 4))
+
+    def test_with_raw_upload_off_the_string_is_passed_through_untouched(self, auth, db, settings, identity, monkeypatch):
+        import gmail_engine
+        from tests.conftest import SRC_USER, TGT_USER
+        monkeypatch.setenv("GMAIL_RAW_UPLOAD", "0")
+        src = auth.source_gmail(SRC_USER)
+        src.add_message(b"hello there", labels=["INBOX"])
+        gmail_engine.GmailMigrator(auth, db, settings, SRC_USER, TGT_USER).run()
+        posted = auth.target_gmail(TGT_USER).calls_to("messages.insert")[0]["body"]["raw"]
+        assert posted == next(iter(src.messages.values()))["raw"], "raw was re-encoded rather than passed through"
 
     def test_byte_accounting_still_measures_the_decoded_size(self, auth, db,
                                                              settings, identity):

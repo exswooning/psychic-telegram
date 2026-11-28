@@ -38,3 +38,11 @@ def test_a_thread_gone_from_the_target_still_gets_the_message(gmail_migrator, au
     tgt = auth.target_gmail(TGT_USER)
     assert tgt.call_count("messages.insert") == 2       # tried the thread, then alone
     assert len(tgt.messages) == 1
+
+
+def test_conversation_lock_storage_is_bounded(gmail_migrator):
+    first = gmail_migrator._conversation_lock("thread-7")
+    assert gmail_migrator._conversation_lock("thread-7") is first
+    for i in range(10_000):
+        gmail_migrator._conversation_lock(f"thread-{i}")
+    assert len(gmail_migrator._conv_locks) <= 256

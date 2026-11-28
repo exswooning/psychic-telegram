@@ -147,7 +147,7 @@ const GoogleStyleAuth: React.FC<{
       } }}
     >
       <IconButton
-        onClick={onClose} size="small"
+        onClick={onClose} size="small" aria-label="Close"
         sx={{ position: 'absolute', top: 12, right: 12, color: G_TEXT_DIM }}
       >
         <CloseIcon fontSize="small" />
@@ -530,9 +530,11 @@ const QuickTenantSetup: React.FC<{
   const alreadyHere = !!tenantCfg?.hasKey
     && (tenantCfg.domain || '').toLowerCase() === domain.trim().toLowerCase()
   const result = status?.result
+  const previewOnly = !!result?.dryRun || !!result?.phases.some(p =>
+    p.name.includes('skipped: dry run') || p.detail === 'dry run')
   // Only a result for THIS domain: the slot's last run may have been another tenant's
   // (target2.sarafgloabalexim.com's "Setup done" and its users showed on mdharan.com).
-  const setUpOk = !!result?.ok && !status?.running && (result.domain
+  const setUpOk = !!result?.ok && !previewOnly && !status?.running && (result.domain
     ? result.domain === domain.trim().toLowerCase() : alreadyHere)
   // Once per key on file for this domain, and again when a setup run finishes.
   const readinessKey = alreadyHere && !status?.running
@@ -1482,10 +1484,17 @@ const QuickTenantSetup: React.FC<{
         </Box>
       )}
 
-      {setUpOk && showProvisionUsers && side === 'target' && (
+      {previewOnly && <Alert severity="info" sx={{ mt: 2 }}>
+        Preview complete. No tenant connection or users were created. Run setup and pass the readiness checks before provisioning accounts.
+      </Alert>}
+      {/* A target whose key is on file and that Google says is Ready can map and provision users
+          whether or not a setup ran in this browser session: requiring a fresh "Setup done" hid these
+          buttons on an already-set-up target, so a 45-user run could not be mapped from the UI
+          (t.sarafgloabalexim.com, 2026-11-02). */}
+      {alreadyHere && readyHere && !previewOnly && !status?.running && showProvisionUsers && side === 'target' && (
         <Box sx={{ mt: 2, pt: 2, borderTop: '1px solid', borderColor: 'divider' }}>
           <Typography variant="subtitle2" sx={{ fontWeight: 700, mb: 1 }}>
-            Setup done — provision accounts
+            {setUpOk ? 'Setup done — provision accounts' : 'Ready — map and provision accounts'}
           </Typography>
 
           {/* Step one, and the one that was missing entirely.

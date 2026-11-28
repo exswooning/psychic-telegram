@@ -1,0 +1,460 @@
+# Codex pieces — 2026-11-27
+
+## Prevent the seeder from shadowing the guarded verifier
+
+- **Files:** `seed_loader.py`, `reset_target.py`, `campaign_changes.py`, `separate_credentials.py`, `verify_scopes.py`, `tests/test_seed_loader.py`, `tests/test_reset_target.py`
+- **Tests:** `.venv/bin/python -m pytest tests/test_seed_loader.py tests/test_reset_target.py tests/test_separate_credentials.py tests/test_verify_scopes.py tests/test_campaign_executor.py -q -rs`
+- **Result:** Passed. Seeder imports now use one cached file-path loader that removes `data-generator/` from `sys.path` after module execution; scope and campaign callers no longer leave the shadowing directory behind.
+
+# Codex pieces
+
+## 2026-11-27 — Source write guard red team
+
+- **Piece:** Added a fake-transport attack matrix over 831 discovery write-method/route combinations, transport and upload bypass probes, strict expected failures for current leaks, and the credential-backed `source_attack_probe.py` dry-run/live CLI.
+- **Files:** `tests/test_source_write_attacks.py`, `source_attack_probe.py`, `docs/tasks/source-guard-redteam.md`, `docs/tasks/codex-pieces.md`.
+- **Tests and result:**
+  - `.venv/bin/python -m pytest -o addopts=--tb=short tests/test_source_write_attacks.py -q` — **281 passed, 567 xfailed** in 8.85s. The strict xfails record the currently observed leak routes, including the incomplete move update; the document lists each route and reason.
+  - `.venv/bin/python -m py_compile source_attack_probe.py tests/test_source_write_attacks.py` — passed.
+  - `.venv/bin/python source_attack_probe.py --help` — passed.
+  - Invoked live mode with `dharan.gov.np` — refused with exit code 2 before credential construction, as required. The fake-transport dry-run was tested; no credential-backed dry-run, live writes, or network requests were run.
+
+## 2026-11-27 — Align source attack regressions to the transport guard
+
+- **Piece:** Removed all xfails from the 831 discovery cases; accepted the three read-only POST endpoints in the leak classifier; counted `MediaUpload` refusal at request construction; removed bare `auth._http()` because it carries no source credentials. Updated the route findings to reflect the merged guard.
+- **Files:** `tests/test_source_write_attacks.py`, `source_attack_probe.py`, `docs/tasks/source-guard-redteam.md`, `docs/tasks/codex-pieces.md`.
+- **Tests and result:**
+  - `.venv/bin/python -m pytest --runxfail -o addopts=--tb=short tests/test_source_write_attacks.py -q` — **847 passed** in 5.40s.
+  - `.venv/bin/python -m pytest -o addopts=--tb=short tests/test_source_write_attacks.py tests/test_source_transport_guard.py -q` — **878 passed** in 6.92s.
+- No credential-backed dry-run or live probe was run; no network requests were made.
+
+
+# Codex worktree pieces
+
+## Phase binding analyzer and telemetry
+
+- **Piece:** Read-only, per-account phase analysis with measured limiter, CPU, line, and worker-slot inputs. Missing signals stay `UNKNOWN`; they do not produce a `NOTHING` verdict.
+- **Files:** `phase_binding.py`, `metrics.py`, `main.py`, `db.py`, `verify_sample.py`, `tally.py`, `split_mail.py`, `dms_light_proof.py`, `data-generator/seed_sandbox.py`, `tests/test_phase_binding.py`.
+- **Tests:** `.venv/bin/python -m pytest tests/test_phase_binding.py tests/test_sampler.py -q` — **13 passed**. `.venv/bin/python -m py_compile phase_binding.py sampler.py metrics.py main.py tally.py split_mail.py dms_light_proof.py verify_sample.py db.py data-generator/seed_sandbox.py tests/test_phase_binding.py tests/test_sampler.py` — **passed**.
+- **Result:** Crafted ledger and metric/sampler series cover Google quota, line, CPU, NOTHING, and incomplete evidence. Worker occupancy now records busy user/task slots in migration, verification, tally, DMS reconciliation, and seeding pools. Seed metrics are persisted as bounded snapshots and retain a per-run summary.
+
+## Sampler and live runbook
+
+- **Piece:** Add the standalone Linux JSONL CPU/interface sampler and document how to capture/analyze one account run, the verdict thresholds, evidence limits, historical baseline rates, and the inline test metric sample.
+- **Files:** `sampler.py`, `tests/test_sampler.py`, `data-generator/test_seed_sandbox.py`, `docs/tasks/phase-binding.md`, `docs/tasks/synthetic-10-plan.md`, `docs/tasks/codex-pieces.md`.
+- **Tests:** `.venv/bin/python -m pytest tests/test_phase_binding.py tests/test_sampler.py -q` — **13 passed**; `.venv/bin/python -m pytest data-generator/test_seed_sandbox.py::test_seed_metrics_persist_the_sample_series_and_worker_slots -q` — **1 passed**. The existing regression selection across metrics, verifier, tally, DMS light proof, and split-mail tests also exited **0**.
+- **Result:** Baseline rates are 373.9 Drive files/min, 102.9 DMS messages/min, and 830 DMS-check messages/min. Historical and inline fixture metrics lack enough evidence for a binding verdict, so the analyzer reports UNKNOWN.
+
+## Limiter evidence attribution
+
+- **Piece:** Keep cumulative limiter rejections phase-local; an unbased counter or empty event list cannot claim a quota result or a clean NOTHING verdict.
+- **Files:** `phase_binding.py`, `tests/test_phase_binding.py`, `docs/tasks/phase-binding.md`, `docs/tasks/codex-pieces.md`.
+- **Tests:** `.venv/bin/python -m pytest tests/test_phase_binding.py tests/test_sampler.py -q` — **13 passed**.
+- **Result:** Exact rejection counts require a counter delta across a phase boundary. An observed limiter backoff remains positive quota evidence when its exact rejection count is unavailable. Missing baseline evidence stays UNKNOWN.
+
+# Codex work pieces
+
+## P4.2 — realistic profile service and link data
+
+- Closed the open profile gaps for calendar, contact, and task rates; named their assumptions and source in code.
+- Made the link-mail kind distribution a validated plan input with a named default, and linked outside-kind mail to a pool file owned by the pool account.
+- Kept the default pool file cap at 50 MiB, allowed larger profile files up to the configured cap, streamed large uploads, and included pool bytes in the budget.
+- Files: `data-generator/profile_plan.py`, `data-generator/profile_seed.py`, `data-generator/seed_sandbox.py`, `data-generator/test_profile_seed.py`, `tests/fakes.py`.
+- Tests: `.venv/bin/python -m pytest data-generator/test_profile_seed.py -q --tb=short` — **34 passed**.
+
+## P4.3 — complete offline budget and seat accounting
+
+- Budget output includes per-service items (including the cohort's five idempotent Gmail settings writes and two existence reads per mailbox), bytes crossing the box, sequential phase hours, API-rate sources, and a refusal gate. Account provisioning includes serial user lookups plus creates and the new-account count; the 300-seat calculation reserves the admin and all 30 cohort accounts, including twins, and reports 269 new accounts.
+- Files: `data-generator/profile_plan.py`, `data-generator/seed_sandbox.py`, `data-generator/test_profile_seed.py`.
+- Tests: `.venv/bin/python -m pytest data-generator/test_profile_seed.py -q --tb=short` — **35 passed** at the P4.3 checkpoint. Final offline plan command reported 300/300 seats and 269 new accounts, priced all Gmail settings on 299 mailboxes, and refused at 384.3 h against the default 12-hour cap. The 10 GiB-tail plan with `--max-hours 360` exited successfully at 360.0 h.
+
+## P4.4 — hard-stop resume coverage for every profile service
+
+- Fake services can now raise a hard-stop `BaseException` after a chosen number of successful calls. Resume tests kill and restart profile seeds during Drive, Gmail, Calendar, Chat, Contacts, Tasks, and Gmail settings; they verify stable IDs/markers and no duplicate resources. Gmail settings checks forwarding addresses and delegates before creating them on replay, and Chat resumes by reusing its named spaces and messages.
+- Fixed secondary-calendar planning so replay skips cannot shift later calendar names and duplicate calendar events.
+- Files: `tests/fakes.py`, `data-generator/test_profile_seed.py`, `data-generator/seed_sandbox.py`.
+- Tests: `.venv/bin/python -m pytest data-generator/test_profile_seed.py -q --tb=short` — **35 passed** at the P4.4 checkpoint. The final full generator suite, including added Chat and Gmail-settings kill/restart cases, completed at 100% without reported failures.
+
+## P4 integration — generator suite and guard fixture
+
+- Aligned the generator suite's sandbox fixture with the repository suite by isolating the cross-account source registry from the unavailable shared control-plane database. Updated the outside-link regression to require an explicitly outside-owned target.
+- Files: `data-generator/conftest.py`, `data-generator/test_profile_sharing.py`.
+- Tests: focused guard/attachment/link regressions passed. `.venv/bin/python -m pytest data-generator/ -q --tb=short` completed at 100% with no reported failures.
+
+## P5.2–P5.3 — 300-user VM runbook
+
+- Added the ordered VM preflight, sandbox wipe, offline plan review, live seed, seven benchmark/fact checks, identity initialization, and coverage audit. Recorded the exact user-corrected plan-only command and expected default-budget refusal, along with the expanded 10 GiB-tail budget command and the required benchmark evidence.
+- Files: `docs/tasks/seed-300-runbook.md`.
+- Tests: both local offline plan commands were exercised after the final budget changes (default command: expected budget refusal; expanded 10 GiB-tail command: exit 0 at 360.0 h). VM execution is intentionally left to Claude on the owned VM.
+
+## P4 integration follow-up — service-only seeding compatibility
+
+- Made secondary-calendar metric aggregation tolerate absent optional counters returned by a minimal test double. This keeps service-only and full-seed reporting compatible.
+- Files: `data-generator/seed_sandbox.py`.
+- Tests: `.venv/bin/python -m pytest tests/test_seed_one_service.py -q --tb=short` — **19 passed**; `.venv/bin/python -m pytest data-generator/ -q --tb=short` completed at 100% with no reported failures.
+
+## P4/P5 integration follow-up — profile CLI cohort and settings budget
+
+- Profile `--users` is a total seat count, so it no longer filters the selected cohort as if `300` were a cohort local-part. The complete budget includes Gmail settings across all 299 non-admin mailboxes (writes and existence reads). The live runbook explicitly leaves Chat off, as the plan requires.
+- Files: `data-generator/profile_plan.py`, `data-generator/seed_sandbox.py`, `data-generator/test_profile_seed.py`, `data-generator/test_seed_sandbox.py`, `tests/fakes.py`, `data-generator/test_seeder_coverage.py`, `docs/tasks/seed-300-runbook.md`.
+- Tests: focused profile/sharing/coverage and cohort-selection regressions completed at 100% without reported failures; `.venv/bin/python -m pytest data-generator/ -q --tb=short` completed at 100% without reported failures. `.venv/bin/python -m pytest tests/test_seed_one_service.py -q --tb=short` — **19 passed**.
+
+## Repository-suite verification
+
+- Ran `.venv/bin/python -m pytest tests/ -q --tb=short` separately from `data-generator/`; the completed run reported **24 failures and 4 setup errors**. It included host sandbox `PermissionError` for loopback binds and `ps` subprocess calls, a host RAM probe returning 0.0 GB, and two service-only seeder failures. Those two seeder failures pass in the focused 19-test rerun above.
+- A second full `tests/` run on the final code state was interrupted when the usage limit reset the active session at 51%; it produced no final report. VM commands and benchmarks remain unverified on Claude's VM by design.
+
+## P5 runbook follow-up — live seat preflight
+
+- Added a read-only source Directory check before the wipe/seed steps. It verifies the admin plus 30 cohort/twin accounts exist, that `p001`–`p269` are unused, and that the planned union is exactly 300 seats; it reports only counts on mismatch.
+- Files: `docs/tasks/seed-300-runbook.md`.
+- Tests: offline plan commands remain passing as recorded above. The Directory preflight itself requires Claude's VM credentials and has not been run locally.
+
+# Codex implementation pieces
+
+## Piece 1 — finding/run kind classification and migration scope
+
+- **Files:** `known_issues.py`, `verification_repairs.py`, `parity_gate.py`, `parity_deep_audit.py`, `repair.py`, `verify_sample.py`, `api_server.py`, `tests/test_known_issues.py`, `tests/test_known_issues_run_kinds_dns.py`, `tests/test_repair_scope_services.py`.
+- **Tests:** `.venv/bin/python -m pytest tests/test_known_issues.py tests/test_known_issues_run_kinds_dns.py tests/test_repair_scope_services.py -q` — passed (32 tests).
+- **Result:** Added the requested Drive and Gmail finding kinds, corrected the nonconverging reset conflict to needs-person, and made Drive-only scope close Gmail queue rows as `OUT_OF_SCOPE` with the DMS reason. Reopening Gmail scope requeues those rows. Historical classification now processes the supplied live batch in one bounded pass.
+
+## Piece 2 — target-only Drive finding repairs
+
+- **Files:** `known_issues.py`, `finding_repairs.py`, `external_access.py`, `verification_repairs.py`, `tests/test_known_issues.py`, `tests/test_known_issues_run_kinds_dns.py`, `tests/test_government_finding_repairs.py`.
+- **Tests:** `.venv/bin/python -m pytest tests/test_known_issues.py tests/test_known_issues_run_kinds_dns.py tests/test_repair_scope_services.py tests/test_government_finding_repairs.py tests/test_government_run_failure_repairs.py tests/test_verification_repairs.py tests/test_known_issues_are_recorded.py -q` — passed (68 tests; fake APIs and ledger only).
+- **Result:** A unique fresh content match is adopted into the ledger; multiple or zero matches remain for a person. External original shortcuts are created or moved on the target while fallback grants needing review are listed. Sheet repair removes only extra target protected-range editors after proving other structure matches; Form title repair writes only the target. Combined shortcut and fallback findings retain the accepted external-copy kind, while fallback-only findings need a person.
+
+## Piece 3 — named Gmail run failures
+
+- **Files:** `known_issues.py`, `gmail_engine.py`, `repair.py`, `tests/test_known_issues_run_kinds_dns.py`, `tests/test_government_run_failure_repairs.py`.
+- **Tests:** `.venv/bin/python -m pytest tests/test_known_issues.py tests/test_known_issues_run_kinds_dns.py tests/test_repair_scope_services.py tests/test_government_finding_repairs.py tests/test_government_run_failure_repairs.py tests/test_verification_repairs.py tests/test_known_issues_are_recorded.py -q` — passed (68 tests; fake APIs and ledger only).
+- **Result:** Source raw-read 404s after listing are recorded as `SOURCE_GONE`, not failed, including reconciliation of existing matching failures. Ambiguous destination matches and different-content reset leftovers are named needs-person outcomes with concrete next steps, surfaced in the repair summary, and excluded from automatic retries.
+
+## Piece 4 — reclassify nested not-copied failures and name unsupported Drive cases
+
+- **Files:** `known_issues.py`, `finding_repairs.py`, `external_access.py`, `verification_repairs.py`, `tests/test_known_issues.py`, `tests/test_government_finding_repairs.py`.
+- **Tests:** `.venv/bin/python -m pytest tests/test_known_issues.py tests/test_known_issues_run_kinds_dns.py tests/test_repair_scope_services.py tests/test_government_finding_repairs.py tests/test_government_run_failure_repairs.py tests/test_verification_repairs.py tests/test_known_issues_are_recorded.py tests/test_retry_failed.py tests/test_retry_failed_drafts.py -q` — passed.
+- **Result:** A `notCopied` row with an item `type` and `error` now uses the run-failure classifier, and classifier version 3 reprocesses older queue rows. Run kinds found in the one-to-one queue appear by name in its summary. Added person-directed kinds and repair output for Apps Script source differences, Forms file-upload questions, Sheet tab/gid conflicts, and external shortcut placement blocked on a missing parent mapping.
+
+## Piece 5 — block the remaining automatic Gmail conflict retry
+
+- **Files:** `repair.py`, `tests/test_government_run_failure_repairs.py`.
+- **Tests:** `.venv/bin/python -m pytest tests/test_missing_mail_recovery.py tests/test_verification_repairs.py tests/test_government_run_failure_repairs.py tests/test_retry_failed.py tests/test_retry_failed_drafts.py -q` — passed.
+- **Result:** The verification missing-mail recovery path now rejects `gmail.reset_leftover` rows as well as `retry_failed`; the fake-ledger check confirms no target message insert is attempted for the different-content conflict.
+
+## Piece 6 — make stranded Gmail retries follow the failure classifier
+
+- **Files:** `retry_failed.py`, `tests/test_retry_failed.py`, `tests/test_retry_failed_drafts.py`, `tests/test_government_run_failure_repairs.py`, `tests/test_missing_mail_recovery.py`.
+- **Tests:** `.venv/bin/python -m pytest tests/test_retry_failed.py tests/test_retry_failed_drafts.py tests/test_government_run_failure_repairs.py tests/test_missing_mail_recovery.py -q` — passed.
+- **Result:** Failed messages and drafts are filtered by the named needs-person kinds rather than exact error-string equality, so wrapped/extended ambiguous and different-content errors cannot slip back into automatic retry.
+
+## Piece 7 — close campaign coverage and preserve regression contracts
+
+- **Files:** `campaign_scenarios.py`, `known_issues.py`, `finding_repairs.py`, `verification_repairs.py`, `tests/test_campaign.py`, `tests/test_escalation_recovery.py`.
+- **Tests:** `.venv/bin/python -m pytest tests/test_campaign.py tests/test_escalation_recovery.py tests/test_resource_keys.py tests/test_lint.py tests/test_known_issues.py tests/test_known_issues_run_kinds_dns.py tests/test_repair_scope_services.py tests/test_government_finding_repairs.py tests/test_government_run_failure_repairs.py tests/test_missing_mail_recovery.py tests/test_verification_repairs.py tests/test_retry_failed.py tests/test_retry_failed_drafts.py -q -rA` — passed (exit 0).
+- **Result:** Added a campaign scenario and covering test path for each new kind, kept native-structure’s existing user-facing title stable, retained bounded classifier batches in the batch regression, and removed unused locals flagged by lint. The run’s progress reached 100% with no failures.
+
+## Piece 8 — verify queued findings close after target repairs
+
+- **Files:** `tests/test_government_finding_repairs.py`.
+- **Tests:** `.venv/bin/python -m pytest tests/test_government_finding_repairs.py tests/test_government_run_failure_repairs.py tests/test_known_issues.py tests/test_campaign.py -q` — passed (exit 0).
+- **Result:** The native Sheet and Form fake repairs now enqueue their sanitized findings, verify target-only changes, then simulate a clean follow-up check and assert the queue closes. The combined external shortcut/fallback row is asserted as accepted `drive.external_copy`, while its unreviewed fallback grants remain open with the person-review reason.
+
+# Codex work pieces for review
+
+## Piece 1 — changed-after target cases (3/9)
+
+- Implemented `gmail.labels_missing`, `drive.mtime` and `drive.missing_on_target`: each has an explicit baseline migration act, a guarded target-side change, and a verification/repair or gate judgment. The runner now performs baseline → change → verify in that order and checks listed outcomes as well as automatic fixes.
+- Files: `campaign.py`, `campaign_changes.py`, `campaign_scenarios.py`, `tests/test_campaign.py`, `tests/test_campaign_error_acts.py`, `docs/tasks/error-acts.md`.
+- Tests: `.venv/bin/python -m pytest tests/test_campaign_error_acts.py tests/test_campaign.py -q` — **passed, 78 tests**.
+- Tenant/live status: not run; offline fake-driver evidence only.
+
+## Piece 3 — source-side changes (3/9)
+
+- Implemented `gmail.unmapped_source`, `drive.content_changed` and `contacts.unmapped_source`. Each now has an explicit baseline migration, a domain-guarded write to a., and its verify/repair, delta, or listed-next-step judgment. All nine changed-after cases now have acts.
+- Files: `campaign_changes.py`, `campaign_scenarios.py`, `tests/test_campaign_error_acts.py`, `docs/tasks/error-acts.md`.
+- Tests: `.venv/bin/python -m pytest tests/test_campaign_error_acts.py tests/test_campaign.py -q` — **passed, 78 tests**.
+- Tenant/live status: not run; offline fake-driver evidence only.
+
+## Piece 4 — first seeded fixture acts (3 cases)
+
+- Added explicit fixture registry names and product-path fixture preparation for `gmail.no_message_id`, `drive.embedded_images` and `tasks.untitled`. c04's new `mail_no_message_id_link` fixture is a Drive-link candidate, so it exercises the migration's split-mail path without moving bulk mail through the engine. The other two use the existing image Doc and empty-title task fixtures. Each scenario migrates and verifies its fixture user; the fake-driver test checks a PASS when handled and a FAIL when the finding is not handled.
+- Files: `campaign.py`, `campaign_scenarios.py`, `campaign_evidence.py`, `data-generator/fixtures.py`, `data-generator/cohorts/fableplan2.json`, `data-generator/test_cohort.py`, `tests/test_campaign.py`, `tests/test_campaign_error_acts.py`, `tests/test_seed_one_service.py`, `docs/tasks/error-acts.md`.
+- Tests: `.venv/bin/python -m pytest tests/test_campaign_error_acts.py tests/test_campaign.py tests/test_campaign_evidence.py tests/test_seed_one_service.py -q` — **passed, 106 tests**. `.venv/bin/python -m pytest data-generator/test_cohort.py -q` — **passed, 15 tests**.
+- Tenant/live status: not run; offline fake-driver evidence only. Live fixture seeding uses the existing `/api/seed` product route with the source domain confirmation and `fixtures_only` cohort scope.
+
+## Piece 2 — remaining target-side changes (3/9)
+
+- Implemented `drive.grant_missing`, `contacts.missing_on_target` and `tasks.list_missing` with an explicit baseline migration, guarded target-side mutation, and the verify/repair or listed-next-step judge.
+- Files: `campaign_changes.py`, `campaign_scenarios.py`, `tests/test_campaign_error_acts.py`, `docs/tasks/error-acts.md`.
+- Tests: `.venv/bin/python -m pytest tests/test_campaign_error_acts.py tests/test_campaign.py -q` — **passed, 78 tests**.
+- Tenant/live status: not run; offline fake-driver evidence only.
+
+## Piece 5 — seeded Drive and comment acts (3 cases)
+
+- Added explicit fixture preparation and scoped Drive migration/verification acts for `drive.shortcut_target`, `drive.comments` and `run.comment_differs`, using the existing c03 fixtures. The offline Driver test verifies each fixture is declared for its scenario owner, reaches PASS when handled and FAIL when not handled.
+- Files: `campaign_scenarios.py`, `tests/test_campaign_error_acts.py`, `docs/tasks/error-acts.md`.
+- Tests: `.venv/bin/python -m pytest tests/test_campaign_error_acts.py tests/test_campaign.py tests/test_campaign_evidence.py tests/test_seed_one_service.py -q` — **passed, 107 tests**.
+- Tenant/live status: not run; offline fake-driver evidence only.
+
+## Piece 6 — seeded sharing and read-limit acts (3 cases)
+
+- Added fixture-backed Drive migration and verification acts for `drive.group_grant`, `drive.sheet_too_large` and `drive.comments_unreadable`. Tests tie each declared fixture to its cohort owner and exercise PASS plus unhandled FAIL through the fake Driver.
+- Files: `campaign_scenarios.py`, `tests/test_campaign_error_acts.py`, `docs/tasks/error-acts.md`.
+- Tests: `.venv/bin/python -m pytest tests/test_campaign_error_acts.py tests/test_campaign.py tests/test_campaign_evidence.py tests/test_seed_one_service.py -q` — **passed, 107 tests**.
+- Tenant/live status: not run; offline fake-driver evidence only.
+
+## Piece 7 — colleague shortcut and outside-owner boundary (2 cases)
+
+- Added the fixture-backed `drive.item_absent` Drive act and its PASS/FAIL fake-Driver checks. Moved `drive.unmapped_source` to UNSEEDABLE: the exact outside-owned upload requires credentials outside the allowed a./b. write scope; its source probe remains covered by the named test.
+- Files: `campaign_scenarios.py`, `tests/test_campaign_error_acts.py`, `tests/test_campaign_evidence.py`, `docs/tasks/error-acts.md`.
+- Tests: `.venv/bin/python -m pytest tests/test_campaign_error_acts.py tests/test_campaign.py tests/test_campaign_evidence.py tests/test_seed_one_service.py -q` — **passed, 107 tests**.
+- Tenant/live status: not run; offline fake-driver evidence only.
+
+## Piece 8 — evidence-backed malware refusal (1 case)
+
+- Added the `run.malware_flag` Drive act for c09. Its source probe now proves Google's exact `403 cannotDownloadAbusiveFile` response for the EICAR fixture; an existing file name alone cannot make this scenario pass. Added PASS/unhandled FAIL fake-Driver coverage.
+- Files: `campaign_scenarios.py`, `campaign_evidence.py`, `tests/test_campaign_error_acts.py`, `tests/test_campaign_evidence.py`, `docs/tasks/error-acts.md`.
+- Tests: `.venv/bin/python -m pytest tests/test_campaign_error_acts.py tests/test_campaign.py tests/test_campaign_evidence.py tests/test_seed_one_service.py -q` — **passed, 108 tests**.
+- Tenant/live status: not run; offline fake-driver evidence only.
+
+## Piece 9 — Form image boundary (1 case)
+
+- Moved `run.form_rebuild` to UNSEEDABLE. The current product fixture API can create text and choice items, but the known failure needs an image item already on the source Form; making that item requires a Forms-owner UI credential. The focused rebuild test remains its named coverage.
+- Files: `campaign_scenarios.py`, `campaign_evidence.py`, `docs/tasks/error-acts.md`.
+- Tests: `.venv/bin/python -m pytest tests/test_campaign_error_acts.py tests/test_campaign.py tests/test_campaign_evidence.py tests/test_seed_one_service.py -q` — **passed, 108 tests**.
+- Tenant/live status: not run; offline fake-driver evidence only.
+
+## Piece 10 — old-domain SENT mail (1 case)
+
+- Added the `mail_old_domain_sent` fixture on c05 and a Gmail-only engine migration/verification act for `gmail.labels_added`. Its source probe requires a SENT label and the exact source account in From, so another old-domain message cannot stand in for the case.
+- Files: `data-generator/fixtures.py`, `data-generator/cohorts/fableplan2.json`, `data-generator/test_cohort.py`, `campaign_scenarios.py`, `campaign_evidence.py`, `tests/test_campaign_error_acts.py`, `tests/test_campaign_evidence.py`, `docs/tasks/error-acts.md`.
+- Tests: `.venv/bin/python -m pytest tests/test_campaign_error_acts.py tests/test_campaign.py tests/test_campaign_evidence.py tests/test_seed_one_service.py -q` — **passed, 109 tests**. `.venv/bin/python -m pytest data-generator/test_cohort.py -q` — **passed, 16 tests**.
+- Tenant/live status: not run; offline fake-driver evidence only.
+
+## Piece 11 — split-mail fixtures and DMS evidence (5 cases)
+
+- Added a real same-domain peer-file link fixture for `gmail.link_owner_not_migrated` and `run.mail_owed_to_dms`; moved the no-Message-ID fixture to c06; removed fake missing/outside file IDs that blocked split scans. Added explicit split migration acts for `gmail.body_link_copy` and `gmail.link_scan_encrypted`. Duplicate and owed-to-DMS cases now use the product `/api/v2/dms/start` as a follow-up. The judge checks the relevant audit row and Gmail verdict; the fake Driver proves PASS with evidence and FAIL without handling.
+- Files: `data-generator/fixtures.py`, `data-generator/cohorts/fableplan2.json`, `data-generator/test_cohort.py`, `campaign_scenarios.py`, `campaign_evidence.py`, `campaign.py`, `tests/test_campaign_error_acts.py`, `docs/tasks/error-acts.md`.
+- Tests: `.venv/bin/python -m pytest tests/test_campaign_error_acts.py tests/test_campaign.py tests/test_campaign_evidence.py tests/test_seed_one_service.py -q` — **passed, 109 tests**. `.venv/bin/python -m pytest data-generator/test_cohort.py -q` — **passed, 17 tests**.
+- Tenant/live status: not run; offline fake-driver evidence only. The DMS follow-up is only asserted through the fake Driver.
+
+## Piece 12 — fixed-defect absence acts (4 cases)
+
+- Added `gmail.link_scan_fixed`, `drive.sheets_scope`, `drive.office_compared_as_native` and `drive.comment_quote_escaped` acts. Each seeds its source case, runs the scoped migration and verification, and requires the finding to be absent while the source probe confirms the case exists. Added a missing-Drive-link fixture and a minimal DOCX fixture.
+- Files: `campaign.py`, `campaign_scenarios.py`, `campaign_evidence.py`, `data-generator/fixtures.py`, `data-generator/cohorts/fableplan2.json`, `data-generator/test_cohort.py`, `tests/test_campaign_error_acts.py`, `docs/tasks/error-acts.md`.
+- Tests: `.venv/bin/python -m pytest tests/test_campaign_error_acts.py tests/test_campaign.py tests/test_campaign_evidence.py tests/test_seed_one_service.py -q` — **passed, 109 tests**. `.venv/bin/python -m pytest data-generator/test_cohort.py -q` — **passed, 19 tests**.
+- Tenant/live status: not run; offline fake-driver evidence only.
+
+## Piece 13 — Forms image rebuild act (1 case; replaces Piece 9 classification)
+
+- Added `forms_with_image` using the Forms API's image-item `sourceUri`, a source probe that reads the named Form and requires its image item, and the scoped Drive migration/verification act. This provides an API fixture, so `run.form_rebuild` is seeded rather than UNSEEDABLE; Piece 9's earlier classification is superseded.
+- Files: `data-generator/fixtures.py`, `data-generator/cohorts/fableplan2.json`, `data-generator/test_cohort.py`, `campaign_scenarios.py`, `campaign_evidence.py`, `tests/test_campaign_error_acts.py`, `tests/test_campaign_evidence.py`, `docs/tasks/error-acts.md`.
+- Tests: `.venv/bin/python -m pytest tests/test_campaign_error_acts.py tests/test_campaign.py tests/test_campaign_evidence.py tests/test_seed_one_service.py -q` — **passed, 110 tests**. `.venv/bin/python -m pytest data-generator/test_cohort.py -q` — **passed, 20 tests**.
+- Tenant/live status: not run; offline fake-driver evidence only. The Forms API image-item request is only checked against the fake API.
+
+# Codex pieces, 27 Nov 2026
+
+## A — create/record recovery
+
+- **Commit:** `79fa6d0` (Claude committed the completed piece).
+- **Files:** `tasks_engine.py`, `calendar_engine.py`, `contacts_engine.py`, `groups_engine.py`, `calendar_resources.py`, `drive_engine.py`, `failpoints.py`, `campaign_scenarios.py`, `campaign_failures.py`, and the corresponding engine, fake, and campaign tests.
+- **Tests:** `tests/test_contacts_tasks.py`, `tests/test_calendar_fidelity.py`, `tests/test_groups_engine.py`, `tests/test_rooms_and_groups_in_run.py`, `tests/test_drive_engine.py`, and `tests/test_campaign.py` completed at 100% with no failures. The campaign module was also rerun independently and passed.
+- **Result:** task-list recovery excludes the default list and follows pagination; secondary calendars and already-landed group members are adopted after a missing mapping; new create-boundary failpoints are registered as kill-only. Claude’s two follow-up test adjustments are included in the commit.
+
+## V — verification at scale
+
+- **Files:** `native_repair.py`, `native_fidelity.py`, `verify_sample.py`, `tests/conftest.py`, `tests/test_sheet_window_growth.py`, `tests/test_native_images_compared.py`, `tests/test_image_fetch_deadline.py`, `tests/test_verify_streamed_binary.py`, and `benchmarks/verify_at_scale_test.py`; measurements and method are in `docs/tasks/verify-at-scale.md`.
+- **Tests:** `.venv/bin/python -m pytest tests/test_sheet_window_growth.py tests/test_native_images_compared.py tests/test_image_fetch_deadline.py tests/test_verify_streamed_binary.py tests/test_verify_sample.py tests/test_verify_unverified.py tests/test_verify_content_memory.py benchmarks/verify_at_scale_test.py -q` passed (177 passed, no failures). The performance harness separately passed all five measured workloads.
+- **Results:** Sheet checks overlap source/target reads and adapt to an 8 MiB response budget, empty ranges expand across the remaining allocated tail, and the default 10M-cell refusal is removed. Binary verification now hashes one-MiB chunks even above 25 MiB. Doc image bodies stream to hashes through a shared eight-worker cap, and source/target native reads overlap. The 10M-cell fake took 12.001 s/146 calls/4.57 MiB peak; the empty 20,000×120 Sheet took 0.002 s/6 calls/0.02 MiB; the 200 MiB fake found its changed byte using 400 chunks/2.00 MiB peak. Full before/after numbers are recorded in the scale report.
+- **Limit:** Gmail request count stayed 200,000 for both 100k-message modes; receipts reduced modeled payload from 819.2 MB to 51.2 MB. Fake workload timings do not predict Google API latency. The first full-scale Sheet run took 120.582 s while re-encoding every response to size it; that attempt was stopped, the estimator was changed, and the completed benchmark passed at 12.001 s.
+
+## B — scoped F-reboot qualification
+
+- **Source:** integrated local commit `db48518` with the current branch's timestamp-precision and API follow-on behavior. No cherry-pick or Git metadata write was performed.
+- **Files:** `campaign_reboot.py`, `campaign.py`, `campaign_failures.py`, `tests/test_campaign_reboot.py`, `tests/test_campaign.py`, `tests/test_campaign_executor.py`, `tests/gate.txt`, and `docs/tasks/reboot-qualification.md`.
+- **Tests:** `.venv/bin/python -m pytest tests/test_campaign_reboot.py tests/test_campaign.py tests/test_campaign_executor.py -q` passed with no failures; `py_compile` passed for the reboot module.
+- **Result:** F-reboot now requires the exact account 3 tenant pair, pinned VM ID, clean activity/repair state, an unarmed failpoint set, an exact pre-boot Drive pass, and a durable checkpoint. It issues one real reboot after that pass and requires a unique audited recovery Start, interrupted exit receipt, terminal result, and read-only full verification before judging PASS. No live VM action was run.
+- **Integration fix:** the imported reboot test expected the old API to schedule `repair` with the migration. The current branch schedules only a scoped tally; its test now asserts that later contract.
+
+## D — benchmark credential scope and Gmail benchmark
+
+- **Source:** `dc44e8f` (`Require account-scoped credentials for named benchmarks`). The exact source diff was applied by hand because this sandbox exposes `.git` read-only; no cherry-pick or other Git metadata write was attempted. `3076e0b` remains unmerged.
+- **Files:** `benchmark_run.py`, `tests/test_benchmark_run.py`, and `docs/tasks/gmail-perf-benchmark.md`.
+- **Tests:** `.venv/bin/python -m pytest tests/test_benchmark_run.py -q` passed (17 passed, no failures); `.venv/bin/ruff check --no-cache benchmark_run.py tests/test_benchmark_run.py` passed.
+- **Result:** a named account benchmark now refuses OAuth or impersonation credentials before starting any child process; account 1's legacy mode remains supported. The Gmail live benchmark specifies account 5, the `p002` and `c10` mailboxes, identical full-read baseline/candidate commands, the required target-only inventory precondition, and a pass bar that preserves completeness and fidelity.
+
+## E — final handoff
+
+- **File:** `docs/tasks/codex-final-handoff-2026-11-27.md`.
+- **Tests:** documentation-only; no additional tests run.
+- **Result:** records V and D outcomes, the earlier B result, the redirected C full-suite state, the current Git restrictions, and the division of remaining B/C/S work across the operator's separate sessions.
+
+# Codex pieces
+
+## Incremental verification inventories — 2026-11-27
+
+- **Piece:** Added versioned, ledger-backed Gmail inventories for source and target mailboxes and a target Drive inventory for the stray check. Gmail advances using `users.history.list`; Drive advances using `changes.list` and a saved start page token. Expired/unusable markers and version changes rebuild from a full read. `VERIFY_INCREMENTAL=0` restores full inventory scans. Unreadable required inventory data remains an error, preserving `INCOMPLETE` verdicts.
+- **Files:** `verification_inventory.py`, `verify_sample.py`, `tests/test_verify_incremental.py`, `tests/benchmark_verify_incremental.py`, `docs/tasks/verify-incremental.md`, `CLAUDE.md`.
+- **Tests:** `.venv/bin/python -m pytest tests/test_verify_incremental.py tests/test_verify_sample.py tests/test_verify_mail_speed.py tests/test_verify_drive_batches.py tests/test_verify_gmail_quota.py tests/test_gmail_check_reads_ahead.py -q -p no:cacheprovider` — passed, exit code 0. `.venv/bin/python tests/benchmark_verify_incremental.py` — passed, exit code 0; 40,000 messages per mailbox measured. Full `.venv/bin/python -m pytest tests/ -q -p no:cacheprovider` — exit code 1: 22 failures and 4 setup errors in control-plane/process-probing, deploy-guard, and localhost-server tests; the sandbox denied `ps` subprocesses and localhost TCP binds, and the macOS resource probe reported 0 total RAM. No verifier test was in the failure list. See `docs/tasks/verify-incremental.md` for benchmark call counts, wall times and the one-time full-seed cost.
+
+# Codex pieces
+
+## F-reboot checkpoint and recorded-phase resume
+
+- **Files:** `campaign.py`, `campaign_failures.py`, `campaign_reboot.py`, `api_server.py`, `main.py`, `run_phases.py` (existing recorder, now used by the scoped qualification), `tests/gate.txt`, `tests/test_campaign.py`, `tests/test_campaign_executor.py`, `tests/test_campaign_reboot.py`, `tests/test_run_phases.py`.
+- **Tests:** `.venv/bin/python -m pytest tests/test_campaign_reboot.py tests/test_run_phases.py tests/test_campaign.py tests/test_campaign_executor.py -q`
+- **Result:** Passed. F-reboot now opts its selected twin into the durable phase record, pins the active recorded Drive phase before reboot, and requires the same run record to finish with `resumedFrom=drive` after boot. Ordinary selected-user runs remain unrecorded by default.
+
+## F-reboot refuses unrelated failpoint arms
+
+- **Files:** `campaign_reboot.py`, `tests/test_campaign_reboot.py`.
+- **Tests:** `.venv/bin/python -m pytest tests/test_campaign_reboot.py -q`
+- **Result:** Passed. The reboot qualification now stops before touching a twin if the local failpoint arm file is unreadable or contains any fault; the reboot itself is the only injected failure.
+
+## F-reboot VM qualification runbook
+
+- **Files:** `docs/tasks/reboot-qualification.md`, `docs/tasks/codex-pieces.md`.
+- **Tests:** Documentation-only; checked the commands, twin selection, request scope, checkpoint path, and PASS evidence against `campaign.py`, `campaign_failures.py`, and `campaign_reboot.py`.
+- **Result:** Written for account 3, a. → b., the fresh campaign's t02 twin, no failpoint arm, the pinned one-time reboot, same-checkpoint continuation, recorded `drive` resume, and the full PASS criteria.
+
+# Codex sweep pieces — 2026-11-27
+
+## Mailbox completion requires a successful draft inventory
+
+- **Piece:** Treat a failed target draft inventory as incomplete mailbox coverage instead of logging and continuing.
+- **Files:** `migration_checks.py`, `tests/test_migration_checks.py`.
+- **Tests:** `.venv/bin/python -m pytest tests/test_migration_checks.py::test_target_draft_inventory_failure_keeps_mailbox_completion_incomplete -q` (failed before the fix; passed after).
+- **Result:** A target draft listing failure is now included in `errors`, so `mailbox_completion()` cannot mark Gmail complete without checking mapped drafts.
+
+## Bound Gmail conversation-lock memory
+
+- **Piece:** Replace the per-conversation lock dictionary with 256 lock stripes so lock storage stays fixed-size on large mailboxes.
+- **Files:** `gmail_engine.py`, `tests/test_gmail_threads.py`.
+- **Tests:** `.venv/bin/python -m pytest tests/test_gmail_threads.py::test_conversation_lock_storage_is_bounded -q` (failed before the fix at 10,000 retained locks); `.venv/bin/python -m pytest tests/test_gmail_threads.py -q` (passed).
+- **Result:** Messages in one source conversation still share a lock; unrelated conversations can collide on a stripe and serialize briefly.
+
+## Fail closed when source protection cannot be read
+
+- **Piece:** Make the `AuthorizedHttp` fallback guard refuse writes when the protected-domain registry is unavailable.
+- **Files:** `auth.py`, `tests/test_source_transport_guard.py`.
+- **Tests:** `.venv/bin/python -m pytest tests/test_source_transport_guard.py::test_registry_failure_does_not_disable_the_direct_client_source_guard -q` (failed before the fix); `.venv/bin/python -m pytest tests/test_source_transport_guard.py -q` (passed).
+- **Result:** A direct delegated client can no longer write as a non-government source subject during a registry failure; explicitly marked target and sandbox writer clients retain their existing bypasses.
+
+## Stop tally scans on repeated page tokens
+
+- **Piece:** Detect repeated pagination tokens in Gmail, Calendar, Contacts, Tasks, and draft count/list loops so a broken API page cannot spin indefinitely.
+- **Files:** `tally.py`, `tests/test_tally.py`.
+- **Tests:** `.venv/bin/python -m pytest tests/test_tally.py::TestCounting::test_repeated_mail_page_token_stops_instead_of_counting_forever -q` (failed before the fix); `.venv/bin/python -m pytest tests/test_tally.py -q` (passed).
+- **Result:** The count now raises a visible runtime error on a repeated token; `count_side()` records it as unknown rather than reporting a completed count.
+
+## Stop repeated tokens in migration inventories
+
+- **Piece:** Detect repeated pagination tokens in Gmail message listing, Drive folder listing, and Drive discovery; also guard the Gmail search/draft and other Drive inventories that share those loops.
+- **Files:** `pagination.py`, `gmail_engine.py`, `drive_engine.py`, `discovery.py`, `tests/test_repeated_pagination.py`.
+- **Tests:** `.venv/bin/python -m pytest tests/test_repeated_pagination.py -q` (all three cases failed before the fix; passed after).
+- **Result:** A repeated token now raises a visible runtime error instead of driving an unbounded API loop. Gmail/Drive inventory failures remain migration failures, never clean completion.
+
+## Bound Gmail split-mail preflight memory
+
+- **Piece:** Replace the full-mailbox reference list and classification dictionary with a second paginated read and batched SQLite scratch rows.
+- **Files:** `gmail_engine.py`, `tests/test_gmail_split_scan_memory.py`.
+- **Tests:** `.venv/bin/python -m pytest tests/test_gmail_split_scan_memory.py -q` (failed before the fix with 1,200 retained classifications; passed after).
+- **Result:** The entire mailbox still completes classification before the first delivery, while retained preflight state is limited to a 500-row write batch and bounded worker queues.
+
+## Keep failed service inventories incomplete
+
+- **Piece:** Propagate failed target Contacts, Contact Groups, Tasks, Chat, and secondary Calendar/ACL inventories so the orchestrator records a service failure; reject repeated pages before yielding their contents.
+- **Files:** `contacts_engine.py`, `tasks_engine.py`, `chat_engine.py`, `calendar_engine.py`, `gmail_engine.py`, `drive_engine.py`, `discovery.py`, `migration_checks.py`, `tests/test_service_failure_completion.py`, `tests/test_repeated_pagination.py`.
+- **Tests:** `.venv/bin/python -m pytest tests/test_service_failure_completion.py -q` (six cases failed before the fix); `.venv/bin/python -m pytest tests/test_repeated_pagination.py -q` (four new pager cases failed before the fix); `.venv/bin/python -m pytest tests/test_service_failure_completion.py tests/test_repeated_pagination.py -q` (13 passed after).
+- **Result:** An unreadable source or target inventory can no longer become empty success, a missing mapped contact is not silently skipped when target inventory is unavailable, and duplicate page contents are not handed to migration writers.
+
+## Keep failed Tasks recopy checks open
+
+- **Piece:** Record a failed source-task inventory as a failed list when the mapped target task list is gone, instead of returning with zero failed counts.
+- **Files:** `tasks_engine.py`, `tests/test_service_failure_completion.py`.
+- **Tests:** `.venv/bin/python -m pytest tests/test_service_failure_completion.py::test_unreadable_tasks_before_recopy_is_counted_as_failure -q` (failed before the fix with `failed == 0`; passed after).
+- **Result:** The Tasks service remains due when a missing target list cannot be safely rebuilt from source evidence.
+
+## Read prior Gmail link evidence without loading it all
+
+- **Piece:** Replace the pre-delivery scanner's whole-inventory `dict` with indexed SQLite lookups and a count query.
+- **Files:** `mail_dead_links.py`, `gmail_engine.py`, `tests/test_gmail_split_scan_memory.py`.
+- **Tests:** `.venv/bin/python -m pytest tests/test_gmail_split_scan_memory.py::test_split_preflight_does_not_materialize_a_completed_link_inventory -q` (failed before the fix); `.venv/bin/python -m pytest tests/test_gmail_split_scan_memory.py tests/test_mail_link_search.py -q` (15 passed after).
+- **Result:** A completed prior link inventory no longer adds mailbox-sized Python state to the split-mail preflight.
+
+## Spool Gmail search candidates to SQLite
+
+- **Piece:** Stream search result pages into a per-run candidate table; calculate recall and membership with SQL instead of mailbox-sized sets.
+- **Files:** `gmail_engine.py`, `tests/test_gmail_split_scan_memory.py`.
+- **Tests:** `.venv/bin/python -m pytest tests/test_gmail_split_scan_memory.py::test_search_mode_spools_candidate_ids_instead_of_building_mailbox_sets -q` (failed before the fix); `.venv/bin/python -m pytest tests/test_gmail_split_scan_memory.py::test_search_mode_spools_candidate_ids_instead_of_building_mailbox_sets tests/test_mail_link_search.py -q` (14 passed after).
+- **Result:** Search mode now keeps candidates, drafts, chats, and known-link recall on disk, while preserving the existing candidate totals and recall figures.
+
+## Stop loops in group and subscription inventories
+
+- **Piece:** Detect repeated tokens in directory group/member inventories and stop Calendar subscription inventories from swallowing a failed read as zero subscriptions.
+- **Files:** `groups_engine.py`, `calendar_engine.py`, `tests/test_repeated_pagination.py`.
+- **Tests:** `.venv/bin/python -m pytest tests/test_repeated_pagination.py::test_calendar_subscription_inventory_stops_on_a_repeated_token tests/test_repeated_pagination.py::test_directory_group_inventory_stops_on_a_repeated_token -q` (both failed before the fix); `.venv/bin/python -m pytest tests/test_repeated_pagination.py tests/test_groups_engine.py tests/test_calendar_fidelity.py -q` (30 passed after).
+- **Result:** These tenant-level scans stop on a repeated page token; subscription inventory failures reach the caller as failures instead of reporting no subscriptions.
+
+## Do not create Tasks without target stray evidence
+
+- **Piece:** Stop task creation when the target task-list inventory cannot be read, rather than treating the list as having no unledgered copies.
+- **Files:** `tasks_engine.py`, `tests/test_service_failure_completion.py`.
+- **Tests:** `.venv/bin/python -m pytest tests/test_service_failure_completion.py::test_unreadable_target_task_inventory_does_not_create_duplicate_tasks -q` (failed before the fix; passed after).
+- **Result:** A transient target read failure cannot turn a prior create-before-ledger interruption into a duplicate task.
+
+## Do not duplicate Drive copies when target inventory fails
+
+- **Piece:** Propagate failure from Drive's target inventory used to adopt an unledgered copy instead of continuing with an empty index.
+- **Files:** `drive_engine.py`, `tests/test_service_failure_completion.py`.
+- **Tests:** `.venv/bin/python -m pytest tests/test_service_failure_completion.py::test_unreadable_drive_target_inventory_does_not_copy_an_unledgered_file -q` (failed before the fix; passed after).
+- **Result:** A failed target read now stops the adoption path before it copies a possible existing target file again.
+
+## Stop Drive moves when staging inventory is unknown
+
+- **Piece:** Propagate staging-drive inventory failures so a stranded target copy is never treated as absent before the next copy/move.
+- **Files:** `drive_engine.py`, `tests/test_service_failure_completion.py`.
+- **Tests:** `.venv/bin/python -m pytest tests/test_service_failure_completion.py::test_unreadable_staging_inventory_does_not_ignore_a_stranded_copy -q` (failed before the fix; passed after).
+- **Result:** Move recovery now stops when it cannot inspect the staging drive and safely adopt a prior copy.
+
+## Cache Drive adoption inventory failures
+
+- **Piece:** Memoize a failed Drive target-adoption inventory so concurrent file workers do not retry the mailbox-wide listing once per file.
+- **Files:** `drive_engine.py`, `tests/test_service_failure_completion.py`.
+- **Tests:** `.venv/bin/python -m pytest tests/test_service_failure_completion.py::test_unreadable_drive_target_inventory_does_not_copy_an_unledgered_file -q` (failed before the cache: two failed target listings; passed after with one).
+- **Result:** The failure remains visible for each item, with one bounded inventory attempt per user.
+
+## Complete and guard read-only inventory pages
+
+- **Piece:** Stop repeated tokens in tenant-wide and pre-migration inventories, and page through every Calendar list instead of counting only its first page.
+- **Files:** `tenant_verify.py`, `inventory.py`, `tests/test_tenant_verify.py`, `tests/test_inventory.py`.
+- **Tests:** `.venv/bin/python -m pytest tests/test_tenant_verify.py::test_tenant_inventory_stops_on_repeated_page_token tests/test_inventory.py::TestScanDrive::test_repeated_inventory_page_token_is_an_error tests/test_inventory.py::TestScanDrive::test_calendar_inventory_follows_every_calendar_page tests/test_inventory.py::TestDraftCounting::test_repeated_draft_page_token_is_an_error -q` (all four failed before the fix); `.venv/bin/python -m pytest tests/test_tenant_verify.py tests/test_inventory.py -q` (31 passed after).
+- **Result:** Inventory counts either finish across all pages or raise on a repeated token; they no longer silently omit Calendar pages or spin forever.
+
+## Avoid quadratic tenant profile comparisons
+
+- **Piece:** Build the source-to-target identity translation once per tenant user check instead of rebuilding the full map for every source user.
+- **Files:** `tenant_verify.py`, `tests/test_tenant_verify.py`.
+- **Tests:** `.venv/bin/python -m pytest tests/test_tenant_verify.py::test_tenant_user_verification_builds_identity_translation_once -q` (failed before because each user received a different rebuilt mapping); `.venv/bin/python -m pytest tests/test_tenant_verify.py -q` (passed after).
+- **Result:** Profile comparison setup scales linearly with mapped user count rather than repeatedly traversing the whole identity map.
+
+## Keep uncertain tally evidence out of COMPLETE
+
+- **Piece:** Record draft inventory failures and require successful per-item evidence plus known counts before a per-user tally can report `COMPLETE`.
+- **Files:** `tally.py`, `db.py`, `tests/test_tally.py`, `tests/test_tally_items.py`, `tests/test_tally_exact_copy.py`.
+- **Tests:** `.venv/bin/python -m pytest tests/test_tally_items.py::test_unreadable_draft_inventory_cannot_roll_up_as_complete -q` (failed before as `COMPLETE`); `.venv/bin/python -m pytest tests/test_tally.py::TestCounting::test_draft_inventory_failure_is_recorded_not_discarded -q` (failed before because the error was discarded); `.venv/bin/python -m pytest tests/test_tally_exact_copy.py::test_an_uncounted_required_service_keeps_the_user_unknown -q` (failed before as `COMPLETE`); `.venv/bin/python -m pytest tests/test_tally_exact_copy.py tests/test_tally_items.py tests/test_tally.py -q` (passed after).
+- **Result:** A draft inventory failure or required-service count error produces `UNKNOWN` when the other measured counts happen to match; known shortages and differences retain their existing verdicts.
+
+## Stream the Drive stray inventory
+
+- **Piece:** Yield Drive target stray pages one at a time instead of retaining every target metadata row before comparison.
+- **Files:** `verify_sample.py`, `tests/test_verify_drive_batches.py`.
+- **Tests:** `.venv/bin/python -m pytest tests/test_verify_drive_batches.py::test_target_stray_inventory_yields_one_page_at_a_time -q` (failed before because both pages were loaded before the first yield); `.venv/bin/python -m pytest tests/test_verify_drive_batches.py -q` (passed after).
+- **Result:** Stray detection preserves full coverage and repeated-token errors while limiting this inventory's retained page data to one API page.
+
+## Preserve MIME-part identity in mail verification
+
+- **Piece:** Compare the canonical MIME tree, part headers, and decoded bodies so attachment metadata and multipart changes cannot be called `equivalent`; omit Gmail-regenerated envelope headers only in the draft comparator, which still compares person-authored fields and MIME content.
+- **Files:** `verify_sample.py`, `tests/test_verify_sample.py`.
+- **Tests:** `.venv/bin/python -m pytest tests/test_verify_sample.py::TestCompareMessage::test_attachment_metadata_is_part_of_message_identity -q` (failed before: attachment filename change returned `equivalent`); the four draft and DMS duplicate regressions reported by Claude all failed after the initial MIME change; `.venv/bin/python -m pytest tests/test_verify_sample.py tests/test_split_mail_duplicates.py -q` (passed, exit 0, including the new strict message and draft attachment tests).
+- **Result:** Ordinary mail verification remains strict about attachment filenames and MIME structure. Draft verification ignores regenerated Message-ID, Date, and From in the MIME envelope while still checking mapped From, encoded/decoded Subject, recipients, body, and attachments, restoring DMS duplicate reconciliation.

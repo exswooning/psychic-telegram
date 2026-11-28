@@ -200,3 +200,33 @@ def test_verify_waits_for_other_work_in_same_account(db):
 def test_other_work_waits_for_verification_repair_in_same_account(db):
     assert ja.try_admit(501, 'verify')[0]
     assert not ja.try_admit(501, 'migrate')[0]
+
+
+class TestOneMigrationPerAccount:
+    """A double click on Run full migration started two full runs of account 3, 72 s apart
+    (2026-11-02): both created the same target accounts and both walked the same Drive."""
+
+    def test_a_second_migration_of_the_same_account_is_refused_not_queued(self, db):
+        assert ja.try_admit(3, "migrate")[0]
+        ok, msg = ja.try_admit(3, "migrate")
+        assert not ok and msg.startswith(ja.ALREADY_RUNNING) and "migrate" in msg
+
+    def test_a_delta_during_a_migration_is_refused_too(self, db):
+        assert ja.try_admit(3, "migrate")[0]
+        ok, msg = ja.try_admit(3, "delta")
+        assert not ok and msg.startswith(ja.ALREADY_RUNNING)
+
+    def test_another_account_and_a_read_only_scan_still_run(self, db):
+        assert ja.try_admit(3, "migrate")[0]
+        assert ja.try_admit(4, "migrate")[0]
+        assert ja.try_admit(3, "discover")[0]
+
+    def test_the_api_says_not_started_and_queues_nothing(self, db, monkeypatch):
+        import api_server
+        import job_queue
+        monkeypatch.setattr(api_server, "_start_admitted", lambda *a, **k: (True, "started pid 1"))
+        assert api_server._run_admitted(["main.py", "migrate"], 3, "migrate")[0]
+        queued = []
+        monkeypatch.setattr(job_queue, "enqueue", lambda *a, **k: queued.append(a) or {"position": 1})
+        ok, detail = api_server._run_admitted(["main.py", "migrate"], 3, "migrate")
+        assert not ok and detail.startswith("Not started: a migrate is already running") and queued == []

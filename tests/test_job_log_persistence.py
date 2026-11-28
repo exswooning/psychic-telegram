@@ -314,3 +314,32 @@ def test_the_ps_scan_reads_the_users_off_the_command_line(monkeypatch):
                         lambda *a, **k: type("R", (), {"stdout": out})())
     job = webui._external_processes()[0]
     assert job["users"] == ["fiona@s.example", "seeduser160@s.example"]
+
+
+class TestEachRunHasItsOwnFile:
+    def test_two_runs_keep_two_files_and_the_old_path_reads_the_newest(self, job_dir):
+        webui_log = webui.job_log_path(7, "seed")
+        os.makedirs(os.path.dirname(webui_log))
+        with open(webui_log, "w") as fh:                  # a log from before per-run files
+            fh.write("ancient\n")
+        job = webui.Job(account_id=7)
+        _run(job, "seed", "print('first run')")
+        _run(job, "seed", "print('second run')")
+        runs = os.path.join(os.path.dirname(webui_log), "runs")
+        texts = {n: open(os.path.join(runs, n)).read() for n in os.listdir(runs)}
+        assert len(texts) == 3 and any("ancient" in t for t in texts.values())
+        assert sum("first run" in t for t in texts.values()) == 1          # the second did not erase it
+        assert os.path.islink(webui_log)
+        with open(webui_log) as fh:                                         # the old path still reads
+            text = fh.read()
+        assert "second run" in text and "first run" not in text
+
+    def test_the_api_launcher_writes_to_the_same_layout(self, job_dir):
+        import api_server
+        fh = api_server._child_output("migrate", 7)
+        fh.close()
+        link = webui.job_log_path(7, "migrate")
+        assert os.path.islink(link) and "=== run started" in open(link).read()
+        fh = api_server._child_output("migrate", 7)
+        fh.close()
+        assert len(os.listdir(os.path.join(os.path.dirname(link), "runs"))) == 2

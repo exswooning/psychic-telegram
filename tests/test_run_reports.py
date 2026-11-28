@@ -504,3 +504,15 @@ def test_an_account_lists_only_its_current_pairs_reports(monkeypatch):
     op = SimpleNamespace(account_id=3, is_superadmin=False, name="x", role="admin")
     out = asyncio.run(api_server.run_reports(account_id=3, op=op))
     assert [r["id"] for r in out["reports"]] == ["b"], out
+
+
+def test_the_report_names_the_runs_memory_peak(db):
+    """Plan item 6: four mail processes filled 19 GB on 9 Nov 2026 and no report said so."""
+    import json as _json
+    import run_report
+    for pid, rss, at in ((1, 900.0, "2026-11-09T14:00:00Z"), (1, 4462.0, "2026-11-09T14:10:00Z"),
+                         (2, 3000.0, "2026-11-09T14:10:00Z"), (3, 9999.0, "2026-11-08T00:00:00Z")):
+        with db.write() as c:
+            c.execute("INSERT INTO run_metrics (recorded_at, payload) VALUES (?, ?)", (at, _json.dumps({"pid": pid, "rss_mb": rss})))
+    m = run_report._memory_peak(db.conn, "2026-11-09T13:00:00Z", "2026-11-09T15:00:00Z")
+    assert m == {"processes": 2, "largestProcessMb": 4462.0, "largestAt": "2026-11-09T14:10:00Z", "sumOfPeaksMb": 7462.0}

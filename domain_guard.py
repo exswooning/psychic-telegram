@@ -37,6 +37,8 @@ import logging
 import json
 import os
 import tempfile
+import threading
+import time
 from datetime import datetime, timezone
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -129,6 +131,11 @@ def source_refuse_reason(domain: str, source_domain: str = "") -> str:
     d = _norm(domain)
     if not d:
         return "The domain is unknown; destructive actions are refused."
+    if renamed_target(d, source_domain):
+        # This account's own migration writing into its target after a rename gave the
+        # target the source's old (government) name. Only a caller naming the renamed
+        # source passes; reset/wipe/undo/seed refuse it by is_government on their own.
+        return ""
     if is_government(d):
         return f"{d} is a government domain. Destructive actions are permanently refused."
     if d in revocations():
@@ -161,7 +168,14 @@ def require_wipe_subjects(subjects, source_domain: str = "") -> None:
         value = (subject or "").strip()
         if value.count("@") != 1 or not all(value.split("@")):
             raise ValueError("A complete user email is required for destructive actions.")
-        require_not_source(value.rsplit("@", 1)[1], source_domain)
+        why = protected_subject(value)          # every account, its owner too: nothing deletes them
+        if why:
+            raise ValueError(why)
+        domain = value.rsplit("@", 1)[1]
+        if is_government(domain):      # never a wipe, even where a migration may write
+            raise ValueError(f"{_norm(domain)} is a government domain. "
+                             "Destructive actions are permanently refused.")
+        require_not_source(domain, source_domain)
 
 
 def revocations() -> dict[str, dict]:
@@ -192,11 +206,191 @@ def protected_domains() -> set[str]:
     return (configured_domains() - revoked) | env_domains() | (source_domains() - revoked)
 
 
+_RENAMES: dict = {"at": -1e9, "rows": []}
+_READING = threading.local()
+
+
+def forget_renames() -> None:
+    _RENAMES["at"] = -1e9
+
+
+def renames() -> list[dict]:
+    """Every recorded primary-domain rename (domain_rename.py), cached a minute: Settings()
+    asks is_government, and reading the control plane builds a Settings (~55 ms)."""
+    if getattr(_READING, "on", False):
+        return []                   # that Settings asking again: labels decide for it
+    if time.monotonic() - _RENAMES["at"] < 60:
+        return _RENAMES["rows"]
+    _READING.on = True
+    try:
+        import control_plane_db as cpdb
+        with cpdb.ro() as conn:
+            rows = [dict(r) for r in conn.execute(
+                "SELECT account_id, side, from_domain, to_domain, applied_at FROM domain_renames")]
+    except Exception:      # noqa: BLE001 - an install before migration 018; labels still decide
+        rows = []
+    finally:
+        _READING.on = False
+    _RENAMES.update(at=time.monotonic(), rows=rows)
+    return rows
+
+
+def _gov_labels(domain: str) -> bool:
+    return "gov" in _norm(domain).split(".")[1:]
+
+
 def is_government(domain: str) -> bool:
     """A government domain (*.gov, *.gov.np, ...): never a sandbox, whatever anyone
-    declares -- it is only ever read, never seeded, reset or wiped."""
-    labels = _norm(domain).split(".")
-    return "gov" in labels[1:]
+    declares -- it is only ever read, never seeded, reset or wiped. A government source
+    renamed (dharan.gov.np -> old.mdharan.com) keeps it: both names of a source-side
+    rename whose old name was government are government, from the moment it is planned."""
+    d = _norm(domain)
+    if _gov_labels(d):
+        return True
+    pairs = [(_norm(r["from_domain"]), _norm(r["to_domain"])) for r in renames() if r["side"] == "source"]
+    gov: set[str] = set()
+    grew = True
+    while grew:                     # a chain of renames carries it along
+        grew = False
+        for f, t in pairs:
+            if (f in gov or _gov_labels(f)) and not {f, t} <= gov:
+                gov |= {f, t}
+                grew = True
+    return d in gov
+
+
+def renamed_target(domain: str, source_domain: str) -> bool:
+    """`domain` is an applied target-side rename's new name AND `source_domain` that same
+    account's applied source-side new name: that account's own migration, nobody else's."""
+    d, s = _norm(domain), _norm(source_domain)
+    if not d or not s:
+        return False
+    rows = [r for r in renames() if r["applied_at"]]
+    accounts = {r["account_id"] for r in rows if r["side"] == "source" and _norm(r["to_domain"]) == s}
+    return any(r["side"] == "target" and _norm(r["to_domain"]) == d and r["account_id"] in accounts
+               for r in rows)
+
+
+# -- protected subjects (migration 019) ------------------------------------------------
+# One account's real users living on a tenant another account seeds and migrates freely
+# (account 8's d-*@a. beside account 5's synthetic campaign on a.). Every other account
+# never sees them -- not in an identity map, a pass, a check or a client -- and no
+# destructive tool touches them, the owner's included. Only the owner's own migration
+# reads and writes them.
+_SUBJECTS: dict = {"at": -1e9, "rows": None}
+
+
+def forget_subjects() -> None:
+    _SUBJECTS.update(at=-1e9, rows=None)
+
+
+def subjects() -> list[dict]:
+    """Every record, cached a minute (records only ever grow, so a stale list misses at most
+    a record made in the last minute: record one before its accounts exist). A failed
+    refresh keeps the last good list; never read at all raises DomainGuardUnavailable."""
+    if _SUBJECTS["rows"] is not None and time.monotonic() - _SUBJECTS["at"] < 60:
+        return _SUBJECTS["rows"]
+    try:
+        import control_plane_db as cpdb
+        with cpdb.ro() as conn:
+            rows = [dict(r) for r in conn.execute("SELECT * FROM protected_subjects")]
+    except Exception as exc:      # noqa: BLE001
+        # ponytail: no control plane at all (a bare CLI checkout, data-generator tests) or one
+        # before migration 019 holds no records; anything else fails closed.
+        if any(s in str(exc) for s in ("no such table", "unable to open database file")):
+            rows = []
+        elif _SUBJECTS["rows"] is not None:
+            return _SUBJECTS["rows"]
+        else:
+            raise DomainGuardUnavailable("protected subjects could not be read") from exc
+    _SUBJECTS.update(at=time.monotonic(), rows=rows)
+    return rows
+
+
+def subject_record(address: str) -> dict | None:
+    a = _norm(address)
+    if a.count("@") != 1:
+        return None
+    local, dom = a.split("@")
+    for r in subjects():
+        if _norm(r["domain"]) != dom:
+            continue
+        if (r["address"] and _norm(r["address"]) == a) or (
+                r["localpart_prefix"] and local.startswith(r["localpart_prefix"].lower())):
+            return r
+    return None
+
+
+def protected_subject(address: str, acting_account_id=None, migration: bool = False) -> str:
+    """Why `address` may not be touched, or "". Protected unless the acting account owns it
+    AND the action is that owner's own migration (its reads and its writes)."""
+    try:
+        r = subject_record(address)
+    except DomainGuardUnavailable:
+        return f"Cannot read protected subjects; {address} is refused."
+    if not r:
+        return ""
+    if migration and acting_account_id is not None and int(acting_account_id) == int(r["owner_account_id"]):
+        return ""
+    return (f"{_norm(address)} is a protected user of account {r['owner_account_id']} "
+            f"({r['reason']}): only that account's migration may read or write it, "
+            "and nothing may delete it.")
+
+
+def hidden(address: str, account_id) -> bool:
+    """Not this account's to see: another account's protected user."""
+    return bool(address) and bool(protected_subject(address, account_id, migration=True))
+
+
+def ledger_account(path: str | None):
+    """Which account a ledger belongs to (data/accounts/<id>/migration.db), else None."""
+    import re
+    m = re.search(r"accounts[/\\](\d+)[/\\]", path or "")
+    return int(m.group(1)) if m else None
+
+
+def acting_account(settings):
+    aid = getattr(settings, "account_id", None)
+    return aid if aid is not None else ledger_account(getattr(settings, "db_path", None))
+
+
+def visible(rows, account_id, keys=("source_email", "target_email")) -> list:
+    """`rows` without another account's protected users, on either side."""
+    try:
+        if not subjects():
+            return list(rows)
+    except DomainGuardUnavailable:
+        return []                 # unknown: show nothing rather than someone else's users
+    return [r for r in rows if not any(hidden(r[k], account_id) for k in keys if r[k])]
+
+
+def subjects_on(domain: str) -> str:
+    """Why a tenant-wide delete (shared drives, groups, every user) on `domain` is refused, or ""."""
+    try:
+        hits = [r for r in subjects() if _norm(r["domain"]) == _norm(domain)]
+    except DomainGuardUnavailable:
+        return f"Cannot read protected subjects; tenant-wide deletes on {_norm(domain)} are refused."
+    if not hits:
+        return ""
+    what = ", ".join(f"{r['localpart_prefix'] + '*' if r['localpart_prefix'] else r['address']} "
+                     f"(account {r['owner_account_id']})" for r in hits)
+    return f"{_norm(domain)} holds protected users: {what}. A tenant-wide delete there is refused."
+
+
+def record_subject(domain: str, owner_account_id: int, reason: str, recorded_by: str,
+                   prefix: str | None = None, address: str | None = None) -> None:
+    """Protect a prefix (`d-`) or one address on `domain` for its owner account, for good."""
+    if not (reason or "").strip():
+        raise ValueError("a reason is required")
+    if (prefix is None) == (address is None):
+        raise ValueError("give a localpart prefix or an address, not both")
+    import control_plane_db as cpdb
+    with cpdb.rw() as conn:
+        conn.execute("INSERT INTO protected_subjects(domain, localpart_prefix, address, owner_account_id, "
+                     "reason, recorded_by) VALUES (?,?,?,?,?,?)",
+                     (_norm(domain), prefix.lower() if prefix else None, _norm(address) if address else None,
+                      int(owner_account_id), reason.strip(), recorded_by or "unknown"))
+    forget_subjects()
 
 
 def is_protected(domain: str) -> bool:
@@ -335,7 +529,20 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--restore", metavar="DOMAIN")
     ap.add_argument("--reason", default="")
     ap.add_argument("--by", default=os.getenv("USER", "operator"))
+    ap.add_argument("--protect-subject", metavar="DOMAIN",
+                    help="protect --prefix or --address on DOMAIN for --owner's migration, for good")
+    ap.add_argument("--prefix")
+    ap.add_argument("--address")
+    ap.add_argument("--owner", type=int)
     a = ap.parse_args(argv)
+
+    if a.protect_subject:
+        if a.owner is None:
+            ap.error("--protect-subject needs --owner")
+        record_subject(a.protect_subject, a.owner, a.reason, a.by, prefix=a.prefix, address=a.address)
+        print(f"protected on {a.protect_subject}: {a.prefix + '*' if a.prefix else a.address} "
+              f"(account {a.owner} only)")
+        return 0
 
     if a.revoke:
         rec = revoke(a.revoke, a.by, a.reason)

@@ -1384,6 +1384,18 @@ class TestStaleServiceMarkersAreReopened:
         assert reopened == [("a@x.com", "contacts")]
         assert db.updates and db.updates[0][0] == "gmail"
 
+    def test_scoped_start_preserves_unselected_service_markers(self):
+        import main
+
+        users = ["a@x.com", "b@x.com"]
+        db = self.FakeDB(
+            rows=[{"entity_type": "user", "source_email": user} for user in users],
+            mappings=[], failures={user: 1 for user in users},
+            done={user: {"contacts"} for user in users})
+
+        assert main.reconcile_service_markers(db, only=["A@X.COM"]) == [("a@x.com", "contacts")]
+        assert db.updates == [("", "a@x.com")]
+
     def test_a_service_that_migrated_something_is_left_alone(self):
         import main
 
@@ -1675,7 +1687,8 @@ class TestBlockedIsNotFailed:
 
         src = inspect.getsource(main._services_already_done)
         assert 'r["status"] != "DONE"' in src
-        assert "_services_already_done" in inspect.getsource(main.run_batch)
+        assert "_pass_user_pairs" in inspect.getsource(main.run_batch)
+        assert "_services_already_done" in inspect.getsource(main._pass_user_pairs)
 
 
 class TestDriveFallsBackBetweenCopyStrategies:

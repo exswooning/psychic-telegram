@@ -48,37 +48,18 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from auth import AuthManager        # noqa: E402
+
+# Parallel deletes per user for the ledger's root items; Drive's per-user write quota is far above 8 in flight.
+RESET_DELETE_WORKERS = int(os.environ.get("RESET_DELETE_WORKERS", "8"))
 from config import Settings         # noqa: E402
 from db import MigrationDB          # noqa: E402
 
 
 def _load_seeder():
-    """
-    Import seed_sandbox without putting data-generator on sys.path.
+    """Import seed_sandbox through the shared path-safe loader."""
+    from seed_loader import load_seed_sandbox
 
-    data-generator/ contains its own verify.py, which shadows the real one for
-    the rest of the process the moment that directory goes on the path -- and
-    the shadowed copy has none of the cutover-gate guards. Caught by the test
-    suite: importing this module made `verify.UserReport([]).ok` return True
-    again, which is the exact false-pass those guards exist to prevent.
-
-    Appending rather than prepending would still shadow anything imported
-    later. Loading by file path shadows nothing at all.
-    """
-    import importlib.util
-
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                        "data-generator", "seed_sandbox.py")
-    spec = importlib.util.spec_from_file_location("_seed_sandbox", path)
-    module = importlib.util.module_from_spec(spec)
-    # seed_sandbox imports corpus, which lives beside it.
-    gen_dir = os.path.dirname(path)
-    sys.path.insert(0, gen_dir)
-    try:
-        spec.loader.exec_module(module)
-    finally:
-        sys.path.remove(gen_dir)
-    return module
+    return load_seed_sandbox()
 
 
 def assert_sandbox(settings: Settings, confirm_domain: str,
@@ -111,6 +92,14 @@ def assert_sandbox(settings: Settings, confirm_domain: str,
 # what carries its marker, as migrated copies do.
 ALL_SERVICES = ("drive", "gmail", "calendar", "chat", "contacts", "tasks")
 
+
+def default_services() -> tuple:
+    """What a reset with no --services clears: everything, and Chat only when Chat is on (MIGRATE_CHAT). With it off
+    the reset listed Chat spaces for every user, got 403 and retried 11 times each: 40 failure lines and ~40 minutes on
+    41 users (a. -> b., 19 Nov 2026)."""
+    from config import chat_by_default
+    return ALL_SERVICES if chat_by_default() else tuple(x for x in ALL_SERVICES if x != "chat")
+
 # What Google puts in every new mailbox ("Tips for using your new inbox", "Get the official Gmail
 # app"). The seeder's own reset only trashes @seed.test mail, so these survive it -- and the source
 # mailboxes hold the same two, which a migration copies. Every reset-and-rerun cycle then leaves
@@ -136,6 +125,29 @@ def trash_google_welcome_mail(gmail) -> int:
             return n
 
 
+def remove_source_mail(gmail, source_domain: str, purge=None) -> int:
+    """Every message naming the source domain, deleted for good when `purge` (a mail.google.com client) is given,
+    else trashed; how many. The seeder's reset takes only @seed.test mail, so what Google's import brought over --
+    Docs notifications, out-of-office replies -- stayed through every reset, and once the source had been cleared
+    the next check read 570 of them as extras on b. (incident #268, 23 Nov 2026). On a sandbox target, mail naming
+    the source arrived by a migration."""
+    q, n = f"from:{source_domain} OR to:{source_domain} OR cc:{source_domain}", 0
+    while True:      # list again from the start: what was removed no longer matches
+        if purge is not None:
+            r = purge.users().messages().list(userId="me", q=q, includeSpamTrash=True, maxResults=500).execute()
+        else:
+            r = gmail.users().messages().list(userId="me", q=q + " -in:trash", maxResults=500).execute()
+        ids = [m["id"] for m in r.get("messages", [])]
+        if not ids:
+            return n
+        if purge is not None:
+            purge.users().messages().batchDelete(userId="me", body={"ids": ids}).execute()
+        else:
+            for mid in ids:
+                gmail.users().messages().trash(userId="me", id=mid).execute()
+        n += len(ids)
+
+
 def reset_all(settings: Settings, auth: AuthManager, users: list[str],
               services: tuple[str, ...], workers: int) -> tuple[dict, list[str]]:
     """Reset every user side by side; (totals, users it could not reach).
@@ -150,7 +162,8 @@ def reset_all(settings: Settings, auth: AuthManager, users: list[str],
     totals = {"drive": 0, "gmail": 0, "calendar": 0, "chat": 0}
     unreached = []
     print(f"  [0/{len(users)}] users reset", flush=True)
-    with futures.ThreadPoolExecutor(max_workers=workers) as pool:
+    pool = futures.ThreadPoolExecutor(max_workers=workers)
+    try:
         pending = [pool.submit(reset_one, settings, auth, u, services) for u in users]
         for n, fut in enumerate(futures.as_completed(pending), 1):
             r = fut.result()
@@ -161,7 +174,29 @@ def reset_all(settings: Settings, auth: AuthManager, users: list[str],
                 totals[k] += r[k]
             if r.get("unreachable"):
                 unreached.append(f"{r['user']} ({', '.join(r['unreachable'])})")
+    except KeyboardInterrupt:
+        # A Stop ends the reset between users: the `with` block's shutdown waited for every queued user, so a
+        # Stop of b.'s reset ran on for 47 min (23 Nov 2026). Users mid-reset finish; the rest never start.
+        pool.shutdown(wait=False, cancel_futures=True)
+        print(f"  stopped: {sum(f.cancelled() for f in pending)} user(s) not started", flush=True)
+        raise
+    pool.shutdown()
     return totals, unreached
+
+
+def _purge_client(settings: Settings, user: str):
+    """A Gmail client on the TARGET key that may delete for good, or None when the grant is missing (the reset then trashes)."""
+    try:
+        import google_auth_httplib2
+        import httplib2
+        from google.oauth2 import service_account
+        from googleapiclient.discovery import build
+        creds = service_account.Credentials.from_service_account_file(
+            settings.target_sa_key, scopes=["https://mail.google.com/"]).with_subject(user)
+        return build("gmail", "v1", http=google_auth_httplib2.AuthorizedHttp(creds, http=httplib2.Http(timeout=120)),
+                     cache_discovery=False)
+    except Exception:      # noqa: BLE001 - absence is an answer: the reset trashes
+        return None
 
 
 def reset_one(settings: Settings, auth: AuthManager, user: str,
@@ -184,10 +219,24 @@ def reset_one(settings: Settings, auth: AuthManager, user: str,
         if key not in services:
             continue
         try:
-            out[key] = fn(svc(user), settings)
+            if key == "gmail":
+                # Permanently, when the target key may (its `mail.google.com` scope): a trashed copy is revived by the
+                # next run (P3.5, 19 Nov 2026), and trashing one message at a time ran at 46 a minute.
+                purge = _purge_client(settings, user)
+                out[key] = fn(svc(user), settings, _purge_client=purge) if purge is not None else fn(svc(user), settings)
+            else:
+                out[key] = fn(svc(user), settings)
         except Exception as exc:  # noqa: BLE001 - one service must not lose the rest
             unreachable.add(key)
             print(f"    ! {user} {key}: {str(exc)[:90]}")
+    if "drive" in services and "drive" not in unreachable:
+        try:
+            gone = _delete_ledger_drive_items(settings, auth, user)
+            out["drive"] += gone
+            if gone:
+                print(f"    {user}: deleted {gone} migrated Drive item(s) outside the seeded tree")
+        except Exception as exc:  # noqa: BLE001 - the seeded tree is already gone; this is tidying
+            print(f"    ! {user} migrated Drive items: {str(exc)[:90]}")
     # Not for a mailbox the seeder's own reset could not reach (an account the target does not have):
     # that error has been reported once already, and a second one for the same cause is only noise.
     if "gmail" in services and "gmail" not in unreachable:
@@ -196,8 +245,20 @@ def reset_one(settings: Settings, auth: AuthManager, user: str,
             out["gmail"] += welcome
             if welcome:
                 print(f"    {user}: trashed {welcome} of Google's own welcome mail")
+            moved = remove_source_mail(auth.target_gmail(user), settings.source_domain, _purge_client(settings, user))
+            out["gmail"] += moved
+            if moved:
+                print(f"    {user}: removed {moved} message(s) naming {settings.source_domain} (Google's import included)")
         except Exception as exc:  # noqa: BLE001 - the seeded mail is already gone; this is tidying
             print(f"    ! {user} welcome mail: {str(exc)[:90]}")
+    if "contacts" in services and "contacts" not in unreachable:
+        try:
+            gone = _delete_ledger_contacts(settings, auth, user)
+            out["contacts"] += gone
+            if gone:
+                print(f"    {user}: deleted {gone} migrated contact(s) without the seed marker")
+        except Exception as exc:  # noqa: BLE001 - the seeded contacts are already gone; this is tidying
+            print(f"    ! {user} migrated contacts: {str(exc)[:90]}")
     if "chat" in services:
         try:
             out["chat"] = seed.reset_chat(auth.target_chat(user), settings, local)
@@ -206,6 +267,120 @@ def reset_one(settings: Settings, auth: AuthManager, user: str,
         out["chat"] += _delete_ledger_spaces(settings, auth, user)
     out["unreachable"] = sorted(unreachable)
     return out
+
+
+def _delete_ledger_contacts(settings: Settings, auth: AuthManager, target_user: str) -> int:
+    """Every contact the ledger says the migration wrote for this user, by resource name. A contact made on the source
+    without the seed marker (campaign_changes' "Campaign Added...") was copied without it, outlived each reset, and
+    the next run added a second one beside it (t16, 27 Nov 2026: contacts 27 on the target for 26 expected)."""
+    import sqlite3
+    try:
+        conn = sqlite3.connect(f"file:{settings.db_path}?mode=ro", uri=True)
+        ids = [r[0] for r in conn.execute(
+            "SELECT m.target_id FROM id_mapping m JOIN identity_map i ON i.source_email = m.source_user "
+            "WHERE lower(i.target_email) = lower(?) AND m.type = 'contact'", (target_user,))]
+        conn.close()
+    except Exception:  # noqa: BLE001 - no ledger to read is nothing to delete
+        return 0
+    from resilience import retry_on_google_error
+    people, n = auth.target_people(target_user), 0
+    delete = retry_on_google_error(label="reset.contacts.delete")(
+        lambda rn: people.people().deleteContact(resourceName=rn).execute())
+    for rn in ids:
+        if not str(rn).startswith("people/"):
+            continue
+        try:
+            delete(rn)
+            n += 1
+        except Exception:  # noqa: BLE001 - already gone (404) is the usual answer after the seeded reset
+            pass
+    return n
+
+
+REPAIR_COPY_PREFIXES = (".Quarantined duplicate ", ".Repair backup - ")
+
+
+def _delete_ledger_drive_items(settings: Settings, auth: AuthManager, target_user: str) -> int:
+    """Every Drive item the ledger says the migration wrote for this user, by id -- not only the seeded tree. A
+    fixture made at the root of a source My Drive was copied to the root of the target's, outside MIGRATION-TEST, so
+    the seeder's reset never matched it; a plain file was adopted by the next run, but a shortcut was made again
+    beside the old one (c03, P3.5 run 1b, 20 Nov 2026: four extra shortcuts held the gate at 40/41). Only ids the
+    ledger maps, on the target; a file already gone answers 404."""
+    import sqlite3
+    try:
+        conn = sqlite3.connect(f"file:{settings.db_path}?mode=ro", uri=True)
+        ids = [r[0] for r in conn.execute(
+            "SELECT m.target_id FROM id_mapping m JOIN identity_map i ON i.source_email = m.source_user "
+            "WHERE lower(i.target_email) = lower(?) AND m.type IN ('file','folder','shortcut') "
+            "AND m.target_id != m.source_id", (target_user,))]
+        conn.close()
+    except Exception:  # noqa: BLE001 - no ledger to read is nothing to delete
+        logging.getLogger(__name__).debug("ignored an error", exc_info=True)
+        return 0
+    drive, n = auth.target_drive(target_user), 0
+    # Only what still sits at the root of the user's My Drive: the seeded tree has just taken everything under it, and
+    # a delete per mapped id cost a call each, nearly all of them 404s (run 2, 20 Nov 2026: c10's 3,000). Anything
+    # nested outside the tree goes with the root folder it sits in, which the ledger maps too.
+    wanted, at_root, token = set(ids), [], None
+    while True:
+        resp = drive.files().list(q="'root' in parents and 'me' in owners and trashed = false", pageSize=1000,
+                                  pageToken=token, fields="nextPageToken,files(id,name)").execute()
+        # And repair's own copies left where it found the file (`finding_repairs`): no ledger row maps them, so c10's
+        # two quarantined duplicates outlived every reset and failed run 15's check (incident #268, 23 Nov 2026).
+        at_root += [f["id"] for f in resp.get("files", []) if f["id"] in wanted
+                    or f.get("name", "").startswith(REPAIR_COPY_PREFIXES)]
+        token = resp.get("nextPageToken")
+        if not token:
+            break
+    from resilience import retry_on_google_error
+
+    def delete_slice(fids: list) -> int:
+        # One client per thread (httplib2 is not thread-safe). In parallel: one at a time, c10's ~3,000 root files
+        # held the whole reset ~90 min after the other 40 users had finished in 4 (P3.5 run 3, 21 Nov 2026).
+        mine, done = auth.target_drive(target_user), 0
+        delete = retry_on_google_error(label="reset.drive.delete")(
+            lambda fid: mine.files().delete(fileId=fid, supportsAllDrives=True).execute())
+        for fid in fids:
+            try:
+                delete(fid)
+                done += 1
+            except Exception as exc:  # noqa: BLE001 - gone already, or not this user's
+                if "404" not in str(exc) and "notFound" not in str(exc):
+                    print(f"    ! {target_user} drive item {fid}: {str(exc)[:90]}")
+        return done
+
+    workers = max(1, min(RESET_DELETE_WORKERS, len(at_root)))
+    with futures.ThreadPoolExecutor(max_workers=workers) as pool:
+        n = sum(pool.map(delete_slice, [at_root[i::workers] for i in range(workers)]))
+    return n
+
+
+def _delete_ledger_shared_drives(settings: Settings, auth: AuthManager) -> int:
+    """The shared drives the ledger says a migration made on the target, deleted with their contents as the target
+    admin. The per-user reset never reached them, so the next run adopted the previous run's files instead of
+    copying them (P3.7 run 7, 21 Nov 2026: info@'s SEEDED-SD-3). Only ids the ledger maps; one already gone is 404."""
+    import sqlite3
+    why = domain_guard.subjects_on(getattr(settings, "target_domain", "") or "")
+    if why:
+        raise ValueError(why)
+    try:
+        conn = sqlite3.connect(f"file:{settings.db_path}?mode=ro", uri=True)
+        ids = [r[0] for r in conn.execute(
+            "SELECT DISTINCT target_id FROM id_mapping WHERE type='shared_drive' AND target_id != source_id")]
+        conn.close()
+    except Exception:  # noqa: BLE001 - no ledger to read is nothing to delete
+        return 0
+    if not ids:
+        return 0
+    admin, n = auth.target_drive(settings.target_admin), 0
+    for did in ids:
+        try:
+            admin.drives().delete(driveId=did, useDomainAdminAccess=True, allowItemDeletion=True).execute()
+            n += 1
+        except Exception as exc:  # noqa: BLE001 - gone already, or refused: say which
+            if "404" not in str(exc) and "notFound" not in str(exc):
+                print(f"    ! shared drive {did}: {str(exc)[:90]}")
+    return n
 
 
 def _delete_ledger_spaces(settings: Settings, auth: AuthManager, target_user: str) -> int:
@@ -247,7 +422,7 @@ def main(argv: list[str] | None = None) -> int:
                          "this the whole tenant is emptied, which is right for "
                          "a rehearsal and wrong for a controlled experiment "
                          "that only needs a few mailboxes reset.")
-    ap.add_argument("--services", default=",".join(ALL_SERVICES),
+    ap.add_argument("--services", default=",".join(default_services()),
                     help="comma-separated subset of drive,gmail,calendar,chat -- "
                          "e.g. --services drive to reset only Drive and leave "
                          "already-migrated Gmail/Calendar/Chat data untouched")
@@ -339,6 +514,9 @@ def main(argv: list[str] | None = None) -> int:
             return 1
 
     totals, unreached = reset_all(settings, auth, users, services, args.workers)
+    if "drive" in services and not args.user:      # a shared drive is everyone's: only a whole-tenant reset takes it
+        n = _delete_ledger_shared_drives(settings, auth)
+        print(f"Removed {n} shared drive(s) the migration made on {settings.target_domain}.")
     print(f"\nRemoved: {totals['drive']} drive root(s), {totals['gmail']} mail "
           f"item(s), {totals['calendar']} calendar item(s), {totals['chat']} chat.")
     # A service it could not reach is not an empty one: "Removed: 0" with rc 0

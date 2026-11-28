@@ -69,11 +69,51 @@ def test_target_mapping_and_label_names_change_invalidates(db,settings):
     c=C.MailCache(verifier(db,settings),s,t,({'label':'Renamed'},{}));assert c.get('1','t1') is None
 
 
-def test_new_mail_mapping_does_not_invalidate_other_bodies(db,settings):
+def test_new_mappings_do_not_invalidate_bodies_that_do_not_link_to_them(db,settings):
+    """A Drive file copied for anyone used to empty every user's mail cache: no comparison was ever reused
+    (account 3, 8 Nov 2026). Only an email whose rewritten links name that file depends on it."""
     s,t=seed(db,settings);db.record_mapping(SRC_USER,'new','new-target','message')
     c=C.MailCache(verifier(db,settings),s,t,({},{}));assert c.get('1','t1')
     db.record_mapping(SRC_USER,'drive','new-drive','file')
-    c=C.MailCache(verifier(db,settings),s,t,({},{}));assert c.get('1','t1') is None
+    c=C.MailCache(verifier(db,settings),s,t,({},{}));assert c.get('1','t1')
+
+
+def _with_rewritten(db, sid):
+    db.log_audit(SRC_USER, sid, 'link_rewrite', 'SUCCESS', '')
+
+
+def test_a_rewritten_email_is_rechecked_only_when_a_file_it_links_to_maps_elsewhere(db,settings):
+    _with_rewritten(db, 'r1'); _with_rewritten(db, 'r2')
+    db.record_mapping(SRC_USER, 'fileA', 'copyA', 'file')
+    s,t=Mail(),Mail();c=C.MailCache(verifier(db,settings),s,t,({},{}))
+    body={'messageId':'m','sourceSha256':'a'*64,'targetSha256':'b'*64}
+    c.put('r1','tr1',body,links={'fileA'});c.put('r2','tr2',body,links={'fileB'});c.finish()
+    db.record_mapping(SRC_USER, 'fileB', 'copyB', 'file')              # r2's link now maps to a copy
+    c=C.MailCache(verifier(db,settings),s,t,({},{}))
+    assert c.get('r1','tr1') and c.get('r2','tr2') is None
+
+
+def test_an_email_rewritten_since_its_check_is_rechecked(db,settings):
+    s,t=seed(db,settings);_with_rewritten(db,'3')
+    c=C.MailCache(verifier(db,settings),s,t,({},{}))
+    assert c.get('3','t3') is None and c.get('4','t4')
+
+
+def test_a_receipted_email_is_reused_without_body_hashes(db,settings):
+    """Most of info@'s 40,000 were receipted (content proven as written) and were never cached at all."""
+    s,t=Mail(),Mail();c=C.MailCache(verifier(db,settings),s,t,({},{}))
+    c.put('9','t9',{'messageId':'m9','receipt':True,'comparison':'receipt'});c.finish()
+    assert C.MailCache(verifier(db,settings),s,t,({},{})).get('9','t9')
+
+
+def test_a_stopped_check_keeps_what_it_verified(db,settings,monkeypatch):
+    """A check saved nothing until it finished; info@'s were stopped twice in a day, hours each time."""
+    monkeypatch.setattr(C,'CHECKPOINT_EVERY',10)
+    s,t=Mail(),Mail();c=C.MailCache(verifier(db,settings),s,t,({},{}))
+    for i in range(25):c.put(str(i),'t'+str(i),{'messageId':'m','receipt':True})
+    # no finish(): the process was stopped here
+    again=C.MailCache(verifier(db,settings),s,t,({},{}))
+    assert sum(1 for i in range(25) if again.get(str(i),'t'+str(i))) == 20     # two checkpoints of ten
 
 
 def test_unsaved_or_failed_comparisons_never_acquire_new_checkpoint(db,settings):

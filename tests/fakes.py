@@ -37,6 +37,7 @@ import copy
 import hashlib
 import itertools
 import re
+import threading
 from collections import defaultdict, deque
 from typing import Any, Callable, Optional
 
@@ -102,12 +103,18 @@ class _Call:
         return out
 
 
+class FakeProcessKilled(BaseException):
+    """A hard process stop that bypasses the seeders' per-item error handlers."""
+
+
 class FakeService:
     def __init__(self, owner: str, tenant: str):
         self.owner = owner
         self.tenant = tenant
         self.calls: list[tuple[str, dict]] = []
         self._faults: dict[str, deque] = defaultdict(deque)
+        self._delayed_faults: dict[str, deque] = defaultdict(deque)
+        self._fault_lock = threading.Lock()
         self._ids = itertools.count(1)
 
     # -- introspection helpers used by tests ----------------------------
@@ -123,13 +130,40 @@ class FakeService:
     # -- fault injection ------------------------------------------------
     def fail_next(self, method: str, status: int = 403,
                   reason: str = "rateLimitExceeded", times: int = 1) -> None:
-        for _ in range(times):
-            self._faults[method].append(http_error(status, reason))
+        with self._fault_lock:
+            for _ in range(times):
+                self._faults[method].append(http_error(status, reason))
+
+    def fail_after(self, method: str, successful_calls: int, status: int = 500,
+                   reason: str = "backendError", times: int = 1) -> None:
+        """Inject a fault after N successful calls to model a mid-pass kill point."""
+        if successful_calls < 0:
+            raise ValueError("successful_calls must be non-negative")
+        with self._fault_lock:
+            for _ in range(times):
+                self._delayed_faults[method].append([successful_calls, http_error(status, reason)])
+
+    def kill_after(self, method: str, successful_calls: int) -> None:
+        """Raise a BaseException after N successful calls to model a SIGKILL/restart boundary."""
+        if successful_calls < 0:
+            raise ValueError("successful_calls must be non-negative")
+        with self._fault_lock:
+            self._delayed_faults[method].append(
+                [successful_calls, FakeProcessKilled(f"fake process killed at {method}")])
 
     def _maybe_fail(self, name: str) -> None:
-        q = self._faults.get(name)
-        if q:
-            raise q.popleft()
+        with self._fault_lock:
+            q = self._faults.get(name)
+            if q:
+                error = q.popleft()
+                raise error
+            delayed = self._delayed_faults.get(name)
+            if delayed:
+                remaining, error = delayed[0]
+                if remaining == 0:
+                    delayed.popleft()
+                    raise error
+                delayed[0][0] -= 1
 
     def _new_id(self, prefix: str) -> str:
         return f"{prefix}-{self.tenant}-{next(self._ids)}"
@@ -543,14 +577,20 @@ class _DriveFiles:
             "mimeType": body.get("mimeType"),
             "parents": parents,
             "modifiedTime": body.get("modifiedTime"),
+            "createdTime": body.get("createdTime"),       # Drive keeps a createdTime it is given
             "description": body.get("description"),
             "starred": body.get("starred", False),
             "trashed": False,
             "owners": [{"emailAddress": self.s.owner}],
             "capabilities": {"canDownload": True},
         }
+        if parents and parents[0] in self.s.shared_drives:
+            meta["driveId"] = parents[0]          # in a shared drive: the drive owns it
+            meta["owners"] = []
         if body.get("shortcutDetails"):
             meta["shortcutDetails"] = body["shortcutDetails"]
+        if body.get("appProperties"):
+            meta["appProperties"] = dict(body["appProperties"])
 
         result = {"id": fid}
         if media_body is not None:
@@ -617,11 +657,15 @@ class _DriveFiles:
             "modifiedTime": body.get("modifiedTime") or meta.get("modifiedTime"),
             "description": body.get("description") or meta.get("description"),
             "trashed": False,
-            # Files inside a shared drive have no individual owner.
-            "owners": [],
+            # Files inside a shared drive have no individual owner; a copy into a My Drive is the copier's.
+            "owners": [] if parents and parents[0] in dest.shared_drives else [{"emailAddress": dest.owner}],
             "driveId": parents[0] if parents and parents[0] in dest.shared_drives else None,
             "capabilities": {"canDownload": True},
         }
+        if body.get("appProperties"):
+            new_meta["appProperties"] = dict(body["appProperties"])
+        if body.get("createdTime"):
+            new_meta["createdTime"] = body["createdTime"]
         result = {"id": new_id}
         if fileId in src.content:
             data = src.content[fileId]
@@ -665,9 +709,36 @@ class _DriveFiles:
         dst._mark(fileId)
         return {"id": fileId}
 
+    def _move_out_of_peer_drive(self, fileId: str, to: str) -> dict:
+        """The OTHER tenant's shared drive holds the file and THIS tenant's user is a member of it:
+        they take it out into their own Drive. Refused when that tenant blocks distribution, and a
+        non-member does not even see the file."""
+        peer = self.s.peer
+        meta = peer.store[fileId]
+        did = meta.get("driveId")
+        if not did or not any(p.get("emailAddress") == self.s.owner for p in peer.perms.get(did, [])):
+            raise http_error(404, "notFound", fileId)
+        if peer.distribution_blocked:
+            raise http_error(403, "insufficientFilePermissions",
+                             "The user does not have sufficient permissions for this file.")
+        peer.store.pop(fileId)
+        meta.update(parents=[to], driveId=None, owners=[{"emailAddress": self.s.owner}])
+        self.s.store[fileId] = meta
+        for attr in ("content", "exports", "perms", "comment_store", "_revisions"):
+            here = getattr(peer, attr)
+            if fileId in here:
+                getattr(self.s, attr)[fileId] = here.pop(fileId)
+        peer._seq += 1
+        peer._changed[fileId] = peer._seq
+        self.s._mark(fileId)
+        return {"id": fileId}
+
     def _update(self, fileId: str, body: Optional[dict] = None,
                 media_body=None, addParents: str = "",
                 removeParents: str = "", **_):
+        if (addParents and fileId not in self.s.store and self.s.peer is not None
+                and fileId in self.s.peer.store):
+            return self._move_out_of_peer_drive(fileId, addParents)
         if (addParents and fileId in self.s.store and self.s.peer is not None
                 and addParents in self.s.peer.shared_drives):
             return self._move_across(fileId, addParents)
@@ -680,6 +751,8 @@ class _DriveFiles:
         for k in ("name", "modifiedTime", "description", "starred", "trashed"):
             if body and k in body and not (k == "modifiedTime" and moving_native):
                 meta[k] = body[k]
+        if body and body.get("appProperties"):
+            meta.setdefault("appProperties", {}).update(body["appProperties"])
 
         # Re-parenting. Moving out of a shared drive is what confers real
         # ownership on the impersonated user, so mirror that here.
@@ -979,6 +1052,7 @@ class FakeGmail(FakeService):
         super().__init__(owner, tenant)
         self.messages: dict[str, dict] = {}
         self.drafts: dict[str, dict] = {}
+        self.chip_hits: dict[str, set] = {}
         self.filters: list[dict] = []
         # Every mailbox has a primary send-as entry for its own address.
         self.send_as: list[dict] = [
@@ -987,6 +1061,11 @@ class FakeGmail(FakeService):
         self.labels: list[dict] = [
             {"id": n, "name": n, "type": "system"} for n in SYSTEM_LABELS
         ]
+        self.vacation_settings: dict = {}
+        self.pop_settings: dict = {}
+        self.imap_settings: dict = {}
+        self.forwarding_addresses: list[dict] = []
+        self.mailbox_delegates: list[dict] = []
         # history.list, for the mirror. A start id below `history_floor` is one
         # Gmail no longer keeps -- it answers 404 and the caller must re-scan.
         self.history: list[dict] = []
@@ -1137,12 +1216,34 @@ class _GmailMessages:
             wanted = q.split(":", 1)[1].strip().strip("<>")
             ids = [i for i in ids if str(BytesHeaderParser().parsebytes(
                 base64.urlsafe_b64decode(self.s.messages[i]["raw"])).get("Message-ID", "")).strip().strip("<>") == wanted]
+        elif q and not q.startswith("newer_than:"):
+            ids = [i for i in ids if self._search(q, i, self.s.messages[i])]
         start = int(pageToken or 0)
         page = ids[start: start + maxResults]
         out: dict[str, Any] = {"messages": [{"id": i} for i in page]}
-        if start + maxResults < len(ids):
+        # As Gmail does (18 Nov 2026): a FULL page carries a token even with nothing after it.
+        if page and start + maxResults <= len(ids):
             out["nextPageToken"] = str(start + maxResults)
         return out
+
+    def _search(self, q, mid, m):
+        """The few Gmail operators split mail's search uses. A chip (has:drive ...) has
+        no bytes to match, so a test lists its hits in `chip_hits`."""
+        import re as _re
+        term = _re.sub(r"\s*newer_than:\S+", "", q).strip()
+        raw = base64.urlsafe_b64decode((m.get("raw") or "") + "=" * (-len(m.get("raw") or "") % 4))
+        if term.startswith("has:"):
+            return mid in self.s.chip_hits.get(term, ())
+        if term == "in:drafts":
+            return "DRAFT" in (m.get("labelIds") or [])
+        if term == "in:chats":
+            return "CHAT" in (m.get("labelIds") or [])
+        if term.startswith("filename:"):
+            ext = term.split(":", 1)[1].encode()
+            return bool(_re.search(rb'filename="?[^"\r\n]*\.' + ext + rb'"?', raw, _re.I))
+        if term.startswith('"'):
+            return term.strip('"').encode().lower() in raw.lower()
+        return True
 
     def get(self, **kw):
         return _Call(self.s, "messages.get", self._get, kw)
@@ -1151,6 +1252,9 @@ class _GmailMessages:
         if id not in self.s.messages:
             raise http_error(404, "notFound", id)
         out = copy.deepcopy(self.s.messages[id])
+        if "sizeEstimate" not in out and out.get("raw"):      # the real API always reports it
+            r = out["raw"]
+            out["sizeEstimate"] = len(base64.urlsafe_b64decode(r + "=" * (-len(r) % 4)))
         if format in ("metadata", "minimal", "full"):
             # What the real API returns for these: the headers parsed out, not the
             # raw bytes. Enough for callers that ask only for a header.
@@ -1213,6 +1317,13 @@ class _GmailMessages:
             if i in self.s.messages:
                 self._modify(i, body)
         return {}
+
+    def delete(self, **kw):
+        return _Call(self.s, "messages.delete", lambda id, **_: self.s.messages.pop(id, None) and {}, kw)
+
+    def batchDelete(self, **kw):
+        return _Call(self.s, "messages.batchDelete", lambda body, **_: [
+            self.s.messages.pop(i, None) for i in body.get("ids", [])] and {}, kw)
 
     def untrash(self, **kw):
         return _Call(self.s, "messages.untrash", lambda id, **_: self._modify(
@@ -1346,6 +1457,73 @@ class _GmailSettings:
 
     def sendAs(self):
         return _GmailSendAs(self.s)
+
+    def updateVacation(self, **kw):
+        return _Call(self.s, "settings.updateVacation", self._update_vacation, kw)
+
+    def _update_vacation(self, body: dict, **_):
+        self.s.vacation_settings = copy.deepcopy(body)
+        return copy.deepcopy(body)
+
+    def updatePop(self, **kw):
+        return _Call(self.s, "settings.updatePop", self._update_pop, kw)
+
+    def _update_pop(self, body: dict, **_):
+        self.s.pop_settings = copy.deepcopy(body)
+        return copy.deepcopy(body)
+
+    def updateImap(self, **kw):
+        return _Call(self.s, "settings.updateImap", self._update_imap, kw)
+
+    def _update_imap(self, body: dict, **_):
+        self.s.imap_settings = copy.deepcopy(body)
+        return copy.deepcopy(body)
+
+    def forwardingAddresses(self):
+        return _GmailForwardingAddresses(self.s)
+
+    def delegates(self):
+        return _GmailDelegates(self.s)
+
+
+class _GmailForwardingAddresses:
+    def __init__(self, svc: FakeGmail):
+        self.s = svc
+
+    def list(self, **kw):
+        return _Call(self.s, "forwardingAddresses.list",
+                     lambda **_: {"forwardingAddresses": copy.deepcopy(self.s.forwarding_addresses)}, kw)
+
+    def create(self, **kw):
+        return _Call(self.s, "forwardingAddresses.create", self._create, kw)
+
+    def _create(self, body: dict, **_):
+        address = body["forwardingEmail"].lower()
+        if any(x.get("forwardingEmail", "").lower() == address for x in self.s.forwarding_addresses):
+            raise http_error(409, "duplicate", "forwarding address already exists")
+        item = {"forwardingEmail": body["forwardingEmail"], "verificationStatus": "accepted"}
+        self.s.forwarding_addresses.append(item)
+        return copy.deepcopy(item)
+
+
+class _GmailDelegates:
+    def __init__(self, svc: FakeGmail):
+        self.s = svc
+
+    def list(self, **kw):
+        return _Call(self.s, "delegates.list",
+                     lambda **_: {"delegates": copy.deepcopy(self.s.mailbox_delegates)}, kw)
+
+    def create(self, **kw):
+        return _Call(self.s, "delegates.create", self._create, kw)
+
+    def _create(self, body: dict, **_):
+        address = body["delegateEmail"].lower()
+        if any(x.get("delegateEmail", "").lower() == address for x in self.s.mailbox_delegates):
+            raise http_error(409, "duplicate", "delegate already exists")
+        item = {"delegateEmail": body["delegateEmail"]}
+        self.s.mailbox_delegates.append(item)
+        return copy.deepcopy(item)
 
 
 class _GmailSendAs:
@@ -1731,7 +1909,7 @@ class _CalEvents:
     def instances(self, **kw):
         return _Call(self.s, "events.instances", self._instances, kw)
 
-    def _instances(self, eventId: str, originalStart: Optional[str] = None, **_):
+    def _instances(self, calendarId: str, eventId: str, originalStart: Optional[str] = None, **_):  # required, as in Google's client
         master = self.s.store.get(eventId)
         if not master:
             raise http_error(404, "notFound", eventId)
@@ -1779,6 +1957,20 @@ class FakeMediaUpload:
         return len(self._data)
 
 
+class FakeIoUpload:
+    """Stands in for MediaIoBaseUpload (bytes already in memory)."""
+
+    def __init__(self, fd, mimetype: Optional[str] = None, chunksize: int = -1, resumable: bool = False):
+        self.mimetype, self.resumable = mimetype, resumable
+        self._data = fd.read()
+
+    def read_all(self) -> bytes:
+        return self._data
+
+    def size(self) -> int:
+        return len(self._data)
+
+
 class FakeDownloader:
     """Stands in for MediaIoBaseDownload: one chunk, straight to the handle."""
 
@@ -1806,6 +1998,12 @@ class FakeAuth:
         self.settings = settings
         self._svcs: dict[tuple, FakeService] = {}
         self.delegation_failures: set[tuple[str, str]] = set()
+
+    def _credentials(self, tenant: str, user: str):
+        """What the real AuthManager hands the Gmail verification quota (verify_gmail_quota.for_mailbox):
+        a delegated identity with a service-account email and the impersonated subject."""
+        from types import SimpleNamespace
+        return SimpleNamespace(service_account_email=f"fake-sa@{tenant}.test", _subject=user)
 
     def _get(self, tenant: str, api: str, user: str) -> FakeService:
         key = (tenant, api, user)
@@ -2450,8 +2648,26 @@ class _TaskLists:
     def list(self, **kw):
         return _Call(self.s, "tasklists.list", self._list, kw)
 
-    def _list(self, **_):
-        return {"items": [copy.deepcopy(v) for v in self.s.lists.values()]}
+    def _list(self, maxResults: int = 100, pageToken: Optional[str] = None, **_):
+        rows = list(self.s.lists.values())
+        start = int(pageToken or 0)
+        page = rows[start:start + maxResults]
+        out: dict[str, Any] = {"items": [copy.deepcopy(v) for v in page]}
+        if start + maxResults < len(rows):
+            out["nextPageToken"] = str(start + maxResults)
+        return out
+
+    def get(self, **kw):
+        return _Call(self.s, "tasklists.get", self._get, kw)
+
+    def _get(self, tasklist: str, **_):
+        if tasklist == "@default":
+            if self.s.lists:
+                return copy.deepcopy(next(iter(self.s.lists.values())))
+            raise http_error(404, "notFound", tasklist)
+        if tasklist not in self.s.lists:
+            raise http_error(404, "notFound", tasklist)
+        return copy.deepcopy(self.s.lists[tasklist])
 
     def insert(self, **kw):
         return _Call(self.s, "tasklists.insert", self._insert, kw)
@@ -2479,6 +2695,8 @@ class _Tasks:
 
     def _list(self, tasklist: str, updatedMin: Optional[str] = None,
               showDeleted: bool = False, **_):
+        if tasklist not in self.s.lists:
+            raise http_error(404, "notFound", tasklist)          # as the API does for a deleted list
         rows = self.s.task_store.get(tasklist, [])
         if not showDeleted:
             rows = [t for t in rows if not t.get("deleted")]

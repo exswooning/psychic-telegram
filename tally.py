@@ -42,7 +42,7 @@ from datetime import datetime, timezone
 from config import DEFERRED_TO_DMS
 
 SERVICES = ("drive_files", "drive_folders", "mail", "calendar", "contacts", "tasks")
-LABEL = {"drive_files": "Drive files", "drive_folders": "Drive folders", "mail": "Mail messages",
+LABEL = {"drive_files": "Drive files", "drive_folders": "Drive folders", "mail": "Emails",
          "calendar": "Calendar events", "contacts": "Contacts", "tasks": "Tasks"}
 # audit_log item_type -> the service whose count it explains
 SKIP_TYPE = {"file": "drive_files", "folder": "drive_folders", "message": "mail",
@@ -62,6 +62,17 @@ def classify(error: str) -> str:
 # every one can be exercised without a tenant.
 # ---------------------------------------------------------------------------
 _COMPARED = ("name", "mimeType", "size", "md5Checksum", "modifiedTime")
+
+
+def _next_page(response: dict, token: str | None, seen: set[str], operation: str) -> str | None:
+    """Return the next token, stopping an API that repeats a page forever."""
+    next_token = response.get("nextPageToken")
+    if not next_token:
+        return None
+    if next_token == token or next_token in seen:
+        raise RuntimeError(f"{operation} repeated a page token")
+    seen.add(next_token)
+    return next_token
 
 
 def count_drive(drive, settings, iter_items=None, keep: dict | None = None) -> tuple[int, int]:
@@ -131,7 +142,7 @@ NOT_GOOGLE_WELCOME = ('-from:mail-noreply@google.com -(from:notify-noreply@googl
 
 
 def count_mail(gmail, retry=lambda f: f, keep: set | None = None) -> int:
-    total, token = 0, None
+    total, token, seen = 0, None, set()
     while True:
         resp = retry(lambda t=token: gmail.users().messages().list(
             userId="me", maxResults=500, pageToken=t, includeSpamTrash=True, q=NOT_GOOGLE_WELCOME,
@@ -139,7 +150,7 @@ def count_mail(gmail, retry=lambda f: f, keep: set | None = None) -> int:
         total += len(resp.get("messages", []))
         if keep is not None:
             keep.update(m["id"] for m in resp.get("messages", []))
-        token = resp.get("nextPageToken")
+        token = _next_page(resp, token, seen, "Gmail message count")
         if not token:
             return total
 
@@ -148,20 +159,20 @@ def list_drafts(gmail, retry=lambda f: f) -> dict[str, str]:
     """draft id -> its message id. Drafts are recorded by DRAFT id (gmail_engine), and
     their messages also show in the message list, so mail is compared without them and
     drafts as drafts."""
-    out, token = {}, None
+    out, token, seen = {}, None, set()
     while True:
         resp = retry(lambda t=token: gmail.users().drafts().list(
             userId="me", maxResults=500, pageToken=t, includeSpamTrash=True,
             fields="drafts(id,message/id),nextPageToken").execute())()
         out.update({d["id"]: (d.get("message") or {}).get("id") for d in resp.get("drafts", [])})
-        token = resp.get("nextPageToken")
+        token = _next_page(resp, token, seen, "Gmail draft inventory")
         if not token:
             return out
 
 
 def count_calendar(cal, retry=lambda f: f, keep: set | None = None) -> int:
     # singleEvents=False, as the engine lists: a recurring meeting is one event.
-    total, token = 0, None
+    total, token, seen = 0, None, set()
     while True:
         resp = retry(lambda t=token: cal.events().list(
             calendarId="primary", maxResults=250, singleEvents=False, showDeleted=False,
@@ -169,30 +180,30 @@ def count_calendar(cal, retry=lambda f: f, keep: set | None = None) -> int:
         total += len(resp.get("items", []))
         if keep is not None:
             keep.update(e["id"] for e in resp.get("items", []))
-        token = resp.get("nextPageToken")
+        token = _next_page(resp, token, seen, "Calendar event count")
         if not token:
             return total
 
 
 def count_contacts(people, retry=lambda f: f, keep: set | None = None) -> int:
-    total, token = 0, None
+    total, token, seen = 0, None, set()
     while True:
         resp = retry(lambda t=token: people.people().connections().list(
             resourceName="people/me", pageSize=200, pageToken=t, personFields="metadata").execute())()
         total += len(resp.get("connections", []))
         if keep is not None:
             keep.update(c["resourceName"] for c in resp.get("connections", []))
-        token = resp.get("nextPageToken")
+        token = _next_page(resp, token, seen, "Contacts count")
         if not token:
             return total
 
 
 def count_tasks(tasks, retry=lambda f: f, keep: set | None = None) -> int:
-    total, ltok = 0, None
+    total, ltok, seen_lists = 0, None, set()
     while True:
         lists = retry(lambda t=ltok: tasks.tasklists().list(maxResults=100, pageToken=t).execute())()
         for tl in lists.get("items", []):
-            tok = None
+            tok, seen_tasks = None, set()
             while True:
                 resp = retry(lambda t=tok, i=tl["id"]: tasks.tasks().list(
                     tasklist=i, maxResults=100, pageToken=t, showCompleted=True, showHidden=True,
@@ -200,10 +211,10 @@ def count_tasks(tasks, retry=lambda f: f, keep: set | None = None) -> int:
                 total += len(resp.get("items", []))
                 if keep is not None:
                     keep.update(x["id"] for x in resp.get("items", []))
-                tok = resp.get("nextPageToken")
+                tok = _next_page(resp, tok, seen_tasks, "Task count")
                 if not tok:
                     break
-        ltok = lists.get("nextPageToken")
+        ltok = _next_page(lists, ltok, seen_lists, "Task-list inventory")
         if not ltok:
             return total
 
@@ -236,7 +247,8 @@ def count_side(auth, settings, side: str, user: str, retry=lambda f: f,
     if ids is not None:
         try:
             ids["drafts"] = list_drafts(pick("gmail")(user), retry)
-        except Exception:      # noqa: BLE001 - drafts then go unchecked, mail still is
+        except Exception as exc:      # noqa: BLE001 - drafts then go unchecked, mail still is
+            out["errors"]["drafts"] = f"{type(exc).__name__}: {str(exc)[:160]}"
             log.debug("drafts could not be listed", exc_info=True)
     return out
 
@@ -447,8 +459,17 @@ def run(settings, db, auth, *, users: list[str] | None = None, sample_users: int
             if done[0] % 10 == 0 or done[0] == len(pairs):
                 progress(f"tally: [{done[0]}/{len(pairs)}] users counted")
 
+    def tracked_one(pair):
+        import metrics
+        configured = max(1, workers)
+        metrics.METRICS.worker_started(configured)
+        try:
+            return one(pair)
+        finally:
+            metrics.METRICS.worker_finished()
+
     with futures.ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
-        list(pool.map(one, pairs))
+        list(pool.map(tracked_one, pairs))
     counts = aggregate(sorted(rows, key=lambda r: r["user"]))
 
     deep_agg = None
@@ -528,7 +549,8 @@ def tally_user(auth, settings, db, source_user: str, target_user: str,
         payload["carriedIn"] = row["carried"]
         payload["driveItems"] = compare_drive(
             src_items, tgt_items, db.mapped_ids(source_user, ("file", "folder")))
-    payload["items"] = compare_services(db, source_user, src_ids, tgt_ids)
+    payload["items"] = compare_services(db, source_user, src_ids, tgt_ids,
+                                         row["source"]["errors"], row["target"]["errors"])
     return payload
 
 
@@ -545,16 +567,24 @@ def carried_in(db, source_user: str, owned: dict) -> dict[str, int]:
     return out
 
 
-def compare_services(db, source_user: str, src_ids: dict, tgt_ids: dict) -> dict:
+def compare_services(db, source_user: str, src_ids: dict, tgt_ids: dict,
+                     source_errors: dict | None = None, target_errors: dict | None = None) -> dict:
     """compare_ids for every service both sides could list. A recorded skip is not a
     miss; a draft's message is not compared as mail (drafts are, as drafts)."""
     rows = db.conn.execute(
         "SELECT item_id FROM audit_log WHERE source_user=? AND status LIKE 'SKIPPED%'",
         (source_user,)).fetchall()
     skipped = {r[0] for r in rows}
+    draft_errors = {}
+    if (source_errors or {}).get("drafts"):
+        draft_errors["source"] = (source_errors or {})["drafts"]
+    if (target_errors or {}).get("drafts"):
+        draft_errors["target"] = (target_errors or {})["drafts"]
     src_draft_msgs = set((src_ids.get("drafts") or {}).values())
     tgt_draft_msgs = set((tgt_ids.get("drafts") or {}).values())
     out = {}
+    if draft_errors:
+        out["drafts"] = {"incomplete": True, "errors": draft_errors}
     for svc, types in ITEM_TYPES.items():
         if svc not in src_ids or svc not in tgt_ids:
             continue

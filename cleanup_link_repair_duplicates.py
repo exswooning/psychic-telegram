@@ -77,7 +77,12 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     total_extra = total_trashed = 0
+    import domain_guard
     for user in users:
+        why = domain_guard.protected_subject(user.replace(s.source_domain, s.target_domain))
+        if why:
+            print(f"\n{user}: skipped -- {why}")
+            continue
         repaired = [r[0] for r in db.conn.execute(
             "SELECT item_id FROM audit_log WHERE source_user=? AND "
             "item_type='link_repair'", (user,))]

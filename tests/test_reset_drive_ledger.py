@@ -48,6 +48,18 @@ def _seed(db):
 
 
 class TestResetDriveLedger:
+    def test_repair_records_for_the_reset_service_are_cleared(self, db):
+        """c10's quarantine records outlived the reset and the next check chased files gone with it (#268)."""
+        _seed(db)
+        with db.write() as conn:
+            conn.execute("CREATE TABLE IF NOT EXISTS finding_repair_actions (source_user TEXT, service TEXT, "
+                         "item_id TEXT, state TEXT, detail TEXT, checked_at TEXT)")
+            conn.executemany("INSERT INTO finding_repair_actions (source_user, service, item_id, state) VALUES (?,?,?,?)",
+                             [(SRC, "drive-duplicate", "q1", "QUARANTINED"), (SRC, "gmail-label", "g1", "DONE")])
+        reset_drive_ledger.reset_drive_ledger(db, SRC)
+        left = db.conn.execute("SELECT service FROM finding_repair_actions").fetchall()
+        assert [r[0] for r in left] == ["gmail-label"]
+
     def test_drive_mapping_rows_are_cleared(self, db):
         _seed(db)
         reset_drive_ledger.reset_drive_ledger(db, SRC)
@@ -310,6 +322,9 @@ class TestSideTables:
             "mirror_cycles",      # records of what the mirror did and what a person
             "mirror_deletions",   # decided: nothing reads them to decide whether an
             "mirror_conflicts",   # item still needs migrating, like repair_runs
+            "run_records",    # not per-user: a migrate run's phase record. A reset
+            "run_phases",     # does not undo what a run did; a phase called DONE
+                              # is only skipped when the per-user ledger agrees
             "rate_limiter_ceiling",  # not per-user at all: one row per TENANT
                               # SIDE ('source'/'target'), what a run proved
                               # about Google's own project-wide Drive quota.
@@ -496,3 +511,14 @@ class TestATallyDoesNotOutliveTheItemsItDescribes:
         db.save_user_tally("v@a.com", "v@b.com", 1.0, {"services": {}})
         r.reset_service_ledger(db, "u@a.com", ("drive",))
         assert [t["user"] for t in db.user_tallies()] == ["v@a.com"]
+
+
+def test_a_reset_forgets_the_unverified_objects_it_removed(db, settings, identity):
+    """verification_unverified rows describe items a reset declares gone: they go with them."""
+    import verify_resilience as vr
+    vr.UnverifiedStore(db).record(SRC, "drive", "f1", "t1", "x", vr.Failure(
+        vr.UNVERIFIED_TRANSIENT, 503, 2, "docs", "boom"))
+    assert vr.UnverifiedStore(db).pending(SRC, "drive")
+    import reset_drive_ledger as R
+    R.reset_service_ledger(db, SRC, ("drive",))
+    assert vr.UnverifiedStore(db).pending(SRC, "drive") == []

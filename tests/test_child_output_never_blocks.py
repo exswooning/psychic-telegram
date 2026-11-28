@@ -58,13 +58,12 @@ class TestNoLauncherUsesAnUnreadPipe:
         import webui
         fh = api_server._child_output("delta", 7)
         try:
-            assert os.path.abspath(fh.name) == \
-                os.path.abspath(webui.job_log_path(7, "delta"))
+            # the run's own file; the path the Logs page knows points at it
+            assert os.path.realpath(fh.name) == os.path.realpath(webui.job_log_path(7, "delta"))
         finally:
             fh.close()
 
-    def test_it_appends_rather_than_erasing_the_last_run(self, tmp_path,
-                                                         monkeypatch):
+    def test_each_run_keeps_its_own_file_and_the_last_run_is_not_erased(self, tmp_path, monkeypatch):
         import webui
         monkeypatch.setattr(webui, "job_result_path",
                             lambda a, n: os.path.join(
@@ -76,11 +75,11 @@ class TestNoLauncherUsesAnUnreadPipe:
         second = api_server._child_output("delta", 7)
         second.write(b"run two\n")
         second.close()
-        body = open(os.path.join(str(tmp_path), "logs", "jobs", "7",
-                                 "delta.log"), "rb").read()
-        assert b"run one" in body and b"run two" in body
-        # Each launch marks where its own run begins, for the Jobs page's log.
-        assert body.count(b"=== run started ") == 2 and body.index(b"run one") < body.rindex(b"=== run")
+        folder = os.path.join(str(tmp_path), "logs", "jobs", "7")
+        body = open(os.path.join(folder, "delta.log"), "rb").read()      # the path readers know: the newest run
+        assert b"run two" in body and b"run one" not in body and body.count(b"=== run started ") == 1
+        kept = [open(os.path.join(folder, "runs", n), "rb").read() for n in os.listdir(os.path.join(folder, "runs"))]
+        assert len(kept) == 2 and any(b"run one" in k for k in kept)
 
     def test_an_accountless_job_still_gets_a_home(self, tmp_path, monkeypatch):
         fh = api_server._child_output("seed", None)
@@ -94,7 +93,7 @@ class TestNoLauncherUsesAnUnreadPipe:
         fh = api_server._child_output("../../etc/passwd", 7)
         try:
             assert os.path.dirname(os.path.abspath(fh.name)).endswith(
-                os.path.join("logs", "jobs", "7"))
+                os.path.join("logs", "jobs", "7", "runs"))
         finally:
             fh.close()
 

@@ -9,7 +9,8 @@ import { EDGES, FRAMES, NODES } from './model'
 // The repo's files, listed at build time (no Node fs, so no extra typings).
 // Widen this if a node ever cites a file somewhere else.
 const REPO = [
-  ...Object.keys(import.meta.glob(['../../../*.py', '../../../Caddyfile', '../../../data-generator/*.py']))
+  ...Object.keys(import.meta.glob(['../../../*.py', '../../../Caddyfile', '../../../data-generator/*.py',
+                                    '../../../monitor/*']))
     .map((p) => p.replace('../../../', '')),
   // Inside this project, so globbed from here rather than via the repo root.
   ...Object.keys(import.meta.glob('../pages/*.tsx'))
@@ -65,7 +66,7 @@ describe('the system model', () => {
   it('points pages only at routes the app has', () => {
     const routes = ['/wizard', '/wizard?mode=seed', '/scope', '/identities', '/settings', '/jobs', '/nodes',
                     '/services', '/verification', '/errors', '/report', '/mission-control', '/metrics',
-                    '/activity', '/tests']
+                    '/activity', '/tests', '/one-to-one']
     for (const n of NODES) if (n.page) expect(routes, `${n.id} -> ${n.page}`).toContain(n.page)
   })
 

@@ -1,0 +1,130 @@
+"""The parity gate: PARITY only when every user's every service is identical or accepted."""
+import sqlite3
+
+import parity_gate as G
+
+U1, U2 = "a@s.test", "b@s.test"
+
+
+def _ledger(verdicts, findings=(), audit=()):
+    c = sqlite3.connect(":memory:")
+    c.executescript("""
+        CREATE TABLE identity_map(source_email TEXT, entity_type TEXT);
+        CREATE TABLE user_verification(source_user TEXT, service TEXT, verdict TEXT, verified_at TEXT, payload TEXT);
+        CREATE TABLE mail_reconciliation_items(source_user TEXT, checked_at TEXT);
+        CREATE TABLE verification_repair_queue(source_user TEXT, service TEXT, category TEXT, item_id TEXT,
+            detail TEXT, issue TEXT, state TEXT);
+        CREATE TABLE audit_log(source_user TEXT, item_type TEXT, status TEXT, error_message TEXT, timestamp TEXT);""")
+    users = {u for u, _, _ in verdicts}
+    c.executemany("INSERT INTO identity_map VALUES(?, 'user')", [(u,) for u in users])
+    c.executemany("INSERT INTO user_verification VALUES(?,?,?, '2026-11-15T10:00:00Z', ?)",
+                  [(u, s, v, '{"extras": [1, 2]}') for u, s, v in verdicts])
+    c.executemany("INSERT INTO verification_repair_queue VALUES(?,?,?,?,?,?, 'OPEN')", findings)
+    c.executemany("INSERT INTO audit_log VALUES(?,?,?,?, '2026-11-15T09:00:00Z')", audit)
+    return c
+
+
+def _all(user, verdict="IDENTICAL", **override):
+    return [(user, s, override.get(s, verdict)) for s in G.SERVICES]
+
+
+def test_every_service_identical_is_parity():
+    r = G.assess(_ledger(_all(U1) + _all(U2)))
+    assert r["verdict"] == "PARITY" and r["usersAtParity"] == 2
+
+
+def test_a_service_never_checked_is_unverified_never_a_pass():
+    v = [x for x in _all(U1) if x[1] != "tasks"]
+    assert G.assess(_ledger(v))["verdict"] == "UNVERIFIED"
+    assert G.assess(_ledger(_all(U1, tasks="INCOMPLETE")))["verdict"] == "UNVERIFIED"
+
+
+def test_an_unexplained_difference_fails_and_is_named():
+    r = G.assess(_ledger(_all(U1, drive="DIFFERENCES"),
+                         [(U1, "drive", "differences", "f1", '{"diffs": ["something odd"]}', "unclassified")]))
+    assert r["verdict"] == "NOT_PARITY"
+    assert r["differences"][0]["kind"] == "unclassified" and r["differences"][0]["how"] == "person"
+
+
+def test_a_difference_with_no_finding_is_named_from_the_saved_check():
+    r = G.assess(_ledger(_all(U1, gmail="DIFFERENCES")))
+    assert r["verdict"] == "NOT_PARITY" and r["differences"][0]["kind"] == "gmail.extras"
+    assert r["differences"][0]["detail"] == "2 in the saved check"
+
+
+def test_a_check_older_than_the_last_change_is_stale_never_a_pass():
+    c = _ledger(_all(U1))
+    c.execute("INSERT INTO mail_reconciliation_items VALUES(?, '2026-11-15T11:00:00Z')", (U1,))
+    r = G.assess(c)
+    assert r["verdict"] == "UNVERIFIED" and r["unverified"][0]["verdict"].startswith("STALE")
+    assert [u["service"] for u in r["unverified"]] == ["gmail"], "a mail change leaves the other services' checks standing"
+
+
+def test_a_change_nobody_can_place_makes_every_service_stale():
+    c = _ledger(_all(U1))
+    c.execute("INSERT INTO audit_log VALUES(?, 'mystery', 'SUCCESS', '', '2026-11-15T11:00:00Z')", (U1,))
+    assert len(G.assess(c)["unverified"]) == len(G.SERVICES)
+
+
+def test_a_kind_no_api_can_carry_is_accepted():
+    r = G.assess(_ledger(_all(U1, drive="DIFFERENCES"),
+                         [(U1, "drive", "differences", "f1", "relinked", "drive.form_relinked")]))
+    assert r["verdict"] == "PARITY" and len(r["accepted"]) == 1
+
+
+def test_the_operators_accepted_difference_passes():
+    accepted = [{"sourceUser": U1, "item": "Form image X", "why": "operator accepted"}]
+    r = G.assess(_ledger(_all(U1, drive="DIFFERENCES"),
+                         [(U1, "drive", "differences", "f1", "Form item 1 (Form image X) missing", "unclassified")]),
+                 accepted)
+    assert r["verdict"] == "PARITY" and r["accepted"][0]["why"] == "operator accepted"
+
+
+def test_a_repair_owed_fails_but_says_bitport_does_it():
+    r = G.assess(_ledger(_all(U1, gmail="DIFFERENCES"),
+                         [(U1, "gmail", "differences", "m1", "labels added on the target: ['INBOX']", "gmail.labels_added")]))
+    assert r["verdict"] == "NOT_PARITY" and r["differences"][0]["how"] == "auto"
+
+
+def test_explained_remainder_is_listed_and_does_not_fail():
+    r = G.assess(_ledger(_all(U1), audit=[(U1, "acl", "SKIPPED_UNMAPPED_IDENTITY", "orphaned")]), dms_failed=17)
+    assert r["verdict"] == "PARITY"
+    assert {x["status"] for x in r["remainder"]} == {"SKIPPED_UNMAPPED_IDENTITY", "DMS_FAILED"}
+
+
+def test_a_failed_item_fails_the_gate():
+    r = G.assess(_ledger(_all(U1), audit=[(U1, "file", "FAILED", "boom")]))
+    assert r["verdict"] == "NOT_PARITY"
+
+
+def test_the_report_reads_plainly():
+    text = G.report(G.assess(_ledger(_all(U1, drive="DIFFERENCES"),
+                                     [(U1, "drive", "differences", "f1", "x", "drive.grant_missing")])))
+    assert text.startswith("PARITY GATE: NOT_PARITY") and "Bitport repairs it" in text
+
+
+def test_record_writes_the_verdict_and_opens_then_closes_an_incident(tmp_path, monkeypatch):
+    import run_watch
+    monkeypatch.setattr(G, "HERE", tmp_path)
+    opened, closed = [], []
+    monkeypatch.setattr(run_watch, "open_incident", lambda **kw: opened.append(kw) or (1, True))
+    monkeypatch.setattr(run_watch, "list_incidents", lambda *a, **k: [{"id": 9, "fingerprint": "parity_gate:3"}])
+    monkeypatch.setattr(run_watch, "resolve", lambda i, why: closed.append(i))
+    db = tmp_path / "ledger.db"
+    src = _ledger(_all(U1, drive="DIFFERENCES"), [(U1, "drive", "differences", "f1", "x", "unclassified")])
+    src.commit(); src.backup(dst := sqlite3.connect(db)); dst.close()
+    assert G.record(3, str(db))["verdict"] == "NOT_PARITY"
+    assert opened and opened[0]["fingerprint"] == "parity_gate:3" and not closed
+    assert (tmp_path / "logs" / "reports" / "3" / "parity-gate-latest.json").exists()
+    src2 = _ledger(_all(U1)); src2.commit(); db.unlink(); src2.backup(dst := sqlite3.connect(db)); dst.close()
+    assert G.record(3, str(db))["verdict"] == "PARITY" and closed == [9]
+
+
+def test_every_audit_type_the_code_writes_names_its_service():
+    """An unplaced type reads as a change to every service (dms_duplicate made 5 directory checks STALE)."""
+    import glob, os, re
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    written = set()
+    for f in glob.glob(os.path.join(root, "*.py")):
+        written |= set(re.findall(r"log_audit\(\s*[^,]+,\s*[^,]+,\s*\"([a-z_]+)\"", open(f, encoding="utf-8").read()))
+    assert written and not written - set(G.SERVICE_OF) - G.EVERY_SERVICE, sorted(written - set(G.SERVICE_OF) - G.EVERY_SERVICE)

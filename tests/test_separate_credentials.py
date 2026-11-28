@@ -111,3 +111,17 @@ class TestSeparate:
         import scope_guard
         monkeypatch.setattr(scope_guard, "_console_login", lambda s, t: {})
         assert sc.separate(3) == 2
+
+
+def test_the_seed_entry_is_probed_with_the_seed_key_not_the_accounts_migrate_key(monkeypatch):
+    """18 Nov 2026: dataclasses.replace re-ran Settings.__post_init__, which reloaded the account's migrate key,
+    so the seed key's grant always read 'not delegated' and was overwritten on every run."""
+    import verify_scopes
+    import separate_credentials as sc
+    from config import Settings
+    seen = []
+    monkeypatch.setattr(verify_scopes, "verify", lambda st, side, scopes: seen.append(st.source_sa_key) or [])
+    st = Settings()
+    monkeypatch.setattr(Settings, "__post_init__", lambda self: setattr(self, "source_sa_key", "migrate.json"))
+    sc._probe(st, "seed.json", ["s"])
+    assert seen == ["seed.json"]

@@ -36,6 +36,13 @@ def box(tmp_path):
         # No restart left unfinished by an earlier deploy (sync_vps.sh RESTART_PENDING).
         'if [[ "$*" == *"test -f"*"RESTART_PENDING"* ]]; then exit 1; fi\n'
         'echo "ssh: $*" >> "$FAKE_LOG"; exit 0\n')
+    (bindir / "ps").write_text(
+        '#!/usr/bin/env bash\n'
+        'if [[ -n "${FAKE_PS_MARKER:-}" && -f "$FAKE_PS_MARKER" ]]; then\n'
+        '  printf "%s\\n" "$FAKE_PS_LINE"\n'
+        'elif [[ -n "${FAKE_PS_PID:-}" ]] && kill -0 "$FAKE_PS_PID" 2>/dev/null; then\n'
+        '  printf "%s\\n" "$FAKE_PS_LINE"\n'
+        'fi\n')
     for f in bindir.iterdir():
         f.chmod(f.stat().st_mode | stat.S_IEXEC)
     ledger = dest / "data" / "accounts" / "9" / "migration.db"
@@ -45,7 +52,7 @@ def box(tmp_path):
 
     def deploy(would="api_server.py", **env):
         log.write_text("")
-        e = {**os.environ, "PATH": f"{bindir}:{os.environ['PATH']}", "FAKE_LOG": str(log),
+        e = {**os.environ, "SKIP_GATE": "1", "SKIP_UI_BUILD": "1", "PATH": f"{bindir}:{os.environ['PATH']}", "FAKE_LOG": str(log),
              "FAKE_WOULD": would, **{k: str(v) for k, v in env.items()}}
         r = subprocess.run(["bash", SCRIPT, "root@box", str(dest)], capture_output=True,
                            text=True, env=e, cwd=ROOT)
@@ -89,10 +96,12 @@ def test_a_running_job_refuses(box):
     p = subprocess.Popen([sys.executable, str(job)])
     try:
         time.sleep(0.5)
-        r, log = box()
+        r, log = box(FAKE_PS_PID=p.pid,
+                     FAKE_PS_LINE=f"{p.pid} {sys.executable} {job}")
         assert r.returncode == 3 and "tally.py" in r.stderr
     finally:
         p.kill()
+        p.wait()
 
 
 def test_the_override_deploys_anyway(box):
@@ -110,24 +119,50 @@ def test_a_frontend_only_deploy_is_never_refused(box):
 def _mirror_cycle(box, seconds):
     """A stand-in `main.py ... mirror` process, as the busy check sees one."""
     fake = box.tmp / "main.py"
-    fake.write_text(f"import time\ntime.sleep({seconds})\n")
-    return subprocess.Popen([sys.executable, str(fake), "--account-id", "9", "mirror"])
+    marker = box.tmp / "mirror.alive"
+    fake.write_text(f"import pathlib, time\np=pathlib.Path({str(marker)!r})\np.touch()\ntime.sleep({seconds})\np.unlink(missing_ok=True)\n")
+    process = subprocess.Popen([sys.executable, str(fake), "--account-id", "9", "mirror"])
+    for _ in range(100):
+        if marker.exists():
+            break
+        time.sleep(0.01)
+    return process, marker
 
 
 def test_a_mirror_cycle_alone_is_waited_out_not_refused(box):
-    p = _mirror_cycle(box, 4)
+    p, marker = _mirror_cycle(box, 4)
     try:
-        r, log = box(MIRROR_WAIT_SEC=60)
+        r, log = box(MIRROR_WAIT_SEC=60, FAKE_PS_MARKER=marker,
+                     FAKE_PS_LINE=f"{p.pid} {sys.executable} {box.tmp / 'main.py'} --account-id 9 mirror")
     finally:
         p.kill()
+        p.wait()
     assert r.returncode == 0, r.stderr
     assert "waiting for it to finish" in r.stdout and "systemctl restart" in log
 
 
 def test_a_mirror_cycle_that_outlasts_the_wait_still_refuses(box):
-    p = _mirror_cycle(box, 60)
+    p, marker = _mirror_cycle(box, 60)
     try:
-        r, log = box(MIRROR_WAIT_SEC=0)
+        r, log = box(MIRROR_WAIT_SEC=0, FAKE_PS_MARKER=marker,
+                     FAKE_PS_LINE=f"{p.pid} {sys.executable} {box.tmp / 'main.py'} --account-id 9 mirror")
     finally:
         p.kill()
+        p.wait()
     assert r.returncode == 3 and "mirror" in r.stderr and "rsync:" not in log
+
+
+def test_a_running_dms_refuses_before_copying_the_pinned_campaign_baseline(box):
+    """The fresh campaign pins the actual Python baseline across all phases,
+    including the local DMS controller; do not replace it while it is active."""
+    job = box.tmp / "dms_migrate.py"
+    job.write_text("import time; time.sleep(30)\n")
+    p = subprocess.Popen([sys.executable, str(job)])
+    try:
+        time.sleep(0.5)
+        r, log = box(FAKE_PS_PID=p.pid,
+                     FAKE_PS_LINE=f"{p.pid} {sys.executable} {job}")
+        assert r.returncode == 3 and "REFUSING" in r.stderr
+        assert "rsync:" not in log and "systemctl restart" not in log
+    finally:
+        p.kill()

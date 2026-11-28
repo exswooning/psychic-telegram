@@ -153,6 +153,7 @@ const AdminAccounts: React.FC = () => {
                     <Switch
                       size="small"
                       checked={a.subscription_active}
+                      inputProps={{ 'aria-label': `Subscription active for ${a.email}` }}
                       onClick={() => setPending({
                         id: a.id, email: a.email,
                         kind: 'subscription', active: !a.subscription_active,
@@ -163,6 +164,7 @@ const AdminAccounts: React.FC = () => {
                     <Switch
                       size="small"
                       checked={a.seed_enabled}
+                      inputProps={{ 'aria-label': `Seeding allowed for ${a.email}` }}
                       onClick={() => setPending({
                         id: a.id, email: a.email,
                         kind: 'seed', enabled: !a.seed_enabled,
@@ -269,7 +271,7 @@ const PairLimit: React.FC<{ accountId: number; limit: number }> = ({ accountId, 
   const n = Number(value)
   return (
     <TextField size="small" type="number" value={value} sx={{ width: 80 }}
-               inputProps={{ min: 1, max: 1000, 'data-testid': `pair-limit-${accountId}` }}
+               inputProps={{ min: 1, max: 1000, 'aria-label': `Migrations allowed for account ${accountId}`, 'data-testid': `pair-limit-${accountId}` }}
                onChange={(e) => setValue(e.target.value)}
                onBlur={() => {
                  if (Number.isInteger(n) && n >= 1 && n !== saved) {

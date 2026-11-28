@@ -20,7 +20,11 @@ export function summarizeService(users: User[], key: ServiceKey, checks: Verific
   const attention = rows.some(r => problemStatuses.includes(r.progress.status)) || findings.length > 0
   const complete = rows.length > 0 && rows.every(r => ['completed', 'verified'].includes(r.progress.status))
   const status = !rows.length ? 'Not reported' : attention ? 'Needs review' : complete ? 'Copied as reported' : rows.some(r => r.progress.status === 'in_progress' || r.progress.status === 'retrying') ? 'In progress' : copied ? 'Partly copied' : 'Not started'
-  return { key, rows, copied, total, attention, complete, status, findings }
+  // Why a service reads "Partly copied" when its counts already match: the status follows the
+  // people (are they all finished?), the counts only what has been written so far.
+  const done = rows.filter(r => ['completed', 'verified'].includes(r.progress.status)).length
+  const reason = rows.length && status === 'Partly copied' ? `${done} of ${rows.length} ${rows.length === 1 ? 'person' : 'people'} finished` : ''
+  return { key, rows, copied, total, attention, complete, status, findings, reason }
 }
 /** A ledger progress figure, never a fidelity or storage parity score. */
 export function ledgerProgress(users: User[]): number | null {

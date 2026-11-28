@@ -132,6 +132,23 @@ class TestTallyNow:
                                             "users": ["ann@a.com", "bob@a.com"]})
         a = seen["argv"]
         assert [a[i + 1] for i, x in enumerate(a) if x == "--user"] == ["ann@a.com", "bob@a.com"]
+        assert seen["then"] == "tally_fix@ann@a.com,bob@a.com"
+
+    def test_it_can_count_selected_users_without_autofix(self, cp, monkeypatch):
+        aid = _signup(cp)
+        seen = self._capture(monkeypatch)
+        r = cp.post("/api/v2/tally/run", json={"reason": "check only", "account_id": aid,
+                                               "users": ["  Ann@A.COM  "], "repair": False})
+        assert r.status_code == 200 and r.json()["ok"] is True
+        assert seen["argv"][-2:] == ["--user", "Ann@A.COM"]
+        assert seen["then"] is None
+
+    @pytest.mark.parametrize("value", ["", "  ", "ann@a.com,bob@a.com"])
+    def test_it_refuses_blank_and_comma_joined_user_entries(self, cp, monkeypatch, value):
+        aid = _signup(cp)
+        seen = self._capture(monkeypatch)
+        r = cp.post("/api/v2/tally/run", json={"reason": "check only", "account_id": aid, "users": [value]})
+        assert r.status_code == 400 and not seen
 
     def test_it_needs_a_reason(self, cp, monkeypatch):
         aid = _signup(cp)

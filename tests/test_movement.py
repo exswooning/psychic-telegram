@@ -1,11 +1,11 @@
 """How a migration is moving, for the Jobs detail: the pass, each service's method as the
-running process has it (a government source always reads download_upload), and counts."""
+running process has it (a government source reads server_side by default, download_upload when launched so), and counts."""
 import api_server
 
 
 def test_movement_reads_the_pass_the_methods_and_the_counts(db, monkeypatch):
     monkeypatch.setenv("SOURCE_DOMAIN", "dharan.gov.np")
-    monkeypatch.setenv("TRANSFER_MODE", "server_side")
+    monkeypatch.setenv("TRANSFER_MODE", "download_upload")
     monkeypatch.setattr(api_server.job_admission, "list_active", lambda: [])
     monkeypatch.setattr(api_server, "_job_log_lines", lambda *a, **k: [
         "=== run started old", "PASS 3/3 pid=1: calendar", "=== run started 2026-10-19T13:29:41Z: migrate ===",

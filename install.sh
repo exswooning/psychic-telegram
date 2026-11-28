@@ -24,7 +24,18 @@ set -euo pipefail
 BOLD=$(tput bold 2>/dev/null || true); DIM=$(tput dim 2>/dev/null || true)
 GREEN=$(tput setaf 2 2>/dev/null || true); RED=$(tput setaf 1 2>/dev/null || true)
 YELLOW=$(tput setaf 3 2>/dev/null || true); RESET=$(tput sgr0 2>/dev/null || true)
-step() { echo; echo "${BOLD}==> $*${RESET}"; }
+CURRENT_STEP="starting"
+step() { CURRENT_STEP="$*"; echo; echo "${BOLD}==> $*${RESET}"; }
+# A step that fails without saying why used to end the install in silence (a first-time user, 14 Nov 2026).
+# Only speak when -e is on: best-effort steps run with `set +e` and must stay quiet when a command inside them fails.
+on_unexpected_stop() {
+  case $- in *e*) ;; *) return 0 ;; esac
+  echo
+  echo "${RED}The installer stopped unexpectedly during: ${CURRENT_STEP}.${RESET}"
+  echo "  Nothing is broken. Run the same command again: it is safe to repeat and carries on where it stopped."
+  echo "  If it stops here again, send the last 30 lines of ${LOG:-/var/log/bitport-install.log} to whoever supports you."
+}
+trap on_unexpected_stop ERR
 ok()   { echo "  ${GREEN}✓${RESET} $*"; }
 warn() { echo "  ${YELLOW}!${RESET} $*"; }
 die()  { echo "  ${RED}✗ $*${RESET}" >&2; exit 1; }
@@ -56,8 +67,25 @@ runnet() {
 # dropped connection can't take the install down with it.
 ORIG_NONINTERACTIVE="${NONINTERACTIVE:-0}"
 
+# Long steps print nothing of their own (pip runs quiet): say something every 30 s so a slow connection never
+# looks like a frozen installer. Account of a first install over a slow link: 40 minutes of an unchanged screen.
+with_heartbeat() {
+  local what="$1"; shift
+  local start=$SECONDS beat rc=0
+  ( while sleep 30; do echo "  ${DIM}... $what: still working, $(( (SECONDS - start) / 60 )) min so far (a slow connection can take 30 min or more)${RESET}"; done ) &
+  beat=$!
+  # "|| rc=$?": under set -e a failing command would end the script HERE, before the heartbeat is stopped,
+  # leaving it printing for ever and the install dead with no message.
+  "$@" || rc=$?
+  kill "$beat" 2>/dev/null || true
+  wait "$beat" 2>/dev/null || true
+  return $rc
+}
 # Is TCP port $1 free on this host right now?
-port_free() { ! ss -tln 2>/dev/null | awk '{print $4}' | grep -qE "[.:]$1\$"; }
+# A port held only by Caddy counts as free: Caddy is ours (apt starts it on :80 with its own welcome page
+# the moment it is installed) and this installer replaces its settings just below. Without this the
+# installer saw its own Caddy as a stranger, moved Bitport to port 81 and told the user to type ":81".
+port_free() { ! ss -tlnp 2>/dev/null | awk '{print $4, $0}' | grep -E "[.:]$1 " | grep -qv 'users:(("caddy"'; }
 # First free port at-or-after $1 (checked up to +50). Ports get squatted by
 # whatever else runs on a shared box -- asuswb had SABnzbd already sitting on
 # 8080 and Nextcloud's own Apache already on 80, silently breaking Bitport's
@@ -111,12 +139,14 @@ ask() {  # ask VAR "prompt" "default"
 # to a string printed only as "(generated)". That turns "safe to re-run",
 # which this installer promises at the top, into a lockout.
 PASSWORD_GIVEN=0
+PASSWORD_GENERATED="${PASSWORD_GENERATED:-0}"   # the first, interactive run hands this to the background run
 ask_secret() {  # ask_secret VAR "prompt"
   local var="$1" prompt="$2" cur="${!1:-}"
   if [ -n "$cur" ]; then PASSWORD_GIVEN=1; echo "  $prompt: ${DIM}(from env)${RESET}"; return; fi
-  if [ "${NONINTERACTIVE:-0}" = 1 ]; then printf -v "$var" '%s' "$(openssl rand -base64 12)"; echo "  $prompt: ${DIM}(generated)${RESET}"; return; fi
-  local reply; read -r -s -p "  $prompt (blank = generate): " reply || true; echo
+  if [ "${NONINTERACTIVE:-0}" = 1 ]; then printf -v "$var" '%s' "$(openssl rand -base64 12)"; PASSWORD_GENERATED=1; echo "  $prompt: ${DIM}(generated -- shown once, at the end)${RESET}"; return; fi
+  local reply; read -r -s -p "  $prompt (press Enter to have one made for you): " reply || true; echo
   [ -n "$reply" ] && PASSWORD_GIVEN=1
+  [ -z "$reply" ] && PASSWORD_GENERATED=1
   printf -v "$var" '%s' "${reply:-$(openssl rand -base64 12)}"
 }
 
@@ -167,12 +197,17 @@ if [ "$ORIG_NONINTERACTIVE" != 1 ] && [ "$DRY_RUN" != 1 ] && [ "${BITPORT_DAEMON
   echo "connection can't interrupt the install -- this terminal is free to close."
   echo "  Log:    $LOG"
   echo "  Follow: tail -f $LOG"
-  export INSTALL_DIR BITPORT_DOMAIN BITPORT_ADMIN_EMAIL BITPORT_ADMIN_PASSWORD ENABLE_BROWSER
+  export INSTALL_DIR BITPORT_DOMAIN BITPORT_ADMIN_EMAIL BITPORT_ADMIN_PASSWORD ENABLE_BROWSER PASSWORD_GENERATED
   export NONINTERACTIVE=1 BITPORT_DAEMONIZED=1
   setsid nohup bash "$0" >>"$LOG" 2>&1 </dev/null &
   disown
   echo "  PID:    $!"
-  echo "  Done when the log ends with \"Bitport installed.\""
+  echo
+  echo "  ${DIM}The install is running. Its progress is shown below. You can close this window;${RESET}"
+  echo "  ${DIM}the install keeps going, and you can watch it again with: tail -f $LOG${RESET}"
+  echo
+  tail -n +1 -f --pid=$! "$LOG" 2>/dev/null
+  grep -q "Bitport is installed" "$LOG" 2>/dev/null || { echo; echo "${RED}The install stopped before it finished.${RESET} Read the last lines above, or $LOG."; exit 1; }
   exit 0
 fi
 
@@ -346,9 +381,15 @@ step "Python environment"
 PY=$(command -v python3.14 python3.13 python3.12 2>/dev/null | head -1); PY=${PY:-python3}
 [ -x "$INSTALL_DIR/.venv/bin/python" ] || run "$PY -m venv '$INSTALL_DIR/.venv'"
 run "'$INSTALL_DIR/.venv/bin/pip' install -q --upgrade pip"
-run "'$INSTALL_DIR/.venv/bin/pip' install -q -r '$INSTALL_DIR/requirements.txt'"
+# pip's cache lives in a folder root owns (sudo keeps the CALLER's home, which root cannot write to: pip then
+# warned on every run and downloaded everything again each time).
+export PIP_CACHE_DIR=/var/cache/bitport-pip PIP_DISABLE_PIP_VERSION_CHECK=1
+install -d -m 755 "$PIP_CACHE_DIR" 2>/dev/null || true
+with_heartbeat "installing Python packages" runnet "'$INSTALL_DIR/.venv/bin/pip' install -q -r '$INSTALL_DIR/requirements.txt'" \
+    || die "Installing the Python packages failed. This is almost always the internet connection. Run the same command again: it is safe to repeat and carries on where it stopped."
 [ -f "$INSTALL_DIR/requirements-control-plane.txt" ] && \
-  run "'$INSTALL_DIR/.venv/bin/pip' install -q -r '$INSTALL_DIR/requirements-control-plane.txt'"
+  with_heartbeat "installing Python packages" runnet "'$INSTALL_DIR/.venv/bin/pip' install -q -r '$INSTALL_DIR/requirements-control-plane.txt'" \
+    || die "Installing the Python packages failed. This is almost always the internet connection. Run the same command again: it is safe to repeat and carries on where it stopped."
 # playwright drives every browser-automation step the Setup Wizard offers
 # (sign-in, domain-wide delegation), imported lazily inside the functions
 # that actually launch a browser -- so a broken install here surfaces days
@@ -589,7 +630,12 @@ if [ "${BITPORT_KEY_ONLY_SSH:-yes}" != yes ]; then
 elif [ "$DRY_RUN" = 1 ]; then
   ok "dry-run: would make SSH key-only and start fail2ban"
 elif run "bash '$INSTALL_DIR/harden_ssh.sh'"; then
-  ok "SSH is key-only; fail2ban bans repeated failures"
+  if sshd -T 2>/dev/null | grep -qi '^passwordauthentication yes'; then
+    warn "SSH still accepts passwords: no SSH key is installed for root, and turning passwords off now would lock you out."
+    warn "fail2ban is protecting it. To finish later: copy your key to this server (ssh-copy-id), then run: sudo bash $INSTALL_DIR/harden_ssh.sh"
+  else
+    ok "SSH is key-only; fail2ban bans repeated failures"
+  fi
 else
   warn "SSH hardening did not complete -- see above"
 fi
@@ -605,21 +651,35 @@ else
   done
 fi
 
-echo
-echo "${BOLD}${GREEN}Bitport installed.${RESET}"
-if [ -n "$BITPORT_DOMAIN" ]; then
-  echo "  URL:      https://$BITPORT_DOMAIN/app"
-elif [ "${PUBLIC_PORT:-80}" = 80 ]; then
-  echo "  URL:      http://<server-ip>/app"
-else
-  echo "  URL:      http://<server-ip>:$PUBLIC_PORT/app"
+IP=$(hostname -I 2>/dev/null | awk '{print $1}'); IP=${IP:-your-server-address}
+if [ -n "$BITPORT_DOMAIN" ]; then APP_URL="https://$BITPORT_DOMAIN/app"
+elif [ "${PUBLIC_PORT:-80}" = 80 ]; then APP_URL="http://$IP/app"
+else APP_URL="http://$IP:$PUBLIC_PORT/app"; fi
+if [ "$DRY_RUN" != 1 ]; then
+  sed "s#__INSTALL_DIR__#$INSTALL_DIR#g" "$INSTALL_DIR/bitport-cli.sh" > /usr/local/bin/bitport && chmod 755 /usr/local/bin/bitport
+  printf 'URL=%s\nLOGIN=%s\n' "$APP_URL" "$BITPORT_ADMIN_EMAIL" > "$INSTALL_DIR/install-info.txt"
+  if [ "${PASSWORD_GENERATED:-0}" = 1 ]; then
+    umask 077; printf '%s\n' "$BITPORT_ADMIN_PASSWORD" > /root/bitport-admin-password.txt
+  fi
 fi
-echo "  Login:    $BITPORT_ADMIN_EMAIL"
-[ "${ORIG_NONINTERACTIVE:-0}" = 1 ] && echo "  Password: ${DIM}(as supplied / generated -- check your env or the prompt output)${RESET}"
 echo
-echo "  Next: open the URL, sign in, and use the ${BOLD}Setup Wizard${RESET} in the"
-echo "  sidebar to connect your source and target Google Workspace tenants."
-
+echo "${BOLD}${GREEN}Bitport is installed.${RESET}"
+echo
+echo "  ${BOLD}1. Open this address in a web browser:${RESET}   $APP_URL"
+echo "  ${BOLD}2. Sign in with:${RESET}"
+echo "       email:     $BITPORT_ADMIN_EMAIL"
+if [ "${PASSWORD_GENERATED:-0}" = 1 ]; then
+  echo "       password:  $BITPORT_ADMIN_PASSWORD     (write it down; it is also saved in /root/bitport-admin-password.txt)"
+else
+  echo "       password:  the one you chose"
+fi
+echo "  ${BOLD}3. Click 'Setup Wizard'${RESET} in the left menu. It walks you through connecting your two"
+echo "     Google Workspace accounts (the one you move from, and the one you move to)."
+echo
+echo "  Handy commands, typed in this terminal:"
+echo "     bitport ui       a live dashboard of your migration     bitport status   is it running?"
+echo "     bitport url      the web address again                  bitport help     all commands"
+echo
 # The self-extracting installer's own EXIT trap never fires (see
 # make-selfinstall.sh's comment: `exec` replaces that process, so it never
 # reaches its own exit) -- clean up its temp extraction dir here instead, as

@@ -242,7 +242,7 @@ export const AddNodeWizard: React.FC<{
         <TextField size="small" fullWidth value={addr}
                    onChange={(e) => setAddr(e.target.value)}
                    placeholder="http://192.168.1.50:81"
-                   inputProps={{ 'data-testid': 'node-addr' }} />
+                   inputProps={{ 'data-testid': 'node-addr', 'aria-label': 'Address of the other machine' }} />
         <Typography variant="caption" color="text.secondary"
                     sx={{ display: 'block', mt: 0.75 }}>
           The address <em>that</em> machine can use — a LAN address on the

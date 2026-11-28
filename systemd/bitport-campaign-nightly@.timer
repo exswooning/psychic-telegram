@@ -1,0 +1,13 @@
+[Unit]
+Description=Run the Bitport campaign nightly for account %i
+
+[Timer]
+# 20:00 UTC is 01:45 in Nepal: the operator reads the line in the morning. Persistent: a box that was off
+# through the window runs it on boot instead of skipping the night.
+OnCalendar=*-*-* 20:00:00 UTC
+RandomizedDelaySec=10m
+Persistent=true
+
+# Not enabled by deploy. Start one per account: systemctl enable --now bitport-campaign-nightly@<account-id>.timer
+[Install]
+WantedBy=timers.target

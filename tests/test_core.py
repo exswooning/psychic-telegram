@@ -230,6 +230,9 @@ def test_other_401s_still_fail_immediately():
         assert calls["n"] == 1, f"401 {reason}/{message!r} must not be retried"
 
 
+import resilience as R  # noqa: E402
+
+
 def test_5xx_and_429_are_retried_then_give_up():
     for status in (429, 500, 502, 503, 504):
         calls = {"n": 0}
@@ -241,7 +244,9 @@ def test_5xx_and_429_are_retried_then_give_up():
 
         with pytest.raises(RuntimeError):
             down()
-        assert calls["n"] == 3, f"HTTP {status} should be attempted 1+2 times"
+        # A 429 is Google pacing us: it gets the rate-limit budget whatever the caller asked (2ee11fe, 20 Nov 2026).
+        want = 1 + (max(2, R.RATE_LIMIT_RETRY_BUDGET) if status == 429 else 2)
+        assert calls["n"] == want, f"HTTP {status} should be attempted {want} times"
 
 
 def test_retry_after_header_is_honoured():
@@ -498,7 +503,7 @@ def test_bar_and_truncate():
     assert tui.bar(0.0, 10) == "." * 10
     assert tui.bar(1.0, 10) == "#" * 10
     assert tui.bar(0.5, 10) == "#####....."
-    assert tui.bar(None, 5) == "?????"      # unknown, not zero
+    assert tui.bar(None, 5) == "....."      # unknown: an empty bar, not a row of "?" (a fault to a first-time user, 14 Nov)
     assert tui.bar(2.0, 4) == "####"        # clamped
     assert tui.truncate("abcdefgh", 5) == "abcd\u2026"
     assert tui.fmt_duration(3725) == "01:02:05"
@@ -510,3 +515,60 @@ def test_upload_connections_do_not_take_a_resume_for_a_redirect():
     import auth
     h = auth._http()
     assert 308 not in h.redirect_codes and 301 in h.redirect_codes
+
+
+def _gmail_429(at):
+    from tests.fakes import FakeResp
+    from googleapiclient.errors import HttpError
+    msg = f"User-rate limit exceeded.  Retry after {at}"
+    return HttpError(FakeResp(429, {}), json.dumps({"error": {"message": msg, "errors": [
+        {"reason": "rateLimitExceeded", "message": msg}]}}).encode())
+
+
+def test_gmails_retry_after_time_in_the_body_is_waited_out_not_given_up_on(monkeypatch):
+    """Live: Gmail asked for 15-30 minutes in the BODY (no header); a ~4-minute ladder gave up and
+    729 messages went unverified, one user's mail FAILED."""
+    import datetime as dt
+
+    import resilience
+    waits = []
+    monkeypatch.setattr(resilience, "_wait", waits.append)
+    at = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=17)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    calls = {"n": 0}
+
+    @retry_on_google_error(max_retries=2, base_delay=0.01, max_delay=0.02)
+    def read():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise _gmail_429(at)
+        return "ok"
+
+    assert read() == "ok" and len(waits) == 1 and 16 * 60 < waits[0] < 18 * 60 + 1
+
+
+def test_a_wait_longer_than_the_cap_fails_the_item_at_once(monkeypatch):
+    import datetime as dt
+
+    import pytest
+
+    import resilience
+    monkeypatch.setattr(resilience, "RETRY_AFTER_CAP", 60.0)
+    monkeypatch.setattr(resilience, "_wait", lambda d: pytest.fail("must not wait"))
+    at = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+    @retry_on_google_error(max_retries=5)
+    def read():
+        raise _gmail_429(at)
+
+    with pytest.raises(RuntimeError, match="RETRY_AFTER_CAP_SEC"):
+        read()
+
+
+def test_a_long_wait_still_hears_stop(monkeypatch):
+    import pytest
+
+    import main
+    import resilience
+    main.SHUTDOWN.set()           # the autouse fixture clears it again
+    with pytest.raises(RuntimeError, match="stopped while waiting"):
+        resilience._wait(600)

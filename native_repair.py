@@ -7,8 +7,9 @@ Unsupported structures stay explicit instead of silently losing native features.
 from __future__ import annotations
 
 import copy
+import json
 
-from link_rewrite import rewrite_text, _rewrite_importrange
+from link_rewrite import rewrite_text, _rewrite_importrange, DRIVE_ID, IMPORTRANGE_ID
 
 CELL_FIELDS = "userEnteredValue,userEnteredFormat,note,textFormatRuns,dataValidation"
 SHEET_FIELDS = (
@@ -29,10 +30,50 @@ def _rewrite(value, lookup):
     return value
 
 
-def read_sheet(svc, fid, cell_budget=2000000):
-    """Read native structures and bounded grid windows, including every tab."""
+def _contains_rewritable_link(value, seen=None):
+    """Fast exact gate for cell equality; only rewrite_text's two link forms matter."""
+    if seen is None:
+        seen=set()
+    if isinstance(value, str):
+        if "google.com" in value.lower():
+            return bool(DRIVE_ID.search(value.encode("utf-8", "surrogatepass")))
+        if "importrange" in value.lower():
+            return bool(IMPORTRANGE_ID.search(value.encode("utf-8", "surrogatepass")))
+        return False
+    if isinstance(value, dict):
+        if id(value) in seen:
+            return False
+        seen.add(id(value))
+        return any(_contains_rewritable_link(v,seen) for v in value.values())
+    if isinstance(value, list):
+        if id(value) in seen:
+            return False
+        seen.add(id(value))
+        return any(_contains_rewritable_link(v,seen) for v in value)
+    return False
+
+
+def _same_display(cell):
+    """A URL in a cell shows as a link whether hyperlinkDisplayType is LINKED or unset, and Sheets sets LINKED on its
+    own when a link is written into a copy (account 3, 15 Nov 2026). Unset and LINKED are one state."""
+    fmt = cell.get('userEnteredFormat')
+    if isinstance(fmt, dict) and fmt.get('hyperlinkDisplayType') == 'LINKED':
+        fmt = {k: v for k, v in fmt.items() if k != 'hyperlinkDisplayType'}
+        cell = {**cell, 'userEnteredFormat': fmt} if fmt else {k: v for k, v in cell.items() if k != 'userEnteredFormat'}
+    return cell
+
+
+def read_sheet(svc, fid, cell_budget=None, pace=lambda: None):
+    """Read native structures and bounded grid windows, including every tab. `pace` is called
+    before each request: a big sheet is many requests, and Google allows 60 reads a minute per user."""
+    if cell_budget is None:
+        # The grid's ALLOCATED cells (rows x columns, blank included). 2,000,000 by default; a sheet
+        # that is larger is refused rather than read in thousands of requests. Raise it for a sheet
+        # the operator has qualified: VERIFY_SHEET_CELL_BUDGET.
+        import os
+        cell_budget=int(os.getenv("VERIFY_SHEET_CELL_BUDGET","2000000"))
     fields=SHEET_FIELDS.split(",data(",1)[0]+")"
-    doc=svc.spreadsheets().get(spreadsheetId=fid,fields=fields).execute()
+    pace();doc=svc.spreadsheets().get(spreadsheetId=fid,fields=fields).execute()
     cells=sum(int(s["properties"].get("gridProperties",{}).get("rowCount",0))*int(s["properties"].get("gridProperties",{}).get("columnCount",0)) for s in doc.get("sheets",[]))
     if cells>cell_budget:
         raise RuntimeError("Native sheet allocated cells exceed the explicit per-read budget; increase only for a qualified workload")
@@ -51,7 +92,7 @@ def read_sheet(svc, fid, cell_budget=2000000):
                 # method only with the full Sheets scope, so on a read-only grant every
                 # native Sheet read 403 ACCESS_TOKEN_SCOPE_INSUFFICIENT (dharan, 2026-10-23).
                 rng="'"+props["title"].replace("'","''")+"'!"+_a1(col,row)+":"+_a1(end_col-1,min(height,row+row_step)-1)
-                result=svc.spreadsheets().get(spreadsheetId=fid,ranges=[rng],includeGridData=True,
+                pace();result=svc.spreadsheets().get(spreadsheetId=fid,ranges=[rng],includeGridData=True,
                     fields="sheets(properties.sheetId,data(startRow,startColumn,rowData(values("+CELL_FIELDS+"))))").execute()
                 for chunk in result.get("sheets",[]):
                     if chunk.get("properties",{}).get("sheetId")==props["sheetId"]:
@@ -69,9 +110,85 @@ def _a1(col, row):
     return f"{letters}{row+1}"
 
 
+NATIVE_PADDING = {"top": 2, "right": 3, "bottom": 2, "left": 3}     # a Sheet made in Sheets (measured 21 Nov 2026)
+
+
+def _pad(p):
+    return {k: (p or {}).get(k, 0) for k in ("top", "right", "bottom", "left")}
+
+
+_DEFAULT_BLACK = ({"themeColor": "TEXT"}, {"rgbColor": {}})
+
+
+def _font(v):
+    # One font, two spellings: a Sheet made in Sheets says "arial,sans,sans-serif", an import "Arial".
+    return v.split(",")[0].strip().lower() if isinstance(v, str) else v
+
+
+def _is_default_text(key, value, default):
+    if key == "fontFamily":
+        return _font(value) == _font(default.get(key))
+    if key == "foregroundColorStyle":      # the theme's text colour and plain black render the same (21 Nov 2026)
+        return value in _DEFAULT_BLACK and default.get(key, {"rgbColor": {}}) in _DEFAULT_BLACK
+    return default.get(key) == value
+
+
+def _display_cell(cell, default, default_text):
+    """One cell's format as displayed, in place (see _displayed_formats)."""
+    fmt = cell.get("userEnteredFormat")
+    shown = _pad(fmt.pop("padding")) if isinstance(fmt, dict) and "padding" in fmt else default
+    if shown != NATIVE_PADDING:
+        cell.setdefault("userEnteredFormat", {})["padding"] = shown
+    fmt = cell.get("userEnteredFormat")
+    if isinstance(fmt, dict) and isinstance(fmt.get("textFormat"), dict):
+        tf = {k: v for k, v in fmt["textFormat"].items() if not _is_default_text(k, v, default_text)}
+        if tf:
+            fmt["textFormat"] = tf
+        else:
+            del fmt["textFormat"]
+    if cell.get("userEnteredFormat") == {}:
+        del cell["userEnteredFormat"]
+    return cell
+
+
+def _sheet_defaults(doc):
+    """(padding, text format) a side's cells inherit, or None when its metadata does not say."""
+    df = (doc.get("properties") or {}).get("defaultFormat")
+    if not isinstance(df, dict) or "padding" not in df:
+        return None
+    return _pad(df["padding"]), df.get("textFormat") or {}
+
+
+def _displayed_formats(doc):
+    """Cell formats as a person sees them. An Office import's default lacks top/bottom padding (text ~2 px lower);
+    native_styles writes the source's padding on the cells, and Sheets then stamps the default text style on them
+    too. So a cell's padding is its own or the spreadsheet default, compared only where it differs from a native
+    Sheet's; a text format equal to the spreadsheet's default is no format. Trailing cells and rows left empty by
+    that are trimmed, as Sheets itself leaves them out. Measured: the repaired Sheet renders pixel-identical."""
+    df = (doc.get("properties") or {}).get("defaultFormat")
+    if not isinstance(df, dict) or "padding" not in df:
+        return
+    default = _pad(df.pop("padding"))
+    default_text = df.get("textFormat") or {}
+    for sheet in doc.get("sheets") or []:
+        for data in sheet.get("data") or []:
+            rows = data.get("rowData") or []
+            for row in rows:
+                cells = row.get("values") or []
+                for cell in cells:
+                    _display_cell(cell, default, default_text)
+                while cells and cells[-1] == {}:
+                    cells.pop()
+                if "values" in row and not cells:
+                    del row["values"]
+            while rows and rows[-1] == {}:
+                rows.pop()
+
+
 def canonical_sheet(document, lookup=lambda fid: None):
     """Compare entered values/formulas and native structures, not volatile recalculation results."""
-    doc = _rewrite(copy.deepcopy(document), lookup)
+    doc = _rewrite(document, lookup)
+    _displayed_formats(doc)
     sheets = doc.get("sheets", [])
     sheet_ids = {s["properties"]["sheetId"]: i for i, s in enumerate(sheets)}
     generated = {
@@ -95,6 +212,8 @@ def canonical_sheet(document, lookup=lambda fid: None):
         for k, v in value.items():
             if k == "sheetId":
                 out[k] = sheet_ids.get(v, v)
+            elif k == "fontFamily" and isinstance(v, str):
+                out[k] = _font(v)
             elif k in generated:
                 out[k] = generated[k].setdefault(str(v), len(generated[k]))
             elif k not in (
@@ -108,13 +227,52 @@ def canonical_sheet(document, lookup=lambda fid: None):
     return clean(doc)
 
 
+def _sheet_differences(a, b, path="", limit=20):
+    """Bounded structural paths; never expose cell values/formulas in diagnostics."""
+    out = []
+    def walk(x, y, where):
+        if len(out) >= limit or x == y:
+            return
+        if isinstance(x, dict) and isinstance(y, dict):
+            for key in sorted(set(x) | set(y)):
+                if len(out) >= limit: break
+                p = f"{where}.{key}" if where else str(key)
+                if key not in x: out.append(f"{p}: extra on target")
+                elif key not in y: out.append(f"{p}: missing on target")
+                else: walk(x[key], y[key], p)
+        elif isinstance(x, list) and isinstance(y, list):
+            for i in range(min(len(x), len(y))):
+                if len(out) >= limit: break
+                walk(x[i], y[i], f"{where}[{i}]")
+            if len(out) < limit and len(x) != len(y):
+                out.append(f"{where}: length differs ({len(x)} source, {len(y)} target)")
+        else:
+            out.append(f"{where}: differs")
+    walk(a, b, path)
+    return out
+
+
 def compare_sheets(source, target, lookup):
     a, b = canonical_sheet(source, lookup), canonical_sheet(target)
-    return (
-        []
-        if a == b
-        else ["native Sheet entered values, formatting, or structures differ"]
-    )
+    if a == b:
+        return []
+    # Keep the existing summary for consumers; append bounded, content-free evidence.
+    out = ["native Sheet entered values, formatting, or structures differ"]
+    for index, (src, tgt) in enumerate(zip(a.get("sheets", []), b.get("sheets", []))):
+        label = f"tab {index + 1}"
+        # API windows have start offsets, so a difference at rowData[0] is not
+        # necessarily row 1. Report actual A1 addresses for matched windows.
+        for left, right in zip(src.get("data", []), tgt.get("data", [])):
+            if (left.get("startRow", 0), left.get("startColumn", 0)) != (right.get("startRow", 0), right.get("startColumn", 0)):
+                continue
+            for row, (sr, tr) in enumerate(zip(left.get("rowData", []), right.get("rowData", []))):
+                for col, (sc, tc) in enumerate(zip(sr.get("values", []), tr.get("values", []))):
+                    if sc != tc:
+                        cell = _a1(left.get("startColumn", 0) + col, left.get("startRow", 0) + row)
+                        out += _sheet_differences(sc, tc, f"{label}!{cell}", max(0, 20-len(out)))
+                    if len(out) >= 20: return out + ["Further differences omitted; full comparison still failed"]
+    out += _sheet_differences(a, b, limit=max(0, 20-len(out)))
+    return out
 
 
 def repair_sheet_cells(auth, db, settings, user, target, sid, tid, sm, tm, backup):
@@ -456,3 +614,165 @@ def repair_empty_doc(auth, db, settings, user, target, sid, tid, sm, tm, backup)
         "backup": backup_id,
         "scope": "paragraph text readback; full style fidelity requires the final native check",
     }
+
+
+def compare_sheets_streamed(source, target, sid, tid, lookup=lambda fid: None,
+                            fetch=lambda request: request.execute(), pace=lambda: None,
+                            max_cells=None, window_cells=10000):
+    """Compare every allocated cell in bounded windows; never retain whole grids.
+
+    Request/cell limits still fail closed. Structures are compared independently;
+    diagnostics identify ranges and contain no cell contents.
+    """
+    fields = SHEET_FIELDS.split(',data(', 1)[0] + ')'
+    def get(api, fid, **kwargs):
+        pace()
+        return fetch(api.spreadsheets().get(spreadsheetId=fid, **kwargs))
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=2, thread_name_prefix="sheet-verify") as pool:
+        fa = pool.submit(get, source, sid, fields=fields)
+        fb = pool.submit(get, target, tid, fields=fields)
+        a, b = fa.result(), fb.result()
+    # A provider ignoring a field mask must not make the metadata comparison
+    # retain huge grid data; grid windows below are the authoritative cell reads.
+    def metadata(doc):
+        if not isinstance(doc.get('sheets'), list) or not doc['sheets']:
+            raise RuntimeError('Sheet metadata is incomplete')
+        return {**doc, 'sheets': [{k:v for k,v in s.items() if k!='data'} for s in doc['sheets']]}
+    a,b=metadata(a),metadata(b)
+    diffs = _sheet_differences(canonical_sheet(a, lookup), canonical_sheet(b))
+    if diffs:
+        return ['native Sheet structures differ'] + diffs
+    cells = sum(int(s['properties'].get('gridProperties', {}).get('rowCount',0))*
+                int(s['properties'].get('gridProperties', {}).get('columnCount',0)) for s in a.get('sheets',[]))
+    if max_cells is not None and cells > max_cells:
+        raise RuntimeError('Streaming Sheet comparison exceeds qualified cell budget; coverage incomplete')
+    def content(doc, sheet_id, side):
+        matches=[s for s in doc.get('sheets',[]) if s.get('properties',{}).get('sheetId')==sheet_id]
+        if len(matches)!=1:
+            raise RuntimeError('Sheet window response omitted or duplicated its sheet identity')
+        shown=_sheet_defaults(side)
+        for grid in matches[0].get('data',[]):
+            row0,col0=grid.get('startRow',0),grid.get('startColumn',0)
+            for ri,row in enumerate(grid.get('rowData',[])):
+                for ci,cell in enumerate(row.get('values',[])):
+                    if not cell:
+                        continue
+                    if shown:
+                        cell=_display_cell(copy.deepcopy(cell),*shown)
+                    yield (row0+ri,col0+ci),_same_display(cell)
+
+    def content_differs(xr, yr, source_sheet_id, target_sheet_id):
+        # Ordered sparse iterators avoid million-entry dictionaries for dense windows.
+        xi,yi=iter(content(xr,source_sheet_id,a)),iter(content(yr,target_sheet_id,b))
+        sx,sy=next(xi,None),next(yi,None)
+        has_values=sx is not None or sy is not None
+        while sx is not None or sy is not None:
+            if sx is None or sy is None or sx[0]!=sy[0]:
+                return True,True
+            if sx[1]==sy[1] and not _contains_rewritable_link(sx[1]):
+                sx,sy=next(xi,None),next(yi,None)
+                continue
+            if _rewrite(sx[1],lookup)!=sy[1]:
+                return True,True
+            sx,sy=next(xi,None),next(yi,None)
+        return False,has_values
+    # Sheets API responses are limited to 10 MB. Keep a margin for transport and
+    # client decoding; the window adapts to an estimated JSON response size, not a fixed
+    # 10,000-cell guess. Empty windows can cover the remaining allocated extent in
+    # one request; a dense response grows only as fast as the observed payload allows.
+    response_budget = 8 * 1024 * 1024
+    def response_size(doc):
+        rows=cells=0
+        samples=[]
+        for sheet in doc.get('sheets',[]):
+            for grid in sheet.get('data',[]):
+                row_data_list=grid.get('rowData',[])
+                for row_data in row_data_list:
+                    values=row_data.get('values',[])
+                    rows+=1;cells+=len(values)
+                # Sample 32 rows across each grid and four columns across each
+                # sampled row. A high-width sample makes the estimate conservative
+                # for variable cell contents without serializing every cell again.
+                sample_rows=row_data_list
+                for i in range(min(32,len(sample_rows))):
+                    row_index=0 if len(sample_rows)<=1 else i*(len(sample_rows)-1)//(min(32,len(sample_rows))-1)
+                    values=sample_rows[row_index].get('values',[])
+                    if not values:
+                        continue
+                    col_indexes=sorted({0,len(values)//3,(2*len(values))//3,len(values)-1})
+                    samples.extend(values[j] for j in col_indexes)
+        max_cell=max((len(json.dumps(cell,separators=(',',':'),ensure_ascii=False).encode('utf-8'))
+                      for cell in samples),default=2)
+        max_cell=max((len(json.dumps(cell,separators=(',',':'),ensure_ascii=False).encode('utf-8'))
+                      for cell in samples),default=2)
+        # Sampled cell width is padded by 50%; row and grid framing is budgeted
+        # separately. An HTTP response-limit error halves and retries the range.
+        return int(512+rows*64+cells*(max_cell+1)*1.5)
+
+    def grid_data(doc,sheet_id):
+        matches=[s for s in doc.get('sheets',[]) if s.get('properties',{}).get('sheetId')==sheet_id]
+        if len(matches)!=1:
+            raise RuntimeError('Sheet window response omitted or duplicated its sheet identity')
+        return matches[0].get('data',[])
+
+    with ThreadPoolExecutor(max_workers=2, thread_name_prefix="sheet-verify") as pool:
+      for sa,sb in zip(a.get('sheets',[]),b.get('sheets',[])):
+        props=sa['properties'];grid=props.get('gridProperties',{})
+        if props.get('sheetType','GRID')!='GRID':continue
+        width,height=int(grid.get('columnCount',0)),int(grid.get('rowCount',0))
+        if width <= 0 or height <= 0:
+            raise RuntimeError('Sheet grid dimensions are unavailable; coverage incomplete')
+        row=0; step=max(1,window_cells//width)
+        while row<height:
+            end_row=min(height,row+step)
+            rng="'"+props['title'].replace("'","''")+"'!"+_a1(0,row)+':'+_a1(width-1,end_row-1)
+            grid_fields='sheets(properties.sheetId,data(startRow,startColumn,rowData(values('+CELL_FIELDS+'))))'
+            # A response-limit error is retried as smaller adjacent windows. Other
+            # errors propagate, so an incomplete read can never be reported equal.
+            while True:
+                try:
+                    fx=pool.submit(get,source,sid,ranges=[rng],includeGridData=True,fields=grid_fields)
+                    fy=pool.submit(get,target,tid,ranges=[rng],includeGridData=True,fields=grid_fields)
+                    xr,yr=fx.result(),fy.result()
+                    xb,yb=response_size(xr),response_size(yr)
+                    if max(xb,yb)>response_budget:
+                        if step<=1:
+                            raise RuntimeError('A single-row Sheet response exceeds the safe API response budget; coverage incomplete')
+                        step=max(1,step//2); end_row=min(height,row+step)
+                        rng="'"+props['title'].replace("'","''")+"'!"+_a1(0,row)+':'+_a1(width-1,end_row-1)
+                        continue
+                    break
+                except Exception as exc:
+                    status=getattr(getattr(exc,'resp',None),'status',None)
+                    detail=str(exc).lower()
+                    too_large=(status==413 or any(mark in detail for mark in
+                             ('response too large','response size','returned too much data')))
+                    if not too_large or step<=1:
+                        raise
+                    step=max(1,step//2); end_row=min(height,row+step)
+                    rng="'"+props['title'].replace("'","''")+"'!"+_a1(0,row)+':'+_a1(width-1,end_row-1)
+            xdata=grid_data(xr,props['sheetId'])
+            ydata=grid_data(yr,sb['properties']['sheetId'])
+            has_values=any(grid.get('rowData') for grid in xdata+ydata)
+            same_defaults=_sheet_defaults(a)==_sheet_defaults(b)
+            if xdata==ydata and same_defaults and not _contains_rewritable_link(xdata):
+                differs=False
+            else:
+                differs,_=content_differs(xr,yr,props['sheetId'],sb['properties']['sheetId'])
+            if differs:
+                diffs.append('native Sheet cell content/style differs in '+rng)
+                if len(diffs)>20:diffs=diffs[:20]
+            actual_step=end_row-row
+            row=end_row
+            if not has_values:
+                # The empty response itself is the used-extent signal: ask for the
+                # entire remaining allocated tail, then split only if the API says
+                # its real response limit would be exceeded.
+                step=max(1,height-row)
+            else:
+                observed=max(xb,yb,1)
+                area=width*actual_step
+                grown=max(step,min(step*4,max(1,int(area*response_budget/observed)//width)))
+                step=grown
+    return diffs

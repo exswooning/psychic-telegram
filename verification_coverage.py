@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import time
 import json
 
 VERSION = 2
 
+
+NO_READ_API = {"application/vnd.google-apps.vid", "application/vnd.google-apps.site"}
 
 def check(key, label, status, checked=0, matched=0, note=None, required=True):
     return {
@@ -32,6 +35,23 @@ def pages(v, call, key):
         seen.add(token)
 
 
+FORM_MIME = "application/vnd.google-apps.form"
+
+
+COMMENT_WINDOW = 50      # files whose threads are read side by side before the next window starts
+
+
+def _is_form(svc, fid, execute=lambda fn: fn()) -> bool:
+    """A type Drive keeps no comments for (a Form, an Apps Script project -- it.department@, 15 Nov 2026 -- ...):
+    the API answers 404 for its threads, which means no comments, not an unreadable file."""
+    from drive_engine import DriveMigrator
+    try:
+        return execute(lambda: svc.files().get(fileId=fid, fields="mimeType", supportsAllDrives=True)
+                       .execute()).get("mimeType") in DriveMigrator.NO_COMMENTS_API
+    except Exception:      # noqa: BLE001 - unknown type: let the original error stand
+        return False
+
+
 def add(v, result, key, label, fn):
     try:
         result.setdefault("checks", []).append(fn())
@@ -43,6 +63,42 @@ def add(v, result, key, label, fn):
             check(key, label, "INCOMPLETE", note=detail)
         )
         result["errors"].append(f"{label}: {detail}")
+
+
+def permissions_status(result: dict) -> str:
+    """The verdict of drive.permissions from one user's Drive result."""
+    sharing = result.get("sharing") or {}
+    return (
+        "EMPTY"
+        if result.get("emptySource")
+        else "INCOMPLETE"
+        if any("sharing" in e for e in result["errors"])
+        else "DIFFERENCES"
+        if any(
+            any("grant" in d for d in item.get("diffs", []))
+            for item in result["differences"]
+        )
+        else "NOT_VERIFIED"
+        # Only an OWED grant is still due; a deliberate skip (no Google account at all) is
+        # a decision, not something left to check (live: finance@s. read INCOMPLETE on 2
+        # such grants while its own note said "0 remain unverified"). A result saved before
+        # owed was counted keeps the old reading.
+        if sharing.get("owed", sharing.get("notReproduced")) or result.get("not_owner") or (
+            result.get("carriedIn") and (
+                not result.get("externalSharing")
+                or result["externalSharing"].get("unverified")
+                or result["externalSharing"].get("notChecked")))
+        else "MATCHED"
+        if sharing.get("filesCompared", 0)
+        else "NOT_VERIFIED"
+    )
+
+
+def native_checked_count(evidence, native_ids) -> int:
+    """This user's in-scope natives whose content was compared, each once."""
+    ids = set(native_ids or ())
+    return len({e.get("source") for e in evidence
+                if e.get("service") == "drive" and e.get("nativeFeaturesChecked") and e.get("source") in ids})
 
 
 def drive(v, result):
@@ -109,7 +165,14 @@ def drive(v, result):
                     "error": "Live in-scope Drive item has no source-to-target migration mapping",
                 }
             )
-        result["nativeSourceCount"] = sum(f.get("mimeType","").startswith("application/vnd.google-apps.") and not f.get("mimeType","").endswith((".folder",".shortcut")) for f in files if f["id"] in in_scope)
+        # Operator's decision (19 Nov 2026): a Vids video or a Site is copied and mapped, and its structure and
+        # sharing are checked, but Google has no API that reads its content, so it is named, never counted as compared.
+        result["nativeNoReadApi"] = sorted(f.get("name", f["id"]) for f in files
+                                           if f["id"] in in_scope and f["id"] not in reasoned and f.get("mimeType") in NO_READ_API)
+        native_ids = [f["id"] for f in files if f["id"] in in_scope and f["id"] not in reasoned
+                      and f.get("mimeType", "").startswith("application/vnd.google-apps.")
+                      and not f.get("mimeType", "").endswith((".folder", ".shortcut")) and f.get("mimeType") not in NO_READ_API]
+        result["nativeSourceCount"], result["nativeSourceIds"] = len(native_ids), native_ids
         result["sourceInventory"] = {
             "inScope": len(in_scope),
             "excludedSharedOrTenantItems": excluded,
@@ -154,7 +217,11 @@ def drive(v, result):
                 for a, b, _ in v._pairs(kind)
             }
             matched = 0
-            for item in owned_items:
+            # An item the ledger decided not to copy, with a reason (a My Maps, a Site) has no target to compare;
+            # it is named in the report's remainder. c09's Ward Boundary Map read "absent from target" for ever
+            # and held the parity gate at 40/41 (a. -> b., 18 Nov 2026).
+            checked_items = [i for i in owned_items if i["id"] in mapping or i["id"] not in reasoned]
+            for item in checked_items:
                 sid = item["id"]
                 tid = mapping.get(sid)
                 target = targets.get(tid)
@@ -200,11 +267,11 @@ def drive(v, result):
                 "drive.structure",
                 "Exact parent folders, names and shortcut targets",
                 "DIFFERENCES"
-                if matched != len(owned_items)
+                if matched != len(checked_items)
                 else "MATCHED"
-                if owned_items
+                if checked_items
                 else "EMPTY",
-                len(owned_items),
+                len(checked_items),
                 matched,
             )
 
@@ -260,51 +327,92 @@ def drive(v, result):
         check(
             "drive.permissions",
             "File and folder share access",
-            "EMPTY"
-            if result.get("emptySource")
-            else "INCOMPLETE"
-            if any("sharing" in e for e in result["errors"])
-            else "DIFFERENCES"
-            if any(
-                any("grant" in d for d in item.get("diffs", []))
-                for item in result["differences"]
-            )
-            else "NOT_VERIFIED"
-            if sharing.get("notReproduced") or result.get("not_owner") or (
-                result.get("carriedIn") and (
-                    not result.get("externalSharing")
-                    or result["externalSharing"].get("unverified")
-                    or result["externalSharing"].get("notChecked")))
-            else "MATCHED"
-            if sharing.get("filesCompared", 0)
-            else "NOT_VERIFIED",
+            permissions_status(result),
             sharing.get("filesCompared", 0),
             sharing.get("matched", 0),
             f"{sharing.get('matched', 0)} grants matched; {sharing.get('notReproduced', 0)} deliberately skipped grants "
+            f"({sharing.get('owed', 0)} of them owed until the colleague has an account) "
             f"and permissions on {result.get('not_owner', 0)} unreadable source items and "
             f"{(result.get('externalSharing') or {}).get('matched', 0)} external originals have equivalent access and verified shortcuts; "
             f"{(result.get('externalSharing') or {}).get('unverified', result.get('carriedIn', 0))} remain unverified. "
             "External originals keep their owners and collaborators; retained private copies are content fallbacks.",
         )
     )
-    native_checked=sum(bool(e.get("nativeFeaturesChecked")) for e in v.evidence if e.get("service")=="drive")
+    # Only this user's in-scope natives: a shared drive's are compared too, and counted, info@ read 74 checked of 26
+    # and INCOMPLETE on every run (23 Nov 2026).
+    native_checked = native_checked_count(v.evidence, result.get("nativeSourceIds"))
     result["checks"].append(check("drive.native", "Readable native content, formatting and structures",
         "EMPTY" if result.get("nativeSourceCount")==0 else "INCOMPLETE" if native_checked!=result.get("nativeSourceCount") else "DIFFERENCES" if any(e.get("nativeFeaturesMatched") is False for e in v.evidence if e.get("service")=="drive") else "MATCHED",
         result.get("nativeSourceCount",0),native_checked,
-        note="Native API fields only. Embedded image bytes and unsupported Google types block this check; revision history is separate."))
+        note="Native API fields only. Embedded image bytes and unsupported Google types block this check; revision history is separate."
+             + (f" Copied, content not comparable (no API reads a Vids video or a Site): {', '.join(result['nativeNoReadApi'])}."
+                if result.get("nativeNoReadApi") else "")))
     if getattr(v.settings,"migrate_comments",False):
         def comments():
             from migration_comments import list_threads,differences
             compared=matched=0
-            for sid,tid,_ in v._pairs("file",sample=True):
-                a=list_threads(src,sid,v._x)
-                b=list_threads(v.auth.target_drive(v.tgt_user),tid,v._x)
-                diffs=differences(a,b,v.db.target_for_source_id)
-                compared+=len(a);matched+=len(a) if not diffs else 0
-                if diffs:result["differences"].append({"source":sid,"target":tid,"scope":"drive-comments","diffs":diffs})
+            # One list call per side per file (~1 per second): ~50 minutes for 1,500 files, so say
+            # where it is. Live (info@, 6 Nov 2026) it ran under the stale "Drive stray check" label
+            # with no counter and read as stuck.
+            pairs=v._pairs("file",sample=True)
+            unread=[]
+            from resilience import RetryBudgetExceeded
+            import copy
+            from concurrent.futures import ThreadPoolExecutor
+            from verify_sample import _drive_file_workers
+
+            def read(sid,tid):
+                """Both sides of one file's threads, on a copy of the verifier so this file's budget is its
+                own, with this thread's own Drive clients. Returns the threads, "unread", or None for a Form."""
+                w=copy.copy(v)
+                w._file_deadline=None
+                s,t=v.auth.source_drive(v.src_user),v.auth.target_drive(v.tgt_user)
+                w._publish_stats(currentDocument=sid, currentMime="comment threads", currentSince=time.time())
+                try:
+                    # One time budget for BOTH sides of this file (VERIFY_DOC_BUDGET_SEC): a slow file is
+                    # unread, not a reason to hold the user -- ecodev@'s JPEG sat at 287s of 300 (7 Nov 2026).
+                    with w._doc_budget():
+                        try:
+                            a=list_threads(s,sid,w._x)
+                        except RetryBudgetExceeded:
+                            raise
+                        except Exception as exc:
+                            # A Form has no Drive comments; the API answers 404 for its threads. That is no
+                            # comments, not an unreadable file -- confirmed by its type, never assumed.
+                            if "404" in str(exc) and _is_form(s,sid,w._x):
+                                return None
+                            raise
+                        return a,list_threads(t,tid,w._x)
+                except RetryBudgetExceeded:
+                    return "unread"
+            # Side by side (VERIFY_DRIVE_WORKERS): at one file a time this phase was three times the whole
+            # file comparison (buildingpermit@: 540 s of compare, 2,075 s in all -- 8 Nov 2026). Results come
+            # back in file order; every count and difference is recorded here, on this thread.
+            workers=max(1,min(len(pairs) or 1,_drive_file_workers()))
+            with ThreadPoolExecutor(max_workers=workers,thread_name_prefix="verify-comments") as pool:
+                # In windows, so an error or a Stop waits for at most one window of reads, not the queue.
+                for base in range(0,len(pairs),COMMENT_WINDOW):
+                    window=pairs[base:base+COMMENT_WINDOW]
+                    v._report_progress("Drive comment threads",base,len(pairs))
+                    for (sid,tid,_),got in zip(window,pool.map(lambda p: read(p[0],p[1]),[(a,b) for a,b,_ in window])):
+                        if got is None:
+                            continue
+                        if got=="unread":
+                            unread.append(sid)
+                            continue
+                        a,b=got
+                        diffs=differences(a,b,v.db.target_for_source_id)
+                        compared+=len(a);matched+=len(a) if not diffs else 0
+                        if diffs:result["differences"].append({"source":sid,"target":tid,"scope":"drive-comments","diffs":diffs})
+            v._publish_stats(currentDocument=None, currentMime=None, currentSince=None)
+            note="Original author/date are retained as attribution text when replayed; native author identities/history are not reproduced."
+            if unread:
+                # Never a pass: a file whose threads were not read in time is named, not skipped silently.
+                return check("drive.comments","Comment thread text, replies, anchors and resolution","INCOMPLETE",compared,matched,
+                    note=f"{len(unread)} file(s) had comment threads not read within the time budget (first: {', '.join(unread[:3])}). "+note)
             return check("drive.comments","Comment thread text, replies, anchors and resolution",
                 "DIFFERENCES" if any(i.get("scope")=="drive-comments" for i in result["differences"]) else "MATCHED" if compared else "EMPTY",compared,matched,
-                note="Original author/date are retained as attribution text when replayed; native author identities/history are not reproduced.")
+                note=note)
         add(v,result,"drive.comments","Comment threads",comments)
     else:
         result["checks"].append(check("drive.comments","Comment threads","NOT_SELECTED",required=False))
@@ -629,7 +737,7 @@ def finish(result, service):
                 "gmail.settings",
                 "Filters, delegates, forwarding and mailbox settings",
                 "NOT_VERIFIED",
-                note="Message equality does not establish mailbox-setting equality.",
+                note="Email equality does not establish mailbox-setting equality.",
                 required=False,
             )
         )

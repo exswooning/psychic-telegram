@@ -29,11 +29,16 @@ def failed_items(db, item_types=RETRYABLE_TYPES) -> dict:
     """{source_user: {item_type: [item_id, ...]}} for retryable failures."""
     marks = ",".join("?" for _ in item_types)
     rows = db.conn.execute(
-        f"""SELECT source_user, item_type, item_id FROM audit_log
+        f"""SELECT source_user, item_type, item_id, error_message FROM audit_log
              WHERE status = 'FAILED' AND item_type IN ({marks})""",
         tuple(item_types)).fetchall()
     out: dict = {}
+    import known_issues
     for r in rows:
+        if r["item_type"] in ("message", "draft"):
+            kind = known_issues.classify_failure(r["item_type"], r["error_message"] or "")
+            if kind in ("gmail.destination_ambiguous", "gmail.reset_leftover"):
+                continue
         out.setdefault(r["source_user"], {}).setdefault(
             r["item_type"], []).append(r["item_id"])
     return out

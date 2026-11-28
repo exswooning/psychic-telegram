@@ -104,12 +104,19 @@ def receipt(db, user, sid):
 
 def shortcut_meta(tgt, fid, execute=lambda fn: fn()):
     return execute(lambda: tgt.files().get(fileId=fid, supportsAllDrives=True,
-        fields="id,name,mimeType,parents,ownedByMe,trashed,shortcutDetails,appProperties").execute())
+        fields="id,name,mimeType,parents,ownedByMe,owners(emailAddress),trashed,shortcutDetails,appProperties").execute())
+
+
+def _target_owned(meta, target):
+    if meta.get("ownedByMe") is True:
+        return True
+    return any((o.get("emailAddress") or "").lower() == target.lower()
+               for o in meta.get("owners") or [])
 
 
 def valid_shortcut(meta, user, target, sid, name, parent):
     return (meta.get("mimeType") == SHORTCUT_MIME and not meta.get("trashed")
-            and meta.get("ownedByMe") is True and meta.get("name") == name
+            and _target_owned(meta, target) and meta.get("name") == name
             and meta.get("parents") == [parent]
             and (meta.get("shortcutDetails") or {}).get("targetId") == sid
             and (meta.get("appProperties") or {}).get("bitportExternalOriginal") == marker(user, target, sid))
@@ -191,14 +198,35 @@ def save(db, user, sid, target, copy_id, state, detail, shortcut=None):
 
 
 def repair(auth, db, settings, user, result):
-    """Create only target-owned shortcuts; no original or retained copy is modified."""
+    """Create or place target-owned shortcuts; no original or retained copy is modified."""
     from finding_repairs import _target
     from verify_sample import _stop_check
     from db import utc_now
 
     target = _target(db, settings, user)
-    out = {"candidates": 0, "changed": 0, "verified": 0, "ownerActions": [], "errors": []}
-    for item in ((result.get("sharing") or {}).get("external") or {}).get("items", []):
+    out = {"candidates": 0, "changed": 0, "verified": 0, "ownerActions": [], "needsPerson": [], "errors": []}
+    items = list(((result.get("sharing") or {}).get("external") or {}).get("items", []))
+    known = {i.get("source") for i in items}
+    for finding in result.get("differences") or []:
+        if finding.get("scope") == "external-original-access" and finding.get("source") not in known:
+            items.append({"source": finding.get("source"), "target": finding.get("target"),
+                          "name": finding.get("item"), "status": "DIFFERENCES"})
+            known.add(finding.get("source"))
+    import re
+    for error in result.get("errors") or []:
+        if "visible source parent has no mapped target folder" not in str(error).lower():
+            continue
+        match = re.match(r"Repair remains incomplete:\s*([^:]+):", str(error), re.IGNORECASE)
+        if not match:
+            continue
+        sid = match.group(1).strip()
+        if sid in known:
+            continue
+        copy_id = db.get_target_id(user, sid, "file") or db.get_target_id(user, sid, "folder")
+        if copy_id:
+            items.append({"source": sid, "target": copy_id, "status": "INCOMPLETE"})
+            known.add(sid)
+    for item in items:
         _stop_check()
         if item.get("status") == "MATCHED":
             continue
@@ -226,17 +254,18 @@ def repair(auth, db, settings, user, result):
                         "AND target_user=? AND copy_id=? AND state='OWNER_ACTION_REQUIRED'",
                         (json.dumps(fresh, sort_keys=True), utc_now(), user, sid, target, copy_id))
                 out["ownerActions"].append(fresh)
-                continue
-            if fresh["fallbackState"] != "PRIVATE_COPY_RETAINED":
-                raise RuntimeError("Retained fallback has other grants; review is required before accepting original-reference mode")
             tgt = auth.target_drive(target)
             m = marker(user, target, sid)
             # The marker is a SHA256 hex string, never query text from a filename.
             found, token, seen = [], None, set()
             while True:
                 page = tgt.files().list(q="trashed=false and 'me' in owners and appProperties has { key='bitportExternalOriginal' and value='" + m + "' }",
-                    fields="nextPageToken,files(id)", pageToken=token, pageSize=1000).execute()
-                found.extend(f["id"] for f in page.get("files", []))
+                    fields="nextPageToken,files(id,mimeType,shortcutDetails,appProperties)",
+                    pageToken=token, pageSize=1000).execute()
+                found.extend(f["id"] for f in page.get("files", [])
+                             if (f.get("appProperties") or {}).get("bitportExternalOriginal") == m
+                             and f.get("mimeType") == SHORTCUT_MIME
+                             and (f.get("shortcutDetails") or {}).get("targetId") == sid)
                 token = page.get("nextPageToken")
                 if not token:
                     break
@@ -247,6 +276,19 @@ def repair(auth, db, settings, user, result):
                 raise RuntimeError("Multiple marked shortcuts exist; no new shortcut was created")
             if found:
                 shortcut = found[0]
+                current = shortcut_meta(tgt, shortcut)
+                if (current.get("mimeType") != SHORTCUT_MIME or current.get("trashed")
+                        or not _target_owned(current, target)
+                        or (current.get("shortcutDetails") or {}).get("targetId") != sid):
+                    raise RuntimeError("Marked shortcut changed identity; no placement update was made")
+                if current.get("name") != fresh["name"] or current.get("parents") != [fresh["expectedParent"]]:
+                    parents = current.get("parents") or []
+                    remove = ",".join(p for p in parents if p != fresh["expectedParent"])
+                    add = "" if fresh["expectedParent"] in parents else fresh["expectedParent"]
+                    tgt.files().update(fileId=shortcut, body={"name": fresh["name"],
+                        "appProperties": {"bitportExternalOriginal": m}}, addParents=add,
+                        removeParents=remove, supportsAllDrives=True, fields="id").execute()
+                    out["changed"] += 1
             else:
                 if prior and prior["state"] not in ("OWNER_ACTION_REQUIRED", "RESERVED"):
                     raise RuntimeError("A previous shortcut create may have succeeded; replay is blocked")
@@ -284,10 +326,24 @@ def repair(auth, db, settings, user, result):
             db.record_mapping(user, sid, shortcut, "external_shortcut", source_name=fresh["name"])
             save(db, user, sid, target, copy_id, "CREATED", fresh, shortcut)
             after = inspect_one(auth, db, settings, user, target, sid, copy_id)
-            if not after["originalAccessVerified"] or after["fallbackState"] != "PRIVATE_COPY_RETAINED":
-                raise RuntimeError("Fresh original access or shortcut placement failed readback")
+            if after["shortcutState"] != "MATCHED":
+                raise RuntimeError("Fresh shortcut placement failed readback")
+            if after["fallbackState"] != "PRIVATE_COPY_RETAINED":
+                reason = "Retained fallback has other grants; review is required before accepting original-reference mode"
+                out["needsPerson"].append({"source": sid, "reason": reason})
+                out["errors"].append(f"{sid}: {reason}")
+                save(db, user, sid, target, copy_id, "NEEDS_ATTENTION", after, shortcut)
+                continue
+            if not after["originalAccessVerified"]:
+                out["ownerActions"].append(after)
+                save(db, user, sid, target, copy_id, "OWNER_ACTION_REQUIRED", after, shortcut)
+                continue
             save(db, user, sid, target, copy_id, "VERIFIED", after, shortcut)
             out["verified"] += 1
         except Exception as exc:
-            out["errors"].append(f"{sid}: {error_detail(exc)}")
+            detail = error_detail(exc)
+            if "visible source parent has no mapped target folder" in detail.lower():
+                reason = "Map the visible source parent folder to the target, then rerun shortcut placement."
+                out["needsPerson"].append({"source": sid, "reason": reason})
+            out["errors"].append(f"{sid}: {detail}")
     return out

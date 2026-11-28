@@ -173,3 +173,79 @@ def test_first_changed_at_is_the_start_of_the_current_unbroken_run_of_changed(db
             c.execute("INSERT INTO source_guard_checks(checked_at, since, verdict, report) VALUES (?,?,?,?)",
                       (at, "s", v, "{}"))
     assert G.latest(db)["firstChangedAt"] == "t3"
+
+
+def test_a_search_by_this_tool_is_a_read_not_a_change():
+    """files.list with a query is logged as "search": four name lookups on a. stopped P3.7 run 8 (22 Nov 2026)."""
+    def ev(ip, name, **p):
+        return ({"ipAddress": ip, "id": {"time": "t"}, "actor": {"email": "u@src"}}, {"name": name}, p)
+    log = {"token": [ev("9.9.9.9", "authorize", client_id="42")],
+           "drive": [ev("9.9.9.9", "search"), ev("9.9.9.9", "edit", doc_title="a real change")],
+           "admin": [], "calendar": []}
+    out = G.audit(None, "since", "42", events=lambda app: log[app])
+    assert [r["event"] for r in out["byBitport"]] == ["edit"]
+
+
+def test_a_seed_on_the_source_is_never_stopped_by_the_guard(monkeypatch, tmp_path):
+    """22 Nov 2026: the guard armed for the dharan rehearsal stopped a reseed of the sandbox a. 90 s in."""
+    import json
+    import api_server
+    import source_guard
+    ledger = tmp_path / "m.db"
+    ledger.write_text("")
+    key = tmp_path / "k.json"
+    key.write_text(json.dumps({"client_id": "42"}))
+    monkeypatch.setattr(api_server, "_account_db_path", lambda aid: str(ledger))
+    monkeypatch.setattr(api_server, "_account_jobs", lambda aid: [{"pid": 77, "job_name": "seed"}])
+
+    class St:
+        source_domain, source_sa_key = "a.example", str(key)
+    monkeypatch.setattr("config.Settings", lambda account_id=None: St())
+
+    class D:
+        def __init__(self, path): pass
+        def close(self): pass
+    monkeypatch.setattr("db.MigrationDB", D)
+    monkeypatch.setattr(source_guard, "snapshot_taken", lambda d: "2026-10-19")
+    stops = []
+    monkeypatch.setattr(api_server, "_stop_account_jobs", lambda aid, why: stops.append(why) or 1)
+    monkeypatch.setattr(source_guard, "audit", lambda st, since, cid: {
+        "byBitport": [{"event": "create", "item": "Policies tracker 001", "app": "drive"}], "byGoogle": []})
+    assert api_server._source_guard_fast(5) == [] and stops == []
+    assert api_server._source_guard_one(5) is None and stops == []
+
+
+def test_the_fast_watch_never_reads_from_before_the_baseline(monkeypatch, tmp_path):
+    """Incident #263 (22 Nov 2026): the read position a seed left was replayed when the next job started --
+    24 of the seed's own writes, all before the re-taken baseline, stopped a reset of b."""
+    import json
+    import api_server
+    import source_guard
+    ledger = tmp_path / "m.db"
+    ledger.write_text("")
+    key = tmp_path / "k.json"
+    key.write_text(json.dumps({"client_id": "42"}))
+    monkeypatch.setattr(api_server, "_account_db_path", lambda aid: str(ledger))
+    monkeypatch.setattr(api_server, "_account_jobs", lambda aid: [{"pid": 77, "job_name": "reset target"}])
+
+    class St:
+        source_domain, source_sa_key = "a.example", str(key)
+    monkeypatch.setattr("config.Settings", lambda account_id=None: St())
+
+    class D:
+        def __init__(self, path): pass
+        def close(self): pass
+    monkeypatch.setattr("db.MigrationDB", D)
+    monkeypatch.setattr(source_guard, "snapshot_taken", lambda d: "2026-11-22T19:41:50Z")
+    monkeypatch.setitem(api_server._GUARD_AUDIT_SINCE, 5, "2026-11-22T19:16:00.000Z")
+    seen = []
+    monkeypatch.setattr(source_guard, "audit", lambda st, since, cid: seen.append(since) or {"byBitport": [], "byGoogle": []})
+    api_server._source_guard_fast(5)
+    assert seen == ["2026-11-22T19:41:53.000Z"]      # the baseline plus Google's logging skew
+
+
+def test_a_write_logged_just_after_the_baseline_second_is_in_the_baseline():
+    """Incident #266 (23 Nov 2026): a write at 21:45:15.87 was logged 21:45:16.062, the baseline kept 21:45:16."""
+    import source_guard
+    assert source_guard.audit_floor("2026-11-22T21:45:16Z") > "2026-11-22T21:45:16.062Z"
+    assert source_guard.audit_floor("2026-11-22T21:45:16.000Z") == "2026-11-22T21:45:19.000Z"

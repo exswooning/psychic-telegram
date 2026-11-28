@@ -17,8 +17,12 @@ across automatically.
 
 from __future__ import annotations
 
+import failpoints
 import base64
 import contextlib
+import json
+import sys
+import time
 import logging
 import os
 import concurrent.futures as futures
@@ -27,10 +31,12 @@ import re
 import uuid
 
 from google.auth.exceptions import RefreshError
-from googleapiclient.http import MediaFileUpload  # noqa: F401
+from googleapiclient.http import MediaFileUpload, MediaIoBaseUpload  # noqa: F401
 
-from config import DEFERRED_TO_DMS, DELIVERED_BY_DMS, OWED_GRANT, Settings
+from config import (DEFERRED_TO_DMS, DELIVERED_BY_DMS, GMAIL_RECOVERY_AMBIGUOUS,
+                    GMAIL_RECOVERY_DIFFERENT, OWED_GRANT, Settings)
 from sample_budget import Budget
+from pagination import next_page_token
 from link_rewrite import rewrite_raw
 from resilience import (PermanentAPIError, RateLimiter, TransportExhausted,
                         retry_on_google_error, shutdown_requested)
@@ -43,6 +49,18 @@ OPTIONAL_PASS_ERRORS = (PermanentAPIError, RuntimeError, RefreshError)
 
 log = logging.getLogger(__name__)
 
+# Split mail's candidate searches, run separately (ids only) and unioned, so a report
+# can say what each form found. Gmail search is not proof of coverage: a link Gmail did
+# not index is missed, which is why every full run also re-reads the messages this
+# ledger already proved link-bearing and reports any the searches did not name.
+LINK_SEARCHES = ("has:drive", "has:document", "has:spreadsheet", "has:presentation",
+                 '"drive.google.com"', '"docs.google.com"',
+                 # text attachments are read by the classifier, and a forwarded .eml blocks
+                 "filename:txt", "filename:htm", "filename:html", "filename:csv",
+                 "filename:ics", "filename:eml")
+NOT_A_CANDIDATE = ("not named by Gmail's link search, so its body was not read; "
+                   "awaiting verified DMS delivery")
+
 SYSTEM_LABELS = {
     "INBOX", "SENT", "DRAFT", "SPAM", "TRASH", "UNREAD", "STARRED",
     "IMPORTANT", "CHAT", "CATEGORY_PERSONAL", "CATEGORY_SOCIAL",
@@ -51,6 +69,24 @@ SYSTEM_LABELS = {
 
 # Gmail's simple (non-resumable) upload path tops out at 5 MB.
 LARGE_MESSAGE_THRESHOLD = 5 * 1024 * 1024
+# The message pool needs to serialize deliveries within a conversation, but
+# retaining one lock per conversation makes memory grow with mailbox history.
+# Stripes bound that state; unrelated conversations may occasionally serialize.
+CONVERSATION_LOCK_STRIPES = 256
+
+
+def _small_upload(raw_b64: str):
+    """A message under 5 MB as its own bytes (message/rfc822), not base64 text inside JSON: a quarter fewer bytes on
+    a line whose upload is the limit (0.9 MB/s on the box). None when it must still go as `raw` in the body: the
+    switch is off (GMAIL_RAW_UPLOAD=0), or the bytes are not ASCII -- googleapiclient's one-shot multipart upload
+    cannot carry those ("'ascii' codec can't encode", the seeder's first raw upload, 17 Nov 2026)."""
+    if os.getenv("GMAIL_RAW_UPLOAD", "1").lower() in ("0", "false", "no"):
+        return None
+    data = base64.urlsafe_b64decode(raw_b64 + "=" * (-len(raw_b64) % 4))
+    if not data.isascii():
+        return None
+    import io
+    return MediaIoBaseUpload(io.BytesIO(data), mimetype="message/rfc822", resumable=False)
 
 
 def _ascii_headers(raw_b64: str) -> str:
@@ -114,9 +150,11 @@ class GmailMigrator:
         self._src_override = None
         self._tgt_override = None
         self._stats_lock = threading.Lock()
-        self._conv_locks: dict[str, threading.Lock] = {}
-        self._conv_locks_guard = threading.Lock()
+        self._scan_lock = threading.Lock()
+        self._link_scan: dict = {}
+        self._conv_locks = tuple(threading.Lock() for _ in range(CONVERSATION_LOCK_STRIPES))
         self.limiter = RateLimiter(settings.per_user_qps)
+        self.scan_limiter = RateLimiter(getattr(settings, "mail_scan_qps", settings.per_user_qps))
         self.stats = {
             "inserted": 0, "failed": 0, "skipped": 0,
             "drafts_inserted": 0, "drafts_failed": 0, "drafts_skipped": 0,
@@ -166,6 +204,8 @@ class GmailMigrator:
     def _bump(self, key: str, n: int = 1) -> None:
         with self._stats_lock:
             self.stats[key] += n
+        import progress
+        progress.tick(self.source_user, "gmail", n)      # the heartbeat oversight's stall check reads
 
     def _retry(self, fn, before_retry=None, label=None):
         return retry_on_google_error(
@@ -330,13 +370,56 @@ class GmailMigrator:
         found = [m["id"] for m in (resp.get("messages") or [])
                  if m["id"] != ignore]
         if getattr(self, "recover_unmapped", False):
-            claimed = {r[0] for r in self.db.conn.execute("SELECT target_id FROM id_mapping WHERE source_user=? AND type='message'", (self.source_user,))}
-            found = [tid for tid in found if tid not in claimed]
+            if found:
+                # Gmail returns at most 100 candidates. Probe just those IDs
+                # instead of loading the whole mailbox's mappings for each message.
+                marks = ",".join("?" for _ in found)
+                claimed = {row[0] for row in self.db.conn.execute(
+                    f"SELECT target_id FROM id_mapping INDEXED BY ix_map_target "
+                    f"WHERE target_id IN ({marks}) AND source_user=? AND type='message'",
+                    (*found, self.source_user),
+                )}
+                found = [tid for tid in found if tid not in claimed]
             if len(found) > 1 or resp.get("nextPageToken"):
-                raise RuntimeError("Ambiguous unclaimed destination Message-ID; recovery blocked")
+                raise RuntimeError(GMAIL_RECOVERY_AMBIGUOUS)
         if self.settings.mail_only_with_links and (len(found) > 1 or resp.get("nextPageToken")):
+            # Leftovers a reset moved to Trash are retained, not copies: only more than one LIVE copy is ambiguous
+            # (alice, P3.5, 19 Nov 2026: two trashed copies of one Message-ID blocked six messages).
+            # Gmail tokens a FULL page even with nothing after it, so a token on a page of two proves nothing: list
+            # again with room (ten), and only a full page of ten is "more".
+            wide = self._retry(lambda: self.tgt.users().messages().list(
+                userId="me", q=query, maxResults=10, includeSpamTrash=True).execute())
+            every = [m["id"] for m in (wide.get("messages") or []) if m["id"] != ignore]
+            if len(every) < 10:
+                live = [t for t in every if "TRASH" not in (self._retry(lambda t=t: self.tgt.users().messages().get(
+                    userId="me", id=t, format="minimal").execute()).get("labelIds") or [])]
+                if len(live) <= 1:
+                    return live[0] if live else every[0]
             raise RuntimeError("Ambiguous destination Message-ID; split delivery blocked")
         return found[0] if found else None
+
+    # A kill between Gmail accepting an insert and the ledger recording it left a copy the next run could
+    # not see, and in engine mode it inserted a second (the 10/10 plan's kill-then-rerun test, 15 Nov 2026).
+    # An intent row is written just before each insert -- local, no API call -- and only a message with an
+    # intent and no mapping is looked up by Message-ID first. Split and recovery runs already always look.
+    def _note_insert_intent(self, source_id: str | None) -> None:
+        if not source_id:
+            return
+        with self.db.write() as c:
+            c.execute("CREATE TABLE IF NOT EXISTS mail_insert_intent (source_user TEXT NOT NULL, "
+                      "source_id TEXT NOT NULL, at TEXT NOT NULL, PRIMARY KEY(source_user, source_id))")
+            c.execute("INSERT OR REPLACE INTO mail_insert_intent VALUES(?,?,datetime('now'))",
+                      (self.source_user, source_id))
+
+    def _may_have_landed(self, source_id: str | None) -> bool:
+        if not source_id:
+            return False
+        try:
+            hit = self.db.conn.execute("SELECT 1 FROM mail_insert_intent WHERE source_user=? AND source_id=?",
+                                       (self.source_user, source_id)).fetchone()
+        except Exception:      # no table yet: nothing was ever attempted
+            return False
+        return bool(hit) and not self.db.get_target_id(self.source_user, source_id, "message")
 
     def _insert_once(self, body: dict, media, raw: str,
                      replacing: str | None = None, source_id: str | None = None) -> dict:
@@ -405,35 +488,43 @@ class GmailMigrator:
                             decode(original.get("raw", "")), decode(target.get("raw", "")))
                         expected, count = rewrite_raw(original["raw"], self._drive_link_target)
                         from verify_sample import normalise_message
-                        same_headers = normalise_message(decode(original["raw"]))[0] == normalise_message(decode(target["raw"]))[0]
-                        eligible = old_verdict != "different" or (
-                            getattr(self, "recover_unmapped", False) and same_headers)
+                        # Who the message is, not how it is encoded: a rewrite may re-encode the body (quoted-printable
+                        # to base64, charset quoting), which moves Content-Type and Content-Transfer-Encoding.
+                        who = lambda raw: {k: v for k, v in normalise_message(raw)[0].items()   # noqa: E731
+                                           if k in ("message-id", "from", "to", "cc", "subject", "date")}
+                        same_headers = who(decode(original["raw"])) == who(decode(target["raw"]))
+                        # The old copy is the same MESSAGE (same headers) with other link text: the previous run's own
+                        # rewritten copy, left in Trash by a reset. Without this every re-run after a reset blocked on its
+                        # own leftovers (P3.5, 19 Nov 2026: 1,431 messages). It stays in Trash, untouched.
+                        eligible = old_verdict != "different" or same_headers
                         if eligible and count and decode(expected) == decode(raw):
                             replacing = existing
                             self.db.log_audit(self.source_user, source_id, "reset_link_recovery",
                                               "PENDING", "Target copy " + existing + " retained unchanged in Trash; "
                                               "fresh source content with current link mappings will be inserted separately")
                             return None
-                    raise RuntimeError("Existing destination Message-ID has different content; manual review required")
+                    raise RuntimeError(GMAIL_RECOVERY_DIFFERENT)
                 return {"id": existing, "threadId": target.get("threadId"), "adopted": True}
             log.info("[%s] a previous attempt had already delivered %s; "
                      "adopting it instead of inserting a duplicate",
                      self.source_user, msgid)
             return {"id": existing, "adopted": True}
 
-        insert = lambda: self.tgt.users().messages().insert(   # noqa: E731
+        insert = lambda: failpoints.hit("gmail.inserted", self.tgt.users().messages().insert(   # noqa: E731
             userId="me", body=body, media_body=media,
-            internalDateSource="dateHeader").execute()
+            internalDateSource="dateHeader").execute(), user=self.source_user)
         try:
             if not msgid:
                 if self.settings.mail_only_with_links or not source_id:
                     raise RuntimeError("Missing-ID delivery requires a source identity and qualified non-split path")
                 from mail_identity import insert_without_message_id
                 return insert_without_message_id(self, source_id, raw, insert)
-            if getattr(self, "recover_unmapped", False) or self.settings.mail_only_with_links:
+            if (getattr(self, "recover_unmapped", False) or self.settings.mail_only_with_links
+                    or self._may_have_landed(source_id)):
                 adopted = adopt_if_already_delivered()
                 if adopted is not None:
                     return adopted
+            self._note_insert_intent(source_id)
             return self._retry(insert, before_retry=adopt_if_already_delivered,
                                label="gmail.messages.insert")
         except TransportExhausted:
@@ -447,42 +538,98 @@ class GmailMigrator:
 
     # -- messages --------------------------------------------------------------
     def _iter_messages(self, query: str):
-        token = None
+        token, seen = None, set()
         while True:
             self.limiter.acquire()
             resp = self._retry(lambda t=token: self.src.users().messages().list(
                 userId="me", maxResults=500, pageToken=t, q=query,
                 includeSpamTrash=True,
             ).execute())
+            token = next_page_token(resp, token, seen, "Gmail message inventory")
             for m in resp.get("messages", []):
                 if not self.budget.take():
                     return
                 yield m
-            token = resp.get("nextPageToken")
             if not token:
                 return
 
     def _split_unknown_link(self, fid):
         # Positive external ownership evidence is required. A 403/404,
         # source-owned item or unknown Shared Drive cannot be handed off.
-        meta = self._retry(lambda: self.auth.source_drive(self.source_user).files().get(
-            fileId=fid, fields="id,owners(emailAddress),driveId", supportsAllDrives=True).execute(),
-            label="gmail.split.link_owner")
+        try:
+            meta = self._retry(lambda: self.auth.source_drive(self.source_user).files().get(
+                fileId=fid, fields="id,owners(emailAddress),driveId", supportsAllDrives=True).execute(),
+                label="gmail.split.link_owner")
+        except PermanentAPIError as exc:
+            # A definite 404 for an id the run never mapped: nobody can rewrite it, so the link
+            # reads the same by either route. Blocking on it held back every other message of
+            # the mailbox (4 of 758 on audit@s., 695 on info@s.). Counted, never silent.
+            if not str(exc).startswith("HTTP 404"):
+                raise
+            self._scan_count("unreachableLinks", 1)
+            return "external"
         owners = [o.get("emailAddress", "").rsplit("@", 1)[-1].lower() for o in meta.get("owners", [])]
+        if not owners and meta.get("driveId") and self._foreign_shared_drive(meta["driveId"]):
+            # In a shared drive the source tenant does not hold (another organisation's, shared in):
+            # nothing here can migrate it, and the link reads the same either way. Live (account 3,
+            # 2026-11-03): 3 of it.department@'s links pointed into one and blocked its whole mailbox.
+            self._scan_count("foreignSharedDriveLinks", 1)
+            return "external"
         return "external" if owners and all(x and x != self.settings.source_domain.lower() for x in owners) else "unresolved"
+
+    def _foreign_shared_drive(self, drive_id: str) -> bool:
+        """Is this shared drive outside the source tenant? Asked of the source admin with domain-admin
+        access, once per drive: 404 = not the tenant's. Anything unsure is NOT foreign (it blocks)."""
+        cache = self.__dict__.setdefault("_drive_owner_cache", {})
+        if drive_id not in cache:
+            admin = getattr(self.settings, "source_admin", "") or ""
+            if not admin:
+                return False
+            try:
+                self._retry(lambda: self.auth.source_drive(admin).drives().get(
+                    driveId=drive_id, useDomainAdminAccess=True, fields="id").execute(),
+                    label="gmail.split.link_drive")
+                cache[drive_id] = False
+            except PermanentAPIError as exc:
+                cache[drive_id] = str(exc).startswith("HTTP 404")
+            except Exception:      # noqa: BLE001 - unsure is not foreign
+                return False
+        return cache[drive_id]
 
     def _split_classify(self, mid):
         from split_mail import classify_payload
-        self.limiter.acquire()
-        full = self._retry(lambda: self.src.users().messages().get(
-            userId="me", id=mid, format="full").execute(), label="gmail.split.text")
+        self.scan_limiter.acquire()
+        try:
+            full = self._retry(lambda: self.src.users().messages().get(
+                userId="me", id=mid, format="full").execute(), label="gmail.split.text")
+        except Exception as exc:
+            from verification_reads import error_detail, status_of
+            if status_of(exc) == 404:
+                raise RuntimeError(f"Gmail raw read {mid}: {error_detail(exc)}") from exc
+            raise
+        self._scan_count("bodiesRead", 1)
+        self._scan_count("bytesRead", int(full.get("sizeEstimate") or 0))
         if set(full.get("labelIds") or []) & {"DRAFT", "CHAT"}:
             return full, None
         def text_attachment(aid):
-            self.limiter.acquire()
+            self.scan_limiter.acquire()
+            self._scan_count("attachmentReads", 1)
             return self._retry(lambda: self.src.users().messages().attachments().get(
                 userId="me", messageId=mid, id=aid).execute(), label="gmail.split.text_attachment")
-        return full, classify_payload(full, self._drive_link_target, text_attachment, self._split_unknown_link)
+        def raw():
+            self.scan_limiter.acquire()
+            self._scan_count("rawReads", 1)
+            try:
+                got = self._retry(lambda: self.src.users().messages().get(
+                    userId="me", id=mid, format="raw").execute(), label="gmail.split.raw")
+            except Exception as exc:
+                from verification_reads import error_detail, status_of
+                if status_of(exc) == 404:
+                    raise RuntimeError(f"Gmail raw read {mid}: {error_detail(exc)}") from exc
+                raise
+            data = got.get("raw", "")
+            return base64.urlsafe_b64decode(data + "=" * (-len(data) % 4))
+        return full, classify_payload(full, self._drive_link_target, text_attachment, self._split_unknown_link, raw)
 
     def _migrate_one_message(self, ref: dict) -> None:
         """One message, start to finish. Extracted so a pool can run
@@ -508,14 +655,19 @@ class GmailMigrator:
             return
         if self.settings.mail_only_with_links and not already:
             try:
-                classified, plan = self._split_classify(mid)
+                cached = self._cached_split_result(mid)
+                classified, plan = cached if cached is not None else self._split_classify(mid)
                 if plan and plan["route"] == "BLOCKED":
                     raise RuntimeError("Unresolved Drive link mapping: " + ", ".join(plan["unresolved"]))
+                if plan and plan.get("encrypted"):
+                    # Recorded, never silent: nothing in it could be read, so it goes as it is.
+                    encrypted_why = plan["why"]
+                    self.db.log_audit(self.source_user, mid, "message_link", "LINK_SCAN_ENCRYPTED", encrypted_why)
                 if plan and plan["route"] == "DMS":
                     prior = self.db.get_audit(self.source_user, mid, "message")
+                    detail = plan.get("why") or "no changed Drive link; awaiting verified DMS delivery"
                     if not (prior and prior["status"] == DELIVERED_BY_DMS):
-                        self.db.log_audit(self.source_user, mid, "message", DEFERRED_TO_DMS,
-                                          "no changed Drive link; awaiting verified DMS delivery")
+                        self.db.log_audit(self.source_user, mid, "message", DEFERRED_TO_DMS, detail)
                     self._bump("skipped")
                     return
                 if plan and not self.settings.rewrite_drive_links:
@@ -527,16 +679,22 @@ class GmailMigrator:
                     self._bump("skipped")
                     return
             except Exception as exc:
-                self.db.log_audit(self.source_user, mid, "message", "FAILED_SPLIT" if self.settings.mail_only_with_links else "FAILED",
-                                  "Split classification incomplete: " + str(exc)[:300])
-                self._bump("failed")
+                if self._source_message_gone(exc):
+                    self._record_source_gone(mid, exc)
+                else:
+                    self.db.log_audit(self.source_user, mid, "message", "FAILED_SPLIT" if self.settings.mail_only_with_links else "FAILED",
+                                      "Split classification incomplete: " + str(exc)[:300])
+                    self._bump("failed")
                 return
         try:
             from verification_reads import gmail_raw
             _, full = gmail_raw(self.src, mid, lambda fn: self._retry(fn, label="gmail.messages.get"))
         except (PermanentAPIError, RuntimeError) as exc:
-            self.db.log_audit(self.source_user, mid, "message", "FAILED_SPLIT" if self.settings.mail_only_with_links else "FAILED", str(exc))
-            self._bump("failed")
+            if self._source_message_gone(exc):
+                self._record_source_gone(mid, exc)
+            else:
+                self.db.log_audit(self.source_user, mid, "message", "FAILED_SPLIT" if self.settings.mail_only_with_links else "FAILED", str(exc))
+                self._bump("failed")
             return
         label_ids = full.get("labelIds") or []
         if "CHAT" in label_ids:
@@ -604,7 +762,7 @@ class GmailMigrator:
             # moments later -- the repair erased its own record, and the
             # check that looks for repairs reported none while 38 had run.
             self.db.log_audit(self.source_user, mid, "link_repair", "SUCCESS",
-                              f"{would} link(s) needed repointing; old copy trashed")
+                              f"{would} link(s) needed repointing; old copy trashed {already}")
         # `raw` is already base64url, and `body["raw"]` wants base64url --
         # decoding it only to re-encode the identical bytes doubled peak
         # memory per message and burned CPU on every one. The decode is now
@@ -660,11 +818,22 @@ class GmailMigrator:
         with self._conversation_lock(src_thread):
             self._deliver(mid, raw, mapped_labels, approx_bytes, already, src_thread)
 
+    @staticmethod
+    def _source_message_gone(exc) -> bool:
+        """A listed source message that disappears before its raw read is a recorded skip, not a failure."""
+        from verification_reads import status_of
+
+        return status_of(exc) == 404 and "gmail raw read" in str(exc).lower()
+
+    def _record_source_gone(self, mid, exc) -> None:
+        self.db.log_audit(self.source_user, mid, "message", "SOURCE_GONE",
+                          "Source message returned HTTP 404 after listing; recorded as gone. " + str(exc)[:300])
+        self._bump("skipped")
+
     def _conversation_lock(self, src_thread: str | None):
         if not src_thread:
             return contextlib.nullcontext()
-        with self._conv_locks_guard:
-            return self._conv_locks.setdefault(src_thread, threading.Lock())
+        return self._conv_locks[hash(src_thread) % len(self._conv_locks)]
 
     def _deliver(self, mid: str, raw: str, mapped_labels: list, approx_bytes: int,
                  already, src_thread: str | None) -> None:
@@ -684,7 +853,9 @@ class GmailMigrator:
                 fh.write(base64.urlsafe_b64decode(raw))
             media = MediaFileUpload(path, mimetype="message/rfc822", resumable=True)
         else:
-            body["raw"] = raw
+            media = _small_upload(raw)
+            if media is None:
+                body["raw"] = raw
 
         try:
             # `already` is set only on a link repair, and by here its copy has
@@ -700,6 +871,8 @@ class GmailMigrator:
                 body.pop("threadId")
                 if path:
                     media = MediaFileUpload(path, mimetype="message/rfc822", resumable=True)
+                elif "raw" not in body:
+                    media = _small_upload(raw)
                 result = self._insert_once(body, media, raw, replacing=already, source_id=mid)
         except (PermanentAPIError, RuntimeError) as exc:
             self.db.log_audit(self.source_user, mid, "message", "FAILED_SPLIT" if self.settings.mail_only_with_links else "FAILED", str(exc))
@@ -718,7 +891,8 @@ class GmailMigrator:
         self.db.log_audit(self.source_user, mid, "message", "SUCCESS",
                           bytes_moved=approx_bytes)
         self._bump("inserted")
-        if (getattr(self.settings, "migration_checks_enabled", False) or self.settings.mail_only_with_links
+        from mail_completion import full_mail_check
+        if ((getattr(self.settings, "migration_checks_enabled", False) and full_mail_check(self.settings)) or self.settings.mail_only_with_links
                 or getattr(self, "recover_unmapped", False)):
             from migration_checks import verify_written_mail
             verified = verify_written_mail(self, mid, result["id"], raw, mapped_labels,
@@ -733,6 +907,346 @@ class GmailMigrator:
                                   "SUCCESS" if verified else "NEEDS_ATTENTION",
                                   "Old target copy retained in Trash; fresh copy " + result["id"] +
                                   (" content and labels verified" if verified else " requires verification"))
+
+    def _scan_count(self, key, n):
+        with self._scan_lock:
+            self._link_scan[key] = self._link_scan.get(key, 0) + n
+
+    def _list_ids(self, q):
+        return set(self._iter_search_ids(q))
+
+    def _iter_search_ids(self, q):
+        token, seen = None, set()
+        while True:
+            self.limiter.acquire()
+            resp = self._retry(lambda t=token: self.src.users().messages().list(
+                userId="me", maxResults=500, pageToken=t, q=q, includeSpamTrash=True,
+            ).execute(), label="gmail.split.search")
+            self._scan_count("listCalls", 1)
+            token = next_page_token(resp, token, seen, "Gmail search inventory")
+            for message in resp.get("messages", []):
+                yield message["id"]
+            if not token:
+                return
+
+    def _known_link_ids(self):
+        """Messages an earlier full read proved carry a Drive link: rewritten, or blocked
+        on one. Independent of Gmail's search, so they measure its recall."""
+        rows = self.db.conn.execute(
+            "SELECT item_id FROM audit_log WHERE source_user=? AND ("
+            "(item_type='link_rewrite' AND status='SUCCESS') OR (item_type='message' "
+            "AND status='FAILED_SPLIT' AND error_message LIKE '%Unresolved Drive link%'))",
+            (self.source_user,)).fetchall()
+        return {r[0] for r in rows}
+
+    def _save_link_scan(self):
+        with self._scan_lock:
+            report = dict(self._link_scan)
+        rss = __import__("resource").getrusage(__import__("resource").RUSAGE_SELF).ru_maxrss
+        report["maxRssMb"] = round(rss / (1 << 20 if sys.platform == "darwin" else 1 << 10), 1)
+        with self.db.write() as conn:
+            conn.execute("CREATE TABLE IF NOT EXISTS mail_link_scans (source_user TEXT NOT NULL, "
+                         "started_at TEXT NOT NULL, report TEXT NOT NULL, "
+                         "PRIMARY KEY (source_user, started_at))")
+            conn.execute("INSERT OR REPLACE INTO mail_link_scans VALUES (?,?,?)",
+                         (self.source_user, report["startedAt"], json.dumps(report)))
+
+    def _begin_split_scan(self):
+        """Create a disk-backed cache for pre-delivery classifications.
+
+        A large mailbox cannot keep every message id and classification in RAM
+        while it waits for the whole-mailbox safety scan to finish.
+        """
+        scan_id = uuid.uuid4().hex
+        self._split_scan_id = scan_id
+        with self.db.write() as conn:
+            conn.execute("CREATE TABLE IF NOT EXISTS gmail_split_scan ("
+                         "source_user TEXT NOT NULL, scan_id TEXT NOT NULL, message_id TEXT NOT NULL, "
+                         "classified TEXT NOT NULL, plan TEXT, "
+                         "PRIMARY KEY(source_user, scan_id, message_id))")
+            conn.execute("CREATE TABLE IF NOT EXISTS gmail_split_candidates ("
+                         "source_user TEXT NOT NULL, scan_id TEXT NOT NULL, category TEXT NOT NULL, "
+                         "message_id TEXT NOT NULL, "
+                         "PRIMARY KEY(source_user, scan_id, category, message_id))")
+            # A process stop can leave an abandoned preflight. The next run for
+            # this mailbox supersedes it and drops its scratch rows.
+            conn.execute("DELETE FROM gmail_split_scan WHERE source_user=?", (self.source_user,))
+            conn.execute("DELETE FROM gmail_split_candidates WHERE source_user=?", (self.source_user,))
+        return scan_id
+
+    def _flush_split_candidates(self, scan_id, category, ids):
+        if not ids:
+            return
+        with self.db.write() as conn:
+            conn.executemany(
+                "INSERT OR IGNORE INTO gmail_split_candidates VALUES (?,?,?,?)",
+                [(self.source_user, scan_id, category, mid) for mid in ids],
+            )
+
+    def _store_search_ids(self, query, category, scan_id):
+        batch = []
+        for mid in self._iter_search_ids(query):
+            batch.append(mid)
+            if len(batch) >= 500:
+                self._flush_split_candidates(scan_id, category, batch)
+                batch.clear()
+        self._flush_split_candidates(scan_id, category, batch)
+        return int(self.db.conn.execute(
+            "SELECT COUNT(*) FROM gmail_split_candidates "
+            "WHERE source_user=? AND scan_id=? AND category=?",
+            (self.source_user, scan_id, category),
+        ).fetchone()[0])
+
+    def _store_missed_known_links(self, scan_id):
+        """Add prior proven link IDs missed by Gmail search, using SQL set operations."""
+        known_where = "(item_type='link_rewrite' AND status='SUCCESS') OR " \
+                      "(item_type='message' AND status='FAILED_SPLIT' " \
+                      "AND error_message LIKE '%Unresolved Drive link%')"
+        with self.db.write() as conn:
+            total = int(conn.execute(
+                f"SELECT COUNT(DISTINCT item_id) FROM audit_log WHERE source_user=? AND ({known_where})",
+                (self.source_user,),
+            ).fetchone()[0])
+            conn.execute(
+                "INSERT OR IGNORE INTO gmail_split_candidates "
+                "SELECT ?,?, 'known', a.item_id FROM audit_log a "
+                "WHERE a.source_user=? AND (" + known_where + ") AND NOT EXISTS ("
+                "SELECT 1 FROM gmail_split_candidates c WHERE c.source_user=? AND c.scan_id=? "
+                "AND c.category LIKE 'term:%' AND c.message_id=a.item_id)",
+                (self.source_user, scan_id, self.source_user, self.source_user, scan_id),
+            )
+            missed = int(conn.execute(
+                "SELECT COUNT(*) FROM gmail_split_candidates "
+                "WHERE source_user=? AND scan_id=? AND category='known'",
+                (self.source_user, scan_id),
+            ).fetchone()[0])
+        return total, missed
+
+    def _search_has(self, scan_id, category, message_id):
+        if category == "candidate":
+            where = "category LIKE 'term:%' OR category='known'"
+        else:
+            where = "category=?"
+        row = self.db.conn.execute(
+            "SELECT 1 FROM gmail_split_candidates WHERE source_user=? AND scan_id=? AND (" + where + ")" +
+            " AND message_id=? LIMIT 1",
+            ((self.source_user, scan_id, message_id) if category == "candidate" else
+             (self.source_user, scan_id, category, message_id)),
+        ).fetchone()
+        return row is not None
+
+    def _count_search_candidates(self, scan_id):
+        return int(self.db.conn.execute(
+            "SELECT COUNT(DISTINCT message_id) FROM gmail_split_candidates "
+            "WHERE source_user=? AND scan_id=? AND (category LIKE 'term:%' OR category='known')",
+            (self.source_user, scan_id),
+        ).fetchone()[0])
+
+    def _flush_split_scan(self, scan_id, rows):
+        if not rows:
+            return
+        with self.db.write() as conn:
+            conn.executemany(
+                "INSERT OR REPLACE INTO gmail_split_scan "
+                "(source_user, scan_id, message_id, classified, plan) VALUES (?,?,?,?,?)",
+                [(self.source_user, scan_id, mid, json.dumps(classified),
+                  json.dumps(plan) if plan is not None else None)
+                 for mid, classified, plan in rows],
+            )
+
+    def _cached_split_result(self, mid):
+        scan_id = getattr(self, "_split_scan_id", None)
+        if not scan_id:
+            return None
+        row = self.db.conn.execute(
+            "SELECT classified, plan FROM gmail_split_scan "
+            "WHERE source_user=? AND scan_id=? AND message_id=?",
+            (self.source_user, scan_id, mid),
+        ).fetchone()
+        if row is None:
+            return None
+        return json.loads(row[0]), json.loads(row[1]) if row[1] is not None else None
+
+    def _clear_split_scan(self):
+        scan_id = getattr(self, "_split_scan_id", None)
+        if scan_id:
+            with self.db.write() as conn:
+                conn.execute("DELETE FROM gmail_split_scan WHERE source_user=? AND scan_id=?",
+                             (self.source_user, scan_id))
+                conn.execute("DELETE FROM gmail_split_candidates WHERE source_user=? AND scan_id=?",
+                             (self.source_user, scan_id))
+            self._split_scan_id = None
+
+    def _scan_split_before_delivery(self, query):
+        """Classify source mail before the first content insert.
+
+        Exhaustive mode reads every message. Search mode reads only the candidates
+        Gmail's own search names (LINK_SEARCHES, plus every message this ledger already
+        proved link-bearing); the rest are routed to the DMS unread and say so.
+        Keep only route/label metadata, never raw mail/attachments. A blocked
+        reference or unread candidate prevents DMS handoff and any content copy.
+        Existing target mappings must not exempt source mail from this scan.
+        """
+        from db import utc_now
+        mode = (getattr(self.settings, "mail_link_scan", "exhaustive") or "exhaustive").lower()
+        if mode not in ("search", "exhaustive"):
+            raise ValueError("MAIL_LINK_SCAN must be search or exhaustive")
+        scan_id = self._begin_split_scan()
+        staged = []
+        message_count = 0
+        self._link_scan = {"mode": mode, "query": query, "startedAt": utc_now(), "state": "SEARCHING",
+                           "examined": 0, "blocked": 0, "notRead": 0, "bodiesRead": 0, "bytesRead": 0,
+                           "attachmentReads": 0, "listCalls": 0}
+        began = time.monotonic()
+        search_mode = mode == "search"
+        search_counts = None
+        if mode == "search":
+            searches = {}
+            for term in LINK_SEARCHES:
+                category = "term:" + term
+                searches[term] = self._store_search_ids(
+                    f"{term} {query}".strip(), category, scan_id)
+            known_count = missed = None
+            if not query:
+                known_count, missed = self._store_missed_known_links(scan_id)
+            self._store_search_ids(f"in:drafts {query}".strip(), "draft", scan_id)
+            self._store_search_ids(f"in:chats {query}".strip(), "chat", scan_id)
+            search_counts = {"candidates": self._count_search_candidates(scan_id),
+                             "knownLinkMessages": known_count, "recallMissed": missed}
+            self._link_scan.update(searches=searches, **search_counts,
+                                   searchSeconds=round(time.monotonic() - began, 1))
+            log.info("[%s] mail link search: %d candidates (%s); %s known link messages missed by search",
+                     self.source_user, search_counts["candidates"], json.dumps(searches),
+                     "n/a" if query else missed)
+        # Read each mailbox once (the 10/10 plan): the link inventory beside the Drive pass already read this
+        # mailbox with this same classifier. A whole-mailbox exhaustive scan skips what it proved free of Drive
+        # links -- Gmail never changes a message's content -- and reads the rest: links, the unjudged, and
+        # anything that arrived after it. A delta window or no complete inventory reads everything as before.
+        known_inventory = False
+        if mode == "exhaustive" and not query:
+            import mail_dead_links
+            known_inventory = mail_dead_links.inventory_complete(self.db, self.source_user)
+            if known_inventory:
+                self._link_scan.update(inventoryProven=mail_dead_links.proven_count(
+                    self.db, self.source_user, mail_dead_links.FREE))
+        self._link_scan["state"] = "READING"
+        self._save_link_scan()
+        workers = max(int(getattr(self.settings, "mail_workers", 1) or 1),
+                      int(getattr(self.settings, "mail_scan_workers", 1) or 1))
+        self._link_scan.update(scanWorkers=workers, scanQps=getattr(self.scan_limiter, "rate", None))
+
+        def inspect(ref):
+            # Returning only classification metadata bounds retained memory even
+            # when a text part is large. No binary attachment is requested.
+            classified, plan = self._split_classify(ref["id"])
+            if plan and plan["route"] == "BLOCKED":
+                raise RuntimeError("Unresolved Drive link mapping: " + ", ".join(plan["unresolved"]))
+            return {"labelIds": classified.get("labelIds", [])}, plan
+
+        def stage(mid, result):
+            staged.append((mid, result[0], result[1]))
+            if len(staged) >= 500:
+                self._flush_split_scan(scan_id, staged)
+                staged.clear()
+
+        def collect(completed):
+            for future in completed:
+                mid = pending.pop(future)
+                try:
+                    stage(mid, future.result())
+                except Exception as exc:
+                    self.db.log_audit(self.source_user, mid, "message", "FAILED_SPLIT",
+                                      "Pre-delivery link scan: " + str(exc)[:300])
+                    self._scan_count("blocked", 1)
+                self._scan_count("examined", 1)
+                if self._link_scan["examined"] % 500 == 0:
+                    self._save_link_scan()
+                if self._link_scan["examined"] % 100 == 0:
+                    log.info("[%s] mail pre-delivery scan: %d examined, %d blocked",
+                             self.source_user, self._link_scan["examined"], self._link_scan["blocked"])
+
+        pending = {}
+        try:
+            with futures.ThreadPoolExecutor(max_workers=workers, thread_name_prefix="mail-scan") as pool:
+                for ref in self._iter_messages(query):
+                    if shutdown_requested():
+                        raise RuntimeError("Mail link scan interrupted; DMS handoff not ready")
+                    message_count += 1
+                    mid = ref["id"]
+                    known_kind = (mail_dead_links.proven_kind(self.db, self.source_user, mid)
+                                  if known_inventory else None)
+                    if known_kind is not None and known_kind != 1:
+                        import mail_dead_links
+                        labels = (["DRAFT"] if known_kind == mail_dead_links.DRAFT else
+                                  ["CHAT"] if known_kind == mail_dead_links.CHAT else None)
+                        stage(mid, (({"labelIds": labels}, None) if labels else
+                                    ({"labelIds": []}, {"route": "DMS", "changed": {}, "unresolved": [],
+                                     "linkIds": [], "why": "proved free of Drive links by the link inventory"})))
+                        self._scan_count("notRead", 1)
+                        continue
+                    if search_mode and not self._search_has(scan_id, "candidate", mid):
+                        labels = (["DRAFT"] if self._search_has(scan_id, "draft", mid) else
+                                  ["CHAT"] if self._search_has(scan_id, "chat", mid) else None)
+                        stage(mid, (({"labelIds": labels}, None) if labels else
+                                    ({"labelIds": []}, {"route": "DMS", "changed": {},
+                                     "unresolved": [], "linkIds": [], "why": NOT_A_CANDIDATE})))
+                        self._scan_count("notRead", 1)
+                        continue
+                    pending[pool.submit(inspect, ref)] = mid
+                    if len(pending) >= workers * 2:
+                        completed, _ = futures.wait(pending, return_when=futures.FIRST_COMPLETED)
+                        collect(completed)
+                while pending:
+                    if shutdown_requested():
+                        raise RuntimeError("Mail link scan interrupted; DMS handoff not ready")
+                    completed, _ = futures.wait(pending, return_when=futures.FIRST_COMPLETED)
+                    collect(completed)
+            self._flush_split_scan(scan_id, staged)
+            staged.clear()
+        except RuntimeError:
+            self._link_scan["state"] = "INTERRUPTED"
+            self._save_link_scan()
+            self._clear_split_scan()
+            raise
+        except BaseException:
+            self._clear_split_scan()
+            raise
+        blocked = self._link_scan["blocked"]
+        self._link_scan.update(state="BLOCKED" if blocked else "DONE", messages=message_count,
+                               scanSeconds=round(time.monotonic() - began, 1), finishedAt=utc_now())
+        self._save_link_scan()
+        log.info("[%s] mail pre-delivery scan complete (%s): %d messages, %d bodies read, %d not read, %d blocked",
+                 self.source_user, mode, message_count, self._link_scan["bodiesRead"],
+                 self._link_scan["notRead"], blocked)
+        if blocked:
+            self._owe_clean_mail_to_dms()
+            self._clear_split_scan()
+            raise RuntimeError(f"Mail link scan blocked on {blocked} messages; DMS not ready")
+        # Re-list only after the entire mailbox passed the safety scan. The
+        # classifications are held in SQLite, so this remains bounded in RAM.
+        return self._iter_messages(query)
+
+    def _owe_clean_mail_to_dms(self):
+        """A blocked scan never reaches delivery, so the mail it proved needs no rewrite would
+        carry no ledger row and read as lost: the repair's missing-mail recovery then copied a whole
+        mailbox through the engine (734 messages, live, 2026-10-30), ahead of the DMS. Record it as
+        owed to the DMS, as delivery would have."""
+        scan_id = getattr(self, "_split_scan_id", None)
+        if not scan_id:
+            return
+        rows = self.db.conn.execute(
+            "SELECT message_id, plan FROM gmail_split_scan "
+            "WHERE source_user=? AND scan_id=? AND plan IS NOT NULL",
+            (self.source_user, scan_id),
+        )
+        for mid, plan_json in rows:
+            plan = json.loads(plan_json)
+            if not plan or plan.get("route") != "DMS" or self.db.get_target_id(self.source_user, mid, "message"):
+                continue
+            prior = self.db.get_audit(self.source_user, mid, "message")
+            if not prior or prior["status"] not in (DELIVERED_BY_DMS, "SUCCESS"):
+                detail = plan.get("why") or "no changed Drive link; awaiting verified DMS delivery"
+                self.db.log_audit(self.source_user, mid, "message", DEFERRED_TO_DMS, detail)
 
     def run(self, delta: bool = False, since_epoch_days: int = 0,
             drive_in_scope: bool = True) -> dict:
@@ -799,34 +1313,40 @@ class GmailMigrator:
         # regardless of how long ago Stop was pressed. A message not yet
         # reached is simply not in the ledger, same as any other
         # not-yet-run one, and a delta/re-run picks it up.
+        refs = (self._scan_split_before_delivery(query) if self.settings.mail_only_with_links
+                else self._iter_messages(query))
         workers = max(1, int(getattr(self.settings, "mail_workers", 1) or 1))
-        if workers == 1:
-            for ref in self._iter_messages(query):
-                if shutdown_requested():
-                    log.warning("[%s] stopping mail migration early -- "
-                               "signal received", self.source_user)
-                    break
-                self._migrate_one_message(ref)
-        else:
-            with futures.ThreadPoolExecutor(max_workers=workers,
-                                            thread_name_prefix="gmail") as pool:
-                pending: set = set()
-                for ref in self._iter_messages(query):
+        try:
+            if workers == 1:
+                for ref in refs:
                     if shutdown_requested():
                         log.warning("[%s] stopping mail migration early -- "
                                    "signal received", self.source_user)
                         break
-                    # Bounded: a mailbox can be hundreds of thousands of
-                    # messages, and submitting them all up front would hold
-                    # every ref (and its futures) in memory at once.
-                    if len(pending) >= workers * 4:
-                        done, pending = futures.wait(
-                            pending, return_when=futures.FIRST_COMPLETED)
-                        for f in done:
-                            f.result()
-                    pending.add(pool.submit(self._migrate_one_message, ref))
-                for f in futures.as_completed(pending):
-                    f.result()
+                    self._migrate_one_message(ref)
+            else:
+                with futures.ThreadPoolExecutor(max_workers=workers,
+                                                thread_name_prefix="gmail") as pool:
+                    pending: set = set()
+                    for ref in refs:
+                        if shutdown_requested():
+                            log.warning("[%s] stopping mail migration early -- "
+                                       "signal received", self.source_user)
+                            break
+                        # Bounded: a mailbox can be hundreds of thousands of
+                        # messages, and submitting them all up front would hold
+                        # every ref (and its futures) in memory at once.
+                        if len(pending) >= workers * 4:
+                            done, pending = futures.wait(
+                                pending, return_when=futures.FIRST_COMPLETED)
+                            for f in done:
+                                f.result()
+                        pending.add(pool.submit(self._migrate_one_message, ref))
+                    for f in futures.as_completed(pending):
+                        f.result()
+        finally:
+            if self.settings.mail_only_with_links:
+                self._clear_split_scan()
 
         if shutdown_requested():
             self.stats["interrupted"] = True
@@ -837,6 +1357,7 @@ class GmailMigrator:
         if self.settings.migrate_gmail_settings:
             self._migrate_filters()
             self._migrate_signatures()
+            self._migrate_language()
             self._migrate_vacation()
             self._migrate_imap_pop()
             self._migrate_forwarding()
@@ -867,6 +1388,25 @@ class GmailMigrator:
         """
         settings = svc.users().settings()
         return all(hasattr(settings, n) for n in names)
+
+    def _migrate_language(self) -> None:
+        """Gmail's display language (settings.language, gmail.settings.basic). Not carried before
+        9 Nov 2026, so a Nepali-language user met an English Gmail on cutover morning."""
+        if not self._settings_has(self.src, "getLanguage") or not self._settings_has(self.tgt, "updateLanguage"):
+            return
+        try:
+            lang = self._retry(lambda: self.src.users().settings().getLanguage(userId="me").execute())
+            want = (lang or {}).get("displayLanguage")
+            if not want:
+                return
+            have = self._retry(lambda: self.tgt.users().settings().getLanguage(userId="me").execute())
+            if (have or {}).get("displayLanguage") == want or self.settings.dry_run:
+                return
+            self._retry(lambda: self.tgt.users().settings().updateLanguage(
+                userId="me", body={"displayLanguage": want}).execute())
+            self.stats["language_migrated"] = 1
+        except OPTIONAL_PASS_ERRORS as exc:
+            log.warning("[%s] Gmail display language not migrated: %s", self.source_user, exc)
 
     def _migrate_vacation(self) -> None:
         """The out-of-office responder, including its schedule."""
@@ -1128,6 +1668,13 @@ class GmailMigrator:
                 continue
 
             rewritten = self._rewrite_identities(signature)
+            # Drive links too: a signature logo hosted on Drive (`docs.google.com/uc?id=...`, found in
+            # hundreds of account 3's emails, 9 Nov 2026) would otherwise point at the source for good.
+            if self.settings.rewrite_drive_links:
+                from link_rewrite import rewrite_text
+                rewritten, moved = rewrite_text(rewritten, self._drive_link_target)
+                if moved:
+                    self.stats["signature_links_rewritten"] = self.stats.get("signature_links_rewritten", 0) + moved
 
             if self.settings.dry_run:
                 log.info("[DRY RUN] would set signature on %s", target_email)
@@ -1152,7 +1699,7 @@ class GmailMigrator:
 
     # -- drafts ------------------------------------------------------------
     def _iter_drafts(self):
-        token = None
+        token, seen = None, set()
         while True:
             self.limiter.acquire()
             # includeSpamTrash: a draft in the Trash is still the user's (and the tally
@@ -1160,9 +1707,9 @@ class GmailMigrator:
             resp = self._retry(lambda t=token: self.src.users().drafts().list(
                 userId="me", maxResults=100, pageToken=t, includeSpamTrash=True,
             ).execute())
+            token = next_page_token(resp, token, seen, "Gmail draft inventory")
             for d in resp.get("drafts", []):
                 yield d
-            token = resp.get("nextPageToken")
             if not token:
                 return
 
@@ -1235,6 +1782,18 @@ class GmailMigrator:
             self.stats["drafts_inserted"] += 1
 
     # -- filters -------------------------------------------------------------
+    def _existing_filter(self, body: dict) -> str | None:
+        """The target's filter with these criteria and actions, if there is one."""
+        def norm(b: dict) -> str:
+            return json.dumps({"criteria": b.get("criteria") or {}, "action": {
+                k: sorted(v) if isinstance(v, list) else v for k, v in (b.get("action") or {}).items()}}, sort_keys=True)
+        try:
+            have = self._retry(lambda: self.tgt.users().settings().filters().list(userId="me").execute()).get("filter", [])
+        except (PermanentAPIError, RuntimeError):
+            return None
+        want = norm(body)
+        return next((f["id"] for f in have if norm(f) == want), None)
+
     # Criteria (from/to/subject/query/...) are copied verbatim, not identity-
     # mapped: a criteria string can combine multiple conditions in ways that
     # aren't safe to pattern-match and rewrite. Only the add/remove label
@@ -1269,6 +1828,14 @@ class GmailMigrator:
                     action[passthrough] = src_action[passthrough]
 
             body = {"criteria": f.get("criteria", {}), "action": action}
+            if not any(action.values()):
+                # Gmail strips a filter's label action when that label is deleted and keeps the filter,
+                # which then does nothing -- and the API refuses to create one ("Filter doesn't have any
+                # actions", 400). Nothing to carry (a. -> b., 23 Nov 2026: c05's two, incident 264).
+                self.db.log_audit(self.source_user, fid, "filter", "SKIPPED_FILTER_NO_ACTION",
+                                  "the source filter has no action (its label was deleted); nothing to copy")
+                self.stats["filters_skipped"] += 1
+                continue
 
             if self.settings.dry_run:
                 log.info("[DRY RUN] would create filter %s", fid)
@@ -1280,6 +1847,15 @@ class GmailMigrator:
                     userId="me", body=b,
                 ).execute())
             except (PermanentAPIError, RuntimeError) as exc:
+                # "Filter already exists" (400 failedPrecondition): a wipe empties mail and labels
+                # but not a mailbox's filters, so a re-migration meets them (10 Nov 2026: 17 failures
+                # on 6 users). The filter is there: map it and count it as done.
+                existing = self._existing_filter(body) if "already exists" in str(exc) else None
+                if existing:
+                    self.db.record_mapping(self.source_user, fid, existing, "filter")
+                    self.db.log_audit(self.source_user, fid, "filter", "SUCCESS", "already on the target; adopted")
+                    self.stats["filters_skipped"] += 1
+                    continue
                 self.db.log_audit(self.source_user, fid, "filter", "FAILED", str(exc))
                 self.stats["filters_failed"] += 1
                 continue

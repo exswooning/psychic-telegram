@@ -130,6 +130,12 @@ def run(want: bool | None, timeout: int = 900, headful: bool = True,
         setting: str = "project_creation") -> bool:
     """Sign in with DWD_EMAIL/DWD_PASSWORD, then read (want=None) or set the setting.
     Returns its state before anything changed."""
+    if want:
+        import domain_guard
+        if domain_guard.is_government(os.getenv("DWD_EMAIL", "").rpartition("@")[2]):
+            # Operator, 16 Nov 2026: nothing on a government tenant changes unless a person does
+            # it. Setup reports this with the checkbox and its address instead.
+            raise RuntimeError("Bitport does not switch a government tenant's settings on by itself")
     from playwright.sync_api import sync_playwright
     cfg = SETTINGS[setting]
     with sync_playwright() as p:
