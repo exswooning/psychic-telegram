@@ -3077,10 +3077,13 @@ class DriveMigrator:
                 return 0
             self.db.log_audit(self.source_user,source_id,"comment","FAILED",str(exc))
             log.warning("[%s] comment thread remains unresolved on %s: %s",self.source_user,source_id,exc)
-            # A write may have landed before the failure (a reply lost after the comment was created): count it,
-            # so the modifiedTime restore and the late re-stamp check still run. F-lost, 28 Nov 2026: a PDF kept
-            # the run's time because a lost comment reply returned 0 and the file was never re-checked.
-            return 1
+            # A transport failure can hide a write that landed (a reply lost after the comment was created): count
+            # it, so the modifiedTime restore and the late re-stamp check still run. F-lost, 28 Nov 2026: a PDF kept
+            # the run's time. A refusal raised before any write (a precondition) is not one.
+            from googleapiclient.errors import HttpError
+            landed = isinstance(exc, (OSError, TimeoutError)) or (
+                isinstance(exc, HttpError) and getattr(exc.resp, "status", 0) >= 500)
+            return 1 if landed else 0
 
     NO_COMMENTS_API = ("application/vnd.google-apps.script", "application/vnd.google-apps.form",
                        "application/vnd.google-apps.site", "application/vnd.google-apps.map",

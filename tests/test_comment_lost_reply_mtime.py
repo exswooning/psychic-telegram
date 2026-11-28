@@ -17,3 +17,15 @@ def test_a_failed_comment_sync_counts_as_a_possible_write(monkeypatch):
     m._has_no_comments_api = lambda sid: False
     assert m._sync_comments("src-file", "tgt-file") == 1
     assert logged and logged[0][3] == "FAILED"
+
+
+def test_a_refusal_before_any_write_is_not_counted(monkeypatch):
+    import migration_comments
+    monkeypatch.setattr(migration_comments, "reconcile",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("Comment repair requires an exact mapped target file")))
+    m = drive_engine.DriveMigrator.__new__(drive_engine.DriveMigrator)
+    m.settings = type("S", (), {"dry_run": False})()
+    m.source_user = "u@src.test"
+    m.db = type("D", (), {"log_audit": lambda self, *a, **k: None})()
+    m._has_no_comments_api = lambda sid: False
+    assert m._sync_comments("src-file", "tgt-file") == 0
