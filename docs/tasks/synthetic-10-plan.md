@@ -589,6 +589,14 @@ rebuilt layouts (its slides render identical).
 - 27 Nov 2026, 12:20 pm NPT (Claude): **`fp:gmail.inserted:lost` PASS** (`fp2-vm-gmail-lost-t16-20261127c`, VM,
   06:01-06:35Z): the fault fired, the delivered copy was adopted, the complete check equalled the control, nothing
   landed twice. F-kill started on t16 (`fp2-vm-fkill-t16-20261127`).
+- 28 Nov 2026, 3:10 pm NPT (Claude): **P5.1 GO and the seed started.** Operator: 300 users, mail share 30%. Seed key:
+  Google refuses a bundled/headless Chromium sign-in, so it was made from the Mac (seed_key_from_mac.sh: gcloud signed
+  in as info@a. in BrowserOS, a new seed-sa key installed root-only on the VM, 18/18 scopes delegated, sign-in
+  revoked). Seats: admin 1 + cohort 30 + legacy 10 (alice..judy) + 259 profile users (p001-p005 exist) = 300, hence
+  --users 290. Plan: Drive 211,671 files, Gmail 215,385 messages, ~140 h at 1.84 MB/s. Unit fp2-seed300 on the VM
+  (log /root/seed300-*/seed.log). b. is emptied only after the failure queue and its re-runs (P5.2), well before P5.4.
+  l3novo deployed 7b3dc33 (operator word): dharan incidents #321/#312 closed on their own after it. Queue lost to
+  needrestart (an apt install restarted the API and the queue unit): fixed, relaunched as fp2-vm-failq-20261128f.
 - 28 Nov 2026, 12:05 pm NPT (Claude): **Codex's work integrated** (main = 06a78f1): 11 branches merged (sweep 21 bugs,
   finding-kinds, err-acts 31/32, verify at scale, incremental verify, red-team harness, seed-300, reboot with
   recorded-phase resume, phase-binding, suite's seed_loader); the full tests/ suite green on the merged tree apart
