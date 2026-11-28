@@ -5,9 +5,9 @@ read-only there); Drive on the source needs only the migration key's `drive` sco
 from __future__ import annotations
 
 import io
-import sys
 import os
 import time
+from seed_loader import load_seed_sandbox
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -54,8 +54,7 @@ def _plain_file(drive, pairs, side_fields="id,name,mimeType,size"):
 
 
 def _seed_services(settings, user):
-    sys.path.insert(0, os.path.join(HERE, "data-generator"))
-    import seed_sandbox as ss
+    ss = load_seed_sandbox()
     ss._use_own_key(settings)
     return ss, ss._retry_factory(settings)
 

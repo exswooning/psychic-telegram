@@ -334,11 +334,10 @@ def required_scopes(settings: Settings, tenant: str,
         want.add(DIRECTORY_WRITE_SCOPE)
     want.add("https://www.googleapis.com/auth/admin.directory.user.readonly")
     if include_seed and tenant == "source":
-        sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                        "data-generator"))
         try:
-            from seed_sandbox import SEED_SCOPES
-            want |= set(SEED_SCOPES)
+            from seed_loader import load_seed_sandbox
+
+            want |= set(load_seed_sandbox().SEED_SCOPES)
         except Exception:      # noqa: BLE001 - seeding is optional
             logging.getLogger(__name__).debug("ignored an error", exc_info=True)
     return sorted(want)
@@ -417,15 +416,10 @@ def _reads_only(scope: str) -> bool:
 
 def _seed_scopes() -> set:
     """The seeder's own write scopes, or an empty set if it is unavailable."""
-    import os
-    import sys
-
-    sys.path.insert(0, os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), "data-generator"))
     try:
-        from seed_sandbox import SEED_SCOPES
+        from seed_loader import load_seed_sandbox
 
-        return set(SEED_SCOPES)
+        return set(load_seed_sandbox().SEED_SCOPES)
     except Exception:      # noqa: BLE001 - seeding is optional
         return set()
 
