@@ -31,6 +31,7 @@ from typing import Iterator
 
 from config import DRIVE_FILE_FIELDS, FOLDER_MIME, SHORTCUT_MIME, Settings
 from db import MigrationDB
+from pagination import next_page_token
 from resilience import RateLimiter, retry_on_google_error
 
 log = logging.getLogger(__name__)
@@ -58,7 +59,7 @@ def iter_all_drive_items(
         q_parts.append(query_extra)
     q = " and ".join(q_parts)
 
-    page_token = None
+    page_token, seen = None, set()
     while True:
         if limiter:
             limiter.acquire()
@@ -81,9 +82,9 @@ def iter_all_drive_items(
             ).execute()
 
         resp = _list()
+        page_token = next_page_token(resp, page_token, seen, "Drive discovery inventory")
         for f in resp.get("files", []):
             yield f
-        page_token = resp.get("nextPageToken")
         if not page_token:
             return
 

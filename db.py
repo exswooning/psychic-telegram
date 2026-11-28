@@ -2037,9 +2037,14 @@ def tally_rollup(users, tallies: list[dict], deferred: dict[str, int] | None = N
         items = (t or {}).get("driveItems") or {}
         # Every other service, item by item (tally.compare_services): a copy missing or
         # never made is short, whatever the counts say; an extra on the target differs.
-        each = ((t or {}).get("items") or {}).values()
+        item_checks = (t or {}).get("items") or {}
+        each = item_checks.values()
         lost = any(x.get("notMigrated") or x.get("missingOnTarget") for x in each)
-        extra = any(x.get("extraOnTarget") for x in ((t or {}).get("items") or {}).values())
+        extra = any(x.get("extraOnTarget") for x in item_checks.values())
+        item_checks_incomplete = any(isinstance(item, dict) and item.get("incomplete")
+                                     for item in item_checks.values())
+        service_count_unknown = any(isinstance(service, dict) and service.get("usersUnknown", 0)
+                                    for service in ((t or {}).get("services") or {}).values())
         if t is None:
             verdict = "NOT_TALLIED"
         elif t.get("countParity") is None:
@@ -2053,6 +2058,10 @@ def tally_rollup(users, tallies: list[dict], deferred: dict[str, int] | None = N
             # copy that is there but not the same (name, size, checksum,
             # modifiedTime), a mapped item no longer there, or MORE on the target.
             verdict = "DIFFERS"
+        elif item_checks_incomplete or service_count_unknown:
+            # An unavailable service count or per-item inventory (currently draft IDs)
+            # makes exact parity unknown even when other aggregate counts happen to match.
+            verdict = "UNKNOWN"
         else:
             verdict = "COMPLETE"
         totals[verdict] += 1

@@ -21,6 +21,7 @@ import collections
 import concurrent.futures as futures
 from itertools import islice
 import os
+import sqlite3
 import sys
 import time
 
@@ -54,6 +55,43 @@ def proven(db, source_user: str) -> dict | None:
                                     (source_user,)).fetchall())
     except Exception:      # no tables yet
         return None
+
+
+def inventory_complete(db, source_user: str) -> bool:
+    """Whether a finished mailbox inventory exists, without loading its rows."""
+    try:
+        return bool(db.conn.execute(
+            "SELECT 1 FROM mail_link_inventories WHERE source_user=?", (source_user,)
+        ).fetchone())
+    except sqlite3.OperationalError as exc:
+        if "no such table" in str(exc).lower():
+            return False
+        raise
+
+
+def proven_kind(db, source_user: str, message_id: str) -> int | None:
+    """Look up one message's kind from the latest finished inventory."""
+    try:
+        row = db.conn.execute(
+            "SELECT kind FROM mail_link_seen WHERE source_user=? AND message_id=?",
+            (source_user, message_id),
+        ).fetchone()
+        return int(row[0]) if row else None
+    except sqlite3.OperationalError as exc:
+        if "no such table" in str(exc).lower():
+            return None
+        raise
+
+
+def proven_count(db, source_user: str, kind: int) -> int | None:
+    """Count one kind in a finished inventory without materializing message IDs."""
+    if not inventory_complete(db, source_user):
+        return None
+    row = db.conn.execute(
+        "SELECT COUNT(*) FROM mail_link_seen WHERE source_user=? AND kind=?",
+        (source_user, kind),
+    ).fetchone()
+    return int(row[0])
 
 
 SCHEMA = """CREATE TABLE IF NOT EXISTS mail_dead_links (

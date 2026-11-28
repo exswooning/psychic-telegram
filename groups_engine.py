@@ -42,6 +42,7 @@ import failpoints
 
 from auth import AuthManager
 from config import Settings
+from pagination import next_page_token
 from db import MigrationDB
 
 log = logging.getLogger(__name__)
@@ -68,23 +69,23 @@ class GroupMigrator:
 
     def read_groups(self, tenant: str) -> list[dict]:
         svc = self._dir(tenant)
-        out, token = [], None
+        out, token, seen = [], None, set()
         while True:
             resp = svc.groups().list(customer="my_customer", maxResults=200,
                                      pageToken=token).execute()
+            token = next_page_token(resp, token, seen, "Directory group inventory")
             out.extend(resp.get("groups", []))
-            token = resp.get("nextPageToken")
             if not token:
                 return out
 
     def read_members(self, tenant: str, group_email: str) -> list[dict]:
         svc = self._dir(tenant)
-        out, token = [], None
+        out, token, seen = [], None, set()
         while True:
             resp = svc.members().list(groupKey=group_email, maxResults=200,
                                       pageToken=token).execute()
+            token = next_page_token(resp, token, seen, "Directory group-member inventory")
             out.extend(resp.get("members", []))
-            token = resp.get("nextPageToken")
             if not token:
                 return out
 

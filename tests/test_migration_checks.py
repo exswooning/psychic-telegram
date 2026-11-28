@@ -80,6 +80,26 @@ def test_mapped_target_deletion_is_a_gap_even_if_source_mapping_exists(auth, db,
     assert db.conn.execute("SELECT category FROM verification_repair_queue").fetchone()[0] == "missing"
 
 
+def test_target_draft_inventory_failure_keeps_mailbox_completion_incomplete(auth, db, settings, identity, monkeypatch):
+    from tests import fakes
+
+    auth.source_gmail(SRC_USER).add_draft(b"Subject: source draft\r\n\r\nbody", "source-draft")
+    auth.target_gmail(TGT_USER).add_draft(b"Subject: target draft\r\n\r\nbody", "target-draft")
+    db.record_mapping(SRC_USER, "source-draft", "target-draft", "draft")
+    original = fakes._GmailDrafts._list
+
+    def fail_target_inventory(self, **kwargs):
+        if self.s.owner == TGT_USER:
+            raise RuntimeError("target draft inventory unavailable")
+        return original(self, **kwargs)
+
+    monkeypatch.setattr(fakes._GmailDrafts, "_list", fail_target_inventory)
+    got = C.mailbox_completion(auth, db, settings, SRC_USER, TGT_USER)
+
+    assert not got["complete"]
+    assert got["errors"] and "draft" in got["errors"][0].lower()
+
+
 def test_read_only_api_exposes_queue_and_snapshots_without_writes(db, settings, monkeypatch):
     import api_server as api
     monkeypatch.setattr(api, "_ledger_path", lambda aid: settings.db_path)

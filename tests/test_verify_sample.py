@@ -80,6 +80,18 @@ class TestCompareMessage:
         verdict, notes = V.compare_message(self.RAW, self.RAW.replace(b"body 1", b"body 2"))
         assert verdict == "different" and any("body differs" in n for n in notes)
 
+    def test_attachment_metadata_is_part_of_message_identity(self):
+        def attached(filename):
+            return (b"Message-ID: <x@y>\r\nMIME-Version: 1.0\r\n"
+                    b"Content-Type: multipart/mixed; boundary=BOUNDARY\r\n\r\n"
+                    b"--BOUNDARY\r\nContent-Type: text/plain\r\n\r\nbody\r\n"
+                    b"--BOUNDARY\r\nContent-Type: application/octet-stream\r\n"
+                    + f'Content-Disposition: attachment; filename="{filename}"\r\n'.encode()
+                    + b"Content-Transfer-Encoding: base64\r\n\r\nYQ==\r\n--BOUNDARY--\r\n")
+
+        verdict, _ = V.compare_message(attached("original.bin"), attached("renamed.bin"))
+        assert verdict == "different"
+
     def test_an_altered_subject_is_different(self):
         assert V.compare_message(self.RAW, self.RAW.replace(b"n1", b"zz"))[0] == "different"
 
@@ -761,6 +773,21 @@ class TestDraftsAreComparedOnWhatAPersonWrote:
         src = self.SRC.replace(b"Subject: Half-finished", "Subject: Reply \u2014 review".encode("utf-8"))
         tgt = self._tgt().replace(b"Subject: Half-finished", b"Subject: =?UTF-8?B?UmVwbHkg4oCUIHJldmlldw==?=")
         assert V.compare_draft(src, tgt, self.tr)[0] == "equivalent"
+
+    def test_attachment_name_change_in_a_draft_is_still_different(self):
+        def attached(filename):
+            return (b"Message-Id: <generated@mail.gmail.com>\r\nFrom: tom@tenantb.com\r\n"
+                    b"To: bob@tenantb.com\r\nDate: Sat, 26 Sep 2026 07:43:38 -0700\r\n"
+                    b"Subject: Half-finished\r\nMIME-Version: 1.0\r\n"
+                    b"Content-Type: multipart/mixed; boundary=BOUNDARY\r\n\r\n"
+                    b"--BOUNDARY\r\nContent-Type: text/plain\r\n\r\nStill drafting this.\r\n"
+                    b"--BOUNDARY\r\nContent-Type: application/octet-stream\r\n"
+                    + f'Content-Disposition: attachment; filename="{filename}"\r\n'.encode()
+                    + b"Content-Transfer-Encoding: base64\r\n\r\nYQ==\r\n--BOUNDARY--\r\n")
+
+        verdict, differences = V.compare_draft(
+            attached("source.bin"), attached("renamed.bin"), self.tr)
+        assert verdict == "different" and "body or attachments differ" in differences
 
 
 class TestTheCommandLineCanReadWhatItVerifies:

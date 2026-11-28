@@ -233,22 +233,61 @@ def compare_drive_file(src: dict, tgt: dict, src_path: str, tgt_path: str) -> li
     return out
 
 
-def normalise_message(raw: bytes) -> tuple[dict, bytes]:
-    """(headers minus the ones Google adds, payload) -- for the case where the bytes
-    differ and the question is whether the MESSAGE does."""
+def normalise_message(raw: bytes, *, ignored_root_headers=()) -> tuple[dict, bytes]:
+    """(normalised root headers, canonical MIME tree) for non-byte-identical mail.
+
+    Flattening leaf bytes alone loses attachment filenames, content types and
+    multipart nesting: a message could be called equivalent after an attachment
+    was renamed or changed from text to binary. Keep each part's semantic headers
+    and tree position while ignoring transfer encoding and generated boundaries.
+    """
     msg = email.message_from_bytes(raw)
-    headers: dict[str, list[str]] = {}
-    for k, v in msg.items():
-        if k.lower() in VOLATILE_HEADERS:
-            continue
-        headers.setdefault(k.lower(), []).append(" ".join(str(v).split()))
-    def part_bytes(p):
-        data = p.get_payload(decode=True) or b""
-        # Line endings of a TEXT part are not content: a copy that went through the link rewrite comes back with LF
-        # where the source has CRLF (a. -> b., 19 Nov 2026: every label repair on such a message was held). A binary
-        # part stays exact.
-        return data.replace(b"\r\n", b"\n") if p.get_content_maintype() == "text" else data
-    body = b"".join(part_bytes(p) for p in msg.walk() if not p.is_multipart())
+
+    ignored_root = {name.lower() for name in ignored_root_headers}
+
+    def part_headers(part, omit=()):
+        omit = set(omit)
+        headers: dict[str, list[str]] = {}
+        for name, value in part.items():
+            key = name.lower()
+            if key in VOLATILE_HEADERS or key in omit or key == "content-transfer-encoding":
+                continue
+            if key == "content-type":
+                params = part.get_params(header="content-type", unquote=True) or []
+                semantic = sorted((str(k).lower(), " ".join(str(v or "").split()))
+                                  for k, v in params[1:] if str(k).lower() != "boundary")
+                normalized = json.dumps([part.get_content_type().lower(), semantic],
+                                        ensure_ascii=True, separators=(",", ":"))
+            elif key == "content-disposition":
+                params = part.get_params(header="content-disposition", unquote=True) or []
+                semantic = sorted((str(k).lower(), " ".join(str(v or "").split()))
+                                  for k, v in params[1:])
+                disposition = str(params[0][0]).lower() if params else ""
+                normalized = json.dumps([disposition, semantic], ensure_ascii=True,
+                                        separators=(",", ":"))
+            else:
+                normalized = " ".join(str(value).split())
+            headers.setdefault(key, []).append(normalized)
+        return headers
+
+    def mime_tree(part, root=False):
+        payload = part.get_payload()
+        if part.is_multipart() and isinstance(payload, list):
+            body = [mime_tree(child) for child in payload]
+        else:
+            data = part.get_payload(decode=True)
+            if data is None:
+                data = payload if isinstance(payload, bytes) else str(payload or "").encode(
+                    part.get_content_charset() or "utf-8", errors="replace")
+            if part.get_content_maintype() == "text":
+                # Line endings in text are not content: link rewriting may turn CRLF into LF.
+                data = data.replace(b"\r\n", b"\n")
+            body = base64.b64encode(data).decode("ascii")
+        return [part_headers(part, ignored_root if root else ()), body]
+
+    headers = part_headers(msg)
+    body = json.dumps(mime_tree(msg, root=True), ensure_ascii=True,
+                      separators=(",", ":")).encode("ascii")
     return headers, body
 
 
@@ -358,7 +397,10 @@ def compare_draft(src_raw: bytes, tgt_raw: bytes, translate) -> tuple[str, list[
     sa, ta = parseaddr(str(s.get("from", "")))[1].lower(), parseaddr(str(t.get("from", "")))[1].lower()
     if translate(sa) != ta:
         diffs.append(f"from: {sa} -> {ta}")
-    if normalise_message(src_raw)[1] != normalise_message(tgt_raw)[1]:
+    regenerated = ("message-id", "date", "from", "to", "cc", "bcc", "subject",
+                   "reply-to", "in-reply-to", "references")
+    if (normalise_message(src_raw, ignored_root_headers=regenerated)[1]
+            != normalise_message(tgt_raw, ignored_root_headers=regenerated)[1]):
         diffs.append("body or attachments differ")
     return ("different" if diffs else "equivalent"), diffs
 
@@ -1163,9 +1205,11 @@ class Verifier:
         try:
             extra = self._target_files(tgt)
             stray_op = "Drive stray check (target files the ledger does not map)"
-            for n, f in enumerate(extra):
-                if n % 10 == 0:
-                    self._report_progress(stray_op, n, len(extra))
+            scanned = 0
+            for f in extra:
+                if scanned % 10 == 0:
+                    self._report_progress(stray_op, scanned, item=f"file {f.get('id', '?')}")
+                scanned += 1
                 if f["id"] in seen_targets:
                     continue
                 try:
@@ -1217,6 +1261,7 @@ class Verifier:
                                               "duplicateOf": target_keys[key]})
                 else:
                     res["extras"].append({"target": f["id"], "name": f.get("name"), "path": key[0]})
+            self._report_progress(stray_op, scanned, item=f"complete after {scanned} file(s)")
         except Exception as exc:      # noqa: BLE001
             res["errors"].append(f"could not list the target's Drive: {error_detail(exc)}")
         if not any(self._pairs(kind) for kind in ("folder", "file", "shortcut")):
@@ -1456,22 +1501,29 @@ class Verifier:
         return upserts, deletes, marker
 
     def _target_files_full(self, svc) -> list[dict]:
-        out, token, seen_tokens, page = [], None, set(), 0
+        return list(self._target_files_iter(svc))
+
+    def _target_files_iter(self, svc) -> Iterator[dict]:
+        """Every target file the user owns, page by page; a repeated page token stops it (the sweep, 27 Nov)."""
+        token, seen_tokens, page, total = None, set(), 0, 0
         while True:
             page += 1
             operation = "Drive target inventory"
-            self._report_progress(operation, len(out), item=f"page {page}")
+            self._report_progress(operation, total, item=f"page {page}")
             r = self._x(lambda t=token: svc.files().list(
                 q="trashed=false and 'me' in owners", spaces="drive", pageSize=1000, pageToken=t,
                 supportsAllDrives=True, fields="nextPageToken, files(id,name,mimeType,md5Checksum)").execute(),
                 operation=operation)
-            out += [f for f in r.get("files", []) if f.get("mimeType") != FOLDER]
+            files = [f for f in r.get("files", []) if f.get("mimeType") != FOLDER]
             next_token = r.get("nextPageToken")
-            if not next_token:
-                return out
-            if next_token in seen_tokens:
+            if next_token and next_token in seen_tokens:
                 raise RuntimeError(f"Drive target inventory repeated a page token after page {page}; "
-                                   f"stopped after {len(out)} files")
+                                   f"stopped after {total} files")
+            for file in files:
+                yield file
+            total += len(files)
+            if not next_token:
+                return
             seen_tokens.add(next_token)
             token = next_token
 

@@ -130,6 +130,48 @@ class TestCounting:
         cal = type("C", (), {"events": lambda self: ev})()
         assert T.count_calendar(cal) == 3 and ev.calls[0]["singleEvents"] is False
 
+    def test_repeated_mail_page_token_stops_instead_of_counting_forever(self):
+        class RepeatingPages:
+            calls = 0
+
+            def list(self, **kwargs):
+                self.calls += 1
+                if self.calls > 3:
+                    raise AssertionError("pagination did not stop")
+                return type("R", (), {"execute": staticmethod(lambda: {
+                    "messages": [{"id": "same-page"}], "nextPageToken": "repeat"
+                })})()
+
+        pages = RepeatingPages()
+        gm = type("G", (), {"users": lambda self: type("U", (), {
+            "messages": lambda s: pages
+        })()})()
+        with pytest.raises(RuntimeError, match="repeated.*page token"):
+            T.count_mail(gm)
+
+    def test_draft_inventory_failure_is_recorded_not_discarded(self, settings, monkeypatch):
+        class BrokenDrafts:
+            def users(self): return self
+            def drafts(self): return self
+            def list(self, **kwargs): return self
+            def execute(self): raise RuntimeError("drafts forbidden")
+
+        class Auth:
+            def source_drive(self, user): return object()
+            def source_gmail(self, user): return BrokenDrafts()
+            def source_calendar(self, user): return object()
+            def source_people(self, user): return object()
+            def source_tasks(self, user): return object()
+
+        monkeypatch.setattr(T, "count_drive", lambda *a, **k: (0, 0))
+        monkeypatch.setattr(T, "count_mail", lambda *a, **k: 2)
+        monkeypatch.setattr(T, "count_calendar", lambda *a, **k: 0)
+        monkeypatch.setattr(T, "count_contacts", lambda *a, **k: 0)
+        monkeypatch.setattr(T, "count_tasks", lambda *a, **k: 0)
+        out = T.count_side(Auth(), settings, "source", "a@source", ids={})
+        assert "drafts" in out["errors"]
+        assert "drafts" not in out["counts"]
+
 
 class TestSkips:
     def test_only_deliberate_skips_are_subtracted_and_mapped_to_a_service(self, settings, db):

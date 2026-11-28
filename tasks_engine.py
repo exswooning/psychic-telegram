@@ -28,6 +28,7 @@ import logging
 import failpoints
 
 from sample_budget import Budget
+from pagination import next_page_token
 
 from resilience import (PermanentAPIError, RateLimiter, retry_on_google_error,
                         shutdown_requested)
@@ -73,39 +74,34 @@ class TasksMigrator:
 
     # -- reading -------------------------------------------------------------
     def _iter_lists(self):
-        token = None
+        token, seen = None, set()
         while True:
             self.limiter.acquire()
             resp = self._retry(lambda t=token: self.src.tasklists().list(
                 maxResults=100, pageToken=t).execute())
+            token = next_page_token(resp, token, seen, "Task-list inventory")
             for tl in resp.get("items", []):
                 yield tl
-            token = resp.get("nextPageToken")
             if not token:
                 return
 
     def _iter_tasks(self, list_id: str, client=None):
-        token = None
+        token, seen = None, set()
         while True:
             self.limiter.acquire()
             resp = self._retry(lambda t=token: (client or self.src).tasks().list(
                 tasklist=list_id, maxResults=100, pageToken=t,
                 showCompleted=True, showHidden=True, showDeleted=False,
             ).execute())
+            token = next_page_token(resp, token, seen, "Task inventory")
             for t in resp.get("items", []):
                 yield t
-            token = resp.get("nextPageToken")
             if not token:
                 return
 
     # -- entry point ---------------------------------------------------------
     def run(self) -> dict:
-        try:
-            lists = list(self._iter_lists())
-        except (PermanentAPIError, RuntimeError) as exc:
-            log.warning("[%s] Tasks unavailable, not migrated: %s",
-                        self.source_user, exc)
-            return dict(self.stats)
+        lists = list(self._iter_lists())
 
         # Probe the target once, before writing anything.
         #
@@ -209,7 +205,10 @@ class TasksMigrator:
             try:
                 for t in self._iter_tasks(src_id):
                     self.db.forget_mapping(self.source_user, t["id"], "task")
-            except (PermanentAPIError, RuntimeError):
+            except (PermanentAPIError, RuntimeError) as exc:
+                self.db.log_audit(self.source_user, src_id, "task_list", "FAILED",
+                                  f"could not inspect source tasks before recopy: {exc}")
+                self.stats["failed"] += 1
                 return
             self.db.forget_mapping(self.source_user, src_id, "task_list")
             self.stats["recopied_missing"] = self.stats.get("recopied_missing", 0) + 1
@@ -275,19 +274,15 @@ class TasksMigrator:
     def _unmapped_targets(self, tgt_list: str) -> dict:
         """The list's target tasks no ledger row names, by content: a run killed between tasks.insert and
         record_mapping left one, and the next run adopts it instead of inserting a second (F-kill, 27 Nov
-        2026: tasks.created@2 left 21 tasks on b. for 20). A list that cannot be read adopts nothing."""
+        2026: tasks.created@2 left 21 tasks on b. for 20). A failed target inventory must stop before creates."""
         if self.settings.dry_run:
             return {}
         mapped = {r[0] for r in self.db.conn.execute(
             "SELECT target_id FROM id_mapping WHERE source_user=? AND type='task'", (self.source_user,))}
         strays: dict = {}
-        try:
-            for t in self._iter_tasks(tgt_list, client=self.tgt):
-                if t["id"] not in mapped:
-                    strays.setdefault(_task_key(t, t.get("parent")), []).append(t["id"])
-        except (PermanentAPIError, RuntimeError) as exc:
-            log.warning("[%s] could not list target tasks of %s: %s", self.source_user, tgt_list, exc)
-            return {}
+        for t in self._iter_tasks(tgt_list, client=self.tgt):
+            if t["id"] not in mapped:
+                strays.setdefault(_task_key(t, t.get("parent")), []).append(t["id"])
         return strays
 
     def _is_stale(self, src_id: str, task: dict) -> bool:

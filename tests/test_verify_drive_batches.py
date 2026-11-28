@@ -68,6 +68,33 @@ def test_missing_callback_falls_back_to_normal_read(db,settings):
     assert svc.direct==['missing']
 
 
+def test_target_stray_inventory_yields_one_page_at_a_time(db,settings):
+    class Paged:
+        def __init__(self):
+            self.calls = 0
+
+        def files(self): return self
+
+        def list(self, **kwargs):
+            self.token = kwargs.get("pageToken")
+            return self
+
+        def execute(self):
+            self.calls += 1
+            if self.token is None:
+                return {"files": [{"id": "one", "mimeType": "application/pdf"}],
+                        "nextPageToken": "next"}
+            return {"files": [{"id": "two", "mimeType": "application/pdf"}]}
+
+    svc = Paged()
+    v = V.Verifier(None, db, settings, "u@src", "u@tgt")
+    files = iter(v._target_files(svc))
+    assert next(files)["id"] == "one"
+    assert svc.calls == 1
+    assert next(files)["id"] == "two"
+    assert svc.calls == 2
+
+
 def test_drive_windows_are_bounded_and_every_mapping_is_checked(db,settings,monkeypatch):
     src,tgt=object(),object()
     auth=SimpleNamespace(source_drive=lambda u:src,target_drive=lambda u:tgt)

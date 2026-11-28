@@ -71,6 +71,7 @@ def _second_before(ts: str) -> str | None:
     when = datetime.fromisoformat(m.group(1) + frac + ("+00:00" if m.group(3) == "Z" else m.group(3)))
     return (when - timedelta(seconds=1)).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 from sample_budget import Budget
+from pagination import next_page_token
 from resilience import (PermanentAPIError, RateLimiter, retry_on_google_error,
                         shutdown_requested)
 
@@ -140,15 +141,15 @@ class ChatMigrator:
 
     # -- traversal ------------------------------------------------------------
     def _iter_spaces(self):
-        token = None
+        token, seen = None, set()
         while True:
             self.limiter.acquire()
             resp = self._retry(lambda t=token: self.auth.source_chat(
                 self.source_user
             ).spaces().list(pageSize=100, pageToken=t).execute())
+            token = next_page_token(resp, token, seen, "Chat space inventory")
             for s in resp.get("spaces", []):
                 yield s
-            token = resp.get("nextPageToken")
             if not token:
                 return
 
@@ -166,7 +167,7 @@ class ChatMigrator:
     def _iter_messages(self, space_name: str):
         """Oldest first: with no usable createTime, arrival order is the only
         thing preserving the shape of a conversation."""
-        token = None
+        token, seen = None, set()
         while True:
             self.limiter.acquire()
             resp = self._retry(lambda t=token: self.auth.source_chat(
@@ -175,23 +176,15 @@ class ChatMigrator:
                 parent=space_name, pageSize=100, pageToken=t,
                 orderBy="createTime asc",
             ).execute())
+            token = next_page_token(resp, token, seen, "Chat message inventory")
             for m in resp.get("messages", []):
                 yield m
-            token = resp.get("nextPageToken")
             if not token:
                 return
 
     # -- entry point ------------------------------------------------------------
     def run(self) -> dict:
-        try:
-            spaces = list(self._iter_spaces())
-        except OPTIONAL_PASS_ERRORS as exc:
-            log.warning(
-                "[%s] could not list Chat spaces, chat NOT migrated. Needs the "
-                "chat.spaces/chat.messages scopes AND Google Chat switched on "
-                "for the organisation. Error: %s", self.source_user, exc,
-            )
-            return dict(self.stats)
+        spaces = list(self._iter_spaces())
 
         for i, space in enumerate(spaces):
             if self.budget.exhausted:      # a sample has its slice: no further space
@@ -402,15 +395,15 @@ class ChatMigrator:
         return added
 
     def _iter_members(self, space_name: str):
-        out, token = [], None
+        out, token, seen = [], None, set()
         while True:
             self.limiter.acquire()
             resp = self._retry(lambda t=token: self.auth.source_chat(
                 self.source_user
             ).spaces().members().list(
                 parent=space_name, pageSize=100, pageToken=t).execute())
+            token = next_page_token(resp, token, seen, "Chat membership inventory")
             out.extend(resp.get("memberships", []))
-            token = resp.get("nextPageToken")
             if not token:
                 return out
 
@@ -522,13 +515,13 @@ class ChatMigrator:
         nobody on the target can be is skipped, never re-attributed."""
         done = 0
         try:
-            reactions, token = [], None
+            reactions, token, seen = [], None, set()
             while True:
                 resp = self._retry(lambda t=token: self.auth.source_chat(self.source_user)
                                    .spaces().messages().reactions().list(
                                        parent=source_msg, pageSize=200, pageToken=t).execute())
+                token = next_page_token(resp, token, seen, "Chat reaction inventory")
                 reactions += resp.get("reactions", [])
-                token = resp.get("nextPageToken")
                 if not token:
                     break
         except OPTIONAL_PASS_ERRORS as exc:
