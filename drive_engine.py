@@ -3077,7 +3077,10 @@ class DriveMigrator:
                 return 0
             self.db.log_audit(self.source_user,source_id,"comment","FAILED",str(exc))
             log.warning("[%s] comment thread remains unresolved on %s: %s",self.source_user,source_id,exc)
-            return 0
+            # A write may have landed before the failure (a reply lost after the comment was created): count it,
+            # so the modifiedTime restore and the late re-stamp check still run. F-lost, 28 Nov 2026: a PDF kept
+            # the run's time because a lost comment reply returned 0 and the file was never re-checked.
+            return 1
 
     NO_COMMENTS_API = ("application/vnd.google-apps.script", "application/vnd.google-apps.form",
                        "application/vnd.google-apps.site", "application/vnd.google-apps.map",
