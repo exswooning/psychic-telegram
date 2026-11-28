@@ -12,6 +12,7 @@ set -euo pipefail
 read -r -p 'Bitport account ID for a. -> b.: ' ACCOUNT_ID
 [[ "$ACCOUNT_ID" =~ ^[0-9]+$ ]]
 export ACCOUNT_ID
+export SEED_LOCALPART_PREFIX=
 
 # Load only this account's saved pair into the CLI environment. No key contents or passwords are printed.
 eval "$(
@@ -40,6 +41,44 @@ s = Settings(account_id=int(sys.argv[1]))
 assert (s.source_domain, s.target_domain) == (
     "a.sarafgloabalexim.com", "b.sarafgloabalexim.com")
 print(f"Account {sys.argv[1]}: {s.source_domain} -> {s.target_domain}")
+PY
+
+# Confirm the offline plan's 31 existing seats and 269 unused generated
+# addresses against the live source Directory before any target wipe or seed.
+.venv/bin/python - "$ACCOUNT_ID" <<'PY'
+import sys
+from auth import AuthManager
+from config import Settings
+sys.path.insert(0, "data-generator")
+import fixtures
+
+s = Settings(account_id=int(sys.argv[1]))
+directory = AuthManager(s).directory("source")
+existing, token = set(), None
+while True:
+    page = directory.users().list(domain=s.source_domain, maxResults=500,
+                                  pageToken=token,
+                                  fields="nextPageToken,users(primaryEmail)").execute()
+    existing.update(u["primaryEmail"].lower() for u in page.get("users", []))
+    token = page.get("nextPageToken")
+    if not token:
+        break
+cohort = fixtures.load_cohort("data-generator/cohorts/fableplan2.json")["users"]
+cohort_emails = {f"{u['localpart'].lower()}@{s.source_domain.lower()}" for u in cohort}
+admin = s.source_admin.lower()
+profile = {f"p{i:03d}@{s.source_domain.lower()}" for i in range(1, 270)}
+expected_existing = cohort_emails | {admin}
+missing = expected_existing - existing
+occupied_profile = profile & existing
+unexpected = existing - expected_existing
+planned_total = len(existing | expected_existing | profile)
+new_accounts = len(profile - existing)
+print(f"Source Directory seats now: {len(existing)}; cohort users including twins: {len(cohort_emails)}")
+print(f"Planned total seats: {planned_total}/300; new profile accounts to create: {new_accounts}")
+if len(cohort_emails) != 30 or missing or occupied_profile or unexpected or planned_total != 300:
+    print(f"STOP: missing required users={len(missing)}, occupied pNNN={len(occupied_profile)}, "
+          f"other existing users={len(unexpected)}")
+    raise SystemExit("Directory inventory differs from the offline 300-seat plan")
 PY
 
 .venv/bin/python - "$ACCOUNT_ID" <<'PY'
