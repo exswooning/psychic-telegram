@@ -75,9 +75,20 @@ def target_index(gm, make_gm=None, workers: int = 1) -> dict:
             local.gm = make_gm()
         g = getattr(local, "gm", gm)
         return tid, _meta(g, g.tgt, tid, "gmail.light.index-meta")
+
+    pool_workers = max(1, workers if make_gm else 1)
+
+    def tracked_meta(tid):
+        import metrics
+        metrics.METRICS.worker_started(pool_workers)
+        try:
+            return meta(tid)
+        finally:
+            metrics.METRICS.worker_finished()
+
     index: dict = {}
-    with futures.ThreadPoolExecutor(max_workers=max(1, workers if make_gm else 1)) as pool:
-        for tid, (tm, th) in pool.map(meta, ids):
+    with futures.ThreadPoolExecutor(max_workers=pool_workers) as pool:
+        for tid, (tm, th) in pool.map(tracked_meta, ids):
             index.setdefault(th.get("message-id", ""), {})[tid] = (tm, th)
     return index
 

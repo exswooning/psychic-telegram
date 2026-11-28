@@ -20,6 +20,7 @@ import inspect
 import os
 import re
 import sys
+import time
 
 import pytest
 
@@ -1253,6 +1254,37 @@ class TestThrottleNote:
             raise RuntimeError("x")
         monkeypatch.setattr(metrics.METRICS, "snapshot", boom)
         assert s._throttle_note() == ""
+
+
+def test_seed_metrics_persist_the_sample_series_and_worker_slots(settings, monkeypatch, tmp_path):
+    import metrics
+    import seed_sandbox as s
+    from db import MigrationDB
+
+    old_run = dict(s._SEED_RUN)
+    try:
+        started = time.time() - 12
+        s._SEED_RUN.clear()
+        s._SEED_RUN.update(kind="seed", pid=919, started_at="2026-11-27T00:00:00Z",
+                           started_epoch=started, source_domain="source.example", target_domain=None)
+        settings.db_path = str(tmp_path / "seed-ledger.db")
+        monkeypatch.setattr(metrics.METRICS, "snapshot", lambda: {
+            "calls": 8, "elapsed_sec": 99, "worker_slots_configured": 4,
+            "worker_slots_busy": 3, "idle_workers_share": 0.25,
+        })
+        s._save_seed_metrics(settings)
+        db = MigrationDB(settings.db_path)
+        try:
+            [sample] = db.latest_metrics(1)
+            [summary] = db.run_summaries(1)
+            assert sample["run_kind"] == "seed" and sample["run_started_at"] == s._SEED_RUN["started_at"]
+            assert sample["worker_slots_busy"] == 3 and sample["idle_workers_share"] == 0.25
+            assert summary["worker_slots_configured"] == 4 and summary["elapsed_sec"] >= 12
+        finally:
+            db.close()
+    finally:
+        s._SEED_RUN.clear()
+        s._SEED_RUN.update(old_run)
 
 
 class TestFillProgressIsReal:

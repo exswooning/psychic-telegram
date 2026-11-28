@@ -556,6 +556,14 @@ def reconcile_dms(auth, db, settings, progress=None, users=None):
 
         from concurrent.futures import ThreadPoolExecutor
 
+        def tracked_inspect(row):
+            import metrics
+            metrics.METRICS.worker_started(workers)
+            try:
+                return inspect(row)
+            finally:
+                metrics.METRICS.worker_finished()
+
         with ThreadPoolExecutor(
             max_workers=workers, thread_name_prefix="dms-reconcile"
         ) as pool:
@@ -563,8 +571,8 @@ def reconcile_dms(auth, db, settings, progress=None, users=None):
             rest = [r for r in rows if r["item_id"] not in sampled]
 
             def phased():      # the sample finishes (and can switch light proof off) before the rest starts
-                yield from pool.map(inspect, first)
-                yield from pool.map(inspect, rest)
+                yield from pool.map(tracked_inspect, first)
+                yield from pool.map(tracked_inspect, rest)
             for verified, error in phased():
                 out["checked"] += 1
                 if error and error.get("labelsOnly"):

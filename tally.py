@@ -447,8 +447,17 @@ def run(settings, db, auth, *, users: list[str] | None = None, sample_users: int
             if done[0] % 10 == 0 or done[0] == len(pairs):
                 progress(f"tally: [{done[0]}/{len(pairs)}] users counted")
 
+    def tracked_one(pair):
+        import metrics
+        configured = max(1, workers)
+        metrics.METRICS.worker_started(configured)
+        try:
+            return one(pair)
+        finally:
+            metrics.METRICS.worker_finished()
+
     with futures.ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
-        list(pool.map(one, pairs))
+        list(pool.map(tracked_one, pairs))
     counts = aggregate(sorted(rows, key=lambda r: r["user"]))
 
     deep_agg = None
