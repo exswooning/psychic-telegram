@@ -1,107 +1,72 @@
 # F-reboot live qualification
 
-This is the exact two-invocation qualification for Claude to run on the dedicated
-fableplan2 VM after the reviewed branch is available there. It is account 3's
-protected-source / sandbox-target pair:
+This run qualifies the reboot recovery path for FablePlan2 on the dedicated l3novo Bitport VM. It is a two-invocation test: the first invocation starts one selected-user migration and requests one reboot after its recorded Drive phase is running; Claude reruns the same campaign after boot to verify the recovery.
 
-```text
-a.sarafgloabalexim.com  ->  b.sarafgloabalexim.com
-```
+## Scope and twin
 
-The qualification is not a failpoint run. **Arm nothing:** do not set
-`BITPORT_FAULT`, do not write `logs/failpoint`, and do not run another failure
-scenario. `campaign_reboot` refuses to proceed if any failpoint is armed. The
-test itself requests one real guest reboot after it proves the exact migration
-process is still active and has completed its Drive pass.
+- Bitport account: **3**.
+- Source: `a.sarafgloabalexim.com`.
+- Target: `b.sarafgloabalexim.com`.
+- Control: `t01`.
+- Test twin: **`t02@a.sarafgloabalexim.com` → `t02@b.sarafgloabalexim.com`**.
+- Use the fresh campaign name `fp2-vm-freboot-20261127`. With a new campaign directory its twin list is empty, so `LiveDriver` selects the first available twin, t02. It records that choice in `logs/campaigns/fp2-vm-freboot-20261127/twins.json` and the durable checkpoint in `F-reboot.json`.
 
-## Before the first invocation
+Do not remove or edit an existing campaign directory or `F-reboot.json`. If this name already has state, keep it and inspect the state before choosing a new unique campaign name. The runner independently pins account 3, the tenant pair, the selected user's target mapping, and the ledger identity. It resets only the selected twin's target data and migration ledger before the initial Start; it does not wipe either tenant.
 
-1. On the VM's local console, confirm it is a virtual guest and read its machine
-   ID. Keep that ID in the shell only; do not put it in this document or a log.
+## Preconditions
 
-   ```sh
-   systemd-detect-virt --vm --quiet
-   MACHINE_ID=$(cat /etc/machine-id)
-   test -n "$MACHINE_ID"
-   ```
+1. Run from the VM's local console as root in `/opt/bitport`, after the unattended failure queue has finished. Do not run during another migration, queued job, repair, or campaign. The runner checks account activity and repair ledgers and refuses if anything is active.
+2. Confirm account 3 is still configured from a. to b., a. remains protected as a source, and b. is declared as the permitted sandbox. The runner checks these safeguards before touching the twin.
+3. Use the reviewed build containing `campaign_reboot.py`, scoped phase recording, and its tests. Do not start a separate deploy or restart for this qualification.
+4. **Arm no failpoint.** Do not set `BITPORT_FAULT` or write a fault to `logs/failpoint`. F-reboot is caused by the host reboot itself. The runner checks that the failpoint arm file is empty and stops before resetting a twin if any other fault is armed. `--allow reboot` is the explicit permission for the one `systemctl reboot` request.
+5. Confirm the name below is fresh so its first twin is t02. Leave the existing `t01` control untouched.
 
-2. Run from the deployed Bitport checkout on that VM. The account 3 settings,
-   source protection, and explicit sandbox declaration must still identify the
-   pair above. The code verifies account 3, the pinned VM ID, a supported twin
-   and its exact source-to-target identity mapping before acting.
-3. Wait until all accounts are idle. There must be no active or queued tenant
-   jobs, no unfinished repair records, and no existing campaign checkpoint with
-   the chosen campaign name. The runner checks these conditions across the
-   configured account ledgers before it resets a twin.
-4. Use one new campaign name and keep it unchanged after the reboot. No other
-   operator action should start tenant work during the qualification.
+## First invocation: start, record Drive, reboot once
 
-## First invocation
+At the VM console:
 
-From `/opt/bitport` on the VM, run:
-
-```sh
+```bash
 cd /opt/bitport
 .venv/bin/python campaign.py \
   --account-id 3 \
-  --name f-reboot-20261127 \
+  --name fp2-vm-freboot-20261127 \
+  --group failures \
   --only fail:F-reboot \
   --allow reboot \
-  --reboot-guest "$MACHINE_ID"
+  --reboot-guest "$(cat /etc/machine-id)"
 ```
 
-The runner reserves the first unused migration twin from `t02` through `t20`,
-records its source/target mapping and a durable checkpoint, then starts a full
-fidelity migration of that one user on Drive, Gmail, Calendar, Contacts, and
-Tasks. It waits for a Drive `PASS` from that migration's exact PID and archived
-transcript. It then runs `systemctl reboot` on the VM. No other host is rebooted.
+The campaign uses the normal audited Start route with `users=[t02@a.sarafgloabalexim.com]`, services `drive,gmail,calendar,contacts,tasks`, full fidelity enabled, engine mail for this selected user, server-side Drive copy, and `record_phases=true`. It first resets the selected twin on b. and clears that twin's migration ledger. It then verifies the exact Start receipt, process, transcript, and live `drive` phase in the account's `run_records`/`run_phases` record. Only while that exact Drive phase is RUNNING does it persist the checkpoint and call `systemctl reboot`.
 
-The first invocation is expected to stop at the reboot request and print an
-`UNVERIFIED` message explaining that the checkpoint must be continued after
-boot. That first status is not the qualification result. Do not rerun the first
-invocation, delete the checkpoint, or manually start a migration. If the Drive
-pass is not proven within the runner's one-hour wait, it holds without rebooting.
+The VM going offline is expected. The first invocation is not the final verdict; its checkpoint records the reboot request, original PID and admission time, exact action receipt, twin mapping, ledger identity, and phase-record cursor. Do not run another campaign or request a second reboot.
 
-## After the VM returns
+## After boot: continue the same checkpoint
 
-Confirm that the same machine ID is present and that the boot ID and boot time
-have changed. From the same checkout, use the same name, account, scope, and
-machine ID, adding only `--continue-reboot`:
+From the VM's local console, use the same account, name, scope, and guest identity, adding `--continue-reboot`:
 
-```sh
+```bash
 cd /opt/bitport
 .venv/bin/python campaign.py \
   --account-id 3 \
-  --name f-reboot-20261127 \
+  --name fp2-vm-freboot-20261127 \
+  --group failures \
   --only fail:F-reboot \
   --allow reboot \
-  --reboot-guest "$MACHINE_ID" \
+  --reboot-guest "$(cat /etc/machine-id)" \
   --continue-reboot
 ```
 
-The runner verifies a run-bound interrupted exit for the original PID, finds
-exactly one audited post-boot Start for the same twin (autopilot or the
-operator's Start), waits for its terminal result and follow-ons, and then runs a
-read-only One-to-one check with repair disabled. If the Start receipt or exit
-evidence is ambiguous, it holds and must not be restarted with a fresh name to
-try again; preserve the checkpoint for review. It also refuses a second reboot.
+The runner confirms this is the pinned VM's new boot, proves the original process was interrupted by that reboot (and not by a clean exit or audited Stop), and reads any automatic autopilot Start. If autopilot has not resumed it, the runner sends one audited Start for the same twin and exact scope. It never repeats an ambiguous Start. The migration opens the same phase record; because the reboot was injected during Drive, `run_phases.begin()` sets `resumedFrom=drive` and reruns that first not-DONE phase. The ledger may skip a recorded DONE phase only when the selected user's ledger proves that user no longer needs it. The later Gmail and calendar/contacts/tasks phases then complete in order.
 
-## PASS bar
+After the migration and follow-ons are idle, the runner performs a read-only one-to-one verification for the twin (including Directory), with repair disabled, and compares it to control t01.
 
-The final campaign row must be `PASS` for `fail:F-reboot`, with `rebootEvidence`
-showing the original PID's interrupted exit, a unique resumed PID and action
-receipt, the same twin, and `resumedThrough` equal to `autopilot` or `operator
-Start`. The read-only full verification must complete, the twin must match the
-control's service counts, and the judge must find no duplicate landing. A
-missing or incomplete verification, unclear interruption, duplicate item,
-different counts, wrong guest, wrong domain pair, or ambiguous Start is not a
-PASS; retain the checkpoint and report the reason.
+## PASS criteria
 
-The offline unit qualification passed:
+The result is **PASS** only when all of these are evidenced:
 
-```text
-.venv/bin/python -m pytest tests/test_campaign_reboot.py tests/test_campaign.py tests/test_campaign_executor.py -q
-PASS (no failures)
-```
+- The pre-boot migration was the exact account-3 Start for t02, and its recorded Drive phase was active at the time of the reboot.
+- The same durable run record is reused after boot; its resume count increases by one, it names `resumedFrom=drive`, and `drive`, `after_drive`, `gmail`, and `calendar+contacts+tasks` all finish `DONE` under the resumed PID.
+- The original migration has run-bound interruption evidence associated with the reboot; the post-boot Start has one exact audit receipt and a unique clean terminal result (exit code 0).
+- The read-only verification and campaign evidence show t02 equal to control t01 across the expected service checks and counts, with **zero duplicate items**.
 
-No VM, box, tenant, or external service was contacted for that test run.
+Any measured parity difference or duplicate is **FAIL**. Missing, conflicting, or unreadable evidence is **UNVERIFIED** and does not count as a pass. The final `PASS fail:F-reboot` line and result row are written to `logs/campaigns/fp2-vm-freboot-20261127/RESULTS.md` and `results.jsonl`; keep the `F-reboot.json` checkpoint with them.

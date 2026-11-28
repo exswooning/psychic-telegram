@@ -296,3 +296,23 @@
 - **Piece:** Added versioned, ledger-backed Gmail inventories for source and target mailboxes and a target Drive inventory for the stray check. Gmail advances using `users.history.list`; Drive advances using `changes.list` and a saved start page token. Expired/unusable markers and version changes rebuild from a full read. `VERIFY_INCREMENTAL=0` restores full inventory scans. Unreadable required inventory data remains an error, preserving `INCOMPLETE` verdicts.
 - **Files:** `verification_inventory.py`, `verify_sample.py`, `tests/test_verify_incremental.py`, `tests/benchmark_verify_incremental.py`, `docs/tasks/verify-incremental.md`, `CLAUDE.md`.
 - **Tests:** `.venv/bin/python -m pytest tests/test_verify_incremental.py tests/test_verify_sample.py tests/test_verify_mail_speed.py tests/test_verify_drive_batches.py tests/test_verify_gmail_quota.py tests/test_gmail_check_reads_ahead.py -q -p no:cacheprovider` — passed, exit code 0. `.venv/bin/python tests/benchmark_verify_incremental.py` — passed, exit code 0; 40,000 messages per mailbox measured. Full `.venv/bin/python -m pytest tests/ -q -p no:cacheprovider` — exit code 1: 22 failures and 4 setup errors in control-plane/process-probing, deploy-guard, and localhost-server tests; the sandbox denied `ps` subprocesses and localhost TCP binds, and the macOS resource probe reported 0 total RAM. No verifier test was in the failure list. See `docs/tasks/verify-incremental.md` for benchmark call counts, wall times and the one-time full-seed cost.
+
+# Codex pieces
+
+## F-reboot checkpoint and recorded-phase resume
+
+- **Files:** `campaign.py`, `campaign_failures.py`, `campaign_reboot.py`, `api_server.py`, `main.py`, `run_phases.py` (existing recorder, now used by the scoped qualification), `tests/gate.txt`, `tests/test_campaign.py`, `tests/test_campaign_executor.py`, `tests/test_campaign_reboot.py`, `tests/test_run_phases.py`.
+- **Tests:** `.venv/bin/python -m pytest tests/test_campaign_reboot.py tests/test_run_phases.py tests/test_campaign.py tests/test_campaign_executor.py -q`
+- **Result:** Passed. F-reboot now opts its selected twin into the durable phase record, pins the active recorded Drive phase before reboot, and requires the same run record to finish with `resumedFrom=drive` after boot. Ordinary selected-user runs remain unrecorded by default.
+
+## F-reboot refuses unrelated failpoint arms
+
+- **Files:** `campaign_reboot.py`, `tests/test_campaign_reboot.py`.
+- **Tests:** `.venv/bin/python -m pytest tests/test_campaign_reboot.py -q`
+- **Result:** Passed. The reboot qualification now stops before touching a twin if the local failpoint arm file is unreadable or contains any fault; the reboot itself is the only injected failure.
+
+## F-reboot VM qualification runbook
+
+- **Files:** `docs/tasks/reboot-qualification.md`, `docs/tasks/codex-pieces.md`.
+- **Tests:** Documentation-only; checked the commands, twin selection, request scope, checkpoint path, and PASS evidence against `campaign.py`, `campaign_failures.py`, and `campaign_reboot.py`.
+- **Result:** Written for account 3, a. → b., the fresh campaign's t02 twin, no failpoint arm, the pinned one-time reboot, same-checkpoint continuation, recorded `drive` resume, and the full PASS criteria.

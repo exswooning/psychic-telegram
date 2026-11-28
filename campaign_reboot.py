@@ -23,6 +23,7 @@ SCENARIO = "fail:F-reboot"
 PAIR = ("a.sarafgloabalexim.com", "b.sarafgloabalexim.com")
 MIGRATE = "/api/v2/migrate/start"
 SERVICES = ("drive", "gmail", "calendar", "contacts", "tasks")
+RECORDED_PHASES = ("drive", "after_drive", "gmail", "calendar+contacts+tasks")
 PROCFS = Path("/proc")
 MACHINE_ID = Path("/etc/machine-id")
 STARTED_PID = re.compile(r"^started pid ([1-9]\d*):")
@@ -60,7 +61,8 @@ def _pid(detail) -> int | None:
 
 
 def _body(user: str) -> dict:
-    return {**CF.START, "users": [user], "services": list(SERVICES), "full_fidelity": True}
+    return {**CF.START, "users": [user], "services": list(SERVICES), "full_fidelity": True,
+            "record_phases": True}
 
 
 def _matches_scope(action: dict, params: dict, user: str) -> bool:
@@ -68,18 +70,38 @@ def _matches_scope(action: dict, params: dict, user: str) -> bool:
             and not any(params.get(k) for k in ("dry_run", "sample", "redo_links")))
 
 
+def _drive_checkpoint(record: dict | None, pid: int) -> dict:
+    """Bind the reboot to this twin's recorded, currently running Drive phase."""
+    if not isinstance(record, dict) or record.get("pid") != pid:
+        raise Held("the exact migration's phase record is unavailable")
+    phases = record.get("phases")
+    passes = [p.get("name") for p in phases or [] if p.get("kind") == "pass"]
+    by_name = {p.get("name"): p for p in phases or []}
+    if (passes != list(RECORDED_PHASES) or record.get("resumeFrom") != "drive"
+            or by_name.get("drive", {}).get("state") != "RUNNING"):
+        raise Held("the migration has not recorded its active Drive phase")
+    return {"run": record["run"], "resumes": record["resumes"], "resumeFrom": "drive"}
+
+
+def _resumed_checkpoint(record: dict | None, prior: dict, pid: int) -> dict:
+    """Require the restarted PID to finish the same durable phase record at its saved cursor."""
+    if (not isinstance(record, dict) or record.get("run") != prior["run"]
+            or record.get("pid") != pid or record.get("resumes") != prior["resumes"] + 1
+            or record.get("resumedFrom") != prior["resumeFrom"]):
+        raise Held("the post-boot run did not resume the recorded phase checkpoint")
+    phases = record.get("phases") or []
+    passes = [p.get("name") for p in phases if p.get("kind") == "pass"]
+    states = {p.get("name"): p.get("state") for p in phases}
+    if passes != list(RECORDED_PHASES) or any(states.get(name) != "DONE" for name in RECORDED_PHASES):
+        raise Held("the resumed phase record did not finish every migration pass")
+    return {"run": record["run"], "resumes": record["resumes"], "resumedFrom": record["resumedFrom"]}
+
+
 class LinuxEvidence:
     """Read the guest and Bitport's existing admission, audit and terminal records."""
 
     def __init__(self, driver):
         self.driver = driver
-
-    @staticmethod
-    def no_failpoints() -> None:
-        import failpoints
-
-        if failpoints._specs():
-            raise Held("F-reboot is the fault; disarm all BITPORT_FAULT entries before starting")
 
     def guest(self, expected: str) -> tuple[str, int]:
         virtual = subprocess.run(["systemd-detect-virt", "--vm", "--quiet"], timeout=5).returncode == 0
@@ -121,6 +143,20 @@ class LinuxEvidence:
         if not os.path.samestat(before, path.stat()):
             raise Held("the twin's ledger changed while its identity was being read")
         return {"target": rows[0][0], "ledger": str(path), "ledger_identity": [before.st_dev, before.st_ino]}
+
+    def phase_record(self) -> dict:
+        import run_phases
+        from config import Settings
+
+        path = Path(Settings(account_id=self.driver.account_id).db_path).resolve(strict=True)
+        try:
+            with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)) as conn:
+                record = run_phases.latest(conn)
+        except sqlite3.OperationalError as exc:
+            raise Held("the account's durable run-phase record is unavailable") from exc
+        if record is None:
+            raise Held("the account has no durable run-phase record")
+        return record
 
     def guard_activity(self, allowed_pid: int | None = None, started: str | None = None) -> None:
         import control_plane_db as cpdb
@@ -173,7 +209,7 @@ class LinuxEvidence:
             raise Held("the original Start's audit receipt has a different scope")
         return dict(row)
 
-    def drive(self, pid: int, user: str, action: dict, wait: float) -> str:
+    def drive(self, pid: int, user: str, action: dict, wait: float) -> tuple[str, dict]:
         import control_plane_db as cpdb
         import run_watch
         import webui
@@ -216,12 +252,17 @@ class LinuxEvidence:
                 transcript.seek(max(0, transcript.tell() - 2_000_000))
                 passes = marker.findall(transcript.read().decode(errors="replace"))
             if passes and "drive" in passes[-1].split(","):
-                return row["started_at"]
+                try:
+                    checkpoint = _drive_checkpoint(self.phase_record(), pid)
+                except Held:
+                    checkpoint = None       # the PASS marker precedes RUNNING by a few instructions
+                if checkpoint:
+                    return row["started_at"], checkpoint
             remaining = until - time.monotonic()
             if remaining <= 0:
                 break
             self.driver.sleep(min(2, remaining))
-        raise Held("no current Drive pass was proven for the exact pre-reboot migration")
+        raise Held("no current recorded Drive pass was proven for the exact pre-reboot migration")
 
     def interruption(self, state: dict, boot_time: int) -> int:
         import job_exit
@@ -325,9 +366,14 @@ def run(path: Path, driver, evidence, name: str, guest: str, allow: set, continu
         raise Held("F-reboot needs --allow reboot")
     if not re.fullmatch(r"[a-f0-9]{32}", guest or "") or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}", name):
         raise Held("a pinned virtual guest and a simple campaign name are required")
+    try:
+        armed = driver.armed()
+    except Exception as exc:  # noqa: BLE001 - cannot reboot safely if the fault file is unreadable
+        raise Held("the failpoint arm state could not be checked") from exc
+    if armed:
+        raise Held("F-reboot requires an empty failpoint arm file; no other fault may be armed")
     boot, boot_time = evidence.guest(guest)
     evidence.scope()
-    evidence.no_failpoints()
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     with path.with_suffix(".lock").open("a", encoding="utf-8") as lock:
         try:
@@ -358,12 +404,14 @@ def run(path: Path, driver, evidence, name: str, guest: str, allow: set, continu
             if not pid:
                 raise Held("the original Start did not immediately identify its PID; no reboot was requested")
             action = evidence.original_action(reply, user, reason, pid)
-            started = evidence.drive(pid, user, action, wait)
+            started, phase_checkpoint = evidence.drive(pid, user, action, wait)
             evidence.guard_activity(pid, started)
-            state.update(stage="reboot prepared", prior_pid=pid, prior_started=started, prior_action=action["id"])
+            state.update(stage="reboot prepared", prior_pid=pid, prior_started=started, prior_action=action["id"],
+                         phase_checkpoint=phase_checkpoint)
             _save(path, state)
             evidence.guard_activity(pid, started)
-            if evidence.drive(pid, user, action, 0) != started:
+            current_drive = evidence.drive(pid, user, action, 0)
+            if (current_drive[0] if isinstance(current_drive, tuple) else current_drive) != started:
                 raise Held("the original Drive pass is no longer active")
             X.check_shell("systemctl reboot", allow)
             state.update(stage="reboot requested", reboot_requested_at=time.time())
@@ -416,6 +464,7 @@ def run(path: Path, driver, evidence, name: str, guest: str, allow: set, continu
         finished = evidence.terminal(action, pid, wait)
         if not driver.wait_idle(wait):
             raise Held("post-boot follow-ons are still active")
+        phase_proof = _resumed_checkpoint(evidence.phase_record(), state["phase_checkpoint"], pid)
         evidence.guard_activity()
         if state["stage"] != "verification requested":
             state.update(stage="verification requested", resume_boot=boot, resume_action=action["id"])
@@ -430,7 +479,8 @@ def run(path: Path, driver, evidence, name: str, guest: str, allow: set, continu
                 raise Held("post-boot verification is still active")
         status, reason = judge(CF.ROWS["F-reboot"][3], driver.facts(user, since=finished))
         proof = {"priorPid": state["prior_pid"], "priorStartedAt": state["prior_started"], "interruptedExit": interrupted,
-                 "resumedPid": pid, "actionId": action["id"], "resumedThrough": initiator, "finishedAt": finished}
+                 "resumedPid": pid, "actionId": action["id"], "resumedThrough": initiator, "finishedAt": finished,
+                 "phaseRecord": phase_proof}
         result = {"id": SCENARIO, "group": "failures", "how": "failure", "status": status, "reason": reason,
                   "user": user, "twins": [user], "started_at": state["started_at"], "rebootEvidence": proof}
         if status != "UNVERIFIED":

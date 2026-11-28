@@ -117,11 +117,11 @@ def runner(monkeypatch, settings, db):
     main.MEMORY_PAUSE.clear()
     main.SHUTDOWN.clear()
 
-    def run():
+    def run(only=None):
         main.SHUTDOWN.clear()
         try:
             return main._run_with_memory_pause(None, db, settings, ALL, delta=False, delta_days=0,
-                                               passes=main.ordered_passes(ALL))
+                                               passes=main.ordered_passes(ALL), only=only)
         finally:
             main.SHUTDOWN.clear()
     run.ran, run.after, run.plan = ran, after, plan
@@ -161,6 +161,22 @@ class TestTheRunWritesIt:
         main._run_with_memory_pause(None, db, settings, ALL, delta=False, delta_days=0,
                                     passes=main.ordered_passes(ALL), only=["a@x"])
         assert rp.latest(db.conn) is None
+
+    def test_a_selected_recovery_can_opt_into_a_recorded_phase_cursor(self, runner, db, monkeypatch):
+        monkeypatch.setenv("RUN_RECORD_SCOPED", "true")
+        runner.plan["stop_after"] = "drive"
+        runner(only=["a@x"])
+        first = rp.latest(db.conn)
+        assert first["resumeFrom"] == "drive" and states(db)["drive"] == "STOPPED"
+
+        runner.ran.clear()
+        runner.plan["stop_after"] = None
+        runner.plan["needs"] = "nobody"
+        runner(only=["a@x"])
+        resumed = rp.latest(db.conn)
+        assert resumed["run"] == first["run"] and resumed["resumes"] == 1
+        assert resumed["resumedFrom"] == "drive"
+        assert runner.ran == ["drive", "gmail", "calendar+contacts+tasks"]
 
 
 class TestARestartResumes:

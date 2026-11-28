@@ -19,6 +19,19 @@ PRIOR_STARTED = R._iso(BOOT_1 + 10)
 RESUMED = R._iso(BOOT_2 + 50)
 
 
+def phase_record(*, pid=4242, resumes=0, resumed_from=None, drive_state="RUNNING", done=False):
+    later = "DONE" if done else "PENDING"
+    return {"run": 44, "pid": pid, "resumes": resumes, "resumedFrom": resumed_from,
+            "resumeFrom": None if done else "drive",
+            "phases": [
+                {"name": "drive", "kind": "pass", "state": "DONE" if done else drive_state},
+                {"name": "after_drive", "kind": "pass", "state": "DONE" if done else "PENDING"},
+                {"name": "gmail", "kind": "pass", "state": later},
+                {"name": "calendar+contacts+tasks", "kind": "pass", "state": later},
+                {"name": "tally", "kind": "follow_on", "state": later},
+            ]}
+
+
 class Evidence:
     def __init__(self):
         self.boot = ("first-boot", BOOT_1)
@@ -27,6 +40,7 @@ class Evidence:
         self.activity = []
         self.audits = []
         self.rc = 130
+        self.record = phase_record()
 
     def guest(self, expected):
         if expected != GUEST:
@@ -39,9 +53,6 @@ class Evidence:
             return {"target": self.target, "ledger": "/opt/bitport/data/accounts/3/migration.db",
                     "ledger_identity": self.ledger_identity}
 
-    def no_failpoints(self):
-        return None
-
     def guard_activity(self, pid=None, started=None):
         self.activity.append((pid, started))
 
@@ -52,7 +63,10 @@ class Evidence:
     def drive(self, pid, user, action, wait):
         assert (pid, user) == (4242, USER)
         assert action["id"] == 6
-        return PRIOR_STARTED
+        return PRIOR_STARTED, R._drive_checkpoint(self.phase_record(), pid)
+
+    def phase_record(self):
+        return self.record
 
     def interruption(self, state, epoch):
         assert (state["prior_pid"], state["prior_started"], epoch) == (4242, PRIOR_STARTED, BOOT_2)
@@ -66,6 +80,7 @@ class Evidence:
 
     def terminal(self, action, pid, wait):
         assert (action["id"], pid) == (7, 5252)
+        self.record = phase_record(pid=pid, resumes=1, resumed_from="drive", done=True)
         return RESUMED
 
     def initiator(self, action, interrupted):
@@ -80,6 +95,10 @@ class Driver:
         self.evidence, self.checkpoint = evidence, checkpoint
         self.calls = []
         self.resume_reply = "ok"
+        self.failpoints = []
+
+    def armed(self):
+        return list(self.failpoints)
 
     def take_twin(self, *, before_reset):
         self.calls.append("twin")
@@ -153,6 +172,7 @@ def test_checkpoint_continues_the_same_twin_once_and_uses_read_only_verification
     assert restarted["rebootEvidence"] == {
         "priorPid": 4242, "priorStartedAt": PRIOR_STARTED, "interruptedExit": 130, "resumedPid": 5252,
         "resumedThrough": "operator Start", "actionId": 7, "finishedAt": RESUMED,
+        "phaseRecord": {"run": 44, "resumes": 1, "resumedFrom": "drive"},
     }
     assert len([c for c in driver.calls if isinstance(c, tuple) and c[0] == R.MIGRATE]) == 2
     assert driver.calls.count("twin") == driver.calls.count("reboot") == 1
@@ -189,6 +209,22 @@ def test_unchanged_boot_different_account_changed_mapping_and_clean_exit_are_all
     with pytest.raises(R.Held, match="no run-bound interruption"):
         run(True)
     assert driver.calls == before
+
+
+def test_reboot_is_not_requested_without_a_running_recorded_drive_phase(trial):
+    _, evidence, driver, run = trial
+    evidence.record["phases"][0]["state"] = "PENDING"
+    with pytest.raises(R.Held, match="active Drive phase"):
+        run()
+    assert "reboot" not in driver.calls
+
+
+def test_f_reboot_refuses_a_stale_failpoint_arm(trial):
+    _, _, driver, run = trial
+    driver.failpoints = ["drive.copy.landed@3"]
+    with pytest.raises(R.Held, match="empty failpoint arm file"):
+        run()
+    assert driver.calls == []
 
 
 @pytest.mark.parametrize("receipt", ["lost", "queued"])
@@ -295,19 +331,6 @@ def test_linux_guest_identity_uses_only_the_pinned_virtual_machine(monkeypatch, 
         evidence.guest(GUEST)
 
 
-def test_f_reboot_refuses_to_start_while_any_other_failpoint_is_armed(monkeypatch, tmp_path):
-    import failpoints
-
-    armed = tmp_path / "failpoint"
-    armed.write_text("drive.copy.landed@1\n")
-    monkeypatch.setattr(failpoints, "FAULT_FILE", str(armed))
-    evidence = R.LinuxEvidence(None)
-    with pytest.raises(R.Held, match="F-reboot is the fault"):
-        evidence.no_failpoints()
-    armed.write_text("")
-    evidence.no_failpoints()
-
-
 def test_linux_drive_needs_the_exact_live_process_and_its_own_archive(monkeypatch, tmp_path):
     import control_plane_db as cpdb
     import webui
@@ -341,7 +364,9 @@ def test_linux_drive_needs_the_exact_live_process_and_its_own_archive(monkeypatc
     with pytest.raises(R.Held, match="fixture bounded"):
         evidence.drive(4242, USER, action, 1)
     archive.write_text("PASS 1/3 pid=4242: drive\n")
-    assert evidence.drive(4242, USER, action, 1) == PRIOR_STARTED
+    record = phase_record()
+    monkeypatch.setattr(evidence, "phase_record", lambda: record)
+    assert evidence.drive(4242, USER, action, 1) == (PRIOR_STARTED, R._drive_checkpoint(record, 4242))
     with pytest.raises(R.Held, match="original Start acknowledgement"):
         evidence.drive(4242, USER, {**action, "started_at": R._iso(BOOT_1 + 11)}, 1)
     with cpdb.rw() as conn:
@@ -488,7 +513,7 @@ def test_real_start_route_produces_the_scoped_argv_and_action_receipt(configured
     launched = []
 
     def start_admitted(argv, aid, job, env, then):
-        launched.append((argv, aid, job, env["TRANSFER_MODE"], then))
+        launched.append((argv, aid, job, env["TRANSFER_MODE"], env.get("RUN_RECORD_SCOPED"), then))
         return True, f"started pid 4242: {' '.join(argv[1:4])}"
 
     monkeypatch.setattr(A, "_start_admitted", start_admitted)
@@ -503,9 +528,8 @@ def test_real_start_route_produces_the_scoped_argv_and_action_receipt(configured
     argv = [A.PY, "main.py", "--account-id", "3", "migrate", "--services", ",".join(R.SERVICES)]
     if rewrite:
         argv.append("--ordered")
-    # The current Start route attaches only a scoped tally; verification repair
-    # is a separate follow-on managed by the current API contract.
-    assert launched == [(argv + ["--user", USER], 3, "migrate", "server_side", [f"tally@{USER}"])]
+    assert launched == [(argv + ["--user", USER], 3, "migrate", "server_side", "true",
+                         [f"tally@{USER}"])]
     action = evidence.original_action(ack, USER, reason, 4242)
     assert json.loads(action["params_json"])["full_fidelity"] is True
     assert evidence.launches(USER, 0) == [action]
