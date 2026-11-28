@@ -2091,3 +2091,9 @@ def test_a_reset_of_named_users_keeps_the_tenants_groups_and_manifest():
     src = inspect.getsource(seed_sandbox.main)
     guard = src.index("if args.users:\n            print(\"  groups and the seed manifest kept")
     assert guard < src.index("reset_groups(build_directory_groups") < src.index("os.remove(f)")
+
+
+def test_the_seeders_connections_never_take_308_for_a_redirect():
+    """28 Nov 2026: the 300-user seed died on its first resumable pool upload (RedirectMissingLocation)."""
+    import seed_sandbox
+    assert 308 not in seed_sandbox._http(30).redirect_codes

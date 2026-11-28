@@ -124,6 +124,16 @@ SEED_LABELS = ["Clients", "Clients/Acme", "Clients/Acme/2024",
 MAIL_CAL_WORKERS = max(1, int(os.getenv("SEED_MAIL_WORKERS", "4")))
 
 
+
+def _http(timeout: int) -> "httplib2.Http":
+    """An httplib2 connection that does not take 308 for a redirect. Google answers every chunk of a resumable upload
+    but the last with 308 "Resume Incomplete" and no Location, which httplib2 raises as RedirectMissingLocation:
+    the 300-user seed died on its first large pool file (VM, 28 Nov 2026). auth._http has done this since 10 Oct."""
+    import httplib2
+    http = httplib2.Http(timeout=timeout)
+    http.redirect_codes = http.redirect_codes - {308}
+    return http
+
 def _run_parallel(plans: list, fn, workers: int) -> None:
     """Apply `fn` to pre-planned items on a bounded pool.
 
@@ -2326,7 +2336,7 @@ def build_services(settings: Settings, user: str):
 
     def svc(api, version):
         http = google_auth_httplib2.AuthorizedHttp(
-            creds, http=httplib2.Http(timeout=300)
+            creds, http=_http(300)
         )
         return build(api, version, http=http, cache_discovery=False)
 
@@ -2348,7 +2358,7 @@ def build_chat(settings: Settings, user: str):
         _resolve_key_path(settings), scopes=seed_scopes(settings)
     ).with_subject(_subject(user))
     http = google_auth_httplib2.AuthorizedHttp(
-        creds, http=httplib2.Http(timeout=300)
+        creds, http=_http(300)
     )
     return build("chat", "v1", http=http, cache_discovery=False)
 
@@ -2382,7 +2392,7 @@ def build_people_tasks(settings: Settings, user: str):
 
     def svc(api, version):
         http = google_auth_httplib2.AuthorizedHttp(
-            creds, http=httplib2.Http(timeout=300)
+            creds, http=_http(300)
         )
         return build(api, version, http=http, cache_discovery=False)
 
@@ -2405,7 +2415,7 @@ def build_reports(settings: Settings, user: str):
         _resolve_key_path(settings), scopes=SEED_SCOPES + [REPORTS_SCOPE]
     ).with_subject(_subject(user))
     http = google_auth_httplib2.AuthorizedHttp(
-        creds, http=httplib2.Http(timeout=120)
+        creds, http=_http(120)
     )
     return build("admin", "reports_v1", http=http, cache_discovery=False)
 
@@ -2426,7 +2436,7 @@ def build_directory_readonly(settings: Settings, user: str):
         _resolve_key_path(settings), scopes=[DIRECTORY_READONLY_SCOPE]
     ).with_subject(_subject(user))
     http = google_auth_httplib2.AuthorizedHttp(
-        creds, http=httplib2.Http(timeout=120)
+        creds, http=_http(120)
     )
     return build("admin", "directory_v1", http=http, cache_discovery=False)
 
@@ -2448,7 +2458,7 @@ def build_directory_groups(settings: Settings, user: str):
         _resolve_key_path(settings), scopes=[GROUP_WRITE_SCOPE]
     ).with_subject(_subject(user))
     http = google_auth_httplib2.AuthorizedHttp(
-        creds, http=httplib2.Http(timeout=120)
+        creds, http=_http(120)
     )
     return build("admin", "directory_v1", http=http, cache_discovery=False)
 
@@ -2471,7 +2481,7 @@ def build_gmail_purge(settings: Settings, user: str):
             _resolve_key_path(settings), scopes=[GMAIL_PURGE_SCOPE]
         ).with_subject(_subject(user))
         http = google_auth_httplib2.AuthorizedHttp(
-            creds, http=httplib2.Http(timeout=120))
+            creds, http=_http(120))
         return build("gmail", "v1", http=http, cache_discovery=False)
     except Exception:      # noqa: BLE001 - absence is an answer, not an error
         return None
@@ -2496,7 +2506,7 @@ def build_gmail_settings(settings: Settings, user: str):
             scopes=[GMAIL_SETTINGS_SCOPE, GMAIL_SHARING_SCOPE]
         ).with_subject(_subject(user))
         http = google_auth_httplib2.AuthorizedHttp(
-            creds, http=httplib2.Http(timeout=120))
+            creds, http=_http(120))
         return build("gmail", "v1", http=http, cache_discovery=False)
     except Exception:      # noqa: BLE001 - absence is an answer, not an error
         return None
@@ -2519,7 +2529,7 @@ def _build_directory_readwrite(settings: Settings, user: str):
         scopes=SEED_SCOPES + [provision.DIRECTORY_WRITE_SCOPE],
     ).with_subject(_subject(user))
     http = google_auth_httplib2.AuthorizedHttp(
-        creds, http=httplib2.Http(timeout=120)
+        creds, http=_http(120)
     )
     return build("admin", "directory_v1", http=http, cache_discovery=False)
 
