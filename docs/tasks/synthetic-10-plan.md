@@ -589,6 +589,12 @@ rebuilt layouts (its slides render identical).
 - 27 Nov 2026, 12:20 pm NPT (Claude): **`fp:gmail.inserted:lost` PASS** (`fp2-vm-gmail-lost-t16-20261127c`, VM,
   06:01-06:35Z): the fault fired, the delivered copy was adopted, the complete check equalled the control, nothing
   landed twice. F-kill started on t16 (`fp2-vm-fkill-t16-20261127`).
+- 28 Nov 2026, 3:30 pm NPT (Claude): **Incremental verify field-proven on dharan** (l3novo, 7b3dc33, read-only, no
+  repair): finance@ Gmail one-to-one 1,953 s on 24 Nov -> 398 s (run 1 builds the inventory) -> 7 s (run 2, history
+  only), the same verdict both times (3,926/3,927 identical, the same 1 difference). Also: the 300-user seed's writes
+  tripped account 3's source guard and stopped its campaign (F-lost, F-api spoiled); a seed running from the command
+  line now counts as a source writer like an admitted seed job (api_server, on the VM). Chain fp2-chain2 on the VM:
+  after the failure queue, reruns (F-lost, F-api, F-webui) -> errors -> benchmarks -> watchers.
 - 28 Nov 2026, 3:10 pm NPT (Claude): **P5.1 GO and the seed started.** Operator: 300 users, mail share 30%. Seed key:
   Google refuses a bundled/headless Chromium sign-in, so it was made from the Mac (seed_key_from_mac.sh: gcloud signed
   in as info@a. in BrowserOS, a new seed-sa key installed root-only on the VM, 18/18 scopes delegated, sign-in
