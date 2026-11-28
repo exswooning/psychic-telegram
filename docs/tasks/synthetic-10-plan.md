@@ -589,6 +589,15 @@ rebuilt layouts (its slides render identical).
 - 27 Nov 2026, 12:20 pm NPT (Claude): **`fp:gmail.inserted:lost` PASS** (`fp2-vm-gmail-lost-t16-20261127c`, VM,
   06:01-06:35Z): the fault fired, the delivered copy was adopted, the complete check equalled the control, nothing
   landed twice. F-kill started on t16 (`fp2-vm-fkill-t16-20261127`).
+- 28 Nov 2026, 12:05 pm NPT (Claude): **Codex's work integrated** (main = 06a78f1): 11 branches merged (sweep 21 bugs,
+  finding-kinds, err-acts 31/32, verify at scale, incremental verify, red-team harness, seed-300, reboot with
+  recorded-phase resume, phase-binding, suite's seed_loader); the full tests/ suite green on the merged tree apart
+  from seams fixed here: draft compare read every Gmail draft copy as different (real bug), a lost comment reply
+  skipped the mtime restore (F-lost, 7e43235/cd8f674), F-api waited 4 h for a repair log that cannot exist
+  (wait_running on the verify follow-on). data-generator/ green; no frontend change. The Mac rebooted overnight:
+  VM restarted, queue relaunched (F-kill-random PASS, F-stop PASS, F-lost FAIL then fixed), now
+  `fp2-vm-failq-20261128e` (12 rows). a.'s admin login on the VM (root-only) for the seed key; gcloud, Chromium and
+  Xvfb installed there.
 - 27 Nov 2026, 5:20 pm NPT (Claude): **Field results.** F-kill rerun d PASS (12/12 points, contacts/tasks adopted,
   0 duplicates). Source guard: with the installed code 5 routes WROTE to a. (probe on c05, restored); the transport
   guard (5100c7c, 17e82f4) refuses all; a 696-attempt discovery sweep over 12 APIs sent no write; deployed to l3novo
