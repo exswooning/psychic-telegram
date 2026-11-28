@@ -156,8 +156,8 @@ _PROTECTED_SUBJECT_CACHE: dict = {}
 
 def _protected_source_subject(subject: str) -> bool:
     """Is this impersonated user on a protected source domain (domain_guard's record: a source not declared a
-    sandbox, or any government domain)? Cached a minute. A government domain counts as protected even when the
-    record cannot be read; any other domain then falls back to the per-client guard alone."""
+    sandbox, or any government domain)? Cached a minute. If the protection record cannot be read, uncertainty is
+    protected: a direct AuthorizedHttp client must not gain write access because the registry is unavailable."""
     import time
     domain = subject.rsplit("@", 1)[-1].lower()
     hit = _PROTECTED_SUBJECT_CACHE.get(domain)
@@ -166,13 +166,18 @@ def _protected_source_subject(subject: str) -> bool:
     try:
         import domain_guard
         protected = bool(domain_guard.source_refuse_reason(domain))      # includes every government domain
-    except Exception:      # noqa: BLE001
+    except Exception as exc:      # noqa: BLE001 - registry uncertainty must not disable the transport guard
         try:
             import domain_guard
             protected = bool(domain_guard.is_government(domain))
         except Exception:      # noqa: BLE001
             protected = domain.endswith(".gov") or ".gov." in domain
-        logging.getLogger(__name__).warning("source protection of %s could not be read; protected=%s", domain, protected)
+        # Government classification can establish protection, but a negative result does not prove this is not a
+        # configured source. Refuse direct-client writes until the registry is readable again.
+        protected = True
+        logging.getLogger(__name__).warning(
+            "source protection of %s could not be read; refusing writes until it is available (%s)",
+            domain, type(exc).__name__)
     _PROTECTED_SUBJECT_CACHE[domain] = (protected, time.monotonic())
     return protected
 

@@ -31,6 +31,7 @@ import logging
 import failpoints
 
 from sample_budget import Budget
+from pagination import next_page_token
 
 from resilience import (PermanentAPIError, RateLimiter, retry_on_google_error,
                         shutdown_requested)
@@ -188,33 +189,33 @@ class ContactsMigrator:
 
     # -- reading -------------------------------------------------------------
     def _iter_contacts(self):
-        token = None
+        token, seen = None, set()
         while True:
             self.limiter.acquire()
             resp = self._retry(lambda t=token: self.src.people().connections()
                                .list(resourceName="people/me", pageSize=200,
                                      pageToken=t,
                                      personFields=PERSON_FIELDS).execute())
+            token = next_page_token(resp, token, seen, "Contacts inventory")
             for p in resp.get("connections", []):
                 if not self.budget.take():
                     return
                 yield p
-            token = resp.get("nextPageToken")
             if not token:
                 return
 
     def _iter_groups(self):
-        token = None
+        token, seen = None, set()
         while True:
             self.limiter.acquire()
             resp = self._retry(lambda t=token: self.src.contactGroups()
                                .list(pageSize=100, pageToken=t).execute())
+            token = next_page_token(resp, token, seen, "Contact group inventory")
             for g in resp.get("contactGroups", []):
                 # SYSTEM_CONTACT_GROUP covers starred/myContacts etc, which
                 # exist on the target already and cannot be created.
                 if g.get("groupType") == "USER_CONTACT_GROUP":
                     yield g
-            token = resp.get("nextPageToken")
             if not token:
                 return
 
@@ -228,20 +229,16 @@ class ContactsMigrator:
         self._strays = {}
         if self.settings.dry_run:
             return
-        live, token = {}, None
-        try:
-            while True:
-                self.limiter.acquire()
-                r = self._retry(lambda t=token: self.tgt.people().connections().list(
-                    resourceName="people/me", personFields="names,emailAddresses", pageSize=1000,
-                    pageToken=t).execute())
-                live.update({p["resourceName"]: p for p in r.get("connections", [])})
-                token = r.get("nextPageToken")
-                if not token:
-                    break
-        except Exception as exc:      # noqa: BLE001 - no listing, no forgetting
-            log.warning("[%s] could not list the target's contacts: %s", self.source_user, exc)
-            return
+        live, token, seen = {}, None, set()
+        while True:
+            self.limiter.acquire()
+            r = self._retry(lambda t=token: self.tgt.people().connections().list(
+                resourceName="people/me", personFields="names,emailAddresses", pageSize=1000,
+                pageToken=t).execute())
+            token = next_page_token(r, token, seen, "Target Contacts inventory")
+            live.update({p["resourceName"]: p for p in r.get("connections", [])})
+            if not token:
+                break
         # An unmapped target contact is kept by identity: a run killed between createContact and
         # record_mapping left it, and the next run adopts it instead of making a second (F-kill, 27 Nov 2026:
         # contacts.created@2 left two "Jordan Petrov" on b.).
@@ -279,12 +276,7 @@ class ContactsMigrator:
     def _migrate_groups(self) -> dict:
         """Contact groups first: a contact's membership references them."""
         mapping: dict[str, str] = {}
-        try:
-            groups = list(self._iter_groups())
-        except (PermanentAPIError, RuntimeError) as exc:
-            log.warning("[%s] contact groups unavailable: %s",
-                        self.source_user, exc)
-            return mapping
+        groups = list(self._iter_groups())
 
         for g in groups:
             name = g.get("name") or "Imported group"
@@ -344,15 +336,15 @@ class ContactsMigrator:
         reject the create in the first place -- anything else would answer a
         different question than the one that failed.
         """
-        token = None
+        token, seen = None, set()
         try:
             while True:
                 resp = self._retry(lambda t=token: self.tgt.contactGroups()
                                    .list(pageSize=200, pageToken=t).execute())
+                token = next_page_token(resp, token, seen, "Target contact group inventory")
                 for g in resp.get("contactGroups", []):
                     if (g.get("name") or "") == name:
                         return g.get("resourceName")
-                token = resp.get("nextPageToken")
                 if not token:
                     return None
         except (PermanentAPIError, RuntimeError) as exc:

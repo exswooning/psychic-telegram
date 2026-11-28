@@ -45,6 +45,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from auth import AuthManager                      # noqa: E402
 from config import FOLDER_MIME, SHORTCUT_MIME, Settings  # noqa: E402
 from db import MigrationDB                        # noqa: E402
+from pagination import next_page_token            # noqa: E402
 
 log = logging.getLogger("inventory")
 
@@ -117,7 +118,7 @@ def scan_drive(drive, settings: Settings, user: str) -> dict:
     shared_files: list[dict] = []
     grantee_totals: Counter = Counter()
     unexportable = 0
-    page_token = None
+    page_token, seen_tokens = None, set()
 
     while True:
         resp = drive.files().list(
@@ -126,6 +127,7 @@ def scan_drive(drive, settings: Settings, user: str) -> dict:
             fields=FILE_FIELDS, supportsAllDrives=True,
             includeItemsFromAllDrives=True,
         ).execute()
+        page_token = next_page_token(resp, page_token, seen_tokens, "Drive inventory")
 
         for f in resp.get("files", []):
             mime = f.get("mimeType", "")
@@ -163,7 +165,6 @@ def scan_drive(drive, settings: Settings, user: str) -> dict:
                     for addr in share["grantees"]:
                         grantee_totals[addr] += 1
 
-        page_token = resp.get("nextPageToken")
         if not page_token:
             break
 
@@ -189,12 +190,12 @@ def count_drafts(gmail) -> int:
     figure rather than an obvious error. Drafts are few enough that paging
     them costs one or two requests.
     """
-    total, token = 0, None
+    total, token, seen_tokens = 0, None, set()
     while True:
         resp = gmail.users().drafts().list(
             userId="me", maxResults=500, pageToken=token).execute()
+        token = next_page_token(resp, token, seen_tokens, "Gmail draft inventory")
         total += len(resp.get("drafts", []))
-        token = resp.get("nextPageToken")
         if not token:
             return total
 
@@ -215,18 +216,25 @@ def scan_calendar(cal) -> dict:
     it only follows (a colleague's, a public holiday calendar) is counted as followed,
     not by its events: live, administration@dharan.gov.np read "250 events", all of
     them "Holidays in Nepal", with none of its own."""
-    cals = cal.calendarList().list().execute().get("items", [])
+    cals, token, seen_tokens = [], None, set()
+    while True:
+        resp = cal.calendarList().list(maxResults=250, pageToken=token).execute()
+        token = next_page_token(resp, token, seen_tokens, "Calendar inventory")
+        cals.extend(resp.get("items", []))
+        if not token:
+            break
     followed = [c for c in cals if c.get("accessRole") != "owner"]
     cals = [c for c in cals if c.get("accessRole") == "owner"]
     events = 0
     for c in cals:
-        token = None
+        token, seen_tokens = None, set()
         while True:
             resp = cal.events().list(calendarId=c["id"], maxResults=2500,
                                      pageToken=token,
                                      fields="nextPageToken,items(id)").execute()
+            token = next_page_token(resp, token, seen_tokens,
+                                    f"Calendar event inventory {c['id']}")
             events += len(resp.get("items", []))
-            token = resp.get("nextPageToken")
             if not token:
                 break
     return {"calendars": len(cals), "events": events, "followed": len(followed)}
@@ -236,21 +244,22 @@ def scan_chat(chat) -> dict:
     """Chat is optional and frequently not switched on; absence is not an error."""
     spaces = messages = 0
     try:
-        token = None
+        token, seen_spaces = None, set()
         while True:
             resp = chat.spaces().list(pageSize=100, pageToken=token).execute()
+            token = next_page_token(resp, token, seen_spaces, "Chat spaces inventory")
             found = resp.get("spaces", [])
             spaces += len(found)
             for sp in found:
-                mt = None
+                mt, seen_messages = None, set()
                 while True:
                     mr = chat.spaces().messages().list(
                         parent=sp["name"], pageSize=1000, pageToken=mt).execute()
+                    mt = next_page_token(mr, mt, seen_messages,
+                                         f"Chat message inventory {sp['name']}")
                     messages += len(mr.get("messages", []))
-                    mt = mr.get("nextPageToken")
                     if not mt:
                         break
-            token = resp.get("nextPageToken")
             if not token:
                 break
     except Exception as exc:  # noqa: BLE001 - reported, never fatal

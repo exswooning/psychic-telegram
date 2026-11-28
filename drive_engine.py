@@ -41,6 +41,7 @@ DOC_RTF_FOR = "application/vnd.google-apps.document"
 from config import (EXPORT_MIME_MAP, FOLDER_MIME, MOVE_PENDING, OVER_DAILY_CAP, OWED_GRANT,
                     SHORTCUT_MIME, STAGING_MODES, Settings)
 from sample_budget import Budget
+from pagination import next_page_token
 from resilience import (AdaptiveRateLimiter, DailyQuotaGuard, PermanentAPIError,
                         QuotaExhausted, RateLimiter, retry_on_google_error,
                         shutdown_requested)
@@ -636,6 +637,7 @@ class DriveMigrator:
         # Copies an earlier run put in place but never recorded, indexed at the
         # first unmapped file (see _take_placed).
         self._placed: dict[tuple, list[dict]] | None = None
+        self._placed_error: Exception | None = None
         self._placed_lock = threading.Lock()
         # Set up properly by _open_file_pool() at the start of run(). Defined
         # here too so a caller that drives _sync_files() directly -- several
@@ -851,14 +853,14 @@ class DriveMigrator:
     def _source_files(self) -> dict[str, dict] | None:
         """Every file this user owns on the source, by id -- or None if it could not be read."""
         try:
-            d, out, token = self.auth.source_drive(self.source_user), {}, None
+            d, out, token, seen = self.auth.source_drive(self.source_user), {}, None, set()
             while True:
                 r = self._retry(lambda t=token: d.files().list(
                     q="'me' in owners", pageSize=1000, pageToken=t,
                     fields="nextPageToken,files(id,name,mimeType,createdTime)").execute(),
                     write=False, tenant="source")
                 out.update({f["id"]: f for f in r.get("files", [])})
-                token = r.get("nextPageToken")
+                token = next_page_token(r, token, seen, "Drive source tripwire inventory")
                 if not token:
                     return out
         except Exception as exc:      # noqa: BLE001 - a check that cannot run says so
@@ -1186,18 +1188,18 @@ class DriveMigrator:
         # drive is now told by the item's own driveId.
         extra_fields = ",owners,driveId" if with_owners else ""
         fields = f"nextPageToken, files({ITEM_FIELDS}{extra_fields})"
-        token = None
+        token, seen = None, set()
         while True:
             resp = self._retry(lambda t=token, fl=fields: self.src.files().list(
                 q=q, pageSize=LIST_PAGE_SIZE, pageToken=t, fields=fl,
                 spaces="drive", supportsAllDrives=True, **extra,
             ).execute(), label="drive.files.list", write=False,
                                tenant="source")
+            token = next_page_token(resp, token, seen, "Drive child inventory")
             for f in resp.get("files", []):
                 if with_owners and f.get("driveId") and f.get("driveId") != self.shared_drive:
                     f["_inSharedDrive"] = True
                 yield f
-            token = resp.get("nextPageToken")
             if not token:
                 return
 
@@ -1218,7 +1220,7 @@ class DriveMigrator:
         # Public/link-accessible files can be visible to the user without
         # sharedWithMe=true. The coverage inventory includes these too.
         q = "not 'me' in owners and trashed = false"
-        token = None
+        token, seen = None, set()
         while True:
             resp = self._retry(lambda t=token: self.src.files().list(
                 q=q, pageSize=LIST_PAGE_SIZE, pageToken=t,
@@ -1237,7 +1239,7 @@ class DriveMigrator:
                         for o in f.get("owners") or []):
                     continue
                 self._sync_shared_item(f, tgt_root, depth=1)
-            token = resp.get("nextPageToken")
+            token = next_page_token(resp, token, seen, "Drive shared-with-me inventory")
             if not token:
                 return
 
@@ -1303,7 +1305,7 @@ class DriveMigrator:
         """Files the user owns that no walk reached: an orphan with no parent (Forms leaves its responses Sheet so),
         or one inside a folder someone outside the org owns. dharan.gov.np, 23 Nov 2026: both were never attempted
         and read UNMAPPED_SOURCE at the end. Each goes into the copy of its folder this user holds, else the root."""
-        files, token = [], None
+        files, token, seen = [], None, set()
         q = ("'me' in owners and trashed = false and mimeType != '%s' and mimeType != '%s'"
              % (FOLDER_MIME, SHORTCUT_MIME))
         while not shutdown_requested():
@@ -1315,7 +1317,7 @@ class DriveMigrator:
                       and not self.db.get_target_id(self.source_user, f["id"], "file")
                       and not self.db.conn.execute("SELECT 1 FROM audit_log WHERE source_user=? AND item_id=? LIMIT 1",
                                                    (self.source_user, f["id"])).fetchone()]
-            token = r.get("nextPageToken")
+            token = next_page_token(r, token, seen, "Drive unreached-file inventory")
             if not token:
                 break
         by_parent: dict[str, list] = {}
@@ -1616,8 +1618,17 @@ class DriveMigrator:
             return None
         key = self._placed_key(item, tgt_parent)
         with self._placed_lock:
+            if self._placed_error is not None:
+                raise RuntimeError(f"Drive target inventory remains unavailable: {self._placed_error}") \
+                    from self._placed_error
             if self._placed is None:
-                self._placed = self._index_placed()
+                try:
+                    self._placed = self._index_placed()
+                except Exception as exc:
+                    # One failed mailbox-wide inventory must not trigger one
+                    # full target listing per file worker.
+                    self._placed_error = exc
+                    raise
             candidates = self._placed.get(key) or []
             for i, f in enumerate(candidates):
                 if item.get("md5Checksum") and f.get("md5Checksum") != item["md5Checksum"]:
@@ -1636,30 +1647,25 @@ class DriveMigrator:
                       supportsAllDrives=True, q="trashed = false") if self.shared_drive
                  else dict(spaces="drive", q="'me' in owners and trashed = false"))
         out: dict[tuple, list[dict]] = {}
-        token = None
-        try:
-            while True:
-                resp = self._retry(lambda t=token: self.tgt.files().list(
-                    pageSize=1000, pageToken=t, **where,
-                    fields="nextPageToken,files(id,name,mimeType,createdTime,modifiedTime,"
-                           "md5Checksum,parents)").execute(), write=False)
-                for f in resp.get("files", []):
-                    if f["id"] not in mapped:
-                        for p in f.get("parents") or []:
-                            out.setdefault(self._placed_key(f, p), []).append(f)
-                token = resp.get("nextPageToken")
-                if not token:
-                    self.target_preexisting = sum(len(v) for v in out.values())
-                    if self.target_preexisting and not mapped:
-                        log.warning("[%s] the target already holds %d file(s)/folder(s) before any was migrated "
-                                    "(none is in the ledger): a copy matching a source file's folder, name, type and "
-                                    "created time is adopted, the rest stays beside the migrated files",
-                                    self.source_user, self.target_preexisting)
-                    return out
-        except (PermanentAPIError, RuntimeError) as exc:
-            log.warning("[%s] could not list the target's files; a copy an earlier run left "
-                        "unrecorded will be copied again: %s", self.source_user, exc)
-            return out
+        token, seen = None, set()
+        while True:
+            resp = self._retry(lambda t=token: self.tgt.files().list(
+                pageSize=1000, pageToken=t, **where,
+                fields="nextPageToken,files(id,name,mimeType,createdTime,modifiedTime,"
+                       "md5Checksum,parents)").execute(), write=False)
+            token = next_page_token(resp, token, seen, "Drive target inventory")
+            for f in resp.get("files", []):
+                if f["id"] not in mapped:
+                    for p in f.get("parents") or []:
+                        out.setdefault(self._placed_key(f, p), []).append(f)
+            if not token:
+                self.target_preexisting = sum(len(v) for v in out.values())
+                if self.target_preexisting and not mapped:
+                    log.warning("[%s] the target already holds %d file(s)/folder(s) before any was migrated "
+                                "(none is in the ledger): a copy matching a source file's folder, name, type and "
+                                "created time is adopted, the rest stays beside the migrated files",
+                                self.source_user, self.target_preexisting)
+                return out
 
     # -- strategy cascade ------------------------------------------------------
     # The Google types a server-side copy lands where it is asked to. Live, dharan.gov.np:
@@ -1679,7 +1685,7 @@ class DriveMigrator:
             return self._form_sheets_cache
         found: set | None = set()
         try:
-            d, token = self.src, None
+            d, token, seen = self.src, None, set()
             while True:
                 r = self._retry(lambda t=token: d.files().list(
                     q=f"mimeType='{FORM_MIME}' and trashed=false", pageSize=1000, pageToken=t,
@@ -1690,7 +1696,7 @@ class DriveMigrator:
                         formId=fid, fields="linkedSheetId").execute(), label="forms.get")
                     if got.get("linkedSheetId"):
                         found.add(got["linkedSheetId"])
-                token = r.get("nextPageToken")
+                token = next_page_token(r, token, seen, "Drive Form Sheet inventory")
                 if not token:
                     break
         except Exception as exc:      # noqa: BLE001 - unknown: no Sheet is known safe
@@ -2024,23 +2030,19 @@ class DriveMigrator:
         orphan: account 3 has 128 of them in 64 staging drives. One listing
         per user, not per file -- the drive is normally empty.
         """
-        token = None
-        try:
-            while True:
-                resp = self._retry(lambda: self.tgt.files().list(
-                    corpora="drive", driveId=self._staging_drive_id,
-                    includeItemsFromAllDrives=True, supportsAllDrives=True,
-                    q="trashed = false", pageSize=1000, pageToken=token,
-                    fields="nextPageToken,files(id,name,mimeType,modifiedTime,md5Checksum)",
-                ).execute(), write=False)
-                for f in resp.get("files", []):
-                    self._staged.setdefault(self._staged_key(f), []).append(f)
-                token = resp.get("nextPageToken")
-                if not token:
-                    return
-        except (PermanentAPIError, RuntimeError) as exc:
-            log.warning("[%s] could not list the staging drive; stranded copies "
-                        "will not be adopted this run: %s", self.source_user, exc)
+        token, seen = None, set()
+        while True:
+            resp = self._retry(lambda t=token: self.tgt.files().list(
+                corpora="drive", driveId=self._staging_drive_id,
+                includeItemsFromAllDrives=True, supportsAllDrives=True,
+                q="trashed = false", pageSize=1000, pageToken=t,
+                fields="nextPageToken,files(id,name,mimeType,modifiedTime,md5Checksum)",
+            ).execute(), write=False)
+            token = next_page_token(resp, token, seen, "Drive staging inventory")
+            for f in resp.get("files", []):
+                self._staged.setdefault(self._staged_key(f), []).append(f)
+            if not token:
+                return
 
     def _take_staged(self, item: dict) -> dict | None:
         """A stranded staged copy of this item, claimed so no other worker

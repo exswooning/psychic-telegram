@@ -141,6 +141,24 @@ def test_a_module_that_builds_its_own_client_cannot_write_as_a_protected_source_
     assert rec.sent == [("GET", "https://www.googleapis.com/drive/v3/files/f")]
 
 
+def test_registry_failure_does_not_disable_the_direct_client_source_guard(monkeypatch):
+    import domain_guard
+    import google_auth_httplib2
+
+    def unavailable(*args, **kwargs):
+        raise RuntimeError("domain registry unavailable")
+
+    monkeypatch.setattr(domain_guard, "source_refuse_reason", unavailable)
+    monkeypatch.setattr(domain_guard, "is_government", unavailable)
+    auth._PROTECTED_SUBJECT_CACHE.clear()
+    rec = Recorder()
+    http = google_auth_httplib2.AuthorizedHttp(_Creds("alice@source.example"), http=rec)
+
+    with pytest.raises(SourceWriteRefused):
+        http.request("https://www.googleapis.com/drive/v3/files/f", "DELETE")
+    assert rec.sent == []
+
+
 def test_the_hook_leaves_the_target_a_sandbox_and_an_explicit_writer_alone(monkeypatch):
     http, rec = _hooked("u@tgt.test", monkeypatch)
     http.request("https://www.googleapis.com/drive/v3/files/f", "DELETE")

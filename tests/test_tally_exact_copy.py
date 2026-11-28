@@ -27,3 +27,9 @@ def test_counts_equal_but_an_item_differs_is_differs():
 
 def test_a_service_nobody_could_count_does_not_decide_it():
     assert _roll({"drive": {"expected": 5, "target": 5}, "chat": {"expected": None, "target": None}}) == "COMPLETE"
+
+
+def test_an_uncounted_required_service_keeps_the_user_unknown():
+    services = {"drive_files": {"expected": 5, "target": 5},
+                "contacts": {"expected": None, "target": None, "usersUnknown": 1}}
+    assert _roll(services) == "UNKNOWN"

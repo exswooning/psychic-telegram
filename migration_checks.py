@@ -12,6 +12,7 @@ import os
 import time
 from concurrent.futures import ThreadPoolExecutor
 from db import utc_now
+from pagination import next_page_token
 
 LABEL_SETTLE_SEC = float(os.getenv("LABEL_SETTLE_SEC", "2"))      # wait before looking at labels again
 LABEL_SETTLE_TRIES = 2
@@ -113,19 +114,21 @@ def mailbox_completion(auth, db, settings, source_user, target_user, retry=lambd
     try:
         drafts = v._pairs("draft")
         if drafts:
-            live_drafts, token, tgt = set(), None, auth.target_gmail(target_user)
+            live_drafts, token, seen, tgt = set(), None, set(), auth.target_gmail(target_user)
             while True:
                 r = tgt.users().drafts().list(userId="me", maxResults=500, pageToken=token).execute()
+                token = next_page_token(r, token, seen, "Target Gmail draft inventory")
                 live_drafts |= {d["id"] for d in r.get("drafts", [])}
-                token = r.get("nextPageToken")
                 if not token:
                     break
             for sid, tid, _ in drafts:
                 if tid not in live_drafts:
                     result["missing"].append({"source": sid, "target": tid, "type": "draft",
                                               "why": "Mapped draft absent from destination"})
-    except Exception as exc:      # noqa: BLE001 - a draft listing that fails is no reason to fail the mailbox
-        logging.getLogger(__name__).warning("[%s] could not list the target's drafts: %s", source_user, exc)
+    except Exception as exc:      # noqa: BLE001 - without the target inventory, draft coverage is unknown
+        detail = "Target draft inventory failed: " + str(exc)[:180]
+        result["errors"].append(detail)
+        logging.getLogger(__name__).warning("[%s] %s", source_user, detail)
     deferred = set()
     if getattr(settings, "mail_only_with_links", False):
         from config import DEFERRED_TO_DMS
@@ -184,13 +187,10 @@ def drive_completion(auth, db, settings, source_user, target_user, retry=lambda 
                 q=query, spaces="drive", corpora="user", pageSize=1000, pageToken=t,
                 supportsAllDrives=True, includeItemsFromAllDrives=False,
                 fields="nextPageToken,files(id,mimeType,size,md5Checksum,parents,name)").execute())()
+            token = next_page_token(response, token, seen, "Drive completion inventory")
             out.update({item["id"]: item for item in response.get("files", [])})
-            token = response.get("nextPageToken")
             if not token:
                 return out
-            if token in seen:
-                raise RuntimeError("Drive completion inventory repeated a page token")
-            seen.add(token)
     # The ledger's own last word on each item: a reasoned skip (another organisation's
     # shared drive, not exportable, no download allowed, ...) or an owed item is
     # accounted for -- listed with its reason, never a silent gap and never a match.
