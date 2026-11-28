@@ -36,6 +36,7 @@ class Scenario:
     title: str
     how: str
     fixtures: tuple = ()
+    seed_fixtures: tuple = ()    # names in data-generator/fixtures.py, seeded on the fixture user in a.
     act: dict = field(default_factory=dict)
     inject: dict = field(default_factory=dict)
     expect: dict = field(default_factory=dict)
@@ -47,16 +48,16 @@ class Scenario:
 # how -> (ids, fixtures or the change made). Fixtures name data-generator/fixtures.py entries (P2.4).
 _ERRORS = {
     "seeded": ({
-        "gmail.labels_added": "c04", "gmail.duplicate": "c04", "gmail.no_message_id": "c04",
-        "gmail.body_link_copy": "c04", "gmail.link_owner_not_migrated": "c04",
-        "gmail.link_scan_encrypted": "c04", "run.mail_owed_to_dms": "c04",
+        "gmail.labels_added": "c05", "gmail.duplicate": "c04", "gmail.no_message_id": "c06",
+        "gmail.body_link_copy": "c04", "gmail.link_owner_not_migrated": "c08",
+        "gmail.link_scan_encrypted": "c04", "run.mail_owed_to_dms": "c08",
         "drive.shortcut_target": "c03", "drive.item_absent": "c03", "drive.group_grant": "c02",
-        "drive.embedded_images": "c03",
-        "run.form_rebuild": "c09", "drive.comments": "c03", "run.comment_differs": "c03",
+        "drive.embedded_images": "c03", "run.form_rebuild": "c09",
+        "drive.comments": "c03", "run.comment_differs": "c03",
         "drive.comments_unreadable": "c09", "drive.sheet_too_large": "c03",
-        "tasks.untitled": "c07", "run.malware_flag": "c09", "drive.unmapped_source": "c02"}, "happens in the run"),
+        "tasks.untitled": "c07", "run.malware_flag": "c09"}, "happens in the run"),
     "must_not_happen": ({
-        "gmail.link_scan_fixed": "c04", "drive.sheets_scope": "c03", "drive.office_compared_as_native": "c01",
+        "gmail.link_scan_fixed": "c02", "drive.sheets_scope": "c03", "drive.office_compared_as_native": "c07",
         "drive.comment_quote_escaped": "c03"}, "fixed defect: the finding must not return"),
     "arm": ({"drive.native_structure": "a twin's Drive moved by download_upload"}, "download_upload arm only"),
     "changed_after": ({
@@ -98,12 +99,61 @@ _ERRORS = {
                     "drive.form_upload_question": "a crafted file-upload question that needs a person; covered by the Drive finding repair test",
                     "drive.sheet_tabs": "a crafted Sheet tab and gid conflict that needs a person; covered by the Drive finding repair test",
                     "gmail.source_gone": "a crafted source message returning 404 after listing; covered by the run failure repair test",
-                    "gmail.destination_ambiguous": "a crafted duplicate destination Message-ID; covered by the run failure repair test"},
+                    "gmail.destination_ambiguous": "a crafted duplicate destination Message-ID; covered by the run failure repair test",
+                    "drive.unmapped_source": "the outside-owned file requires an account outside the source domain to upload it into c02's folder; that credential is outside the authorized a./b. write scope"},
                    "likely unseedable"),
     # not_migrated first: it needs c07's Chat still unmigrated, the rest migrate it.
     "chat": ({"chat.not_migrated": "c07", "chat.attributed": "c07", "chat.space_type": "c07", "chat.members": "c07",
               "chat.sender": "c07", "chat.text": "c07"}, "opt-in, outside the score"),
 }
+
+# Explicit source fixtures for the seeded and must-not-happen error cases. The
+# cohort seed uses these same names; tests keep the registry and owner aligned.
+_ERROR_FIXTURES = {
+    "gmail.duplicate": ("mail_shapes",),
+    "gmail.no_message_id": ("mail_no_message_id_link",), "gmail.body_link_copy": ("mail_shapes",),
+    "gmail.link_owner_not_migrated": ("mail_unmigrated_peer_link",), "gmail.link_scan_encrypted": ("mail_shapes",),
+    "run.mail_owed_to_dms": ("mail_unmigrated_peer_link",),
+    "gmail.link_scan_fixed": ("mail_unreadable_link",),
+    "drive.shortcut_target": ("drive_shortcuts",), "drive.item_absent": ("colleague_shortcut",),
+    "drive.group_grant": ("sharing_extras",), "drive.embedded_images": ("doc_with_image",),
+    "run.form_rebuild": ("forms_with_image",), "drive.comments": ("drive_comments",),
+    "gmail.labels_added": ("mail_old_domain_sent",),
+    "run.comment_differs": ("comment_actions",), "drive.comments_unreadable": ("forms_basic",),
+    "drive.sheet_too_large": ("big_sheet",), "drive.sheets_scope": ("drive_comments",),
+    "drive.office_compared_as_native": ("office_doc",), "tasks.untitled": ("tasks_shapes",),
+    "run.malware_flag": ("eicar",),
+    "drive.comment_quote_escaped": ("drive_comments",),
+}
+_SEEDED_ACTS = {
+    "gmail.no_message_id", "drive.embedded_images", "tasks.untitled",
+    "drive.shortcut_target", "drive.comments", "run.comment_differs",
+    "drive.group_grant", "drive.sheet_too_large", "drive.comments_unreadable",
+    "drive.item_absent", "run.malware_flag", "gmail.labels_added", "run.form_rebuild",
+    "gmail.duplicate", "gmail.body_link_copy", "gmail.link_owner_not_migrated",
+    "gmail.link_scan_encrypted", "run.mail_owed_to_dms",
+}
+
+def _seeded_act(kid: str) -> tuple[dict, dict]:
+    """A scoped product migration plus the check that reads the seeded case."""
+    service = "drive" if kid.startswith("run.") else kid.split(".", 1)[0]
+    if kid == "gmail.labels_added":
+        return _migrate(services=["gmail"], mail_mode="engine"), {"verify_after": "gmail", "service": "gmail"}
+    if kid == "run.mail_owed_to_dms":
+        act = _migrate(services=["drive", "gmail"], mail_mode="split", dms_after=False)
+        act["after"] = [{"path": "/api/v2/dms/start", "body": {
+            "reason": f"campaign error act {kid}: settle DMS mail evidence"}}]
+        return act, {"verify_after": "gmail", "service": "gmail"}
+    if service == "gmail":
+        # Link fixtures need Drive mapped before Gmail rewriting. A selected-user
+        # run cannot start the account-wide DMS, so ledger-proof cases name the
+        # product DMS route as an explicit follow-up.
+        act = _migrate(services=["drive", "gmail"], mail_mode="split", dms_after=False)
+        if kid in ("gmail.duplicate", "run.mail_owed_to_dms"):
+            act["after"] = [{"path": "/api/v2/dms/start", "body": {
+                "reason": f"campaign error act {kid}: settle DMS mail evidence"}}]
+        return act, {"verify_after": "gmail", "service": "gmail"}
+    return _migrate(services=[service]), {"verify_after": service, "service": service}
 # What covers an unseedable or google-decided kind when it cannot be caused live.
 UNIT_TESTS = {
     "run.resource_key": "tests/test_resource_keys.py",
@@ -121,6 +171,7 @@ UNIT_TESTS = {
     "run.held_for_drive": "tests/test_new_accounts_and_held_mail.py",     # held while Drive failed, runs once Drive succeeds
     "drive.form_relinked": "tests/test_form_relink.py",
     "drive.forms_response_sheet": "tests/test_form_relink.py",
+    "drive.unmapped_source": "tests/test_campaign_evidence.py",
     "run.comment_missing": "tests/test_resource_keys.py",                 # two files, one comment id, both comments copied
     "drive.copy_unrecorded": "tests/test_government_finding_repairs.py",
     "drive.external_copy_review": "tests/test_government_finding_repairs.py",
@@ -143,8 +194,9 @@ EVIDENCE = {
 
 
 # Kinds proved from the source instead (campaign_evidence.PROBES): the case is there, and the user reads IDENTICAL.
-SOURCE_PROBES = ("drive.sheet_too_large", "drive.embedded_images", "run.form_rebuild", "drive.group_grant", "gmail.no_message_id", "gmail.body_link_copy", "gmail.link_owner_not_migrated", "tasks.untitled", "drive.comments", "drive.shortcut_target", "run.malware_flag", "drive.comment_quote_escaped",
-                  "drive.item_absent", "drive.comments_unreadable", "run.comment_differs", "drive.unmapped_source")
+SOURCE_PROBES = ("drive.sheet_too_large", "drive.embedded_images", "drive.group_grant", "gmail.no_message_id", "gmail.body_link_copy", "gmail.link_owner_not_migrated", "tasks.untitled", "drive.comments", "drive.shortcut_target", "run.malware_flag", "run.form_rebuild", "drive.comment_quote_escaped",
+                  "drive.item_absent", "drive.comments_unreadable", "run.comment_differs", "drive.unmapped_source",
+                  "gmail.labels_added", "gmail.link_scan_fixed", "drive.sheets_scope", "drive.office_compared_as_native")
 
 
 def _ends(kid: str) -> str:
@@ -174,6 +226,17 @@ def _check(service: str) -> dict:
     return {"path": "/api/v2/one-to-one/run", "body": {"users": ["$user"], "services": [service], "limit": 0, "repair": False}}
 
 
+_MUST_NOT_ACTS = {
+    "gmail.link_scan_fixed": (_migrate(services=["drive", "gmail"], mail_mode="split", dms_after=False),
+                               {"verify_after": "gmail", "service": "gmail"}),
+    "drive.sheets_scope": (_migrate(services=["drive"]), {"verify_after": "drive", "service": "drive"}),
+    "drive.office_compared_as_native": (_migrate(services=["drive"]),
+                                         {"verify_after": "drive", "service": "drive"}),
+    "drive.comment_quote_escaped": (_migrate(services=["drive"]),
+                                    {"verify_after": "drive", "service": "drive"}),
+}
+
+
 def _lost(point: str) -> dict:
     return {"env": {"BITPORT_FAULT": f"{point}@1:lost"}}
 
@@ -197,6 +260,15 @@ _ACT = {
     **{k: (_migrate(services=["chat"]), {}, {"verify_after": "chat"})
        for k in ("chat.attributed", "chat.space_type", "chat.members", "chat.sender", "chat.text")},
 }
+
+# The changed-after acts always make a baseline copy first, then make exactly one
+# change on a. or b. and read it with the normal check/repair path. Keep this list
+# explicit so an unimplemented change stays UNVERIFIED in the campaign.
+_CHANGED_AFTER_ACTS = {
+    "gmail.labels_missing", "drive.mtime", "drive.missing_on_target", "drive.grant_missing",
+    "contacts.missing_on_target", "tasks.list_missing", "gmail.unmapped_source",
+    "drive.content_changed", "contacts.unmapped_source",
+}
 # Kinds a failure scenario causes: this one reads what that one left on its twin (so that one runs first).
 _VIA_FAILURE = {"run.disk_full": "fail:F-disk", "run.db_rollback": "fail:F-disk", "run.dns": "fail:F-net-12"}
 
@@ -218,8 +290,16 @@ def _errors() -> list:
             end = _ends(kid)
             if how == "changed_after":
                 expect = {"finding_classified": kid, "ends_as": end, "service": kid.split(".")[0],
-                          **({end: kid} if end != "listed" else {})}
+                          **{end: kid}}
             act, inject, more = _ACT.get(kid, ({}, None, {}))
+            if how == "seeded" and kid in _SEEDED_ACTS:
+                act, more = _seeded_act(kid)
+                expect.update(more)
+            if how == "must_not_happen" and kid in _MUST_NOT_ACTS:
+                act, more = _MUST_NOT_ACTS[kid]
+                expect.update(more)
+            if how == "changed_after" and kid in _CHANGED_AFTER_ACTS:
+                act = _migrate(services=[kid.split(".")[0]])
             if kid in _ACT or kid in _VIA_FAILURE:
                 # a fixed defect must not return; every other kind is classified, then ends as its entry says
                 expect = ({"finding_absent": kid, "ends_as": end} if kid == "run.db_rollback"
@@ -230,6 +310,7 @@ def _errors() -> list:
             out.append(Scenario(
                 id=f"err:{kid}", group=group, title=f"{kid} ({why})", how=how, act=act,
                 fixtures=(what,) if what in {f"c{n:02d}" for n in range(1, 11)} else (),
+                seed_fixtures=_ERROR_FIXTURES.get(kid, ()),
                 inject=inject if inject is not None else (
                     {"failure": _VIA_FAILURE[kid]} if kid in _VIA_FAILURE else
                     {"cause": what} if how in ("changed_after", "on_target", "failpoint", "failure",

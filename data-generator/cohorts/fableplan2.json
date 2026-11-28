@@ -19,7 +19,8 @@
    "events": 10,
    "fixtures": [
     "sharing_extras",
-    "outside_folder"
+    "outside_folder",
+    "mail_unreadable_link"
    ]
   },
   {
@@ -53,7 +54,8 @@
    "mail": 30,
    "events": 6,
    "fixtures": [
-    "mail_settings"
+    "mail_settings",
+    "mail_old_domain_sent"
    ]
   },
   {
@@ -63,7 +65,8 @@
    "events": 20,
    "fixtures": [
     "calendar_shapes",
-    "calendar_extras"
+    "calendar_extras",
+    "mail_no_message_id_link"
    ]
   },
   {
@@ -72,7 +75,8 @@
    "mail": 20,
    "events": 6,
    "fixtures": [
-    "tasks_shapes"
+    "tasks_shapes",
+    "office_doc"
    ]
   },
   {
@@ -80,7 +84,9 @@
    "scale": "tiny",
    "mail": 20,
    "events": 6,
-   "fixtures": []
+   "fixtures": [
+    "mail_unmigrated_peer_link"
+   ]
   },
   {
    "localpart": "c09",
@@ -90,7 +96,8 @@
    "fixtures": [
     "eicar",
     "person_only_check",
-    "forms_basic"
+    "forms_basic",
+    "forms_with_image"
    ]
   },
   {

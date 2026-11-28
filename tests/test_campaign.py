@@ -104,7 +104,7 @@ class FakeDriver(C.Driver):
         self.calls.append("twin")
         return "t02"
 
-    def prepare(self, fixtures):
+    def prepare(self, fixtures, user=None):
         self.calls.append(("prepare", fixtures))
 
     def api(self, method, path, body):
@@ -266,7 +266,7 @@ def test_a_dry_run_touches_nothing(tmp_path, monkeypatch, capsys):
 
 
 def test_a_cause_the_driver_cannot_make_yet_is_unverified_not_failed():
-    sc = S.Scenario(id="x", group="errors", title="t", how="changed_after", act={"path": "/p"},
+    sc = S.Scenario(id="err:drive.mtime", group="errors", title="t", how="changed_after", act={"path": "/p"},
                     inject={"cause": "touch a file on b."}, expect={"finding_classified": "drive.mtime"})
     row = C.run_scenario(sc, FakeDriver(boom=C.Unautomated("inject touch a file on b.")), "n", set())
     assert row["status"] == "UNVERIFIED" and "not automated yet" in row["reason"]
@@ -323,6 +323,12 @@ def test_a_seeded_case_proved_from_the_source_needs_the_case_there_and_a_clean_u
     assert C.judge(exp, clean)[0] == "UNVERIFIED"
 
 
+def test_seeded_ends_as_checks_the_gate_when_a_finding_is_present_but_allows_clean_source_evidence():
+    exp = {"finding_classified": "tasks.untitled", "ends_as": "fixed", "or_source": "tasks.untitled"}
+    assert C.judge(exp, {"findings": {"tasks.untitled"}, "fixed": set(), "source_has": True})[0] == "FAIL"
+    assert C.judge(exp, {"findings": set(), "source_has": True, "verdicts": {"tasks": "IDENTICAL"}})[0] == "PASS"
+
+
 def test_a_defect_that_must_not_return_proves_nothing_if_the_case_was_never_made():
     exp = {"finding_absent": "drive.comment_quote_escaped", "needs_source": "drive.comment_quote_escaped"}
     assert C.judge(exp, {"findings": set(), "source_has": True})[0] == "PASS"
@@ -343,13 +349,17 @@ class _ChangeDriver(FakeDriver):
     def verify(self, user, service):
         self.calls.append(("verify", user, service))
 
-    def delta(self, user):
-        self.calls.append(("delta", user))
+    def delta(self, user, service="drive"):
+        self.calls.append(("delta", user, service))
+
+
+_CHANGE_ACT = {"path": "/api/v2/migrate/start", "body": {"users": ["$user"], "services": ["drive"]}}
 
 
 def test_a_changed_after_scenario_changes_a_twin_checks_it_and_reads_the_fix_log():
     d = _ChangeDriver(facts={"findings": {"drive.mtime"}, "fixed": {"drive.mtime"}})
     s = S.Scenario("err:drive.mtime", "errors", "t", "changed_after",
+                   act=_CHANGE_ACT,
                    expect={"finding_classified": "drive.mtime", "service": "drive", "fixed": "drive.mtime"})
     r = C.run_scenario(s, d, "t", set())
     assert r["status"] == "PASS" and ("change", "drive.mtime", "t02") in d.calls and ("verify", "t02", "drive") in d.calls
@@ -358,6 +368,7 @@ def test_a_changed_after_scenario_changes_a_twin_checks_it_and_reads_the_fix_log
 def test_a_change_found_but_not_fixed_fails():
     d = _ChangeDriver(facts={"findings": {"drive.mtime"}, "fixed": set()})
     s = S.Scenario("err:drive.mtime", "errors", "t", "changed_after",
+                   act=_CHANGE_ACT,
                    expect={"finding_classified": "drive.mtime", "service": "drive", "fixed": "drive.mtime"})
     assert C.run_scenario(s, d, "t", set())["status"] == "FAIL"
 
@@ -365,6 +376,7 @@ def test_a_change_found_but_not_fixed_fails():
 def test_an_edit_on_the_source_is_followed_by_a_delta_and_a_second_check():
     d = _ChangeDriver(facts={"findings": {"drive.content_changed"}, "fixed": {"drive.content_changed"}})
     s = S.Scenario("err:drive.content_changed", "errors", "t", "changed_after",
+                   act=_CHANGE_ACT,
                    expect={"finding_classified": "drive.content_changed", "service": "drive", "fixed": "drive.content_changed"})
     assert C.run_scenario(s, d, "t", set())["status"] == "PASS"
     kinds = [c[0] for c in d.calls if isinstance(c, tuple)]
@@ -400,7 +412,7 @@ def test_every_error_ends_as_its_known_issues_entry_says_and_the_gate_agrees():
         entry = known_issues.BY_ID.get(kid) or known_issues.RUN_BY_ID[kid]
         want = "fixed" if entry[6] else "accepted" if kid in parity_gate.ACCEPTED_KINDS else "listed"
         assert s.expect.get("ends_as") == want, (kid, s.expect.get("ends_as"), want)
-        if s.act and kid != "run.db_rollback":
+        if s.act and kid != "run.db_rollback" and not (s.expect.get("or_source") or s.expect.get("or_evidence")):
             assert s.expect.get(want) == kid, (kid, s.expect)
 
 

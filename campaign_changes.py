@@ -60,6 +60,7 @@ def _seed_services(settings, user):
 
 
 def mtime(ctx):
+    _guard(ctx.tgt, ctx.settings.target_domain, "changes files on")
     drive = ctx.auth.target_drive(ctx.tgt)
     _, tid, f = _plain_file(drive, _mapped(ctx.db, ctx.src, "file"))
     drive.files().update(fileId=tid, body={"modifiedTime": "2019-01-01T00:00:00.000Z"}, supportsAllDrives=True).execute()
@@ -67,6 +68,7 @@ def mtime(ctx):
 
 
 def missing_on_target(ctx):
+    _guard(ctx.tgt, ctx.settings.target_domain, "deletes files from")
     drive = ctx.auth.target_drive(ctx.tgt)
     _, tid, f = _plain_file(drive, _mapped(ctx.db, ctx.src, "file"))
     drive.files().delete(fileId=tid, supportsAllDrives=True).execute()
@@ -74,6 +76,7 @@ def missing_on_target(ctx):
 
 
 def grant_missing(ctx):
+    _guard(ctx.tgt, ctx.settings.target_domain, "changes sharing on")
     drive = ctx.auth.target_drive(ctx.tgt)
     for _, tid in _mapped(ctx.db, ctx.src, "file"):
         try:
@@ -95,6 +98,7 @@ def grant_missing(ctx):
 
 def content_changed(ctx):
     from googleapiclient.http import MediaIoBaseUpload
+    _guard(ctx.src, ctx.settings.source_domain, "changes files on")
     drive = ctx.auth.source_drive(ctx.src, writable=True)
     sid, _, f = _plain_file(drive, [(s, s) for s, _ in _mapped(ctx.db, ctx.src, "file")])
     drive.files().update(fileId=sid, media_body=MediaIoBaseUpload(
@@ -104,6 +108,7 @@ def content_changed(ctx):
 
 def labels_missing(ctx):
     """Take a label OFF a copied message: one of the user's own, else STARRED, IMPORTANT or the read state."""
+    _guard(ctx.tgt, ctx.settings.target_domain, "changes mail on")
     g = ctx.auth.target_gmail(ctx.tgt)
     for _, tid in _mapped(ctx.db, ctx.src, "message", limit=200):
         try:
@@ -120,6 +125,7 @@ def labels_missing(ctx):
 
 
 def unmapped_source(ctx):
+    _guard(ctx.src, ctx.settings.source_domain, "adds mail to")
     ss, retry = _seed_services(ctx.settings, ctx.src)
     _, gmail, _ = ss.build_services(ctx.settings, ctx.src)
     raw = (f"From: someone@example.test\r\nTo: {ctx.src}\r\nSubject: campaign: new mail after the run {time.time():.0f}\r\n"
@@ -129,6 +135,7 @@ def unmapped_source(ctx):
 
 
 def contacts_unmapped_source(ctx):
+    _guard(ctx.src, ctx.settings.source_domain, "adds contacts to")
     ss, retry = _seed_services(ctx.settings, ctx.src)
     people, _ = ss.build_people_tasks(ctx.settings, ctx.src)
     people.people().createContact(body={"names": [{"givenName": "Campaign", "familyName": f"Added{int(time.time())}"}]}).execute()
@@ -136,6 +143,7 @@ def contacts_unmapped_source(ctx):
 
 
 def contacts_missing_on_target(ctx):
+    _guard(ctx.tgt, ctx.settings.target_domain, "deletes contacts from")
     people = ctx.auth.target_people(ctx.tgt)
     for _, tid in _mapped(ctx.db, ctx.src, "contact"):
         try:
@@ -147,6 +155,7 @@ def contacts_missing_on_target(ctx):
 
 
 def tasks_list_missing(ctx):
+    _guard(ctx.tgt, ctx.settings.target_domain, "deletes task lists from")
     tasks = ctx.auth.target_tasks(ctx.tgt)
     for _, tid in reversed(_mapped(ctx.db, ctx.src, "task_list")):
         try:

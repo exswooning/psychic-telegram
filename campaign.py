@@ -105,7 +105,7 @@ class Driver:
     def change(self, kind: str, user: str) -> str: raise Unautomated(f"no change is written for {kind}")
     def verify(self, user: str, service: str) -> None: raise NotImplementedError
     def delta(self, user: str) -> None: raise NotImplementedError
-    def prepare(self, fixtures: tuple) -> None: raise NotImplementedError
+    def prepare(self, fixtures: tuple, user: str | None = None) -> None: raise NotImplementedError
     def api(self, method: str, path: str, body: dict | None) -> dict: raise NotImplementedError
     def inject(self, inject: dict) -> None: raise NotImplementedError
     def wait_idle(self, timeout: int) -> bool: raise NotImplementedError
@@ -293,8 +293,8 @@ class LiveDriver(Driver):
         self.api("POST", "/api/v2/one-to-one/run", {"users": [user], "services": [service], "limit": 0, "repair": True,
                                                      "reason": f"campaign {self.name}: verify {user} {service}"})
 
-    def delta(self, user: str) -> None:
-        self.api("POST", "/api/v2/migrate/delta", {"users": [user], "services": ["drive"], "days": 3,
+    def delta(self, user: str, service: str = "drive") -> None:
+        self.api("POST", "/api/v2/migrate/delta", {"users": [user], "services": [service], "days": 3,
                                                     "reason": f"campaign {self.name}: the delta that copies an edit made on the source"})
 
     def take_twin(self) -> str:
@@ -396,8 +396,53 @@ class LiveDriver(Driver):
             self.sleep(min(self.poll, max(0, deadline - time.monotonic())))
         raise Unautomated(f"no successful terminal result for {job} of {user}")
 
-    def prepare(self, fixtures: tuple) -> None:
-        return None          # the cohort is seeded once (P3.1); a fixture names the cohort user holding it
+    def prepare(self, fixtures: tuple, user: str | None = None) -> None:
+        """Seed the named cohort user's idempotent fixtures through the product seed endpoint on a."""
+        if not fixtures:
+            return
+        if not user:
+            raise Unautomated("fixture seed has no cohort user")
+        import webui
+        from config import Settings
+
+        st = Settings(account_id=self.account_id)
+        local, _, domain = user.partition("@")
+        if not local or domain.lower() != st.source_domain.lower():
+            raise campaign_changes.Refused(f"fixture user {user!r} is not on this account's source domain")
+        cohort_path = os.path.join(HERE, "data-generator", "cohorts", "fableplan2.json")
+        try:
+            with open(cohort_path, encoding="utf-8") as fh:
+                cohort = json.load(fh)
+            entry = next(u for u in cohort["users"] if u["localpart"].lower() == local.lower())
+        except (OSError, ValueError, KeyError, StopIteration) as exc:
+            raise Unautomated(f"could not read the campaign fixture mapping for {local}") from exc
+        if not set(fixtures) <= set(entry.get("fixtures") or ()):
+            raise Unautomated(f"{local} does not declare campaign fixture(s) {', '.join(fixtures)}")
+
+        previous = webui.load_job_result(self.account_id, "seed") or {}
+        previous_started = previous.get("started") if type(previous.get("started")) in (int, float) else 0
+        reply = self.webui("POST", "/api/seed", {
+            "confirm_domain": st.source_domain, "cohort": "fableplan2", "users": local,
+            "fixtures_only": True, "reason": f"campaign {self.name}: fixtures for {local}",
+        })
+        if not isinstance(reply, dict) or reply.get("ok") is not True:
+            raise Unautomated(f"product seed refused the fixture action: {str(reply)[:140]}")
+
+        deadline = time.monotonic() + 4 * 3600
+        while time.monotonic() < deadline:
+            result = webui.load_job_result(self.account_id, "seed") or {}
+            active = any(j.get("account_id") == self.account_id and j.get("job_name") == "seed"
+                         for j in __import__("job_admission").list_active())
+            started = result.get("started")
+            if (not active and type(started) in (int, float) and started > previous_started
+                    and result.get("finished") and type(result.get("rc")) is int):
+                if result["rc"] != 0:
+                    raise Unautomated(f"fixture seed exited {result['rc']} for {local}")
+                return
+            if reply.get("queued"):
+                self.webui("GET", f"/api/queue?account={self.account_id}", None)
+            self.sleep(min(self.poll, max(0, deadline - time.monotonic())))
+        raise Unautomated(f"no successful fixture-seed result for {local}")
 
     def _call(self, base: str, method: str, path: str, body: dict | None) -> dict:
         from urllib.error import HTTPError
@@ -688,7 +733,7 @@ def judge(expect: dict, facts: dict) -> tuple:
     driver could not read (missing key) makes that check UNVERIFIED, never a pass."""
     unread = []
     for key, want in expect.items():
-        if key in ("ends_as", "closes_on", "outcome", "report_kind", "accept", "or_evidence", "or_source", "needs_source", "service", "verify_after") or want is None:
+        if key in ("closes_on", "outcome", "report_kind", "accept", "or_evidence", "or_source", "needs_source", "service", "verify_after") or want is None:
             continue
         if key == "finding_classified":
             have = facts.get("findings")
@@ -713,7 +758,9 @@ def judge(expect: dict, facts: dict) -> tuple:
                     verdicts = facts.get("verdicts") or {}
                     if not seen:
                         return "UNVERIFIED", f"no {want} finding and the ledger shows no {ev[1]} row: the fixture may not have been met"
-                    if any(v != "IDENTICAL" for v in verdicts.values()) or not verdicts:
+                    service = expect.get("service")
+                    checked = {service: verdicts.get(service)} if service else verdicts
+                    if any(v != "IDENTICAL" for v in checked.values()) or not checked:
                         return "FAIL", f"{want} was met ({seen} x {ev[1]}) but the user does not read IDENTICAL: {verdicts}"
                     continue
                 return "FAIL", f"{want} was never classified (saw {sorted(have)[:6]})"
@@ -723,6 +770,24 @@ def judge(expect: dict, facts: dict) -> tuple:
                 unread.append(key)
             elif want not in have:
                 return "FAIL", f"{want} was found but not fixed (fix log: {sorted(have)})"
+        elif key == "ends_as":
+            kind = expect.get("finding_classified")
+            found = facts.get("findings")
+            if found is None:
+                unread.append(key)
+            elif kind in found:
+                if want == "fixed":
+                    have = facts.get("fixed")
+                    if have is None:
+                        unread.append("fixed")
+                    elif kind not in have:
+                        return "FAIL", f"{kind} was found but not fixed (fix log: {sorted(have)})"
+                elif want in ("accepted", "listed"):
+                    have = (facts.get("gate") or {}).get(want)
+                    if have is None:
+                        unread.append(want)
+                    elif kind not in have:
+                        return "FAIL", f"{kind} was found but the parity gate does not mark it {want}"
         elif key in ("accepted", "listed"):       # the parity gate's own word for the kind, for this user
             have = (facts.get("gate") or {}).get(key)
             if have is None:
@@ -812,6 +877,14 @@ def _read(sc, driver, row, user):
         facts["source_has"] = driver.source_has(probe, user)
     status, why = judge(sc.expect, facts)
     return {**row, "status": status, "reason": why, "user": user, "finished_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+
+
+def _judge_user(sc, driver, user, since=None):
+    facts = driver.facts(user, since=since)
+    probe = sc.expect.get("or_source") or sc.expect.get("needs_source")
+    if probe and user:
+        facts["source_has"] = driver.source_has(probe, user)
+    return judge(sc.expect, facts)
 
 
 def _bind(body: dict, user: str | None) -> dict:
@@ -910,35 +983,44 @@ def run_scenario(sc: S.Scenario, driver: Driver, name: str, allow: set, wait: in
             return {**row, "status": "UNVERIFIED", "reason": f"not automated yet: {exc}"}
         except Exception as exc:      # noqa: BLE001 - a step that failed is a result, not a crash of the campaign
             return {**row, "status": "FAIL", "reason": f"{type(exc).__name__}: {str(exc)[:200]}"}
-    if not sc.act and sc.how not in READS_THE_RUN and not (sc.how == "changed_after" and sc.id.split(":", 1)[1] in CHANGES_KNOWN):
+    if sc.how == "changed_after" and not sc.act:
+        return {**row, "status": "UNVERIFIED", "reason": "the scenario has no `act` yet: define it before its first live run (P3.4)"}
+    if not sc.act and sc.how not in READS_THE_RUN:
         return {**row, "status": "UNVERIFIED", "reason": "the scenario has no `act` yet: define it before its first live run (P3.4)"}
     try:
+        if sc.how == "changed_after":
+            user = driver.take_twin()
+            if sc.seed_fixtures or sc.fixtures:
+                driver.prepare(sc.seed_fixtures or sc.fixtures, user)
+            kind = sc.id.split(":", 1)[1]
+            service = sc.expect.get("service") or kind.split(".")[0]
+            since = row["started_at"]
+            reply = driver.api(sc.act.get("method", "POST"), sc.act["path"],
+                               {**_bind(sc.act.get("body", {}), user), "reason": f"campaign {name} {sc.id}: baseline"})
+            if not driver.wait_idle(wait):
+                return {**row, "status": "FAIL", "reason": f"baseline run still running after {wait} s", "reply": reply}
+            made = driver.change(kind, user)
+            driver.verify(user, service)
+            if not driver.wait_idle(wait):
+                return {**row, "status": "FAIL", "reason": f"verification still running after {wait} s", "change": made}
+            if kind in FIXED_BY_DELTA:
+                driver.delta(user, service)
+                if not driver.wait_idle(wait):
+                    return {**row, "status": "FAIL", "reason": f"delta still running after {wait} s", "change": made}
+                driver.verify(user, service)
+                if not driver.wait_idle(wait):
+                    return {**row, "status": "FAIL", "reason": f"post-delta check still running after {wait} s", "change": made}
+            status, why = _judge_user(sc, driver, user, since=since)
+            return {**row, "status": status, "reason": why or made, "user": user, "change": made,
+                    "finished_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
         if sc.how in READS_THE_RUN and not sc.act:
             # The fixture user's own history in the control run: nothing is caused, no twin is spent (there are 19).
             user = driver.fixture_user(sc.fixtures[0]) if sc.fixtures else None
             return _read(sc, driver, row, user)
-        if sc.how == "changed_after" and not sc.act:
-            user = driver.take_twin()
-            kind = sc.id.split(":", 1)[1]
-            made = driver.change(kind, user)
-            driver.verify(user, sc.expect.get("service") or kind.split(".")[0])
-            if not driver.wait_idle(wait):
-                return {**row, "status": "FAIL", "reason": f"still running after {wait} s"}
-            if kind in FIXED_BY_DELTA:
-                # an edit on the source is copied by a delta (or the Mirror), not by a repair: find it, then run it
-                driver.delta(user)
-                if not driver.wait_idle(wait):
-                    return {**row, "status": "FAIL", "reason": f"the delta is still running after {wait} s"}
-                driver.verify(user, sc.expect.get("service") or kind.split(".")[0])
-                if not driver.wait_idle(wait):
-                    return {**row, "status": "FAIL", "reason": f"the second check is still running after {wait} s"}
-            status, why = judge(sc.expect, driver.facts(user))
-            return {**row, "status": status, "reason": why or made, "user": user, "change": made,
-                    "finished_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
         if sc.inject:
             driver.inject(sc.inject)       # a fault is armed (or found unmakeable) before a twin and a run are spent
         user = None if sc.how == "check_only" else driver.fixture_user(sc.fixtures[0]) if sc.fixtures else driver.take_twin()
-        driver.prepare(sc.fixtures)
+        driver.prepare(sc.seed_fixtures or sc.fixtures, user)
         since = row["started_at"]      # a fixture user and a twin both have a history older than this scenario (fp2-live, 24 Nov 2026)
         for _ in range(int(sc.act.get("tries", 1))):
             reply = driver.api(sc.act.get("method", "POST"), sc.act["path"], {**_bind(sc.act.get("body", {}), user), "reason": f"campaign {name} {sc.id}"}) if sc.act else {}
@@ -946,11 +1028,17 @@ def run_scenario(sc: S.Scenario, driver: Driver, name: str, allow: set, wait: in
                 driver.verify(user, sc.act["beside_verify"])
             if not driver.wait_idle(wait):
                 return {**row, "status": "FAIL", "reason": f"still running after {wait} s", "reply": reply}
+            for follow in sc.act.get("after", ()):
+                follow_reply = driver.api(follow.get("method", "POST"), follow["path"],
+                                          _bind(follow.get("body", {}), user))
+                if not driver.wait_idle(wait):
+                    return {**row, "status": "FAIL", "reason": f"follow-up still running after {wait} s",
+                            "reply": follow_reply}
             if sc.expect.get("verify_after"):
                 driver.verify(user, sc.expect["verify_after"])
                 if not driver.wait_idle(wait):
                     return {**row, "status": "FAIL", "reason": f"the check is still running after {wait} s"}
-            status, why = judge(sc.expect, driver.facts(user, since=since))
+            status, why = _judge_user(sc, driver, user, since=since)
             spec = (sc.inject.get("env") or {}).get("BITPORT_FAULT")
             if spec:
                 # An armed fault never reached proves nothing: every failpoint was silently ignored until 24 Nov 2026.

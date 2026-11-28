@@ -72,6 +72,13 @@ class TestTheEndpointChecksTheName:
         argv, _env, err = self._argv(monkeypatch)
         assert not err and "--only" not in argv
 
+    def test_campaign_fixture_seed_is_narrow_and_uses_the_cohort(self, monkeypatch):
+        argv, _env, err = self._argv(monkeypatch, cohort="fableplan2", users="c07", fixtures_only=True)
+        assert not err, err
+        assert "--cohort" in argv and argv[argv.index("--cohort") + 1].endswith("cohorts/fableplan2.json")
+        assert "--users" in argv and argv[argv.index("--users") + 1] == "c07"
+        assert "--fixtures-only" in argv
+
 
 class TestTheSeederHonoursIt:
     """seed_one_user is the thing that must actually skip. These drive it

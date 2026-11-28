@@ -182,15 +182,88 @@ def mail_shapes(ctx: Ctx) -> dict:
     ids = [v for v in (ctx.items or {}).values() if isinstance(v, str)]
     links = [("own file (document link)", f"https://docs.google.com/document/d/{ids[0]}/edit") if ids else None,
              ("own file (open?id=)", f"https://drive.google.com/open?id={ids[-1]}") if ids else None,
-             ("a folder", f"https://drive.google.com/drive/folders/{ids[len(ids) // 2]}") if ids else None,
-             ("a file that was deleted", "https://docs.google.com/document/d/1" + "x" * 43 + "/edit"),
-             ("a file of a user outside the run", "https://drive.google.com/file/d/1" + "y" * 43 + "/view")]
+             ("a folder", f"https://drive.google.com/drive/folders/{ids[len(ids) // 2]}") if ids else None]
     for label, url in [x for x in links if x]:
         put(f"link mail: {label}", _raw(_headers(ctx, f"Link: {label}", message_id=f"lnk-{uuid.uuid4().hex[:8]}@seed.test"),
                                         f"<p>See <a href=\"{url}\">{url}</a></p>", ctype="text/html; charset=utf-8"))
     put("link mail: in a quoted reply", _raw(_headers(ctx, "Re: link", message_id=f"q-{uuid.uuid4().hex[:8]}@seed.test"),
                                              f"ok\r\n\r\n> see {links[0][1] if ids else 'https://drive.google.com/open?id=none'}"))
     return {"made": made, "notes": notes}
+
+
+@fixture("mail_no_message_id_link")
+def mail_no_message_id_link(ctx: Ctx) -> dict:
+    """A distinct no-Message-ID link mail for split mode: link rewriting must find the exact copy by MIME hash."""
+    subject = "No Message-ID link fixture"
+    if _made(ctx, "gmail", f'subject:"{subject}"'):
+        return {"made": 0, "notes": ["already made"]}
+    ids = [v for v in (ctx.items or {}).values() if isinstance(v, str)]
+    if not ids:
+        return {"made": 0, "notes": ["no seeded Drive file to link"]}
+    raw = _raw(_headers(ctx, subject, message_id=None),
+               f"See https://drive.google.com/open?id={ids[0]}")
+    try:
+        ctx.seed.insert_message(ctx.gmail, ctx.retry, raw, ["INBOX"])
+        return {"made": 1, "notes": []}
+    except Exception as exc:      # noqa: BLE001
+        return {"made": 0, "notes": [f"{type(exc).__name__}: {str(exc)[:140]}"]}
+
+
+@fixture("mail_old_domain_sent")
+def mail_old_domain_sent(ctx: Ctx) -> dict:
+    """A SENT-only message whose From address is still in the source domain (`gmail.labels_added`)."""
+    subject = "Old-domain sent fixture"
+    if _made(ctx, "gmail", f'subject:"{subject}"'):
+        return {"made": 0, "notes": ["already made"]}
+    headers = [f"From: {ctx.user}", f"To: {ctx.user}", f"Subject: {subject}",
+               f"Date: {_stamp(3)}", f"Message-ID: <old-domain-{uuid.uuid4().hex[:10]}@seed.test>"]
+    try:
+        ctx.seed.insert_message(ctx.gmail, ctx.retry, _raw(headers, "sent from the source address"), ["SENT"])
+        return {"made": 1, "notes": []}
+    except Exception as exc:      # noqa: BLE001
+        return {"made": 0, "notes": [f"{type(exc).__name__}: {str(exc)[:140]}"]}
+
+
+@fixture("mail_unmigrated_peer_link")
+def mail_unmigrated_peer_link(ctx: Ctx) -> dict:
+    """A Drive link to a readable same-domain peer file, left unmapped by a one-user run."""
+    subject = "Unmigrated peer link fixture"
+    if _made(ctx, "gmail", f'subject:"{subject}"'):
+        return {"made": 0, "notes": ["already made"]}
+    peers = {p.lower() for p in (ctx.peers or ()) if isinstance(p, str)}
+    try:
+        files = ctx.retry(lambda: ctx.drive.files().list(
+            q="sharedWithMe=true and trashed=false", fields="files(id,owners(emailAddress))", pageSize=100).execute())().get("files", [])
+    except Exception as exc:      # noqa: BLE001
+        return {"made": 0, "notes": [f"could not list shared files: {str(exc)[:120]}"]}
+    candidate = next((f for f in files if f.get("id") and any(
+        (o.get("emailAddress") or "").lower() in peers and (o.get("emailAddress") or "").lower() != ctx.user.lower()
+        for o in f.get("owners", []))), None)
+    if not candidate:
+        return {"made": 0, "notes": ["no readable peer-owned Drive file is shared with this user"]}
+    raw = _raw(_headers(ctx, subject, message_id=f"peer-link-{uuid.uuid4().hex[:10]}@seed.test"),
+               f"See https://drive.google.com/open?id={candidate['id']}")
+    try:
+        ctx.seed.insert_message(ctx.gmail, ctx.retry, raw, ["INBOX"])
+        return {"made": 1, "notes": []}
+    except Exception as exc:      # noqa: BLE001
+        return {"made": 0, "notes": [f"{type(exc).__name__}: {str(exc)[:140]}"]}
+
+
+@fixture("mail_unreadable_link")
+def mail_unreadable_link(ctx: Ctx) -> dict:
+    """A link with a syntactically valid Drive id that returns 404 (`gmail.link_scan_fixed`)."""
+    subject = "Unreadable link fixture"
+    if _made(ctx, "gmail", f'subject:"{subject}"'):
+        return {"made": 0, "notes": ["already made"]}
+    fid = "1" + "x" * 43
+    raw = _raw(_headers(ctx, subject, message_id=f"unreadable-{uuid.uuid4().hex[:10]}@seed.test"),
+               f"See https://drive.google.com/open?id={fid}")
+    try:
+        ctx.seed.insert_message(ctx.gmail, ctx.retry, raw, ["INBOX"])
+        return {"made": 1, "notes": []}
+    except Exception as exc:      # noqa: BLE001
+        return {"made": 0, "notes": [f"{type(exc).__name__}: {str(exc)[:140]}"]}
 
 
 @fixture("mail_threads")
@@ -379,6 +452,31 @@ def doc_with_image(ctx: Ctx) -> dict:
     return {"made": 1, "notes": []}
 
 
+@fixture("office_doc")
+def office_doc(ctx: Ctx) -> dict:
+    """A minimal Office-format document that must be compared as bytes (`drive.office_compared_as_native`)."""
+    import io
+    import zipfile
+    from googleapiclient.http import MediaIoBaseUpload
+
+    name = "fableplan2 office document"
+    mime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    if _made(ctx, "drive", name):
+        return {"made": 0, "notes": ["already made"]}
+    payload = io.BytesIO()
+    with zipfile.ZipFile(payload, "w", zipfile.ZIP_DEFLATED) as docx:
+        docx.writestr("[Content_Types].xml", '<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>')
+        docx.writestr("_rels/.rels", '<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"/>')
+        docx.writestr("word/document.xml", '<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p/></w:body></w:document>')
+    try:
+        ctx.retry(lambda: ctx.drive.files().create(
+            body={"name": name, "mimeType": mime}, media_body=MediaIoBaseUpload(io.BytesIO(payload.getvalue()), mimetype=mime),
+            fields="id").execute())()
+        return {"made": 1, "notes": []}
+    except Exception as exc:      # noqa: BLE001
+        return {"made": 0, "notes": [f"{type(exc).__name__}: {str(exc)[:140]}"]}
+
+
 @fixture("forms_basic")
 def forms_basic(ctx: Ctx) -> dict:
     """A Form with a text question, a multiple-choice question and a quiz-less description: rebuilt by the Forms API on
@@ -395,6 +493,25 @@ def forms_basic(ctx: Ctx) -> dict:
         {"createItem": {"item": {"title": "What should the office improve?", "questionItem": {"question": {"textQuestion": {"paragraph": True}}}},
                         "location": {"index": 1}}}]}).execute())()
     return {"made": 1, "notes": []}
+
+
+@fixture("forms_with_image")
+def forms_with_image(ctx: Ctx) -> dict:
+    """A Form image item for the rebuild fallback path (`run.form_rebuild`)."""
+    name = "fableplan2 image survey"
+    if _made(ctx, "drive", name):
+        return {"made": 0, "notes": ["already made"]}
+    forms = _api(ctx, "forms", "v1")
+    try:
+        form = ctx.retry(lambda: forms.forms().create(
+            body={"info": {"title": name, "documentTitle": name}}).execute())()
+        ctx.retry(lambda: forms.forms().batchUpdate(formId=form["formId"], body={"requests": [
+            {"createItem": {"item": {"title": "Ward map", "imageItem": {"image": {
+                "sourceUri": "https://www.google.com/images/branding/googlelogo/2x/googlelogo_color_272x92dp.png",
+                "altText": "Map image"}}}, "location": {"index": 0}}}]}).execute())()
+        return {"made": 1, "notes": []}
+    except Exception as exc:      # noqa: BLE001
+        return {"made": 0, "notes": [f"{type(exc).__name__}: {str(exc)[:140]}"]}
 
 
 @fixture("drive_comments")

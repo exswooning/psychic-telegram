@@ -130,6 +130,22 @@ def _mail(subject):
     return probe
 
 
+def _old_domain_sent(auth, user, _s):
+    g = auth.source_gmail(user).users()
+    hits = g.messages().list(userId="me", q='subject:"Old-domain sent fixture"', includeSpamTrash=True,
+                             maxResults=2).execute().get("messages", [])
+    if len(hits) != 1 or not hits[0].get("id"):
+        return False
+    message = g.messages().get(userId="me", id=hits[0]["id"], format="metadata", metadataHeaders=["From"],
+                                fields="id,labelIds,payload(headers)").execute()
+    labels = message.get("labelIds", [])
+    froms = [h.get("value", "") for h in message.get("payload", {}).get("headers", [])
+             if h.get("name", "").lower() == "from"]
+    from email.utils import parseaddr
+    return message.get("id") == hits[0]["id"] and "SENT" in labels and len(froms) == 1 \
+        and parseaddr(froms[0])[1].lower() == user.lower()
+
+
 def _by_name(name, mime=None):
     def probe(auth, user, _s):
         q = f"name='{name}'" + (f" and mimeType='{mime}'" if mime else "")
@@ -176,6 +192,33 @@ def _form_comments_refused(auth, user, _s):
     return False
 
 
+def _form_with_image(auth, user, _s):
+    d = auth.source_drive(user)
+    files = _owned(auth, user, "name='fableplan2 image survey' and mimeType='application/vnd.google-apps.form'")
+    if not files:
+        return False
+    from googleapiclient.discovery import build
+    forms = build("forms", "v1", http=d._http, cache_discovery=False)
+    form = forms.forms().get(formId=files[0]["id"], fields="items(imageItem(image(contentUri,sourceUri)))").execute()
+    return any((item.get("imageItem") or {}).get("image", {}).get("contentUri")
+               or (item.get("imageItem") or {}).get("image", {}).get("sourceUri")
+               for item in form.get("items", []))
+
+
+def _malware_flagged(auth, user, _s):
+    """Only count the EICAR fixture when Google's source Drive refuses its bytes as abusive."""
+    d = auth.source_drive(user)
+    for f in _owned(auth, user, "name='eicar-test.txt'"):
+        try:
+            d.files().get(fileId=f["id"], alt="media").execute()
+        except Exception as exc:      # noqa: BLE001 - only Google's exact malware refusal proves the case
+            status = getattr(getattr(exc, "resp", None), "status", None)
+            if status == 403 and "cannotDownloadAbusiveFile" in str(exc):
+                return True
+            raise
+    return False
+
+
 def _action_only_reply(auth, user, _s):
     d = auth.source_drive(user)
     for f in _owned(auth, user, "name='fableplan2 comments action doc'"):
@@ -198,17 +241,22 @@ def _outsider_file(auth, user, _s):
 
 
 PROBES = {
+    "gmail.labels_added": _old_domain_sent,
+    "gmail.link_scan_fixed": _mail("Unreadable link fixture"),
     "drive.sheet_too_large": _by_name("fableplan2 big sheet", "application/vnd.google-apps.spreadsheet"),
+    "drive.sheets_scope": _by_name("fableplan2 comments sheet", "application/vnd.google-apps.spreadsheet"),
+    "drive.office_compared_as_native": _by_name(
+        "fableplan2 office document", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
+    "run.form_rebuild": _form_with_image,
     "drive.embedded_images": _by_name("fableplan2 doc with image", "application/vnd.google-apps.document"),
-    "run.form_rebuild": _by_name("fableplan2 ward survey", "application/vnd.google-apps.form"),
     "drive.group_grant": _group_grant,
-    "gmail.no_message_id": _mail("Old mail with no Message-ID"),
+    "gmail.no_message_id": _mail("No Message-ID link fixture"),
     "gmail.body_link_copy": _mail("Re: link"),
-    "gmail.link_owner_not_migrated": _mail("Link: a file of a user outside the run"),
+    "gmail.link_owner_not_migrated": _mail("Unmigrated peer link fixture"),
     "tasks.untitled": _untitled_task,
     "drive.comments": _comments,
     "drive.shortcut_target": lambda a, u, s: bool(_owned(a, u, "mimeType='application/vnd.google-apps.shortcut'")),
-    "run.malware_flag": lambda a, u, s: bool(_owned(a, u, "name='eicar-test.txt'")),
+    "run.malware_flag": _malware_flagged,
     "drive.comment_quote_escaped": _quote_in_comment,
     "drive.item_absent": _shortcut_to_colleague,
     "drive.comments_unreadable": _form_comments_refused,
